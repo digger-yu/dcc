@@ -239,7 +239,7 @@ struct StorageClass {
 }
 
 /// 枚举定义表项: (常量名, 值) 列表 + C23 可选底层类型
-type EnumDef = (Arc<Vec<(String, i64)>>, Option<Box<Type>>);
+type EnumDef = (Arc<Vec<(String, i64)>>, Option<Box<QualType>>);
 
 pub struct Parser<'a> {
     lex: Lexer<'a>,
@@ -306,7 +306,7 @@ impl<'a> Parser<'a> {
         // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
         // types_compatible 允许兼容重定义, 不会报错.
         p.typedefs
-            .insert("nullptr_t".to_string(), Type::Ptr(Box::new(Type::Void)));
+            .insert("nullptr_t".to_string(), Type::Ptr(Box::new(Type::Void.into())));
         p
     }
     fn advance(&mut self) {
@@ -318,8 +318,8 @@ impl<'a> Parser<'a> {
     fn tag_compatible(a: &Type, b: &Type) -> bool {
         fn unwrap(t: &Type) -> &Type {
             match t {
-                Type::Ptr(inner) => unwrap(inner),
-                Type::Array(inner, _) => unwrap(inner),
+                Type::Ptr(inner) => unwrap(&inner.base),
+                Type::Array(inner, _) => unwrap(&inner.base),
                 other => other,
             }
         }
@@ -823,7 +823,7 @@ impl<'a> Parser<'a> {
         let mut ty = base?;
         while self.cur.kind == TokKind::Star {
             self.advance();
-            ty = Type::Ptr(Box::new(ty));
+            ty = Type::Ptr(Box::new(ty.into()));
         }
         Some(ty)
     }
@@ -1495,10 +1495,10 @@ impl<'a> Parser<'a> {
             }
         }
         match callee.ty() {
-            Type::Func(ret, _) => (*ret).clone(),
-            Type::Ptr(inner) => match *inner {
-                Type::Func(ret, _) => (*ret).clone(),
-                other => other,
+            Type::Func(ret, _) => ret.base.clone(),
+            Type::Ptr(inner) => match inner.base {
+                Type::Func(ret, _) => ret.base.clone(),
+                ref other => other.clone(),
             },
             other => other,
         }
@@ -1507,7 +1507,7 @@ impl<'a> Parser<'a> {
     fn type_of_member(&self, base: &Expr, field: &Ident, is_arrow: bool) -> Type {
         let aggregate = if is_arrow {
             match base.ty() {
-                Type::Ptr(inner) => inner.as_ref().clone(),
+                Type::Ptr(inner) => inner.base.clone(),
                 other => other,
             }
         } else {
@@ -1535,8 +1535,8 @@ impl<'a> Parser<'a> {
 
     fn index_result_type(base: &Expr) -> Type {
         match base.ty() {
-            Type::Ptr(inner) | Type::Array(inner, _) => (*inner).clone(),
-            Type::Vector(inner, _) => (*inner).clone(),
+            Type::Ptr(inner) | Type::Array(inner, _) => inner.base.clone(),
+            Type::Vector(inner, _) => inner.base.clone(),
             _ => int_t(),
         }
     }
@@ -2279,7 +2279,7 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                     let func_ty =
-                        Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
+                        Type::Func(Box::new(ty.into()), params.iter().map(|p| p.ty.clone().into()).collect());
                     let sp = name.span.clone();
                     if !self.expect(TokKind::Semi, "';'") {
                         return None;
@@ -2315,8 +2315,8 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                     let func_ty =
-                        Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
-                    let ptr_ty = Type::Ptr(Box::new(func_ty));
+                        Type::Func(Box::new(ty.into()), params.iter().map(|p| p.ty.clone().into()).collect());
+                    let ptr_ty = Type::Ptr(Box::new(func_ty.into()));
                     let sp = name.span.clone();
                     if !self.expect(TokKind::Semi, "';'") {
                         return None;
@@ -2341,8 +2341,8 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let func_ty = Type::Func(
-                    Box::new(ty.clone()),
-                    params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(ty.clone().into()),
+                    params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
                 if !self.expect(TokKind::Semi, "';'") {
                     return None;
@@ -2396,7 +2396,7 @@ impl<'a> Parser<'a> {
                 arr_sizes.push(arr_size);
             }
             for sz in arr_sizes.into_iter().rev() {
-                ty = Type::Array(Box::new(ty), sz);
+                ty = Type::Array(Box::new(ty.into()), sz);
             }
             let ty = self.try_parse_vector_attr(ty);
             if !self.expect(TokKind::Semi, "';'") {
@@ -2775,8 +2775,8 @@ impl<'a> Parser<'a> {
             let attrs = Self::merge_attrs(pre_attrs, post_attrs);
             // 进入函数: 从全局变量表恢复, 清除局部变量
             let func_ty = Type::Func(
-                Box::new(ty.clone()),
-                params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(ty.clone().into()),
+                params.iter().map(|p| p.ty.clone().into()).collect(),
             );
             // 检测是否是嵌套函数 (在外层函数体内)
             let is_nested_func = self.in_function;
@@ -2964,7 +2964,7 @@ impl<'a> Parser<'a> {
                 arr_sizes.push(arr_size);
             }
             for sz in arr_sizes.into_iter().rev() {
-                arr_ty = Type::Array(Box::new(arr_ty), sz);
+                arr_ty = Type::Array(Box::new(arr_ty.into()), sz);
             }
             let mut arr_attrs = pre_attrs.clone();
             arr_attrs.merge(self.parse_attributes());
@@ -3187,13 +3187,13 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let inner_func = Type::Func(
-                    Box::new(ty.clone()),
-                    inner_params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(ty.clone().into()),
+                    inner_params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
-                let ptr_ty = Type::Ptr(Box::new(inner_func));
+                let ptr_ty = Type::Ptr(Box::new(inner_func.into()));
                 let outer_func = Type::Func(
-                    Box::new(ptr_ty),
-                    outer_params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(ptr_ty.into()),
+                    outer_params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
                 attrs.merge(self.parse_attributes());
                 self.skip_asm_label();
@@ -3271,10 +3271,10 @@ impl<'a> Parser<'a> {
                 })])
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
-            let ptr_ty = Type::Ptr(Box::new(ty));
+            let ptr_ty = Type::Ptr(Box::new(ty.into()));
             let func_ty = Type::Func(
-                Box::new(ptr_ty.clone()),
-                inner_params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(ptr_ty.clone().into()),
+                inner_params.iter().map(|p| p.ty.clone().into()).collect(),
             );
             attrs.merge(self.parse_attributes());
             self.skip_asm_label();
@@ -3415,12 +3415,12 @@ impl<'a> Parser<'a> {
                 return None;
             }
             let func_ty = Type::Func(
-                Box::new(ty.clone()),
-                params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(ty.clone().into()),
+                params.iter().map(|p| p.ty.clone().into()).collect(),
             );
-            let mut ptr_ty = Type::Ptr(Box::new(func_ty));
+            let mut ptr_ty = Type::Ptr(Box::new(func_ty.into()));
             for sz in array_sizes.into_iter().rev() {
-                ptr_ty = Type::Array(Box::new(ptr_ty), sz);
+                ptr_ty = Type::Array(Box::new(ptr_ty.into()), sz);
             }
             attrs.merge(self.parse_attributes());
             self.skip_asm_label();
@@ -3468,12 +3468,12 @@ impl<'a> Parser<'a> {
             // 先构造内层数组类型: Array(ty, N1, N2, ...)
             let mut inner_ty = ty;
             for sz in outer_array_sizes.into_iter().rev() {
-                inner_ty = Type::Array(Box::new(inner_ty), sz);
+                inner_ty = Type::Array(Box::new(inner_ty.into()), sz);
             }
             // 然后构造指针类型: Ptr(inner_array)
-            Type::Ptr(Box::new(inner_ty))
+            Type::Ptr(Box::new(inner_ty.into()))
         } else {
-            Type::Ptr(Box::new(ty))
+            Type::Ptr(Box::new(ty.into()))
         };
         let init = if self.cur.kind == TokKind::Assign {
             self.advance();
@@ -3534,7 +3534,7 @@ impl<'a> Parser<'a> {
         let ty = if let Some(vsize) = self.decl_attrs.vector_size.take() {
             let elem_size = ty.size().max(1);
             let count = vsize / elem_size;
-            Type::Vector(Box::new(ty), count)
+            Type::Vector(Box::new(ty.into()), count)
         } else {
             ty
         };
@@ -3600,7 +3600,7 @@ impl<'a> Parser<'a> {
         // 现在期望 `(params)` 形式的函数参数列表
         if self.cur.kind != TokKind::LParen {
             // 不是函数指针, 可能只是指针抽象 `(*)`
-            ty = Type::Ptr(Box::new(ty));
+            ty = Type::Ptr(Box::new(ty.into()));
             return ty;
         }
         self.advance(); // (
@@ -3609,10 +3609,10 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         let func_ty = Type::Func(
-            Box::new(ty),
-            params.iter().map(|p| p.ty.clone()).collect(),
+            Box::new(ty.into()),
+            params.iter().map(|p| p.ty.clone().into()).collect(),
         );
-        ty = Type::Ptr(Box::new(func_ty));
+        ty = Type::Ptr(Box::new(func_ty.into()));
         // 可能后面还有函数指针后缀
         self.try_parse_abstract_func_ptr(ty)
     }
@@ -3662,7 +3662,7 @@ impl<'a> Parser<'a> {
             arr_sizes.push(arr_size);
         }
         for sz in arr_sizes.into_iter().rev() {
-            ty = Type::Array(Box::new(ty), sz);
+            ty = Type::Array(Box::new(ty.into()), sz);
         }
         ty
     }
@@ -3785,7 +3785,7 @@ impl<'a> Parser<'a> {
                         if self.cur.kind == TokKind::RParen {
                             self.advance();
                         }
-                        let ty = Type::Atomic(Box::new(inner?));
+                        let ty = Type::Atomic(Box::new(inner?.into()));
                         return Some(self.finish_type(ty, specifiers_only));
                     }
                     // _Atomic 作为类型限定符: 设置 is_atomic 标志
@@ -4022,7 +4022,7 @@ impl<'a> Parser<'a> {
                             },
                             Field {
                                 name: "overflow_arg_area".into(),
-                                ty: Type::Ptr(Box::new(Type::Void)),
+                                ty: Type::Ptr(Box::new(Type::Void.into())),
                                 offset: 8,
                                 bit_width: None,
                                 bit_offset: 0,
@@ -4031,7 +4031,7 @@ impl<'a> Parser<'a> {
                             },
                             Field {
                                 name: "reg_save_area".into(),
-                                ty: Type::Ptr(Box::new(Type::Void)),
+                                ty: Type::Ptr(Box::new(Type::Void.into())),
                                 offset: 16,
                                 bit_width: None,
                                 bit_offset: 0,
@@ -4321,7 +4321,7 @@ impl<'a> Parser<'a> {
             };
             // C23 底层类型: enum E : unsigned char { ... }
             // 仅允许整数类型说明符; packed 属性后续编码为 Some(SChar)
-            let mut under_ty: Option<Box<Type>> = None;
+            let mut under_ty: Option<Box<QualType>> = None;
             if self.cur.kind == TokKind::Colon {
                 self.advance();
                 let mut uns = false;
@@ -4400,7 +4400,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if b.is_some() || uns || lng > 0 || shrt {
-                    under_ty = Some(Box::new(self.resolve_base(b, uns, lng, shrt)));
+                    under_ty = Some(Box::new(self.resolve_base(b, uns, lng, shrt).into()));
                 }
             }
             if self.cur.kind == TokKind::LBrace {
@@ -4421,7 +4421,7 @@ impl<'a> Parser<'a> {
                 self.decl_attrs.merge(post_enum_attrs);
                 // packed 属性优先: 编码为 1 字节有符号 (与旧行为一致)
                 let under = if enum_packed {
-                    Some(Box::new(Type::SChar))
+                    Some(Box::new(Type::SChar.into()))
                 } else {
                     under_ty.clone()
                 };
@@ -4434,7 +4434,7 @@ impl<'a> Parser<'a> {
                     let cty = if enum_packed {
                         Type::Int
                     } else {
-                        under_ty.as_deref().cloned().unwrap_or(Type::Int)
+                        under_ty.as_deref().map(|q| q.base.clone()).unwrap_or(Type::Int)
                     };
                     self.enum_consts.insert(id.name.clone(), (val, cty));
                     nv = val + 1;
@@ -4666,7 +4666,7 @@ impl<'a> Parser<'a> {
         if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex || is_imaginary {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
             let ty = if is_complex {
-                Type::Complex(Box::new(ty))
+                Type::Complex(Box::new(ty.into()))
             } else if is_imaginary {
                 // C99 6.2.5p11: _Imaginary 仅可与浮点类型组合
                 if !matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
@@ -4676,7 +4676,7 @@ impl<'a> Parser<'a> {
                         Some("use _Imaginary float, _Imaginary double, or _Imaginary long double"),
                     );
                 }
-                Type::Imaginary(Box::new(ty))
+                Type::Imaginary(Box::new(ty.into()))
             } else {
                 ty
             };
@@ -4765,7 +4765,7 @@ impl<'a> Parser<'a> {
             }
             self.advance();
             self.skip_ptr_qualifiers();
-            ty = Type::Ptr(Box::new(ty));
+            ty = Type::Ptr(Box::new(ty.into()));
         }
         ty
     }
@@ -4810,7 +4810,7 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::RParen {
                     self.advance();
                 }
-                return Type::Vector(Box::new(ty), count);
+                return Type::Vector(Box::new(ty.into()), count);
             }
         }
         // 其他属性: 跳过直到 ))
@@ -4918,12 +4918,12 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 let func_ty = Type::Func(
-                    Box::new(spec),
-                    params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(spec.into()),
+                    params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
-                let mut ty = Type::Ptr(Box::new(func_ty));
+                let mut ty = Type::Ptr(Box::new(func_ty.into()));
                 for sz in array_sizes.into_iter().rev() {
-                    ty = Type::Array(Box::new(ty), sz);
+                    ty = Type::Array(Box::new(ty.into()), sz);
                 }
                 ty
             } else {
@@ -4933,19 +4933,19 @@ impl<'a> Parser<'a> {
                     // 先构造内层数组类型: Array(spec, N1, N2, ...)
                     let mut inner_ty = spec;
                     for sz in outer_array_sizes.into_iter().rev() {
-                        inner_ty = Type::Array(Box::new(inner_ty), sz);
+                        inner_ty = Type::Array(Box::new(inner_ty.into()), sz);
                     }
                     // 然后构造指针类型: Ptr(inner_array)
-                    let mut ty = Type::Ptr(Box::new(inner_ty));
+                    let mut ty = Type::Ptr(Box::new(inner_ty.into()));
                     // 最后处理 (*name[N]) 形式的内层数组
                     for sz in array_sizes.into_iter().rev() {
-                        ty = Type::Array(Box::new(ty), sz);
+                        ty = Type::Array(Box::new(ty.into()), sz);
                     }
                     ty
                 } else {
-                    let mut ty = Type::Ptr(Box::new(spec));
+                    let mut ty = Type::Ptr(Box::new(spec.into()));
                     for sz in array_sizes.into_iter().rev() {
-                        ty = Type::Array(Box::new(ty), sz);
+                        ty = Type::Array(Box::new(ty.into()), sz);
                     }
                     ty
                 }
@@ -4978,10 +4978,10 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                     let func_ty =
-                        Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
-                    ty = Type::Ptr(Box::new(func_ty));
+                        Type::Func(Box::new(ty.into()), params.iter().map(|p| p.ty.clone().into()).collect());
+                    ty = Type::Ptr(Box::new(func_ty.into()));
                 } else {
-                    ty = Type::Ptr(Box::new(ty));
+                    ty = Type::Ptr(Box::new(ty.into()));
                 }
                 return (ty, nm);
             }
@@ -5094,7 +5094,7 @@ impl<'a> Parser<'a> {
                             ArraySize::Const(0)
                         };
                         let _ = self.expect(TokKind::RBracket, "']'");
-                        arr_ty = Type::Array(Box::new(arr_ty), arr_size);
+                        arr_ty = Type::Array(Box::new(arr_ty.into()), arr_size);
                     }
                     arr_ty
                 };
@@ -5373,12 +5373,12 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                     let func_ty = Type::Func(
-                        Box::new(ty),
-                        inner_params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(ty.into()),
+                        inner_params.iter().map(|p| p.ty.clone().into()).collect(),
                     );
-                    ty = Type::Ptr(Box::new(func_ty));
+                    ty = Type::Ptr(Box::new(func_ty.into()));
                 } else {
-                    ty = Type::Ptr(Box::new(ty));
+                    ty = Type::Ptr(Box::new(ty.into()));
                 }
                 ps.push(Param {
                     ty,
@@ -5424,10 +5424,10 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                     let func_ty = Type::Func(
-                        Box::new(ty),
-                        inner_params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(ty.into()),
+                        inner_params.iter().map(|p| p.ty.clone().into()).collect(),
                     );
-                    ty = Type::Ptr(Box::new(func_ty));
+                    ty = Type::Ptr(Box::new(func_ty.into()));
                 }
                 ps.push(Param {
                     ty,
@@ -5468,9 +5468,9 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 ty = Type::Ptr(Box::new(Type::Func(
-                    Box::new(ty),
-                    inner_params.iter().map(|p| p.ty.clone()).collect(),
-                )));
+                    Box::new(ty.into()),
+                    inner_params.iter().map(|p| p.ty.clone().into()).collect(),
+                ).into()));
             }
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
@@ -5517,7 +5517,7 @@ impl<'a> Parser<'a> {
                     arr_sizes.push(arr_size);
                 }
                 for sz in arr_sizes.into_iter().rev() {
-                    ty = Type::Array(Box::new(ty), sz);
+                    ty = Type::Array(Box::new(ty.into()), sz);
                 }
             }
             let ty = match ty {
@@ -6497,14 +6497,14 @@ impl<'a> Parser<'a> {
                         }
                     } else if is_ia || is_ib {
                         // _Imaginary 算术类型推导
-                        let inner_a = if let Type::Imaginary(ref i) = lt { i.as_ref().clone() } else { lt.clone() };
-                        let inner_b = if let Type::Imaginary(ref i) = rt { i.as_ref().clone() } else { rt.clone() };
+                        let inner_a = if let Type::Imaginary(ref i) = lt { i.base.clone() } else { lt.clone().into() };
+                        let inner_b = if let Type::Imaginary(ref i) = rt { i.base.clone() } else { rt.clone().into() };
                         // 取较宽的内型
                         let wider = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
                         match op {
                             BinOp::Add | BinOp::Sub if is_ia && is_ib => {
                                 // imag ± imag → imag
-                                Type::Imaginary(Box::new(wider))
+                                Type::Imaginary(Box::new(wider.into()))
                             }
                             BinOp::Mul | BinOp::Div if is_ia && is_ib => {
                                 // imag * imag → real (负), imag / imag → real
@@ -6512,11 +6512,11 @@ impl<'a> Parser<'a> {
                             }
                             BinOp::Add | BinOp::Sub => {
                                 // real ± imag → complex
-                                Type::Complex(Box::new(wider))
+                                Type::Complex(Box::new(wider.into()))
                             }
                             BinOp::Mul | BinOp::Div => {
                                 // real * imag → imag, real / imag → imag
-                                Type::Imaginary(Box::new(wider))
+                                Type::Imaginary(Box::new(wider.into()))
                             }
                             _ => wider,
                         }
@@ -6647,7 +6647,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let e = self.parse_unary()?;
                 let ty = if let Type::Ptr(inner) = &e.ty() {
-                    *inner.clone()
+                    inner.base.clone()
                 } else {
                     int_t()
                 };
@@ -6660,7 +6660,7 @@ impl<'a> Parser<'a> {
             TokKind::Amp => {
                 self.advance();
                 let e = self.parse_unary()?;
-                let ty = Type::Ptr(Box::new(e.ty()));
+                let ty = Type::Ptr(Box::new(e.ty().into()));
                 Some(Expr::AddrOf {
                     e: Box::new(e),
                     span: sp,
@@ -6672,7 +6672,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // &&
                 if self.cur.kind == TokKind::Ident {
                     let label = self.parse_ident()?;
-                    let ptr_ty = Type::Ptr(Box::new(Type::Void));
+                    let ptr_ty = Type::Ptr(Box::new(Type::Void.into()));
                     Some(Expr::LabelAddr {
                         label,
                         span: sp,
@@ -6712,9 +6712,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let e = self.parse_unary()?;
                 let ty = match &e.ty() {
-                    Type::Complex(inner) => (**inner).clone(),
-                    Type::Imaginary(inner) => (**inner).clone(),
-                    t => t.clone(),
+                    Type::Complex(inner) => inner.base.clone(),
+                    Type::Imaginary(inner) => inner.base.clone(),
+                    t => t.clone().into(),
                 };
                 Some(Expr::Real {
                     e: Box::new(e),
@@ -6727,9 +6727,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let e = self.parse_unary()?;
                 let ty = match &e.ty() {
-                    Type::Complex(inner) => (**inner).clone(),
-                    Type::Imaginary(inner) => (**inner).clone(),
-                    t => t.clone(),
+                    Type::Complex(inner) => inner.base.clone(),
+                    Type::Imaginary(inner) => inner.base.clone(),
+                    t => t.clone().into(),
                 };
                 Some(Expr::Imag {
                     e: Box::new(e),
@@ -6805,7 +6805,7 @@ impl<'a> Parser<'a> {
                 // 函数→指针) 后才与 association 类型比较。
                 let ctrl_ty = match controlling.ty() {
                     Type::Array(elem, _) => Type::Ptr(elem),
-                    Type::Func(ret, params) => Type::Ptr(Box::new(Type::Func(ret, params))),
+                    Type::Func(ret, params) => Type::Ptr(Box::new(Type::Func(ret, params).into())),
                     t => t,
                 };
                 let mut result: Option<Expr> = None;
@@ -6861,7 +6861,7 @@ impl<'a> Parser<'a> {
             // nullptr: C23 空指针常量, 等价于 (void*)0
             TokKind::Ident if self.cur.text == "nullptr" => {
                 self.advance();
-                let ptr_ty = Type::Ptr(Box::new(Type::Void));
+                let ptr_ty = Type::Ptr(Box::new(Type::Void.into()));
                 Some(Expr::Int {
                     v: 0,
                     span: sp,
@@ -6955,7 +6955,7 @@ impl<'a> Parser<'a> {
                     if self.cur.kind == TokKind::Star {
                         self.advance();
                         self.skip_ptr_qualifiers();
-                        ty = Type::Ptr(Box::new(ty));
+                        ty = Type::Ptr(Box::new(ty.into()));
                         continue;
                     }
                     break;
@@ -6981,7 +6981,7 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                     }
-                    let ty = Type::Ptr(Box::new(ty));
+                    let ty = Type::Ptr(Box::new(ty.into()));
                     if !self.expect(TokKind::RParen, "')'") {
                         return None;
                     }
@@ -7086,7 +7086,7 @@ impl<'a> Parser<'a> {
                                     self.advance();
                                     if self.cur.kind == TokKind::RParen {
                                         self.advance();
-                                        let ty = Type::Ptr(Box::new(ty));
+                                        let ty = Type::Ptr(Box::new(ty.into()));
                                         let e = self.parse_unary()?;
                                         return Some(Expr::Cast {
                                             ty,
@@ -7301,7 +7301,7 @@ impl<'a> Parser<'a> {
                             e = Expr::String {
                                 data,
                                 span: sp.clone(),
-                                ty: Type::Ptr(Box::new(Type::Char)),
+                                ty: Type::Ptr(Box::new(Type::Char.into())),
                             };
                             continue;
                         }
@@ -7330,7 +7330,7 @@ impl<'a> Parser<'a> {
                             e = Expr::String {
                                 data,
                                 span: sp.clone(),
-                                ty: Type::Ptr(Box::new(Type::Char)),
+                                ty: Type::Ptr(Box::new(Type::Char.into())),
                             };
                             continue;
                         }
@@ -7682,7 +7682,7 @@ impl<'a> Parser<'a> {
                         real: 0.0,
                         imag: v as f64,
                         span: sp,
-                        ty: Type::Complex(Box::new(ty)),
+                        ty: Type::Complex(Box::new(ty.into())),
                     })
                 } else {
                     Some(Expr::Int { v, span: sp, ty })
@@ -7716,7 +7716,7 @@ impl<'a> Parser<'a> {
                         real: 0.0,
                         imag: v,
                         span: sp,
-                        ty: Type::Complex(Box::new(ty)),
+                        ty: Type::Complex(Box::new(ty.into())),
                     })
                 } else {
                     Some(Expr::Float { v, span: sp, ty })
@@ -7733,7 +7733,7 @@ impl<'a> Parser<'a> {
                 Some(Expr::String {
                     data,
                     span: sp,
-                    ty: Type::Ptr(Box::new(Type::Char)),
+                    ty: Type::Ptr(Box::new(Type::Char.into())),
                 })
             }
             TokKind::WideStringLit => {
@@ -7749,7 +7749,7 @@ impl<'a> Parser<'a> {
                 Some(Expr::String {
                     data,
                     span: sp,
-                    ty: Type::Ptr(Box::new(wchar_ty)),
+                    ty: Type::Ptr(Box::new(wchar_ty.into())),
                 })
             }
             // u"..." char16_t string literal
@@ -7764,7 +7764,7 @@ impl<'a> Parser<'a> {
                 Some(Expr::String {
                     data,
                     span: sp,
-                    ty: Type::Ptr(Box::new(Type::Char16)),
+                    ty: Type::Ptr(Box::new(Type::Char16.into())),
                 })
             }
             // U"..." char32_t string literal
@@ -7779,7 +7779,7 @@ impl<'a> Parser<'a> {
                 Some(Expr::String {
                     data,
                     span: sp,
-                    ty: Type::Ptr(Box::new(Type::Char32)),
+                    ty: Type::Ptr(Box::new(Type::Char32.into())),
                 })
             }
             TokKind::CharLit => {
@@ -7866,7 +7866,7 @@ impl<'a> Parser<'a> {
                     return Some(Expr::String {
                         data,
                         span: sp,
-                        ty: Type::Ptr(Box::new(Type::Char)),
+                        ty: Type::Ptr(Box::new(Type::Char.into())),
                     });
                 }
                 if let Some((val, cty)) = self.enum_consts.get(&t).cloned() {
@@ -8144,7 +8144,7 @@ impl<'a> Parser<'a> {
     /// 宿主头文件中常见的整型 typedef 重定义（如 dev_t / uint64_t）
     fn is_integer_typedef(ty: &Type) -> bool {
         match ty {
-            Type::Atomic(inner) => Self::is_integer_typedef(inner),
+            Type::Atomic(inner) => Self::is_integer_typedef(&inner.base),
             Type::Bool
             | Type::Char
             | Type::SChar
@@ -8176,11 +8176,11 @@ impl<'a> Parser<'a> {
     /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容
     fn types_compatible(a: &Type, b: &Type) -> bool {
         let a = match a {
-            Type::Atomic(inner) => inner.as_ref(),
+            Type::Atomic(inner) => &inner.base,
             other => other,
         };
         let b = match b {
-            Type::Atomic(inner) => inner.as_ref(),
+            Type::Atomic(inner) => &inner.base,
             other => other,
         };
         match (a, b) {
@@ -8196,10 +8196,10 @@ impl<'a> Parser<'a> {
             (Type::Double, Type::Double) => true,
             (Type::LongDouble, Type::LongDouble) => true,
             (Type::Ptr(pa), Type::Ptr(pb)) => {
-                if matches!(pa.as_ref(), Type::Void) || matches!(pb.as_ref(), Type::Void) {
+                if matches!(&pa.base, Type::Void) || matches!(&pb.base, Type::Void) {
                     return true;
                 }
-                Self::types_compatible(pa, pb)
+                Self::types_compatible(&pa.base, &pb.base)
             }
             (Type::Void, Type::Void) => true,
             (Type::Fract, Type::Fract) => true,

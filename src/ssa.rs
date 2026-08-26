@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Stmt, Type, UnOp};
+use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, QualType, Stmt, Type, UnOp};
 use crate::diagnostics::Span;
 
 /// SSA 变量名: `"x_3"` 表示 `x` 的第 4 个版本 (下标从 0 起)。
@@ -657,10 +657,10 @@ impl Builder {
                 if *is_arrow {
                     // *obj.field: 先解引用指针, 再访问成员
                     let deref_ty = match &obj_ty {
-                        Type::Ptr(inner) => inner.as_ref().clone(),
+                        Type::Ptr(inner) => inner.base.clone(),
                         other => other.clone(),
                     };
-                    let inner = self.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
+                    let inner = self.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
                     self.emit(Inst {
                         dest: Some(inner.clone()),
                         kind: InstKind::Load {
@@ -711,7 +711,7 @@ impl Builder {
             Expr::AddrOf { e, span, ty: _ } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     let dest = target.unwrap_or_else(|| {
-                        self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span)
+                        self.fresh("addr", Type::Ptr(Box::new(QualType::new(Type::Void))), span)
                     });
                     self.emit(Inst {
                         dest: Some(dest.clone()),
@@ -1248,10 +1248,10 @@ fn lower_lvalue(
         let obj = b.lower_expr(expr);
         if *is_arrow {
             let deref_ty = match &obj_ty {
-                Type::Ptr(inner) => inner.as_ref().clone(),
+                Type::Ptr(inner) => inner.base.clone(),
                 other => other.clone(),
             };
-            let inner = b.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
+            let inner = b.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
             b.emit(Inst {
                 dest: Some(inner.clone()),
                 kind: InstKind::Load {
@@ -1740,7 +1740,7 @@ fn inst_to_expr_resolved(
                 ty: Type::Void,
             }),
             span: sp.clone(),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         InstKind::Load { e, ty } => Expr::Deref {
             e: Box::new(resolve_operand(e, &fake_env, subst)),
@@ -2040,7 +2040,7 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
         Operand::Str(d) => Expr::String {
             data: d.clone(),
             span: Span::point("ssa", 0, 0),
-            ty: Type::Array(Box::new(Type::Char), crate::ast::ArraySize::Const(d.len())),
+            ty: Type::Array(Box::new(QualType::new(Type::Char)), crate::ast::ArraySize::Const(d.len())),
         },
         Operand::SymAddr(n) => Expr::Ident {
             name: crate::ast::Ident {
@@ -2048,7 +2048,7 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
                 span: Span::point("ssa", 0, 0),
             },
             span: Span::point("ssa", 0, 0),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         Operand::FnAddr(n) => Expr::Ident {
             name: crate::ast::Ident {
@@ -2056,7 +2056,7 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
                 span: Span::point("ssa", 0, 0),
             },
             span: Span::point("ssa", 0, 0),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         Operand::Void => Expr::Int {
             v: 0,
@@ -2108,7 +2108,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
                 ty: Type::Void,
             }),
             span: sp.clone(),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         InstKind::Load { e, ty } => Expr::Deref {
             e: Box::new(operand_to_expr(e, env)),

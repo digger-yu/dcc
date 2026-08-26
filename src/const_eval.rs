@@ -105,7 +105,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 // 递归求基地址: 必须是 &ident.field1.field2... 形式
                 let base_addr = match eval_full(&Expr::AddrOf {
                     e: expr.clone(),
-                    ty: Type::Ptr(Box::new(expr.ty())),
+                    ty: Type::Ptr(Box::new(crate::ast::QualType::new(expr.ty()))),
                     span: crate::diagnostics::Span::point("", 0, 0),
                 })? {
                     ConstValue::Addr { name, offset } => (name, offset),
@@ -796,7 +796,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                 })
             };
             match (*is_arrow, expr.ty()) {
-                (true, Type::Ptr(inner)) => match inner.as_ref() {
+                (true, Type::Ptr(inner)) => match &inner.base {
                     Type::Struct(_, f, _) | Type::Union(_, f, _) => lookup(f.as_ref()),
                     _ => None,
                 },

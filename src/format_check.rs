@@ -346,7 +346,7 @@ fn check_format_type(
     // scanf 参数应该是指针类型
     let effective_ty = if is_scanf {
         match ty {
-            Type::Ptr(inner) => inner.as_ref(),
+            Type::Ptr(inner) => &inner.base,
             _ => {
                 out.push(Diagnostic::warn(
                     "W0003",

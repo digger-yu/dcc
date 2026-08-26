@@ -38,7 +38,7 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
         }
         Designator::Index(idx_expr) => {
             let elem_ty = match ty {
-                Type::Array(e, _) => e.as_ref().clone(),
+                Type::Array(e, _) => e.base.clone(),
                 _ => return None,
             };
             let idx = match idx_expr {
@@ -1611,9 +1611,9 @@ impl Codegen {
             Type::Float | Type::Double => {}
             // _Complex float/double: 两个 eightbyte 均为 SSE (SysV,
             // 与 gcc ubsan.cc 一致), 保持初始 [Sse, Sse]
-            Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {}
+            Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {}
             // _Imaginary float/double: 单个 SSE eightbyte (同普通浮点)
-            Type::Imaginary(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {}
+            Type::Imaginary(inner) if matches!(&inner.base, Type::Float | Type::Double) => {}
             Type::Struct(_, fields, _) => {
                 for field in fields.iter() {
                     if !Self::classify_at(&field.ty, base + field.offset, classes) {
@@ -1632,13 +1632,13 @@ impl Codegen {
             }
             Type::Array(elem, ArraySize::Const(n)) => {
                 for i in 0..*n {
-                    if !Self::classify_at(elem, base + i * elem.size(), classes) {
+                    if !Self::classify_at(&elem.base, base + i * elem.size(), classes) {
                         return false;
                     }
                 }
                 return true;
             }
-            Type::Atomic(inner) => return Self::classify_at(inner, base, classes),
+            Type::Atomic(inner) => return Self::classify_at(&inner.base, base, classes),
             _ => {
                 let first = base / 8;
                 let last = (base + ty.size().saturating_sub(1)) / 8;
@@ -5414,10 +5414,10 @@ impl Codegen {
                                     let dst_name = v.name.name.clone();
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                                 } else if let Type::Complex(inner) = &v.ty {
-                                    self.gen_complex_init(&v.name.name, inner, init);
+                                    self.gen_complex_init(&v.name.name, &inner.base, init);
                                 } else if let Type::Imaginary(ref inner) = &v.ty {
                                     // _Imaginary 变量初始化: 存储单个浮点值 (虚部)
-                                    self.gen_imaginary_init(&v.name.name, inner, init);
+                                    self.gen_imaginary_init(&v.name.name, &inner.base, init);
                                 } else if matches!(
                                     &v.ty,
                                     Type::Float | Type::Double | Type::LongDouble
@@ -5769,13 +5769,13 @@ impl Codegen {
                 // _Complex float/double: 两分量均为 SSE 类, 用 XMM 装载/存储
                 // 而非整数 GP 中转 (SysV ABI 3.2.3).
                 let is_complex_sse = matches!(&effective_ty, Type::Complex(inner)
-                    if matches!(inner.as_ref(), Type::Float | Type::Double));
+                    if matches!(&inner.base, Type::Float | Type::Double));
                 if is_complex_sse {
                     let inner_sz = match effective_ty {
                         Type::Complex(ref inner) => inner.size() as i32,
                         _ => 8,
                     };
-                    let is_f32 = matches!(&effective_ty, Type::Complex(inner) if matches!(inner.as_ref(), Type::Float));
+                    let is_f32 = matches!(&effective_ty, Type::Complex(inner) if matches!(&inner.base, Type::Float));
                     let pfx: u8 = if is_f32 { 0xF3 } else { 0xF2 };
                     if let Expr::Call { .. } = arg {
                         self.gen_expr(arg, 0);
@@ -6014,8 +6014,8 @@ impl Codegen {
                         ) && ret_sz > 8;
                         if is_agg_ret {
                             if let Type::Complex(inner) = &ret_ty {
-                                if matches!(inner.as_ref(), Type::Float | Type::Double) {
-                                    self.gen_complex_sse_return(e, inner);
+                                if matches!(&inner.base, Type::Float | Type::Double) {
+                                    self.gen_complex_sse_return(e, &inner.base);
                                 } else {
                                     self.gen_expr(e, 0);
                                     let result_off = -self.frame_size + 8;
@@ -6373,9 +6373,9 @@ impl Codegen {
                                 let dst_name = v.name.name.clone();
                                 self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                             } else if let Type::Complex(inner) = &v.ty {
-                                self.gen_complex_init(&v.name.name, inner, init);
+                                self.gen_complex_init(&v.name.name, &inner.base, init);
                             } else if let Type::Imaginary(ref inner) = &v.ty {
-                                self.gen_imaginary_init(&v.name.name, inner, init);
+                                self.gen_imaginary_init(&v.name.name, &inner.base, init);
                             } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble)
                             {
                                 // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
@@ -6927,7 +6927,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = if *is_arrow {
                         if let Type::Ptr(p) = &expr_ty {
-                            (*p).as_ref().clone()
+                            (*p).base.clone()
                         } else {
                             expr_ty
                         }
@@ -7069,8 +7069,8 @@ impl Codegen {
                     // 分量偏移: 实部 0, 虚部 +inner_sz (LongDouble 为 -8-inner_sz)
                     let is_real = matches!(lv, Expr::Real { .. });
                     let inner = match ce.ty() {
-                        Type::Complex(i) => i.as_ref().clone(),
-                        Type::Imaginary(i) => i.as_ref().clone(),
+                        Type::Complex(i) => i.base.clone(),
+                        Type::Imaginary(i) => i.base.clone(),
                         _ => Type::Double,
                     };
                     let is_imag_var = matches!(ce.ty(), Type::Imaginary(_));
@@ -7170,7 +7170,7 @@ impl Codegen {
                     self.gen_expr(e, 0); // xmm0 = e
                     let e_ty = e.ty();
                     let neg_ty = if let Type::Imaginary(ref inner) = e_ty {
-                        inner.as_ref()
+                        &inner.base
                     } else {
                         &e_ty
                     };
@@ -7209,7 +7209,7 @@ impl Codegen {
                 // gen_complex_binop: 实部 xmm0, 分量对在 [r13+result_off])
                 if matches!(op, UnOp::Neg) && matches!(e.ty(), Type::Complex(_)) {
                     let inner = match &e.ty() {
-                        Type::Complex(i) => i.as_ref().clone(),
+                        Type::Complex(i) => i.base.clone(),
                         _ => Type::Double,
                     };
                     let inner_sz = inner.size() as i32;
@@ -7474,7 +7474,7 @@ impl Codegen {
             Expr::Cast { ty, e, .. } => {
                 // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
                 if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e.as_ref()) {
-                    self.gen_vector_init_rvalue(inits, elem_ty, *n, 0);
+                    self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
                     return;
                 }
                 let src_ty = e.ty();
@@ -7558,7 +7558,7 @@ impl Codegen {
                         self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
                     }
                     (Type::Complex(inner), Type::Int | Type::Long | Type::Char | Type::Short) => {
-                        let is_f32 = matches!(inner.as_ref(), Type::Float);
+                        let is_f32 = matches!(&inner.base, Type::Float);
                         match e.as_ref() {
                             Expr::Binop { .. } => {
                                 // gen_complex_binop 已将实部留在 xmm0
@@ -7633,7 +7633,7 @@ impl Codegen {
                 // 帧临时区 result_off (与 gen_complex_binop 结果布局一致),
                 // 供后续整体赋值 / __real__ / __imag__ 读取。
                 let inner = match ty {
-                    Type::Complex(i) => i.as_ref().clone(),
+                    Type::Complex(i) => i.base.clone(),
                     _ => Type::Double,
                 };
                 let inner_sz = inner.size() as i32;
@@ -7879,7 +7879,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = if *is_arrow {
                         if let Type::Ptr(p) = &expr_ty {
-                            (*p).as_ref().clone()
+                            (*p).base.clone()
                         } else {
                             expr_ty
                         }
@@ -7988,7 +7988,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = if *is_arrow {
                     if let Type::Ptr(p) = &expr_ty {
-                        (*p).as_ref().clone()
+                        (*p).base.clone()
                     } else {
                         expr_ty
                     }
@@ -8102,7 +8102,7 @@ impl Codegen {
             }
             Expr::CompoundLit { ty, inits, .. } => {
                 if let Type::Vector(elem_ty, n) = ty {
-                    self.gen_vector_init_rvalue(inits, elem_ty, *n, 0);
+                    self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
                     return;
                 }
                 // 复合字面量: (type){...} - 在 rodata 中存储初始化数据, 加载地址
@@ -8133,7 +8133,7 @@ impl Codegen {
             }
             Expr::InitList { inits, .. } => {
                 if let Type::Vector(elem_ty, n) = e.ty() {
-                    self.gen_vector_init_rvalue(inits, &elem_ty, n, 0);
+                    self.gen_vector_init_rvalue(inits, &elem_ty.base, n, 0);
                 } else if e.ty().is_arith() || e.ty().is_ptr() || matches!(e.ty(), Type::Bool) {
                     // 标量初始化列表 (如 `int x = {1};` 或带 brace 的复合字面量):
                     // 第一个元素就是要赋的值, 后续 (C99 6.7.8/11) 只能是 0
@@ -8201,8 +8201,8 @@ impl Codegen {
                     self.copy_r13_bytes(src_off, toff, ty.size());
                 }
             }
-            Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
-                let pfx = if matches!(inner.as_ref(), Type::Float) {
+            Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
+                let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3
                 } else {
                     0xF2
@@ -8244,14 +8244,14 @@ impl Codegen {
         }
         self.gen_expr(e, 0);
         match src_ty {
-            Type::Complex(ref inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
-                let pfx = if matches!(inner.as_ref(), Type::Float) {
+            Type::Complex(ref inner) if matches!(&inner.base, Type::Float | Type::Double) => {
+                let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3
                 } else {
                     0xF2
                 };
                 self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off);
-                self.gen_complex_imag_into_xmm0(e, inner);
+                self.gen_complex_imag_into_xmm0(e, &inner.base);
                 self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off + inner.size() as i32);
             }
             Type::Float => self.store_xmm32_stack(0, dst_off),
@@ -8394,15 +8394,15 @@ impl Codegen {
                         while k <= l {
                             self.gen_expr(value, 0);
                             if matches!(
-                                elem_ty.as_ref(),
+                                &elem_ty.base,
                                 Type::Float | Type::Double | Type::LongDouble
                             ) {
-                                self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
+                                self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                             }
                             let off = base + (k * elem_size) as i32;
-                            if matches!(elem_ty.as_ref(), Type::Float) {
+                            if matches!(&elem_ty.base, Type::Float) {
                                 self.store_xmm32_stack(0, off);
-                            } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
+                            } else if matches!(&elem_ty.base, Type::Double | Type::LongDouble) {
                                 self.store_xmm64_stack(0, off);
                             } else {
                                 self.emit_store(0, off, elem_size);
@@ -8433,22 +8433,22 @@ impl Codegen {
                         // 嵌套数组初始化 (如 int m[2][2] = {{1,2},{3,4}}):
                         // 递归展开子数组 (任意深度), 跳过 gen_expr 对 InitList
                         // 的简化处理; 子数组不足的尾部零填充由递归内完成
-                        self.gen_init_list_at(base + (i * elem_size) as i32, elem_ty, nested);
+                        self.gen_init_list_at(base + (i * elem_size) as i32, &elem_ty.base, nested);
                         covered = covered.max(i + 1);
                         continue;
                     }
                     self.gen_expr(value, 0);
                     // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
                     if matches!(
-                        elem_ty.as_ref(),
+                        &elem_ty.base,
                         Type::Float | Type::Double | Type::LongDouble
                     ) {
-                        self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
+                        self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                     }
                     let off = base + (i * elem_size) as i32;
-                    if matches!(elem_ty.as_ref(), Type::Float) {
+                    if matches!(&elem_ty.base, Type::Float) {
                         self.store_xmm32_stack(0, off);
-                    } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
+                    } else if matches!(&elem_ty.base, Type::Double | Type::LongDouble) {
                         self.store_xmm64_stack(0, off);
                     } else {
                         self.emit_store(0, off, elem_size);
@@ -8470,11 +8470,11 @@ impl Codegen {
                         _ => continue,
                     };
                     self.gen_expr(value, 0);
-                    self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
+                    self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                     let off = base + (i * elem_size) as i32;
-                    if matches!(**elem_ty, Type::Float) {
+                    if matches!(elem_ty.base, Type::Float) {
                         self.store_xmm32_stack(0, off);
-                    } else if matches!(**elem_ty, Type::Double) {
+                    } else if matches!(elem_ty.base, Type::Double) {
                         self.store_xmm64_stack(0, off);
                     } else {
                         self.emit_store(0, off, elem_size);
@@ -8646,7 +8646,7 @@ impl Codegen {
                             continue;
                         }
                         let is_float_elem = matches!(
-                            elem_ty.as_ref(),
+                            &elem_ty.base,
                             Type::Float | Type::Double | Type::LongDouble
                         );
                         let mut k = f;
@@ -8657,7 +8657,7 @@ impl Codegen {
                             let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
                             // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
                             // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                            let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                            let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
                                 if let Expr::String { data, .. } = value {
                                     self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                                 } else {
@@ -8699,7 +8699,7 @@ impl Codegen {
                     } = value
                     {
                         let nested_ty = if matches!(nested_ty, Type::Int) {
-                            elem_ty.as_ref()
+                            &elem_ty.base
                         } else {
                             nested_ty
                         };
@@ -8711,13 +8711,13 @@ impl Codegen {
                         }
                     } else {
                         let is_float_elem = matches!(
-                            elem_ty.as_ref(),
+                            &elem_ty.base,
                             Type::Float | Type::Double | Type::LongDouble
                         );
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
                         // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
                         // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                        let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                        let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
                             if let Expr::String { data, .. } = value {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
@@ -8814,12 +8814,12 @@ impl Codegen {
                         _ => continue,
                     };
                     let is_float_elem = matches!(
-                        elem_ty.as_ref(),
+                        &elem_ty.base,
                         Type::Float | Type::Double | Type::LongDouble
                     );
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
                     // 字符串指针元素 (向量元素为指针时): 生成指针槽
-                    let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                    let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
                         if let Expr::String { data, .. } = value {
                             self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                         } else {
@@ -9765,7 +9765,7 @@ impl Codegen {
     fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, result_slot: usize) {
         let (elem_ty, count) = match l.ty() {
             Type::Vector(ref elem, n) => {
-                let et = (**elem).clone();
+                let et = elem.base.clone();
                 (et, n)
             }
             _ => return,
@@ -10018,14 +10018,14 @@ impl Codegen {
                 ty: Type::Vector(elem, n),
                 inits,
                 ..
-            } => Some((elem.as_ref(), *n, inits.as_slice())),
+            } => Some((&elem.base, *n, inits.as_slice())),
             Expr::Cast {
                 ty: Type::Vector(elem, n),
                 e: inner,
                 ..
             } => {
                 if let Expr::InitList { inits, .. } = inner.as_ref() {
-                    Some((elem.as_ref(), *n, inits.as_slice()))
+                    Some((&elem.base, *n, inits.as_slice()))
                 } else {
                     None
                 }
@@ -10046,7 +10046,7 @@ impl Codegen {
             }
             Expr::InitList { inits, .. } => {
                 if let Type::Vector(elem_ty, n) = e.ty() {
-                    self.gen_vector_init_rvalue(inits, &elem_ty, n, temp_slot);
+                    self.gen_vector_init_rvalue(inits, &elem_ty.base, n, temp_slot);
                 }
             }
             _ => self.gen_vector_load_into_slot(e, temp_slot),
@@ -10055,13 +10055,13 @@ impl Codegen {
 
     /// 加载向量变量的第 i 个元素到 rax（整数）或 xmm0（浮点）
     fn gen_scalar_vector_load(&mut self, e: &Expr, elem_idx: usize, elem_size: usize) {
-        let is_float = matches!(e.ty(), Type::Vector(ref inner, _) if matches!(**inner, Type::Float | Type::Double));
+        let is_float = matches!(e.ty(), Type::Vector(ref inner, _) if matches!(inner.base, Type::Float | Type::Double));
         if is_float {
             self.gen_scalar_vector_load_sse(
                 e,
                 elem_idx,
                 elem_size,
-                matches!(e.ty(), Type::Vector(ref inner, _) if matches!(**inner, Type::Float)),
+                matches!(e.ty(), Type::Vector(ref inner, _) if matches!(inner.base, Type::Float)),
             );
             return;
         }
@@ -10115,7 +10115,7 @@ impl Codegen {
     fn gen_vector_load_into_slot(&mut self, e: &Expr, temp_slot: usize) {
         let (elem_ty, count) = match e.ty() {
             Type::Vector(ref elem, n) => {
-                let et = (**elem).clone();
+                let et = elem.base.clone();
                 (et, n)
             }
             _ => return,
@@ -10215,7 +10215,7 @@ impl Codegen {
             .unwrap_or(Type::Int);
         let (elem_ty, count) = match ty {
             Type::Vector(ref elem, n) => {
-                let et = (**elem).clone();
+                let et = elem.base.clone();
                 (et, n)
             }
             _ => return,
@@ -10278,8 +10278,8 @@ impl Codegen {
             Type::Float => "float".into(),
             Type::Double => "double".into(),
             Type::LongDouble => "long double".into(),
-            Type::Ptr(inner) => format!("{} *", Self::ubsan_type_name(inner)),
-            Type::Complex(inner) => format!("_Complex {}", Self::ubsan_type_name(inner)),
+            Type::Ptr(inner) => format!("{} *", Self::ubsan_type_name(&inner.base)),
+            Type::Complex(inner) => format!("_Complex {}", Self::ubsan_type_name(&inner.base)),
             _ => "<unknown>".into(),
         }
     }
@@ -10473,7 +10473,7 @@ impl Codegen {
     fn type_has_vla(ty: &Type) -> bool {
         match ty {
             Type::Array(_, ArraySize::Var(_)) => true,
-            Type::Array(elem, ArraySize::Const(_)) => Self::type_has_vla(elem),
+            Type::Array(elem, ArraySize::Const(_)) => Self::type_has_vla(&elem.base),
             _ => false,
         }
     }
@@ -10483,9 +10483,9 @@ impl Codegen {
         match ty {
             Type::Array(elem, ArraySize::Var(n)) => {
                 self.gen_expr(n, dst); // dst = 元素个数 (运行时)
-                if Self::type_has_vla(elem) {
+                if Self::type_has_vla(&elem.base) {
                     // 元素本身是 VLA: 递归求值 elem_size 到 rcx, dst *= rcx
-                    self.gen_sizeof_runtime(elem, 1);
+                    self.gen_sizeof_runtime(&elem.base, 1);
                     self.imul_reg(dst, 1);
                 } else {
                     let es = elem.size() as i128;
@@ -10495,8 +10495,8 @@ impl Codegen {
                 }
             }
             Type::Array(elem, ArraySize::Const(c)) => {
-                if Self::type_has_vla(elem) {
-                    self.gen_sizeof_runtime(elem, 1); // rcx = elem_size
+                if Self::type_has_vla(&elem.base) {
+                    self.gen_sizeof_runtime(&elem.base, 1); // rcx = elem_size
                     self.mov(dst, 1);
                     self.imul_imm(dst, *c as i128);
                 } else {
@@ -11047,7 +11047,7 @@ impl Codegen {
         let off = self.var_offset(name);
         // _Imaginary: 按内型存储
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
-            inner.as_ref()
+            &inner.base
         } else {
             ty
         };
@@ -11321,8 +11321,8 @@ impl Codegen {
         if let Type::Imaginary(ref inner) = e.ty() {
             if is_real {
                 // __real__ imaginary → 0
-                if matches!(inner.as_ref(), Type::Float | Type::Double | Type::LongDouble) {
-                    if matches!(inner.as_ref(), Type::Float) {
+                if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(&inner.base, Type::Float) {
                         self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
                     } else {
                         self.emit(&[0x66, 0x0F, 0x57, 0xC0]); // xorpd xmm0, xmm0
@@ -11337,7 +11337,7 @@ impl Codegen {
             return;
         }
         let inner = match &e.ty() {
-            Type::Complex(i) => i.as_ref().clone(),
+            Type::Complex(i) => i.base.clone(),
             _ => Type::Double, // 标量路径占位
         };
         if !matches!(e.ty(), Type::Complex(_)) {
@@ -11422,7 +11422,7 @@ impl Codegen {
         let off = self.var_offset(name);
         // _Imaginary: 按内型加载
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
-            inner.as_ref().clone()
+            inner.base.clone()
         } else {
             ty.clone()
         };
@@ -11547,7 +11547,7 @@ impl Codegen {
     fn emit_global_float_load_to_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
         // _Imaginary: 按内型加载
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
-            inner.as_ref()
+            &inner.base
         } else {
             ty
         };
@@ -11828,9 +11828,9 @@ impl Codegen {
     // P2-14: _Complex 算术运算 (add/sub/mul/div) 与比较 (==/!=)
     fn gen_complex_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
         let inner_ty = if let Type::Complex(inner) = &l.ty() {
-            inner.as_ref().clone()
+            inner.base.clone()
         } else if let Type::Complex(inner) = &r.ty() {
-            inner.as_ref().clone()
+            inner.base.clone()
         } else {
             return;
         };
@@ -11995,13 +11995,13 @@ impl Codegen {
         let r_imag = matches!(r.ty(), Type::Imaginary(_));
         // 确定内型: 取两个操作数中较宽的浮点类型
         let inner_a = if l_imag {
-            if let Type::Imaginary(ref i) = l.ty() { i.as_ref().clone() }
+            if let Type::Imaginary(ref i) = l.ty() { i.base.clone() }
             else { Type::Double }
         } else {
             l.ty()
         };
         let inner_b = if r_imag {
-            if let Type::Imaginary(ref i) = r.ty() { i.as_ref().clone() }
+            if let Type::Imaginary(ref i) = r.ty() { i.base.clone() }
             else { Type::Double }
         } else {
             r.ty()
@@ -12520,7 +12520,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = if *is_arrow {
                     if let Type::Ptr(p) = &expr_ty {
-                        (*p).as_ref().clone()
+                        (*p).base.clone()
                     } else {
                         expr_ty
                     }
@@ -12654,19 +12654,19 @@ impl Codegen {
                 // 位置), 直接分存两分量, 不走 rax 单槽 + rep movsb 通用路径
                 if let Type::Complex(inner) = dst_ty {
                     if matches!(
-                        inner.as_ref(),
+                        &inner.base,
                         Type::Float | Type::Double | Type::LongDouble
                     ) {
                         self.gen_expr(r, 0);
-                        self.gen_float_store_at(dst_off, inner);
-                        self.gen_complex_imag_into_xmm0(r, inner);
+                        self.gen_float_store_at(dst_off, &inner.base);
+                        self.gen_complex_imag_into_xmm0(r, &inner.base);
                         let inner_sz = inner.size() as i32;
-                        let imag_base = if matches!(inner.as_ref(), Type::LongDouble) {
+                        let imag_base = if matches!(&inner.base, Type::LongDouble) {
                             dst_off - 8 - inner_sz
                         } else {
                             dst_off + inner_sz
                         };
-                        self.gen_float_store_at(imag_base, inner);
+                        self.gen_float_store_at(imag_base, &inner.base);
                         return;
                     }
                 }
@@ -13283,11 +13283,11 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                 }
             }
-            Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
+            Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
                 self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
                 self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1
                 let result_off = -self.frame_size + 8;
-                let pfx = if matches!(inner.as_ref(), Type::Float) {
+                let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3u8
                 } else {
                     0xF2u8

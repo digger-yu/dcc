@@ -591,9 +591,9 @@ impl Lowering {
             Type::Float => ValueType::Float { bits: 32 },
             Type::Double => ValueType::Float { bits: 64 },
             Type::LongDouble => ValueType::Float { bits: 128 },
-            Type::Ptr(inner) => ValueType::Pointer(Box::new(self.lower_type(inner, span))),
+            Type::Ptr(inner) => ValueType::Pointer(Box::new(self.lower_type(&inner.base, span))),
             Type::Array(inner, size) => ValueType::Array(
-                Box::new(self.lower_type(inner, span)),
+                Box::new(self.lower_type(&inner.base, span)),
                 match size {
                     ast::ArraySize::Const(n) => Some(*n),
                     _ => None,
@@ -610,15 +610,15 @@ impl Lowering {
                 is_union: true,
             },
             Type::Func(ret, params) => ValueType::Function {
-                ret: Box::new(self.lower_type(ret, span)),
-                params: params.iter().map(|p| self.lower_type(p, span)).collect(),
+                ret: Box::new(self.lower_type(&ret.base, span)),
+                params: params.iter().map(|p| self.lower_type(&p.base, span)).collect(),
             },
-            Type::Vector(inner, n) => ValueType::Vector(Box::new(self.lower_type(inner, span)), *n),
-            Type::Complex(inner) => ValueType::Complex(Box::new(self.lower_type(inner, span))),
+            Type::Vector(inner, n) => ValueType::Vector(Box::new(self.lower_type(&inner.base, span)), *n),
+            Type::Complex(inner) => ValueType::Complex(Box::new(self.lower_type(&inner.base, span))),
             Type::Imaginary(inner) => {
-                ValueType::Imaginary(Box::new(self.lower_type(inner, span)))
+                ValueType::Imaginary(Box::new(self.lower_type(&inner.base, span)))
             }
-            Type::Atomic(inner) => self.lower_type(inner, span),
+            Type::Atomic(inner) => self.lower_type(&inner.base, span),
             Type::Named(name) => {
                 self.diagnostics.push(Diagnostic::err(
                     "E1001",
@@ -792,10 +792,10 @@ impl Lowering {
             Expr::Cast { e, .. } => (ExprKind::Cast, vec![self.lower_expr(e)]),
             Expr::Call { callee, args, .. } => {
                 match callee.ty() {
-                    Type::Func(ret, _) => ty = self.lower_type(&ret, &span),
+                    Type::Func(ret, _) => ty = self.lower_type(&ret.base, &span),
                     Type::Ptr(inner) => {
-                        if let Type::Func(ret, _) = inner.as_ref() {
-                            ty = self.lower_type(ret, &span);
+                        if let Type::Func(ret, _) = &inner.base {
+                            ty = self.lower_type(&ret.base, &span);
                         }
                     }
                     _ => {}
@@ -816,7 +816,7 @@ impl Lowering {
             } => {
                 let aggregate = if *is_arrow {
                     match base.ty() {
-                        Type::Ptr(inner) => *inner,
+                        Type::Ptr(inner) => inner.base.clone(),
                         other => other,
                     }
                 } else {
@@ -855,7 +855,7 @@ impl Lowering {
             Expr::Deref { e, .. } => {
                 match e.ty() {
                     Type::Ptr(inner) | Type::Array(inner, _) => {
-                        ty = self.lower_type(&inner, &span);
+                        ty = self.lower_type(&inner.base, &span);
                     }
                     _ => {
                         // 降级为 warning: 隐式声明函数返回 int 但被解引用

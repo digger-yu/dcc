@@ -36,7 +36,7 @@
 //   关闭对应 sanitizer 通道。
 
 use crate::ast::{
-    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, Stmt, Type,
+    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, QualType, Stmt, Type,
     UnOp, VarDecl,
 };
 use crate::cli::CliError;
@@ -1185,7 +1185,7 @@ fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![bound_ty.clone()]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![bound_ty.clone().into()]),
         }),
         args: vec![*bound],
         span: span.clone(),
@@ -1203,7 +1203,7 @@ fn null_deref_check(span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
         }),
         args: vec![Expr::Int {
             v: 0,
@@ -1243,8 +1243,8 @@ fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![val_ty, target_ty.clone(), target_ty.clone()],
+                Box::new(Type::Void.into()),
+                vec![val_ty.into(), target_ty.clone().into(), target_ty.clone().into()],
             ),
         }),
         args: vec![*value, min_expr, max_expr],
@@ -1297,8 +1297,8 @@ fn wrap_with_ubsan_check_arg(expr: &Expr, check_arg: &Expr, kind: &str, span: &S
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void)), inner_ty.clone()],
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into(), inner_ty.clone().into()],
             ),
         }),
         args: vec![
@@ -1332,8 +1332,8 @@ fn wrap_with_ubsan_check(expr: &Expr, kind: &str, span: &Span) -> Expr {
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void)), inner_ty.clone()],
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into(), inner_ty.clone().into()],
             ),
         }),
         args: vec![
@@ -1373,7 +1373,7 @@ fn wrap_with_mem_check(
     let addr_expr = Expr::AddrOf {
         e: Box::new(expr.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(inner_ty.clone())),
+        ty: Type::Ptr(Box::new(inner_ty.clone().into())),
     };
     let size = match kind {
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
@@ -1397,7 +1397,7 @@ fn wrap_with_mem_check_assign(
     let addr_expr = Expr::AddrOf {
         e: Box::new(lhs.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(inner_ty.clone())),
+        ty: Type::Ptr(Box::new(inner_ty.clone().into())),
     };
     let size = match kind {
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
@@ -1483,9 +1483,9 @@ fn make_tsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) ->
         ]
     };
     let param_tys = if matches!(size, 1 | 2 | 4 | 8 | 16) {
-        vec![Type::Ptr(Box::new(Type::Void))]
+        vec![Type::Ptr(Box::new(Type::Void.into())).into()]
     } else {
-        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
+        vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()]
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
@@ -1494,7 +1494,7 @@ fn make_tsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) ->
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), param_tys),
+            ty: Type::Func(Box::new(Type::Void.into()), param_tys.into_iter().map(|p: Type| p.into()).collect::<Vec<QualType>>()),
         }),
         args,
         span: span.clone(),
@@ -1513,8 +1513,8 @@ fn make_kcsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void)), Type::ULong, Type::Int],
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into(), Type::Int.into()],
             ),
         }),
         args: vec![
@@ -1574,9 +1574,9 @@ fn make_asan_call(
         ]
     };
     let param_tys = if has_fixed_size_runtime {
-        vec![Type::Ptr(Box::new(Type::Void))]
+        vec![Type::Ptr(Box::new(Type::Void.into())).into()]
     } else {
-        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
+        vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()]
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
@@ -1585,7 +1585,7 @@ fn make_asan_call(
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), param_tys),
+            ty: Type::Func(Box::new(Type::Void.into()), param_tys.into_iter().map(|p: Type| p.into()).collect::<Vec<QualType>>()),
         }),
         args,
         span: span.clone(),
@@ -1654,7 +1654,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span)
                     ul(g as i128),
                     Type::ULong,
                 )),
-                ty: Type::Ptr(Box::new(Type::UChar)),
+                ty: Type::Ptr(Box::new(Type::UChar.into())),
                 span: span.clone(),
             }),
             span: span.clone(),
@@ -1707,7 +1707,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span)
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
         }),
         args: vec![addr],
         span: span.clone(),
@@ -1822,7 +1822,7 @@ fn wrap_with_msan_load_check(expr: &Expr, size: usize, span: &Span) -> Expr {
     let addr_expr = Expr::AddrOf {
         e: Box::new(expr.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(inner_ty.clone())),
+        ty: Type::Ptr(Box::new(inner_ty.clone().into())),
     };
     let fn_name = msan_check_fn_name(size, false);
     let call = Expr::Call {
@@ -1832,7 +1832,7 @@ fn wrap_with_msan_load_check(expr: &Expr, size: usize, span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -1853,7 +1853,7 @@ fn wrap_with_msan_store_check(lhs: &Expr, assign: &Expr, size: usize, span: &Spa
     let addr_expr = Expr::AddrOf {
         e: Box::new(lhs.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(lhs.ty())),
+        ty: Type::Ptr(Box::new(lhs.ty().into())),
     };
     let fn_name = msan_check_fn_name(size, true);
     let call = Expr::Call {
@@ -1863,7 +1863,7 @@ fn wrap_with_msan_store_check(lhs: &Expr, assign: &Expr, size: usize, span: &Spa
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -1897,7 +1897,7 @@ fn wrap_with_dfsan_load_label(expr: &Expr, size: usize, span: &Span) -> Expr {
     let addr_expr = Expr::AddrOf {
         e: Box::new(expr.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(inner_ty.clone())),
+        ty: Type::Ptr(Box::new(inner_ty.clone().into())),
     };
     let fn_name = format!("__dfsan_load_label_{}", size);
     let call = Expr::Call {
@@ -1907,7 +1907,7 @@ fn wrap_with_dfsan_load_label(expr: &Expr, size: usize, span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Short), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Short.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -1938,7 +1938,7 @@ fn wrap_with_dfsan_store_label(lhs: &Expr, assign: &Expr, size: usize, span: &Sp
     let addr_expr = Expr::AddrOf {
         e: Box::new(lhs.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(lhs.ty())),
+        ty: Type::Ptr(Box::new(lhs.ty().into())),
     };
     let fn_name = format!("__dfsan_store_label_{}", size);
     // label arg: 简化为 0 (clean label)；实际标签由运行时 union 传播
@@ -1950,8 +1950,8 @@ fn wrap_with_dfsan_store_label(lhs: &Expr, assign: &Expr, size: usize, span: &Sp
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void)), Type::Short],
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::Short.into()],
             ),
         }),
         args: vec![
@@ -1984,7 +1984,7 @@ fn wrap_with_cfi_check(callee: &Expr, type_hash: u64, span: &Span) -> Expr {
     let callee_ptr = Expr::AddrOf {
         e: Box::new(callee.clone()),
         span: span.clone(),
-        ty: Type::Ptr(Box::new(callee_ty.clone())),
+        ty: Type::Ptr(Box::new(callee_ty.clone().into())),
     };
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {
@@ -1994,8 +1994,8 @@ fn wrap_with_cfi_check(callee: &Expr, type_hash: u64, span: &Span) -> Expr {
             },
             span: span.clone(),
             ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void)), Type::ULong],
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()],
             ),
         }),
         args: vec![
@@ -2051,7 +2051,7 @@ fn wrap_with_compare_trace(expr: &Expr, span: &Span) -> Expr {
                     span: span.clone(),
                 },
                 span: span.clone(),
-                ty: Type::Func(Box::new(Type::Void), vec![l_ty.clone(), l_ty.clone()]),
+                ty: Type::Func(Box::new(Type::Void.into()), vec![l_ty.clone().into(), l_ty.clone().into()]),
             }),
             args: vec![a, b],
             span: span.clone(),
@@ -2081,7 +2081,7 @@ fn switch_trace_wrapper(arg_expr: &Expr, cases: &[i128], arg_ty: &Type, span: &S
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Long]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Long.into()]),
         }),
         args: vec![arg_expr.clone()],
         span: span.clone(),
@@ -2099,7 +2099,7 @@ fn switch_trace_wrapper(arg_expr: &Expr, cases: &[i128], arg_ty: &Type, span: &S
 fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
     BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
         ty: Type::Array(
-            Box::new(Type::UInt),
+            Box::new(Type::UInt.into()),
             ArraySize::Var(Box::new(Expr::Int {
                 v: 16,
                 span: span.clone(),
@@ -2141,8 +2141,8 @@ fn guard_init(base: &u32, span: &Span) -> BlockItem {
                 },
                 span: span.clone(),
                 ty: Type::Func(
-                    Box::new(Type::Void),
-                    vec![Type::UInt, Type::Ptr(Box::new(Type::UInt))],
+                    Box::new(Type::Void.into()),
+                    vec![Type::UInt.into(), Type::Ptr(Box::new(Type::UInt.into())).into()],
                 ),
             }),
             args: vec![
@@ -2154,7 +2154,7 @@ fn guard_init(base: &u32, span: &Span) -> BlockItem {
                 Expr::Int {
                     v: 0,
                     span: span.clone(),
-                    ty: Type::Ptr(Box::new(Type::UInt)),
+                    ty: Type::Ptr(Box::new(Type::UInt.into())),
                 },
             ],
             span: span.clone(),
@@ -2173,7 +2173,7 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::UInt))]),
+            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::UInt.into())).into()]),
         }),
         args: vec![Expr::Index {
             arr: Box::new(Expr::Ident {
@@ -2182,7 +2182,7 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
                     span: span.clone(),
                 },
                 span: span.clone(),
-                ty: Type::Array(Box::new(Type::UInt), ArraySize::Const(16)),
+                ty: Type::Array(Box::new(Type::UInt.into()), ArraySize::Const(16)),
             }),
             idx: Box::new(Expr::Int {
                 v: idx as i128,
@@ -2270,7 +2270,7 @@ fn sanitizer_call(name: &str, span: &Span) -> BlockItem {
             callee: Box::new(Expr::Ident {
                 name: id,
                 span: span.clone(),
-                ty: Type::Func(Box::new(Type::Void), vec![]),
+                ty: Type::Func(Box::new(Type::Void.into()), vec![]),
             }),
             args: vec![],
             span: span.clone(),

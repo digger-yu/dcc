@@ -852,17 +852,17 @@ pub enum Type {
     LongDouble,
     Fract,
     Accum,              // 定点数: _Fract (1.31格式), _Accum (16.16格式)
-    Complex(Box<Type>),    // _Complex float/double: (real, imag) 两部分
-    Imaginary(Box<Type>),  // _Imaginary float/double: 仅虚部, 大小同内型
-    Ptr(Box<Type>),
-    Array(Box<Type>, ArraySize),
-    Vector(Box<Type>, usize), // SIMD 向量: (元素类型, 元素个数)
+    Complex(Box<QualType>),    // _Complex float/double: (real, imag) 两部分
+    Imaginary(Box<QualType>),  // _Imaginary float/double: 仅虚部, 大小同内型
+    Ptr(Box<QualType>),
+    Array(Box<QualType>, ArraySize),
+    Vector(Box<QualType>, usize), // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Arc<Vec<Field>>, usize), // (name, fields, align)
     Union(String, Arc<Vec<Field>>, usize),   // (name, fields, align)
-    Enum(String, Arc<Vec<(String, i64)>>, Option<Box<Type>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
-    Func(Box<Type>, Vec<Type>),
+    Enum(String, Arc<Vec<(String, i64)>>, Option<Box<QualType>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
+    Func(Box<QualType>, Vec<QualType>),
     Named(String),
-    Atomic(Box<Type>), // _Atomic(T): 原子类型, 大小/对齐同 T
+    Atomic(Box<QualType>), // _Atomic(T): 原子类型, 大小/对齐同 T
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

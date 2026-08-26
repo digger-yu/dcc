@@ -1217,7 +1217,7 @@ impl ArmCodegen {
             // _Complex 字面量
             Expr::ComplexLit { real, imag, ty, .. } => {
                 // 简化: 将实部和虚部存入栈, 返回地址
-                let is_double = matches!(ty, crate::ast::Type::Complex(ref inner) if matches!(inner.as_ref(), crate::ast::Type::Double | crate::ast::Type::LongDouble));
+                let is_double = matches!(ty, crate::ast::Type::Complex(ref inner) if matches!(&inner.base, crate::ast::Type::Double | crate::ast::Type::LongDouble));
                 let size = if is_double { 8 } else { 4 };
                 let real_off = self.alloc_local("<cx_r>", size as i32);
                 let imag_off = self.alloc_local("<cx_i>", size as i32);

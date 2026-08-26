@@ -894,7 +894,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Boolean),
         },
         Type::Ptr(inner) => {
-            let inner_dw = ast_type_to_dwarf(inner);
+            let inner_dw = ast_type_to_dwarf(&inner.base);
             debug::DwarfType {
                 name: format!("{}*", inner_dw.name),
                 byte_size: 8,
@@ -902,7 +902,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             }
         }
         Type::Array(elem, count) => {
-            let elem_dw = ast_type_to_dwarf(elem);
+            let elem_dw = ast_type_to_dwarf(&elem.base);
             let cnt = match count {
                 crate::ast::ArraySize::Const(n) => *n as u64,
                 crate::ast::ArraySize::Var(_) => 0,
@@ -981,21 +981,21 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             name: "function".to_string(),
             byte_size: 0,
             kind: debug::DwarfTypeKind::Func {
-                ret: Box::new(ast_type_to_dwarf(ret)),
-                params: params.iter().map(|p| ast_type_to_dwarf(p)).collect(),
+                ret: Box::new(ast_type_to_dwarf(&ret.base)),
+                params: params.iter().map(|p| ast_type_to_dwarf(&p.base)).collect(),
             },
         },
         Type::Complex(inner) => debug::DwarfType {
-            name: format!("_Complex {}", ast_type_to_dwarf(inner).name),
-            byte_size: ast_type_to_dwarf(inner).byte_size * 2,
+            name: format!("_Complex {}", ast_type_to_dwarf(&inner.base).name),
+            byte_size: ast_type_to_dwarf(&inner.base).byte_size * 2,
             kind: debug::DwarfTypeKind::Struct { members: vec![] },
         },
         Type::Imaginary(inner) => debug::DwarfType {
-            name: format!("_Imaginary {}", ast_type_to_dwarf(inner).name),
-            byte_size: ast_type_to_dwarf(inner).byte_size,
+            name: format!("_Imaginary {}", ast_type_to_dwarf(&inner.base).name),
+            byte_size: ast_type_to_dwarf(&inner.base).byte_size,
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },
-        Type::Atomic(inner) => ast_type_to_dwarf(inner),
+        Type::Atomic(inner) => ast_type_to_dwarf(&inner.base),
         Type::Fract => debug::DwarfType {
             name: "_Fract".to_string(),
             byte_size: 4,
@@ -1007,7 +1007,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },
         Type::Vector(elem, count) => {
-            let elem_dw = ast_type_to_dwarf(elem);
+            let elem_dw = ast_type_to_dwarf(&elem.base);
             debug::DwarfType {
                 name: format!("vector({},{})", elem_dw.name, count),
                 byte_size: elem_dw.byte_size * (*count as u64),
