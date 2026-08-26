@@ -88,6 +88,33 @@ int test_ds(int * __seg_ds p) { return *p; }
 int test_es(int * __seg_es p) { return *p; }
 int test_ss(int * __seg_ss p) { return *p; }
 
+/* 14: function pointer declarator with __seg_gs in * vs identifier */
+int *(*make_fnptr(int init))(void) {
+    static int x;
+    x = init;
+    int *(* __seg_gs fn)(void) = 0;
+    (void)fn;
+    return 0;
+}
+
+/* 15: function pointer return type with __seg_gs between ( and * */
+int (*__seg_gs ret_fnptr(void))(int) {
+    static int local = 99;
+    (void)local;
+    return 0;
+}
+
+/* 16: function pointer field declarator */
+struct with_fnptr {
+    int *(* __seg_gs fp)(void);
+};
+
+/* 17: sizeof / Alignof with __seg_gs in type-leading position */
+int test_sizeof_seg(void) { return sizeof(__seg_gs int); }
+int test_alignof_seg(void) { return _Alignof(__seg_gs int); }
+int test_sizeof_seg_ptr(void) { return sizeof(__seg_gs int *); }
+
+
 int main(void) {
     int x = 5;
     gs_global = 10;

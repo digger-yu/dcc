@@ -2666,6 +2666,29 @@ impl<'a> Parser<'a> {
             }
             // 不是函数指针, 继续正常声明流程 (属性已消费)
         }
+        // 函数指针带段寄存器限定符: type (__seg_fs/__seg_gs *name)(params)
+        // `(` 后跟段寄存器限定符 (x86 per-cpu 访问) 而非 `*`.
+        // 与函数指针带属性同构, 只是限定符在 * 之前.
+        if self.cur.kind == TokKind::LParen
+            && self.peek.kind == TokKind::Ident
+            && matches!(
+                self.peek.text.as_str(),
+                "__seg_fs"
+                    | "__seg_gs"
+                    | "__seg_cs"
+                    | "__seg_ds"
+                    | "__seg_es"
+                    | "__seg_ss"
+            )
+        {
+            self.advance(); // (
+            self.skip_ptr_qualifiers(); // 跳过 __seg_* 限定符
+            if self.cur.kind == TokKind::Star {
+                self.advance(); // *
+                return self.parse_func_ptr_inner(ty, leading_attrs, storage);
+            }
+            // 不是函数指针, 继续正常声明流程 (限定符已消费)
+        }
         // 限定符在基类型与 * 之间 (如 const, __seg_gs 等)
         self.skip_ptr_qualifiers();
         // void __attribute__(...) *fn(): 基本类型后的属性在 specifiers_only 路径下会残留
@@ -3129,13 +3152,10 @@ impl<'a> Parser<'a> {
         leading_attrs: ParsedAttrs,
         storage: StorageClass,
     ) -> Option<Vec<Decl>> {
-        // 可选的 const/volatile/restrict 限定符
-        while matches!(
-            self.cur.kind,
-            TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
-        ) {
-            self.advance();
-        }
+        // 可选的 const/volatile/restrict 限定符与段寄存器地址空间限定符
+        // (如 __seg_gs): 与 parse_ptr_suffix 中 * 与标识符之间的处理一致,
+        // 用 skip_ptr_qualifiers 统一跳过, 避免 E0001.
+        self.skip_ptr_qualifiers();
         // 处理 * 和名字之间的属性: 如 void (*__attribute__((...)) fp)();
         let mut attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
         let name = self.parse_ident()?;
@@ -3539,13 +3559,11 @@ impl<'a> Parser<'a> {
 
         self.advance(); // (
         self.advance(); // *
-        // 跳过可能的 const/volatile/restrict 限定符
-        while matches!(
-            self.cur.kind,
-            TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
-        ) {
-            self.advance();
-        }
+        // 跳过可能的 const/volatile/restrict 限定符与段寄存器限定符
+        // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
+        // 同步, 避免抽象函数指针类型 (如 typeof 中的 `int (*)(...)`)
+        // 报告意外 token.
+        self.skip_ptr_qualifiers();
         // 跳过可能的地址空间属性 __attribute__((...))
         if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
             self.skip_attributes();
@@ -4765,12 +4783,10 @@ impl<'a> Parser<'a> {
             }
         }
         if is_func_ptr {
-            while matches!(
-                self.cur.kind,
-                TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
-            ) {
-                self.advance();
-            }
+            // 跳过可能的 const/volatile/restrict 限定符与段寄存器限定符
+            // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
+            // 同步, 避免函数指针字段声明符报 E0001.
+            self.skip_ptr_qualifiers();
             let nm = if self.cur.kind == TokKind::Ident {
                 let n = self.cur.text.clone();
                 self.advance();
@@ -4877,12 +4893,10 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                 self.advance(); // (
                 self.advance(); // *
-                while matches!(
-                    self.cur.kind,
-                    TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
-                ) {
-                    self.advance();
-                }
+                // 跳过可能的 const/volatile/restrict 限定符与段寄存器限定符
+                // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
+                // 同步, 避免函数指针字段声明符报 E0001.
+                self.skip_ptr_qualifiers();
                 let nm = if self.cur.kind == TokKind::Ident {
                     let n = self.cur.text.clone();
                     self.advance();
@@ -5723,7 +5737,17 @@ impl<'a> Parser<'a> {
         ) || (self.cur.kind == TokKind::Ident
             // 局部变量遮蔽 typedef: 若同名局部变量存在，不应视为类型起始
             && !self.locals.contains_key(&self.cur.text)
-            && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23))
+            // __seg_fs / __seg_gs / __seg_cs / __seg_ds / __seg_es / __seg_ss
+            // 出现在类型最前 (如 `sizeof(__seg_gs int)`), 是类型起始.
+            && (matches!(
+                self.cur.text.as_str(),
+                "__seg_fs"
+                    | "__seg_gs"
+                    | "__seg_cs"
+                    | "__seg_ds"
+                    | "__seg_es"
+                    | "__seg_ss"
+            ) || Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23)))
     }
 
     /// 声明上下文允许把 `unknown_type value` 交给 parse_type 产生精确诊断，
@@ -5790,7 +5814,17 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
-            && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs, self.opts.is_c23))
+            // __seg_fs / __seg_gs / __seg_cs / __seg_ds / __seg_es / __seg_ss
+            // 在类型最前 (sizeof/Alignof 等), 应识别为 peek 类型起始.
+            && (matches!(
+                self.peek.text.as_str(),
+                "__seg_fs"
+                    | "__seg_gs"
+                    | "__seg_cs"
+                    | "__seg_ds"
+                    | "__seg_es"
+                    | "__seg_ss"
+            ) || Self::is_type_specifier_ident(&self.peek.text, &self.typedefs, self.opts.is_c23)))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
