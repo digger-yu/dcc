@@ -4159,6 +4159,40 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let mut fields = fields;
+                // C99 6.7.2.1: flexible array member (FAM) 必须是结构体末尾成员,
+                // 且结构体必须含 ≥ 1 个具名字段. union 内不允许 FAM. 检查任一
+                // 零长数组字段出现位置是否合法, 违反则发 E0015.
+                if !is_u {
+                    let last_idx = fields.len().saturating_sub(1);
+                    for (idx, f) in fields.iter().enumerate() {
+                        if is_zero_sized_array(&f.ty) {
+                            if idx != last_idx {
+                                self.err_here(
+                                    "E0015",
+                                    format!(
+                                        "flexible array member '{}' must be the last member of the struct",
+                                        f.name
+                                    ),
+                                    Some("ISO C99 6.7.2.1: a flexible array member may only appear as the last member of a struct"),
+                                );
+                            } else if count_named_fields(&fields) < 2 {
+                                // C99 6.7.2.1 原文: "more than one named member",
+                                // 即结构体除 FAM 外还须含 ≥ 1 个其他具名字段.
+                                self.err_here(
+                                    "E0015",
+                                    "flexible array member in a struct with no named members",
+                                    Some("ISO C99 6.7.2.1: a flexible array member may not be the only member; the struct must contain at least one other named member"),
+                                );
+                            }
+                        }
+                    }
+                } else if fields.iter().any(|f| is_zero_sized_array(&f.ty)) {
+                    self.err_here(
+                        "E0015",
+                        "flexible array member is not allowed in a union",
+                        Some("ISO C99 6.7.2.1: a flexible array member is a struct-only feature"),
+                    );
+                }
                 // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias/...))
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                     let post_attrs = self.parse_attributes();

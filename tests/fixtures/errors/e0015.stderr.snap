@@ -1,0 +1,5 @@
+error[E0015]: flexible array member in a struct with no named members
+  --> <file>:3:22
+   3 |struct s { int a[]; };
+     |                      ^
+  hint: ISO C99 6.7.2.1: a flexible array member may not be the only member; the struct must contain at least one other named member

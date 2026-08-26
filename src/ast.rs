@@ -990,6 +990,18 @@ pub fn find_field<'a>(fields: &'a [Field], name: &str) -> Option<(&'a Field, usi
     None
 }
 
+/// 是否为零长度数组 (Flexible Array Member 形式 `T a[]` 或 `T a[0]`).
+/// ISO C99 6.7.2.1 规定这种成员必须出现在结构体末尾且结构体必须至少含
+/// 一个具名字段 (`more than one named member`). 实际验证在 parser.rs 完成.
+pub fn is_zero_sized_array(ty: &Type) -> bool {
+    matches!(ty, Type::Array(_, ArraySize::Const(0)))
+}
+
+/// 统计字段列表中具名字段数 (非匿名). 用于验证 FAM 约束.
+pub fn count_named_fields(fields: &[Field]) -> usize {
+    fields.iter().filter(|f| !f.name.is_empty()).count()
+}
+
 impl Expr {
     pub fn ty(&self) -> Type {
         match self {
