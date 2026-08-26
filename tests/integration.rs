@@ -8045,6 +8045,83 @@ fn m19_predefined_macros_available() {
     let _ = fs::remove_file(exe);
 }
 
+// __BASE_FILE__ macro test
+#[test]
+#[cfg(unix)]
+fn base_file_macro_available() {
+    let src = include_str!("fixtures/c/base_file.c");
+    let (out, exe) = run_compile_and_run("base-file", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__BASE_FILE__ macro must be defined and contain filename");
+    let _ = fs::remove_file(exe);
+}
+
+// __INCLUDE_LEVEL__ macro test
+#[test]
+#[cfg(unix)]
+fn include_level_macro_available() {
+    let dir = std::env::temp_dir().join(format!("dcc-inclevel-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("inner.h"),
+        "static inline int get_inner_level(void) {\n\
+         #if __INCLUDE_LEVEL__ != 1\n\
+         return -1;\n\
+         #else\n\
+         return __INCLUDE_LEVEL__;\n\
+         #endif\n\
+         }\n",
+    )
+    .unwrap();
+    let src = "#include \"inner.h\"\n\
+               int main(void) {\n\
+               #if __INCLUDE_LEVEL__ != 0\n\
+               return 1;\n\
+               #endif\n\
+               if (get_inner_level() != 1) return 2;\n\
+               return 0;\n\
+               }\n";
+    let source_path = dir.join("main.c");
+    fs::write(&source_path, src).unwrap();
+    let exe_path = dir.join("main");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = Command::new(&exe_path).status().expect("run exe");
+    assert_eq!(status.code(), Some(0), "__INCLUDE_LEVEL__ must be 0 in main and 1 in included header");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// __TIMESTAMP__ macro test
+#[test]
+#[cfg(unix)]
+fn timestamp_macro_available() {
+    let src = include_str!("fixtures/c/timestamp.c");
+    let (out, exe) = run_compile_and_run("timestamp", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__TIMESTAMP__ must be defined and contain valid date string");
+    let _ = fs::remove_file(exe);
+}
+
 // #pragma locale: 接受且不影响编译
 #[test]
 #[cfg(unix)]

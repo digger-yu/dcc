@@ -85,7 +85,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#pragma STDC FP_CONTRACT` | ON/OFF/DEFAULT 三态；ON 时 x86_64 后端把 `a*b+c` / `a*b-c` 收缩为 `fma` / `fmaf` / `fmal` 调用，OFF/DEFAULT 保持独立乘加 |
 | `#pragma STDC CX_LIMITED_RANGE` | ON/OFF/DEFAULT 三态；ON 时 x86_64 complex 乘除法使用内联有限范围公式，OFF/DEFAULT 使用 `__mulsc3` / `__muldc3` / `__divsc3` / `__divdc3` range-safe helper |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |
-| 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`)；时间宏 `__DATE__` / `__TIME__` / `__TIMESTAMP__` (源文件修改时间) |
+| 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`)；时间宏 `__DATE__` / `__TIME__` / `__TIMESTAMP__` (源文件修改时间)；文件宏 `__FILE__` / `__BASE_FILE__` (主源文件名) / `__INCLUDE_LEVEL__` (include 嵌套深度，主文件为 0) |
 | `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径 |
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
 | 数字分隔符 | `1'000'000` |
@@ -187,6 +187,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 |------|------|
 | 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue + 同尺寸 vector/scalar、vector/vector、complex/vector cast；IR validator 对 binop/unop/cast 使用显式白名单，并用 E1007/E1008 测试拒绝不同尺寸或未枚举转换 |
 | 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字；IR validator 对 binop/unop/cast 使用显式白名单，并固化 complex/vector 同尺寸边界与 complex→signed integer 枚举转换 |
+| `_Imaginary` 类型 | C99 `_Imaginary` 类型支持：`_Imaginary` / `_Imaginary float` / `_Imaginary double` / `_Imaginary long double`；字面量构造 (`3.0if`)；算术运算 (+/-/*/%)；与 `_Complex` 混合运算；x86_64 codegen 完整实现；IR validator 白名单覆盖 |
 | float 取模 | 软件 fmod = l - trunc(l/r) * r，零 libc 依赖；float validator 支持 `%` 并拒绝未枚举运算/转换 |
 | int128 `&&` / `||` | `or rdx, dst` 合并高 64 位后再 test |
 | 全局数组 RIP+SIB | `emit_load_global_indexed`：`[rip+disp32+idx*scale]` 单指令加载 |
