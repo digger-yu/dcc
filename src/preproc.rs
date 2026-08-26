@@ -585,6 +585,60 @@ pub fn preprocess(
     pp.define_builtin("__UINT16_TYPE__", "short unsigned int");
     pp.define_builtin("__INT8_TYPE__", "signed char");
     pp.define_builtin("__UINT8_TYPE__", "unsigned char");
+    // ===== 整型极限值宏 (GCC 兼容, x86_64 LP64) =====
+    // 固定宽度有符号最大值
+    pp.define_builtin("__INT8_MAX__", "127");
+    pp.define_builtin("__INT16_MAX__", "32767");
+    pp.define_builtin("__INT32_MAX__", "2147483647");
+    pp.define_builtin("__INT64_MAX__", "9223372036854775807L");
+    // 固定宽度有符号最小值 (GCC 风格: 用减法避免词法分析歧义)
+    pp.define_builtin("__INT8_MIN__", "(-__INT8_MAX__ - 1)");
+    pp.define_builtin("__INT16_MIN__", "(-__INT16_MAX__ - 1)");
+    pp.define_builtin("__INT32_MIN__", "(-__INT32_MAX__ - 1)");
+    pp.define_builtin("__INT64_MIN__", "(-__INT64_MAX__ - 1)");
+    // 固定宽度无符号最大值
+    pp.define_builtin("__UINT8_MAX__", "255");
+    pp.define_builtin("__UINT16_MAX__", "65535");
+    pp.define_builtin("__UINT32_MAX__", "4294967295U");
+    pp.define_builtin("__UINT64_MAX__", "18446744073709551615UL");
+    // intmax_t / uintmax_t 极限 (x86_64 LP64: long int)
+    pp.define_builtin("__INTMAX_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INTMAX_MIN__", "(-__INTMAX_MAX__ - 1)");
+    pp.define_builtin("__UINTMAX_MAX__", "18446744073709551615UL");
+    // intptr_t / uintptr_t 极限 (x86_64 LP64: long int)
+    pp.define_builtin("__INTPTR_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INTPTR_MIN__", "(-__INTPTR_MAX__ - 1)");
+    pp.define_builtin("__UINTPTR_MAX__", "18446744073709551615UL");
+    // wint_t 极限 (x86_64: unsigned int)
+    pp.define_builtin("__WINT_MAX__", "4294967295U");
+    pp.define_builtin("__WINT_MIN__", "0U");
+    // least 系列 (x86_64: int_leastN = intN)
+    pp.define_builtin("__INT_LEAST8_MAX__", "127");
+    pp.define_builtin("__INT_LEAST8_MIN__", "(-__INT_LEAST8_MAX__ - 1)");
+    pp.define_builtin("__INT_LEAST16_MAX__", "32767");
+    pp.define_builtin("__INT_LEAST16_MIN__", "(-__INT_LEAST16_MAX__ - 1)");
+    pp.define_builtin("__INT_LEAST32_MAX__", "2147483647");
+    pp.define_builtin("__INT_LEAST32_MIN__", "(-__INT_LEAST32_MAX__ - 1)");
+    pp.define_builtin("__INT_LEAST64_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INT_LEAST64_MIN__", "(-__INT_LEAST64_MAX__ - 1)");
+    pp.define_builtin("__UINT_LEAST8_MAX__", "255");
+    pp.define_builtin("__UINT_LEAST16_MAX__", "65535");
+    pp.define_builtin("__UINT_LEAST32_MAX__", "4294967295U");
+    pp.define_builtin("__UINT_LEAST64_MAX__", "18446744073709551615UL");
+    // fast 系列 (x86_64: int_fast8 = signed char,
+    // int_fast16/32/64 = long int)
+    pp.define_builtin("__INT_FAST8_MAX__", "127");
+    pp.define_builtin("__INT_FAST8_MIN__", "(-__INT_FAST8_MAX__ - 1)");
+    pp.define_builtin("__INT_FAST16_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INT_FAST16_MIN__", "(-__INT_FAST16_MAX__ - 1)");
+    pp.define_builtin("__INT_FAST32_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INT_FAST32_MIN__", "(-__INT_FAST32_MAX__ - 1)");
+    pp.define_builtin("__INT_FAST64_MAX__", "9223372036854775807L");
+    pp.define_builtin("__INT_FAST64_MIN__", "(-__INT_FAST64_MAX__ - 1)");
+    pp.define_builtin("__UINT_FAST8_MAX__", "255");
+    pp.define_builtin("__UINT_FAST16_MAX__", "18446744073709551615UL");
+    pp.define_builtin("__UINT_FAST32_MAX__", "18446744073709551615UL");
+    pp.define_builtin("__UINT_FAST64_MAX__", "18446744073709551615UL");
     pp.define_builtin("__ELF__", "1");
     pp.define_builtin("__unix__", "1");
     // 原子内存序常量 (GCC __atomic 内置函数用)
@@ -7672,6 +7726,166 @@ n\
             has_w0201,
             "expected W0201 depth-limit warning, got: {:?}",
             out.diags
+        );
+    }
+
+    /// 整型极限值预定义宏完整验证 (x86_64 LP64)
+    #[test]
+    fn integer_limit_macros_defined_with_correct_values() {
+        // 测试所有新增的 __INT*_MAX__ / __INT*_MIN__ /
+        // __UINT*_MAX__ / __INT_LEAST*_MAX__ / __INT_FAST*_MAX__
+        // 等极限宏是否正确定义并可求值。
+        let src = b"\
+// fixed-width signed MAX
+#if __INT8_MAX__ != 127
+#error INT8_MAX
+#endif
+#if __INT16_MAX__ != 32767
+#error INT16_MAX
+#endif
+#if __INT32_MAX__ != 2147483647
+#error INT32_MAX
+#endif
+#if __INT64_MAX__ != 9223372036854775807L
+#error INT64_MAX
+#endif
+// fixed-width signed MIN (nested expand)
+#if __INT8_MIN__ != -128
+#error INT8_MIN
+#endif
+#if __INT16_MIN__ != -32768
+#error INT16_MIN
+#endif
+#if __INT32_MIN__ != (-2147483647 - 1)
+#error INT32_MIN
+#endif
+#if __INT64_MIN__ != (-9223372036854775807L - 1)
+#error INT64_MIN
+#endif
+// fixed-width unsigned MAX
+#if __UINT8_MAX__ != 255
+#error UINT8_MAX
+#endif
+#if __UINT16_MAX__ != 65535
+#error UINT16_MAX
+#endif
+#if __UINT32_MAX__ != 4294967295U
+#error UINT32_MAX
+#endif
+#if __UINT64_MAX__ != 18446744073709551615UL
+#error UINT64_MAX
+#endif
+// INTMAX / UINTMAX
+#if __INTMAX_MAX__ != 9223372036854775807L
+#error INTMAX_MAX
+#endif
+#if __INTMAX_MIN__ != (-9223372036854775807L - 1)
+#error INTMAX_MIN
+#endif
+#if __UINTMAX_MAX__ != 18446744073709551615UL
+#error UINTMAX_MAX
+#endif
+// INTPTR / UINTPTR
+#if __INTPTR_MAX__ != 9223372036854775807L
+#error INTPTR_MAX
+#endif
+#if __INTPTR_MIN__ != (-9223372036854775807L - 1)
+#error INTPTR_MIN
+#endif
+#if __UINTPTR_MAX__ != 18446744073709551615UL
+#error UINTPTR_MAX
+#endif
+// WINT
+#if __WINT_MAX__ != 4294967295U
+#error WINT_MAX
+#endif
+#if __WINT_MIN__ != 0U
+#error WINT_MIN
+#endif
+// LEAST series
+#if __INT_LEAST8_MAX__ != 127
+#error INT_LEAST8_MAX
+#endif
+#if __INT_LEAST16_MAX__ != 32767
+#error INT_LEAST16_MAX
+#endif
+#if __INT_LEAST32_MAX__ != 2147483647
+#error INT_LEAST32_MAX
+#endif
+#if __INT_LEAST64_MAX__ != 9223372036854775807L
+#error INT_LEAST64_MAX
+#endif
+#if __UINT_LEAST8_MAX__ != 255
+#error UINT_LEAST8_MAX
+#endif
+#if __UINT_LEAST16_MAX__ != 65535
+#error UINT_LEAST16_MAX
+#endif
+#if __UINT_LEAST32_MAX__ != 4294967295U
+#error UINT_LEAST32_MAX
+#endif
+#if __UINT_LEAST64_MAX__ != 18446744073709551615UL
+#error UINT_LEAST64_MAX
+#endif
+// FAST series
+#if __INT_FAST8_MAX__ != 127
+#error INT_FAST8_MAX
+#endif
+#if __INT_FAST16_MAX__ != 9223372036854775807L
+#error INT_FAST16_MAX
+#endif
+#if __INT_FAST32_MAX__ != 9223372036854775807L
+#error INT_FAST32_MAX
+#endif
+#if __INT_FAST64_MAX__ != 9223372036854775807L
+#error INT_FAST64_MAX
+#endif
+#if __UINT_FAST8_MAX__ != 255
+#error UINT_FAST8_MAX
+#endif
+#if __UINT_FAST16_MAX__ != 18446744073709551615UL
+#error UINT_FAST16_MAX
+#endif
+#if __UINT_FAST32_MAX__ != 18446744073709551615UL
+#error UINT_FAST32_MAX
+#endif
+#if __UINT_FAST64_MAX__ != 18446744073709551615UL
+#error UINT_FAST64_MAX
+#endif
+int ok = 1;\n";
+        let out = preprocess(
+            src,
+            "int-limits.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        // 不应有任何 #error 触发的诊断
+        let errors: Vec<_> = out
+            .diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.sev,
+                    crate::diagnostics::Severity::Error
+                )
+            })
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "some #error triggered: {:?}",
+            errors
+        );
+        assert!(
+            out.text.contains("int ok = 1;"),
+            "output: {}",
+            out.text
         );
     }
 }
