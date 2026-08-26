@@ -317,7 +317,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `__attribute__((__may_alias__))` | 类型属性：指示该类型的指针可以别名任何其他类型，禁用 TBAA。解析并存储于 `ParsedAttrs`，struct/union/enum/typedef 均支持。内核 `__bitwise` 类型 (`__le32`/`__be32` 等) 依赖此属性进行安全的类型双关。当前优化器保守暂无 TBAA，属性正确解析不影响 codegen。测试: `tests/fixtures/c/may_alias.c` |
 | `__attribute__((weak(...)))` / `#pragma weak` | codegen 写 `STB_WEAK` 绑定 |
 | `__attribute__((constructor/destructor(priority)))` | 按 priority 排序 |
-| `__attribute__((alias/ifunc/retain/used/flatten/error/warning/deprecated))` | 全部实装 |
+| `__attribute__((alias("target")))` | 函数与变量别名：解析存入 `FuncDecl.alias_name` / `VarDecl.alias_name`，codegen 创建 ELF 别名符号 (STT_FUNC / STT_OBJECT) 指向目标符号的同一位置；x86_64/aarch64/riscv64/mips/arm 全后端支持；`-S` asm 输出模式发射 `.set alias, target` 指令；内核 `__weak` + `alias` 符号覆盖模式完整支持。测试: `tests/fixtures/c/m27_attr_alias.c`, `m27_attr_alias_var.c`, `m27_attr_alias_weak.c` |
+| `__attribute__((ifunc/retain/used/flatten/error/warning/deprecated))` | 全部实装 |
 | `__attribute__((naked))` | 不生成 prologue/epilogue，函数体完全由内联汇编组成；x86_64/aarch64/riscv64/arm/mips/mips64 全后端支持；用于内核异常向量、系统调用入口等低级入口点 |
 | `noreturn` (`_Noreturn` / `__attribute__((noreturn))` / `__noreturn__` / `__declspec(noreturn)`) | 函数末尾插入 trap 指令 (x86_64 `ud2`)，防止执行流落入后续代码；接受 `noreturn` 宏 (`stdnoreturn.h` 展开为 `_Noreturn`)；x86_64 后端启用；测试：`tests/fixtures/c/noreturn_trap.c` |
 | `__seg_fs` / `__seg_gs` / `__seg_cs` / `__seg_ds` / `__seg_es` / `__seg_ss` 地址空间限定符 | x86 段寄存器限定符。仅解析不处理：解析器在 decl-specifier / 类型与 `*` 之间 / `*` 与标识符之间 / cast / typedef / typeof / struct 字段 / 函数指针声明符 / 函数指针返回类型 / 函数指针字段声明符 / sizeof / _Alignof 等所有合法位置跳过这些关键字，但不存入类型系统，也不影响代码生成。Linux 内核 per-cpu 变量访问依赖此限定符配合 `%fs:`/`%gs:` 段前缀，详见 `docs/missing_features.md` 中的段寄存器 codegen 限制。测试：`tests/fixtures/c/seg_qualifier.c` (含汇编输出检查: `!asm.contains("%fs:") && !asm.contains("%gs:")`) |
