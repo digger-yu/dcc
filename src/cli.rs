@@ -67,9 +67,11 @@ pub struct Config {
     pub emit_module_file: Option<PathBuf>,    // --emit-module-file=foo.bmf: 输出模块接口 (BMF)
     pub dep_file: Option<PathBuf>,            // -MF: 依赖文件输出路径
     pub dep_target: Option<String>,           // -MT/-MQ: 依赖文件中的目标名
-    pub gen_dep: bool,                        // -MD/-MMD: 是否生成依赖文件
-    pub dep_mmd_only: bool,                   // -MMD: 排除系统头文件
+    pub gen_dep: bool,                        // -M/-MM/-MD/-MMD: 是否生成依赖文件
+    pub dep_mmd_only: bool,                   // -MM/-MMD: 排除系统头文件
     pub dep_phony: bool,                      // -MP: 为每个头文件生成 phony 目标
+    pub dep_no_compile: bool,                 // -M/-MM: 仅生成依赖, 不编译
+    pub dep_quote_target: bool,               // -MQ: 对目标中的 $ 转义
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
@@ -443,6 +445,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut gen_dep = false;
     let mut dep_mmd_only = false;
     let mut dep_phony = false;
+    let mut dep_no_compile = false;
+    let mut dep_quote_target = false;
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
@@ -773,6 +777,16 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 while j < opts.len() {
                     let option = opts[j];
                     match option {
+                        "-M" => {
+                            gen_dep = true;
+                            dep_mmd_only = false;
+                            dep_no_compile = true;
+                        }
+                        "-MM" => {
+                            gen_dep = true;
+                            dep_mmd_only = true;
+                            dep_no_compile = true;
+                        }
                         "-MD" => {
                             gen_dep = true;
                             dep_mmd_only = false;
@@ -796,12 +810,21 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                                 .ok_or_else(|| CliError::new("missing arg after -Wp,-MF"))?;
                             dep_file = Some(PathBuf::from(value));
                         }
-                        "-MT" | "-MQ" => {
+                        "-MT" => {
                             j += 1;
                             let value = opts.get(j).ok_or_else(|| {
-                                CliError::new(&format!("missing arg after -Wp,{}", option))
+                                CliError::new("missing arg after -Wp,-MT")
                             })?;
                             dep_target = Some((*value).to_string());
+                            dep_quote_target = false;
+                        }
+                        "-MQ" => {
+                            j += 1;
+                            let value = opts.get(j).ok_or_else(|| {
+                                CliError::new("missing arg after -Wp,-MQ")
+                            })?;
+                            dep_target = Some((*value).to_string());
+                            dep_quote_target = true;
                         }
                         "-MP" => {
                             dep_phony = true;
@@ -1443,7 +1466,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-isystem") => {
                 system_paths.push(PathBuf::from(&a[8..]));
             }
-            // -MD/-MMD: 生成依赖文件
+            // -M/-MM: 仅生成依赖文件, 不编译 (输出到 stdout 或 -MF 指定文件)
+            "-M" => {
+                gen_dep = true;
+                dep_mmd_only = false;
+                dep_no_compile = true;
+            }
+            "-MM" => {
+                gen_dep = true;
+                dep_mmd_only = true;
+                dep_no_compile = true;
+            }
+            // -MD/-MMD: 编译同时生成依赖文件
             "-MD" => {
                 gen_dep = true;
                 dep_mmd_only = false;
@@ -1460,7 +1494,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .ok_or_else(|| CliError::new("missing arg after -MF"))?;
                 dep_file = Some(PathBuf::from(f));
             }
-            // -MT <target>: 依赖中的目标名
+            // -MT <target>: 依赖中的目标名 (字面值)
             "-MT" => {
                 i += 1;
                 dep_target = Some(
@@ -1468,8 +1502,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                         .ok_or_else(|| CliError::new("missing arg after -MT"))?
                         .clone(),
                 );
+                dep_quote_target = false;
             }
-            // -MQ <target>: 同-MT, 带引号
+            // -MQ <target>: 依赖中的目标名 (转义 $ 等特殊字符)
             "-MQ" => {
                 i += 1;
                 dep_target = Some(
@@ -1477,8 +1512,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                         .ok_or_else(|| CliError::new("missing arg after -MQ"))?
                         .clone(),
                 );
+                dep_quote_target = true;
             }
-            // -MP: 为头文件生成空依赖目标 (暂忽略)
+            // -MP: 为头文件生成空依赖目标 (防止删除头文件后 make 报错)
             "-MP" => {
                 dep_phony = true;
             }
@@ -1648,7 +1684,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
         });
         let dep_target = dep_target.or_else(|| {
-            if gen_dep {
+            // -M/-MM: 默认目标由 driver 从输入文件名推导 (stem.o)
+            // -MD/-MMD: 默认目标为输出文件名
+            if gen_dep && !dep_no_compile {
                 Some(output.display().to_string())
             } else {
                 None
@@ -1715,6 +1753,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             gen_dep,
             dep_mmd_only,
             dep_phony,
+            dep_no_compile,
+            dep_quote_target,
             red_zone,
             frame_pointer,
             sse,
@@ -1813,6 +1853,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             gen_dep,
             dep_mmd_only,
             dep_phony,
+            dep_no_compile,
+            dep_quote_target,
             red_zone,
             frame_pointer,
             sse,
@@ -2018,6 +2060,7 @@ mod tests {
         assert!(cfg.dep_phony);
         assert_eq!(cfg.dep_file, Some(PathBuf::from("deps/main.d")));
         assert_eq!(cfg.dep_target, Some("main.o".to_string()));
+        assert!(!cfg.dep_quote_target, "-MT should not set quote flag");
         assert_eq!(cfg.include_paths, vec![PathBuf::from("include")]);
         assert_eq!(cfg.system_paths, vec![PathBuf::from("sysroot/include")]);
         assert_eq!(cfg.force_includes, vec!["forced.h".to_string()]);
@@ -2039,6 +2082,72 @@ mod tests {
         let args = vec!["-Wp,--silently-lost".to_string(), "input.c".to_string()];
         let err = parse(&args).expect_err("unsupported -Wp options must not be ignored");
         assert!(err.msg.contains("unsupported preprocessor option"));
+    }
+
+    #[test]
+    fn m_flag_sets_dep_no_compile() {
+        let args = vec!["-M".to_string(), "input.c".to_string()];
+        let cfg = parse(&args).expect("-M should parse");
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_no_compile);
+        assert!(!cfg.dep_mmd_only, "-M should include system headers");
+    }
+
+    #[test]
+    fn mm_flag_sets_dep_no_compile_and_mmd() {
+        let args = vec!["-MM".to_string(), "input.c".to_string()];
+        let cfg = parse(&args).expect("-MM should parse");
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_no_compile);
+        assert!(cfg.dep_mmd_only, "-MM should exclude system headers");
+    }
+
+    #[test]
+    fn mq_flag_sets_quote_target() {
+        let args = vec![
+            "-MD".to_string(),
+            "-MQ".to_string(),
+            "foo$$bar.o".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("-MQ should parse");
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_quote_target, "-MQ should set quote flag");
+        assert_eq!(cfg.dep_target, Some("foo$$bar.o".to_string()));
+    }
+
+    #[test]
+    fn mt_flag_clears_quote_target() {
+        // -MQ 后接 -MT 应清除 quote 标志
+        let args = vec![
+            "-MD".to_string(),
+            "-MQ".to_string(),
+            "quoted.o".to_string(),
+            "-MT".to_string(),
+            "literal.o".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("-MQ then -MT should parse");
+        assert!(!cfg.dep_quote_target, "-MT after -MQ should clear quote");
+        assert_eq!(cfg.dep_target, Some("literal.o".to_string()));
+    }
+
+    #[test]
+    fn wp_m_flag_sets_dep_no_compile() {
+        let args = vec!["-Wp,-M".to_string(), "input.c".to_string()];
+        let cfg = parse(&args).expect("-Wp,-M should parse");
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_no_compile);
+        assert!(!cfg.dep_mmd_only);
+    }
+
+    #[test]
+    fn wp_mm_flag_sets_dep_no_compile_and_mmd() {
+        let args = vec!["-Wp,-MM".to_string(), "input.c".to_string()];
+        let cfg = parse(&args).expect("-Wp,-MM should parse");
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_no_compile);
+        assert!(cfg.dep_mmd_only);
     }
 
     #[test]
