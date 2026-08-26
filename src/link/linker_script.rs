@@ -1262,10 +1262,11 @@ impl Parser {
                 } else if self.peek() == &Token::Local {
                     self.next(); // consume 'local'
                     self.expect(&Token::Colon)?;
-                    // 读取符号直到 '}'
+                    // 读取符号直到 '}' 或 'global:'
                     loop {
                         match self.peek().clone() {
                             Token::RBrace | Token::Eof => break,
+                            Token::Global => break,
                             Token::Star => {
                                 self.next();
                                 local_symbols.push("*".to_string());
@@ -3104,6 +3105,32 @@ mod tests {
         assert!(syms.contains(&"exported_sym".to_string()));
         // local symbols should NOT be in the defined set
         assert!(!syms.contains(&"hidden_sym".to_string()));
+    }
+
+    #[test]
+    fn parse_version_local_before_global() {
+        // local: before global: should parse correctly
+        let text = r#"
+            VERSION {
+                MYLIB_1.0 {
+                    local:
+                        internal_sym;
+                    global:
+                        public_sym;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.version_nodes.len(), 1);
+        assert_eq!(
+            script.version_nodes[0].global_symbols,
+            vec!["public_sym"]
+        );
+        assert_eq!(
+            script.version_nodes[0].local_symbols,
+            vec!["internal_sym"]
+        );
     }
 
     #[test]
