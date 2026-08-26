@@ -483,4 +483,5 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | jump_label 静态 key 声明 | `_DECLARE_STATIC_KEY_0/1` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
 | CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；`-c a.c b.c ...` 多源文件并行编译 (`-j<N>` 控制 worker 数) |
+| 响应文件 `@file` | GCC 兼容响应文件支持: 命令行中 `@file` 展开为文件内容; 支持空白/换行分隔参数; 双引号/单引号包裹含空白参数; 双引号内 `\\`/`\"` 转义; `#` 注释行; 递归展开 (上限 64 层); `@-` 从 stdin 读取 |
 | Bootstrap 回归对比 | `src/bootstrap.rs`：字节级 / 语义级三层对比 |
