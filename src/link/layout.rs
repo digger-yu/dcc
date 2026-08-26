@@ -12,7 +12,7 @@
 //   LOAD #1:  .text + .rodata       R+X / R
 //   LOAD #2:  .data + .bss + .tdata R+W
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
@@ -182,6 +182,8 @@ pub struct LayoutBuilder {
     pub dynamic_linker: Option<String>,
     /// 链接器脚本路径
     pub linker_script: Option<std::path::PathBuf>,
+    /// COMDAT 去重后丢弃的 FlatSection 索引集合
+    pub comdat_discarded: HashSet<u32>,
 }
 
 impl LayoutBuilder {
@@ -201,6 +203,7 @@ impl LayoutBuilder {
             needed: Vec::new(),
             dynamic_linker: None,
             linker_script: None,
+            comdat_discarded: HashSet::new(),
         }
     }
 
@@ -223,12 +226,20 @@ impl LayoutBuilder {
         for (i, sec) in bundle.sections.iter().enumerate() {
             let kind = classify_section(&sec.name);
             // 跳过 NULL 节、符号表与重定位节（链接后由链接器自己生成）
+            // 同时跳过 SHT_GROUP 节 (COMDAT 组元数据, 不加载到输出)
             if sec.name.is_empty()
                 || sec.name == ".symtab"
                 || sec.name == ".strtab"
                 || sec.name == ".shstrtab"
                 || sec.name.starts_with(".rela")
+                || sec.name == ".group"
+                || sec.name.starts_with(".group.")
+                || sec.ty == crate::codegen::elf::SHT_GROUP
             {
+                continue;
+            }
+            // 跳过 COMDAT 去重后被丢弃的节
+            if self.comdat_discarded.contains(&(i as u32)) {
                 continue;
             }
             // debug 节按需保留

@@ -13,11 +13,50 @@
 //     标记为 hidden visibility (实际效果: 不导出到动态符号表).
 //   - --no-undefined-version：检测未带版本定义的 @ 引用
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::object::InputBundle;
 use super::LinkConfig;
 use crate::codegen::elf::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
+
+/// COMDAT 组去重。
+///
+/// 按签名分组: 相同签名的 COMDAT 组只保留一份, 其余丢弃。
+/// 选择策略: 保留第一个遇到的组 (与 GNU ld 行为一致)。
+/// 返回被丢弃的 FlatSection 索引集合。
+pub fn resolve_comdat_groups(bundle: &InputBundle) -> HashSet<u32> {
+    use super::object::FlatComdatGroup;
+    let mut discarded: HashSet<u32> = HashSet::new();
+
+    if bundle.comdat_groups.is_empty() {
+        return discarded;
+    }
+
+    // 按签名分组
+    let mut groups_by_sig: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, grp) in bundle.comdat_groups.iter().enumerate() {
+        groups_by_sig
+            .entry(grp.signature.clone())
+            .or_default()
+            .push(i);
+    }
+
+    // 对每个签名, 保留第一个, 丢弃其余
+    for (_sig, grp_indices) in &groups_by_sig {
+        if grp_indices.len() <= 1 {
+            continue;
+        }
+        // 保留第一个 (grp_indices[0]), 丢弃其余
+        for &grp_idx in grp_indices.iter().skip(1) {
+            let grp: &FlatComdatGroup = &bundle.comdat_groups[grp_idx];
+            for &member_idx in &grp.member_indices {
+                discarded.insert(member_idx);
+            }
+        }
+    }
+
+    discarded
+}
 
 /// 解析结果：每个名字最终被解析到的全局符号。
 #[derive(Debug, Clone)]

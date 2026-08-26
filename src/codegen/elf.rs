@@ -54,6 +54,7 @@ pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_NOTE: u32 = 7;
 pub const SHT_NOBITS: u32 = 8;
 pub const SHT_DYNSYM: u32 = 11;
+pub const SHT_GROUP: u32 = 17;
 
 // 节标志
 pub const SHF_ALLOC: u32 = 2;
@@ -62,6 +63,14 @@ pub const SHF_WRITE: u32 = 1;
 pub const SHF_TLS: u32 = 0x400;
 pub const SHF_COMPRESSED: u32 = 0x800;
 pub const SHF_INFO_LINK: u32 = 0x40;
+/// SHF_GROUP: section is a member of a COMDAT group
+pub const SHF_GROUP: u32 = 0x200;
+
+// COMDAT group flags (first word of SHT_GROUP section)
+pub const GRP_COMDAT: u32 = 0x1;
+/// GRP_MASKOS / GRP_MASKPROC: reserved mask bits
+pub const _GRP_MASKOS: u32 = 0x0ff00;
+pub const _GRP_MASKPROC: u32 = 0xf0000000;
 
 // 符号绑定
 pub const STB_LOCAL: u8 = 0;

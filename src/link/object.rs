@@ -15,8 +15,8 @@ use crate::codegen::coff::{
 };
 use crate::codegen::elf::{
     ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFMAG, EM_AARCH64, EM_ARM, EM_MIPS,
-    EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_REL, SHT_RELA,
-    SHT_STRTAB, SHT_SYMTAB,
+    EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_GROUP, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_REL,
+    SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
 };
 
 /// 从 .o 文件节头表中读出的原始字段:
@@ -63,6 +63,24 @@ pub struct InputRela {
     pub input_obj: usize,
 }
 
+/// COMDAT 组描述。
+///
+/// SHT_GROUP 节的第一个 4 字节是 flag word (通常为 GRP_COMDAT=1),
+/// 后续每个 4 字节是一个节索引 (shndx), 表示该组的成员节。
+/// 组签名 (signature) 来自该 SHT_GROUP 节在符号表中关联的符号名,
+/// 链接器按签名去重: 相同签名的 COMDAT 组只保留一份。
+#[derive(Debug, Clone)]
+pub struct ComdatGroup {
+    /// 组签名 (来自关联符号名)
+    pub signature: String,
+    /// 组标志 (GRP_COMDAT = 1)
+    pub flags: u32,
+    /// 组成员节在本 .o 的 section header 索引列表
+    pub member_sec_indices: Vec<u32>,
+    /// 来自第几个 .o
+    pub input_obj: usize,
+}
+
 /// 解析后的 .o 文件。
 #[derive(Debug)]
 pub struct InputObject {
@@ -71,6 +89,10 @@ pub struct InputObject {
     pub symbols: Vec<InputSymbol>,
     pub relocations: Vec<InputRela>,
     pub name: String,
+    /// COMDAT 组列表 (来自 SHT_GROUP 节)
+    pub comdat_groups: Vec<ComdatGroup>,
+    /// 每个 section 所属的 COMDAT 组索引 (在 comdat_groups 中), None 表示不属于任何组
+    pub section_to_group: Vec<Option<usize>>,
 }
 
 impl InputObject {
@@ -329,6 +351,8 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
         symbols,
         relocations,
         name: name.to_string(),
+        comdat_groups: Vec::new(),
+        section_to_group: Vec::new(),
     })
 }
 
@@ -702,12 +726,87 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     let _ = SHT_STRTAB;
     let _ = SHN_UNDEF;
 
+    // 解析 SHT_GROUP 节 (COMDAT 组)
+    let mut comdat_groups: Vec<ComdatGroup> = Vec::new();
+    // section_to_group: 每个 InputSection 对应的 comdat_groups 索引
+    let mut section_to_group: Vec<Option<usize>> = vec![None; sections.len()];
+
+    for (grp_sec_idx, raw) in raw_sections.iter().enumerate() {
+        if raw.1 != SHT_GROUP {
+            continue;
+        }
+        // raw = (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
+        //        sh_addralign, sh_entsize, sh_info)
+        let grp_offset = raw.4 as usize;
+        let grp_size = raw.5 as usize;
+        let sh_info = raw.8; // signature symbol index in symtab
+        let _sh_link = raw.4; // we use the already-found symtab/strtab
+
+        if grp_offset + grp_size > data.len() || grp_size < 4 {
+            continue; // truncated or empty group
+        }
+
+        // 读取 flag word (第一个 4 字节)
+        let flags = ru32(grp_offset);
+
+        // 读取成员节索引 (后续每 4 字节一个)
+        let mut member_sec_indices = Vec::new();
+        let mut pos = grp_offset + 4;
+        while pos + 4 <= grp_offset + grp_size {
+            let member_idx = ru32(pos);
+            member_sec_indices.push(member_idx);
+            pos += 4;
+        }
+
+        // 查找签名符号名
+        let signature = if let (Some(sym_i), Some(str_i)) = (symtab_idx, strtab_idx) {
+            let sym_hdr = &raw_sections[sym_i as usize];
+            let str_hdr = &raw_sections[str_i as usize];
+            let default_entsize: u64 = if is_64 { 24 } else { 16 };
+            let entsize = if sym_hdr.7 > 0 { sym_hdr.7 } else { default_entsize };
+            let sym_off = sym_hdr.4 as usize;
+            let str_off = str_hdr.4 as usize;
+            let str_size = str_hdr.5 as usize;
+            let sym_base = sym_off + sh_info as usize * entsize as usize;
+            let min_sz = if is_64 { 24 } else { 16 };
+            if sym_base + min_sz <= data.len() && str_off + str_size <= data.len() {
+                let st_name = ru32(sym_base);
+                let strtab = &data[str_off..str_off + str_size];
+                read_cstr(strtab, st_name as usize)
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                format!(".group.{}", grp_sec_idx)
+            }
+        } else {
+            format!(".group.{}", grp_sec_idx)
+        };
+
+        let grp_idx = comdat_groups.len();
+
+        // 标记成员节所属的组 (在 move 之前)
+        for &member_idx in &member_sec_indices {
+            if let Some(stg) = section_to_group.get_mut(member_idx as usize) {
+                *stg = Some(grp_idx);
+            }
+        }
+
+        comdat_groups.push(ComdatGroup {
+            signature,
+            flags,
+            member_sec_indices,
+            input_obj: 0, // will be set by InputBundle
+        });
+    }
+
     Ok(InputObject {
         machine,
         sections,
         symbols,
         relocations,
         name: name.to_string(),
+        comdat_groups,
+        section_to_group,
     })
 }
 
@@ -729,6 +828,8 @@ pub struct InputBundle {
     /// 全部节的扁平列表
     pub sections: Vec<FlatSection>,
     pub machine: u16,
+    /// 扁平化的 COMDAT 组列表
+    pub comdat_groups: Vec<FlatComdatGroup>,
 }
 
 /// 跨多个 .o 的符号条目。
@@ -772,6 +873,21 @@ pub struct FlatSection {
     pub size: u64,
     pub input_obj: usize,
     pub orig_index: u32,
+    /// COMDAT 组签名 (如果该节属于 COMDAT 组)
+    pub comdat_signature: Option<String>,
+}
+
+/// 扁平化的 COMDAT 组条目。
+#[derive(Debug, Clone)]
+pub struct FlatComdatGroup {
+    /// 组签名
+    pub signature: String,
+    /// 组标志 (GRP_COMDAT = 1)
+    pub flags: u32,
+    /// 组成员在 FlatSection 中的索引列表
+    pub member_indices: Vec<u32>,
+    /// 来自第几个 .o
+    pub input_obj: usize,
 }
 
 impl InputBundle {
@@ -805,10 +921,18 @@ impl InputBundle {
         let mut sections = Vec::new();
         let mut symbols = Vec::new();
         let mut relocations = Vec::new();
+        let mut comdat_groups_flat: Vec<FlatComdatGroup> = Vec::new();
         let mut sym_index_map: HashMap<(usize, u32), u32> = HashMap::new();
 
         for (oi, obj) in objects.iter().enumerate() {
-            for s in &obj.sections {
+            for (si, s) in obj.sections.iter().enumerate() {
+                // 查找该节所属的 COMDAT 组签名
+                let comdat_signature = obj
+                    .section_to_group
+                    .get(si)
+                    .and_then(|g| *g)
+                    .and_then(|gidx| obj.comdat_groups.get(gidx))
+                    .map(|g| g.signature.clone());
                 sections.push(FlatSection {
                     name: s.name.clone(),
                     ty: s.ty,
@@ -818,6 +942,26 @@ impl InputBundle {
                     size: s.size,
                     input_obj: oi,
                     orig_index: s.orig_index,
+                    comdat_signature,
+                });
+            }
+        }
+        // 扁平化 COMDAT 组: 将成员节索引从原始 .o 索引转换为 FlatSection 索引
+        for (oi, obj) in objects.iter().enumerate() {
+            for grp in &obj.comdat_groups {
+                let mut member_indices = Vec::new();
+                for &member_sec_idx in &grp.member_sec_indices {
+                    if let Some(flat_idx) =
+                        find_section_in_bundle(&sections, oi, member_sec_idx)
+                    {
+                        member_indices.push(flat_idx);
+                    }
+                }
+                comdat_groups_flat.push(FlatComdatGroup {
+                    signature: grp.signature.clone(),
+                    flags: grp.flags,
+                    member_indices,
+                    input_obj: oi,
                 });
             }
         }
@@ -871,6 +1015,7 @@ impl InputBundle {
             relocations,
             sections,
             machine,
+            comdat_groups: comdat_groups_flat,
         })
     }
 }

@@ -278,6 +278,14 @@ pub fn link_from_bundle(
         Vec::new()
     };
     let cfg = &cfg_owned;
+    // 0.9 COMDAT 组去重 (在符号解析之前, 丢弃重复 COMDAT 组的节)
+    let comdat_discarded = resolve::resolve_comdat_groups(bundle);
+    if cfg.verbose && !comdat_discarded.is_empty() {
+        eprintln!(
+            "dcc-link: COMDAT dedup: {} section(s) discarded",
+            comdat_discarded.len()
+        );
+    }
     // 1. 符号解析
     let mut undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
     let linker_script_undef: Vec<&str> = linker_script_symbols.iter().map(|s| s.as_str()).collect();
@@ -309,6 +317,7 @@ pub fn link_from_bundle(
     builder.dynamic_linker = cfg.dynamic_linker.clone();
     builder.needed = cfg.needed.clone();
     builder.linker_script = cfg.linker_script.clone();
+    builder.comdat_discarded = comdat_discarded;
     let mut layout = builder
         .build(bundle, &resolved)
         .map_err(|e| diag("E0303", e))?;
