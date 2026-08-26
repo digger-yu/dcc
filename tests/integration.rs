@@ -7054,6 +7054,61 @@ fn format_attr_warns_on_missing_arg() {
 }
 
 #[test]
+fn format_attr_comprehensive_no_warn() {
+    // Correct format usage should produce no W0003 warnings
+    let src = include_str!("fixtures/c/format_attr_full.c");
+    let output = run_syntax_test("fmt-full", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("W0003"),
+        "expected no format warnings, got: {stderr}"
+    );
+}
+
+#[test]
+fn format_attr_type_mismatch_warns() {
+    // int arg for %f should trigger W0003
+    let src = "__attribute__((format(printf, 1, 2))) void p(const char *f, ...);\n\
+               int main(void) { p(\"%f\", 42); return 0; }\n";
+    let output = run_syntax_test("fmt-type", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0003"),
+        "expected type mismatch warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("floating-point"),
+        "expected floating-point hint: {stderr}"
+    );
+}
+
+#[test]
+fn format_attr_gnu_printf_spelling() {
+    // __format__(__gnu_printf__) should work same as format(printf)
+    let src = "__attribute__((__format__(__gnu_printf__, 1, 2))) void p(const char *f, ...);\n\
+               int main(void) { p(\"%d\", 1); return 0; }\n";
+    let output = run_syntax_test("fmt-gnu", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("W0003"),
+        "gnu_printf should not warn on correct usage: {stderr}"
+    );
+}
+
+#[test]
+fn format_attr_scanf_non_pointer_warns() {
+    // scanf with non-pointer arg should warn
+    let src = "__attribute__((format(scanf, 1, 2))) int s(const char *f, ...);\n\
+               int main(void) { s(\"%d\", 42); return 0; }\n";
+    let output = run_syntax_test("fmt-scanf", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("W0003") && stderr.contains("pointer"),
+        "scanf non-pointer should warn: {stderr}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn stdatomic_macros_hosted() {
     let src = include_str!("fixtures/c/atomic.c");

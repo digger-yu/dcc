@@ -365,11 +365,15 @@ fn check_format_type(
     let mismatch = match spec.conv {
         'd' | 'i' => !matches!(
             effective_ty,
-            Type::Int | Type::Short | Type::Char | Type::Long
+            Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar | Type::UChar
+                | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                | Type::Bool
         ),
         'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(
             effective_ty,
-            Type::UInt | Type::Int | Type::Short | Type::Char | Type::ULong | Type::Long
+            Type::UInt | Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar
+                | Type::UChar | Type::ULong | Type::Long | Type::ULongLong | Type::LongLong
+                | Type::Bool
         ),
         'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             if spec.length == "L" {
@@ -378,7 +382,14 @@ fn check_format_type(
                 !matches!(effective_ty, Type::Double | Type::Float)
             }
         }
-        'c' | 's' => !matches!(effective_ty, Type::Ptr(_)),
+        // %c accepts integer types (char promoted to int in variadic args)
+        'c' => !matches!(
+            effective_ty,
+            Type::Int | Type::UInt | Type::Char | Type::SChar | Type::UChar
+                | Type::Short | Type::UShort | Type::Long | Type::ULong
+        ),
+        // %s accepts any pointer (char*)
+        's' => !matches!(effective_ty, Type::Ptr(_)),
         'p' => !matches!(effective_ty, Type::Ptr(_)),
         'n' => !matches!(effective_ty, Type::Ptr(_)),
         _ => false,
