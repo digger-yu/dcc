@@ -766,7 +766,7 @@ struct Function  { name, params, ret_ty, entry, blocks, block_order,
 | P8 | 循环分块 | `loop_tiling` | 检测小循环体（≤4 inst），复制最后一条 pure 指令作为第二个 tile |
 | P9 | 循环交换 | `loop_interchange` | 检测 `*.i.*` + `*.j.*` 嵌套，在 entry 插入 `__dcc_loop_interchanged` hint |
 | P10 | 尾部调用优化 (TCO) | `tail_call_optimization` | 检测 exit BB 含对自身的 `Call`，告知 codegen 可改 jump |
-| P11 | 函数属性传播 | `function_attribute_propagation` | `is_cold` 函数 entry 加 `__dcc_section_cold` Store 提示 |
+| P11 | 函数属性传播 | `function_attribute_propagation` | `is_cold` 函数 entry 加 `__dcc_section_cold` Store 提示；`is_noreturn` 传播到 codegen 触发函数末尾 `ud2` 插入 |
 | P12 | 寄存器分配 | `register_allocation` | 线性扫描占位实现（hint 模式，真实分配在 codegen 的硬编码 GP/XMM 池） |
 | P13 | 别名集合 | `alias_set` | 三档判别（identity / disjoint / overlap），基于 P4 的 set 划分 |
 | P14 | 投机执行 | `speculative_execution` | 把 BB 内 pure 指令集中到 BB 顶端，便于分支条件尽早算出 |
