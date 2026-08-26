@@ -16170,3 +16170,62 @@ fn multi_file_rejects_output_flag() {
 
     let _ = fs::remove_dir_all(&work);
 }
+
+#[test]
+fn response_file_at_file_expands_arguments() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-rsp-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-rsp-{}.o", std::process::id()));
+    let rsp = dir.join(format!("dcc-rsp-{}.rsp", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    // Response file contains: -c -o <obj> <src>
+    fs::write(
+        &rsp,
+        format!("-c\n-o\n{}\n{}\n", obj.display(), src.display()),
+    )
+    .expect("write rsp");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("@{}", rsp.display()))
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        obj.exists(),
+        "response file should produce .o output"
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&rsp);
+}
+
+#[test]
+fn response_file_with_comments_and_quotes() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-rsp-q-{}.c", std::process::id()));
+    let rsp = dir.join(format!("dcc-rsp-q-{}.rsp", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    // Response file with comments and quoted args
+    fs::write(
+        &rsp,
+        format!(
+            "# This is a comment\n-fsyntax-only\n\"{}\"\n",
+            src.display()
+        ),
+    )
+    .expect("write rsp");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("@{}", rsp.display()))
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&rsp);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

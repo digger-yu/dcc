@@ -418,7 +418,157 @@ pub fn abi_name(a: Abi) -> &'static str {
     }
 }
 
+/// 响应文件 (response file) 展开: 将 `@file` 参数替换为文件内容。
+///
+/// GCC 兼容语义:
+/// - 参数中以 `@file` 形式出现时, 读取 `file` 的内容并插入参数列表
+/// - 文件内参数以空白 (空格/Tab/换行) 分隔
+/// - 支持双引号和单引号包裹含空白的参数
+/// - 双引号内支持 `\\` 和 `\"` 转义
+/// - `#` 开头的行视为注释, 跳过
+/// - 支持递归展开 (文件内再含 `@file`)
+/// - 递归深度上限 64 层, 防止循环引用
+const MAX_RESPONSE_DEPTH: u32 = 64;
+
+/// 将响应文件内容分词为参数列表。
+///
+/// 分词规则:
+/// - 空白字符 (空格/Tab/换行) 分隔参数
+/// - 双引号 `"..."` 内的空白不分割, 支持 `\\` 和 `\"` 转义
+/// - 单引号 `'...'` 内的空白不分割, 无转义
+/// - 非引号内的 `\` 转义下一个字符
+/// - `#` 开头的行 (行首或前导空白后) 视为注释, 跳到行尾
+fn tokenize_response_content(content: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let chars: Vec<char> = content.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // 跳过空白
+        if chars[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        // 跳过注释行: 行首或前导空白后遇到 #
+        if chars[i] == '#' {
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // 解析一个参数
+        let mut arg = String::new();
+        while i < len && !chars[i].is_ascii_whitespace() {
+            if chars[i] == '"' {
+                // 双引号字符串
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        match chars[i + 1] {
+                            '\\' | '"' => {
+                                arg.push(chars[i + 1]);
+                                i += 2;
+                            }
+                            _ => {
+                                arg.push('\\');
+                                arg.push(chars[i + 1]);
+                                i += 2;
+                            }
+                        }
+                    } else {
+                        arg.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    i += 1; // 跳过结束引号
+                }
+            } else if chars[i] == '\'' {
+                // 单引号字符串 (无转义)
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    arg.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    i += 1; // 跳过结束引号
+                }
+            } else if chars[i] == '\\' && i + 1 < len {
+                // 引号外的反斜杠转义
+                arg.push(chars[i + 1]);
+                i += 2;
+            } else {
+                arg.push(chars[i]);
+                i += 1;
+            }
+        }
+        if !arg.is_empty() {
+            args.push(arg);
+        }
+    }
+    args
+}
+
+/// 递归展开参数列表中的 `@file` 引用。
+fn expand_response_files_impl(
+    args: &[String],
+    depth: u32,
+) -> Result<Vec<String>, CliError> {
+    if depth > MAX_RESPONSE_DEPTH {
+        return Err(CliError::new(&format!(
+            "response file recursion limit ({}) exceeded",
+            MAX_RESPONSE_DEPTH
+        )));
+    }
+    let mut result: Vec<String> = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Some(path) = arg.strip_prefix('@') {
+            if path.is_empty() {
+                // 裸 `@` 不展开, 保留原样
+                result.push(arg.clone());
+                continue;
+            }
+            let content = if path == "-" {
+                // `@-` 从 stdin 读取
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| {
+                        CliError::new(&format!("cannot read stdin for @-: {}", e))
+                    })?;
+                buf
+            } else {
+                std::fs::read_to_string(path).map_err(|e| {
+                    CliError::new(&format!(
+                        "cannot read response file '{}': {}",
+                        path, e
+                    ))
+                })?
+            };
+            let tokens = tokenize_response_content(&content);
+            // 递归展开
+            let expanded = expand_response_files_impl(&tokens, depth + 1)?;
+            result.extend(expanded);
+        } else {
+            result.push(arg.clone());
+        }
+    }
+    Ok(result)
+}
+
+/// 展开参数列表中的 `@file` 响应文件引用。
+///
+/// 这是外部入口, 从 depth=0 开始递归。
+fn expand_response_files(args: &[String]) -> Result<Vec<String>, CliError> {
+    expand_response_files_impl(args, 0)
+}
+
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
+    // 响应文件展开: @file -> 文件内容分词后的参数列表
+    let expanded = expand_response_files(args)?;
+    let args = &expanded;
     let mut inputs: Vec<PathBuf> = vec![];
     let mut output = PathBuf::from("a.out");
     let mut output_explicit = false;
@@ -2469,5 +2619,132 @@ mod tests {
             cfg.sysroot.as_ref().unwrap().to_str().unwrap(),
             "/opt/musl-sysroot"
         );
+    }
+
+    // --- Response file (@file) tests ---
+
+    #[test]
+    fn tokenize_response_content_basic() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content("-O2 -c foo.c");
+        assert_eq!(tokens, vec!["-O2", "-c", "foo.c"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_newlines() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content("-O2\n-c\nfoo.c\n");
+        assert_eq!(tokens, vec!["-O2", "-c", "foo.c"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_double_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content(r#"-DMSG="hello world""#);
+        assert_eq!(tokens, vec!["-DMSG=hello world"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_single_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content("-DMSG='hello world'");
+        assert_eq!(tokens, vec!["-DMSG=hello world"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_escape_in_double_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content(r#""path\to\file""#);
+        assert_eq!(tokens, vec![r#"path\to\file"#]);
+    }
+
+    #[test]
+    fn tokenize_response_content_backslash_escape_outside_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content(r#"path\ with\ spaces"#);
+        assert_eq!(tokens, vec!["path with spaces"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_comments() {
+        use super::tokenize_response_content;
+        let tokens =
+            tokenize_response_content("-O2\n# this is a comment\n-c\n");
+        assert_eq!(tokens, vec!["-O2", "-c"]);
+    }
+
+    #[test]
+    fn tokenize_response_content_empty() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content("");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn response_file_basic_expansion() {
+        use super::expand_response_files;
+        let dir = std::env::temp_dir();
+        let rsp = dir.join("dcc-rsp-basic.txt");
+        std::fs::write(&rsp, "-O2\n-c\n").unwrap();
+        let args = vec![
+            "@".to_string() + rsp.to_str().unwrap(),
+            "foo.c".to_string(),
+        ];
+        let expanded = expand_response_files(&args).unwrap();
+        assert_eq!(expanded, vec!["-O2", "-c", "foo.c"]);
+        let _ = std::fs::remove_file(&rsp);
+    }
+
+    #[test]
+    fn response_file_missing_file_errors() {
+        use super::expand_response_files;
+        let args = vec!["@/nonexistent/dcc-rsp-missing.txt".to_string()];
+        let err = expand_response_files(&args).unwrap_err();
+        assert!(err.msg.contains("cannot read response file"));
+    }
+
+    #[test]
+    fn response_file_nested_expansion() {
+        use super::expand_response_files;
+        let dir = std::env::temp_dir();
+        let inner = dir.join("dcc-rsp-inner.txt");
+        let outer = dir.join("dcc-rsp-outer.txt");
+        std::fs::write(&inner, "-c\n").unwrap();
+        std::fs::write(&outer, format!("-O2\n@{}\n", inner.display())).unwrap();
+        let args = vec![
+            "@".to_string() + outer.to_str().unwrap(),
+            "foo.c".to_string(),
+        ];
+        let expanded = expand_response_files(&args).unwrap();
+        assert_eq!(expanded, vec!["-O2", "-c", "foo.c"]);
+        let _ = std::fs::remove_file(&inner);
+        let _ = std::fs::remove_file(&outer);
+    }
+
+    #[test]
+    fn response_file_bare_at_preserved() {
+        use super::expand_response_files;
+        let args = vec!["@".to_string()];
+        let expanded = expand_response_files(&args).unwrap();
+        assert_eq!(expanded, vec!["@"]);
+    }
+
+    #[test]
+    fn response_file_full_parse_integration() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("dcc-rsp-integ-{}.c", std::process::id()));
+        let rsp = dir.join(format!("dcc-rsp-integ-{}.rsp", std::process::id()));
+        std::fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+        std::fs::write(
+            &rsp,
+            format!("-fsyntax-only\n{}\n", src.display()),
+        )
+        .unwrap();
+        let args = vec!["@".to_string() + rsp.to_str().unwrap()];
+        let cfg = parse(&args).expect("response file should parse");
+        assert!(cfg.syntax_only);
+        assert_eq!(cfg.inputs, vec![src.clone()]);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&rsp);
     }
 }
