@@ -314,6 +314,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `__attribute__((no_sanitize(...)))` | 按通道关闭 sanitizer 插桩 |
 | `__attribute__((copy(fn)))` | 生成 `fn` 的别名符号 |
 | `__attribute__((returns_nonnull))` | codegen 强制非空检查：`test rax, rax; jnz .ok; ud2` |
+| `__attribute__((visibility("...")))` | ELF 符号可见性控制：`default`/`hidden`/`protected` 三态。解析存入 `FuncDecl.visibility` / `VarDecl.visibility`，codegen 映射到 ELF `st_other` 字段 (STV_DEFAULT/STV_HIDDEN/STV_PROTECTED)。`-c` 模式写入 ELF 符号表，`-S` 模式发射 `.visibility` 汇编指令。内置链接器正确处理 hidden 符号 (不导出到动态符号表)。测试: `tests/fixtures/c/visibility_attr.c` |
 | `__attribute__((__may_alias__))` | 类型属性：指示该类型的指针可以别名任何其他类型，禁用 TBAA。解析并存储于 `ParsedAttrs`，struct/union/enum/typedef 均支持。内核 `__bitwise` 类型 (`__le32`/`__be32` 等) 依赖此属性进行安全的类型双关。当前优化器保守暂无 TBAA，属性正确解析不影响 codegen。测试: `tests/fixtures/c/may_alias.c` |
 | `__attribute__((weak(...)))` / `#pragma weak` | codegen 写 `STB_WEAK` 绑定 |
 | `__attribute__((constructor/destructor(priority)))` | 按 priority 排序 |
