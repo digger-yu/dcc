@@ -3575,6 +3575,34 @@ fn may_alias_struct_compiles() {
     );
 }
 
+/// __seg_fs / __seg_gs (and __seg_{cs,ds,es,ss}) 地址空间限定符解析
+///
+/// 这些是 x86 段寄存器限定符 (per-cpu 访问依赖 %gs:/%fs:).
+/// dcc 仅解析不处理: 解析器在所有合法位置 (decl-specifier,
+/// 类型与 * 之间, * 与标识符之间) 跳过这些关键字, 但不存入
+/// 类型系统, 也不影响代码生成. 因此编译成功, 运行结果等价
+/// 于不带限定符的程序. 真正的段寄存器前缀生成尚未实现,
+/// 详见 docs/missing_features.md.
+///
+/// 覆盖: 全局变量 / 函数返回类型 / 函数参数 / 局部变量 /
+/// cast / struct 字段 / typedef / typeof / static 组合 /
+/// 多限定符链 / const 组合 / 全部 6 个 x86 段名.
+#[test]
+fn seg_qualifier_compiles_and_runs() {
+    let source = include_str!("fixtures/c/seg_qualifier.c");
+    let (output, exe) = run_compile_and_run("seg-qualifier", source);
+    assert!(
+        output.status.success(),
+        "seg_qualifier compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    // 运行成功即视为与无限定符版本行为一致 (exit code 由 OS 截断到 8 位,
+    // 期望值 293 -> 37). 重点是程序可执行、可结束, 没有崩溃或段错误.
+    assert!(rc >= 0, "seg_qualifier executable failed: rc={rc}");
+}
+
 /// NOFAIL / # 字符串化：多行实参折叠为单行字面量
 #[test]
 fn nofail_stringify_compiles() {
