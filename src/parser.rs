@@ -66,6 +66,10 @@ struct ParsedAttrs {
     is_host: bool,
     /// __attribute__((naked)): 不生成 prologue/epilogue
     is_naked: bool,
+    /// __attribute__((may_alias)): 类型属性，指示该类型的指针可以别名任何其他类型
+    /// 禁用基于类型的别名分析 (TBAA)。内核中 __bitwise 类型（如 __le32、__be32）
+    /// 依赖此属性进行安全的类型双关。
+    may_alias: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -210,6 +214,9 @@ impl ParsedAttrs {
         }
         if other.is_naked {
             self.is_naked = true;
+        }
+        if other.may_alias {
+            self.may_alias = true;
         }
     }
 }
@@ -1285,6 +1292,11 @@ impl<'a> Parser<'a> {
                     // __attribute__((naked)): 不生成 prologue/epilogue
                     "naked" => {
                         attrs.is_naked = true;
+                        self.advance();
+                    }
+                    // __attribute__((may_alias)): 类型属性，禁用 TBAA
+                    "may_alias" => {
+                        attrs.may_alias = true;
                         self.advance();
                     }
                     // CUDA/HIP 属性拼写 (__attribute__((global)) 等形式):
@@ -4050,6 +4062,7 @@ impl<'a> Parser<'a> {
             // struct __attribute__((packed/aligned/may_alias)) name
             let mut pack = false;
             let mut align_n: Option<usize> = None;
+            let mut may_alias = false;
             while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                 self.advance(); // __attribute__
                 if self.cur.kind == TokKind::LParen {
@@ -4064,6 +4077,9 @@ impl<'a> Parser<'a> {
                         let aname = self.cur.text.trim_matches('_').to_string();
                         if aname == "packed" {
                             pack = true;
+                        }
+                        if aname == "may_alias" {
+                            may_alias = true;
                         }
                         if aname == "aligned" && align_n.is_none() {
                             // Mark that we need to capture the aligned value
@@ -4121,6 +4137,9 @@ impl<'a> Parser<'a> {
                                 self.cur.text.trim_matches('_').to_string();
                             if aname == "packed" {
                                 pack = true;
+                            }
+                            if aname == "may_alias" {
+                                may_alias = true;
                             }
                             if aname == "aligned" {
                                 self.advance();
@@ -4191,7 +4210,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let mut fields = fields;
-                // 检查 struct 后的 __attribute__((packed/aligned(N)))
+                // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias))
                 // 注意: 使用 skip_attributes 正确处理嵌套括号, 如 section(".init.text")
                 // pack/align_n already captured from pre-body attributes
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
@@ -4211,6 +4230,9 @@ impl<'a> Parser<'a> {
                                 let aname = self.cur.text.trim_matches('_').to_string();
                                 if aname == "packed" {
                                     pack = true;
+                                }
+                                if aname == "may_alias" {
+                                    may_alias = true;
                                 }
                                 if aname == "aligned" {
                                     self.advance();
@@ -4298,6 +4320,10 @@ impl<'a> Parser<'a> {
                 let fields_rc = Arc::new(fields);
                 self.struct_defs
                     .insert(nm.clone(), (Arc::clone(&fields_rc), is_u, struct_align));
+                // 记录 may_alias 类型属性供后续使用
+                if may_alias {
+                    self.decl_attrs.may_alias = true;
+                }
                 let ty = if is_u {
                     Type::Union(nm, fields_rc, struct_align)
                 } else {

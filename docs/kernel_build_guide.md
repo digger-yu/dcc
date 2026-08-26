@@ -122,7 +122,7 @@ for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操�
 | 修复项 | 说明 |
 |--------|------|
 | `NOFAIL` / `#` 字符串化 | 多行实参折叠为单行字面量，消除 `modpost.c:5560` Invalid token |
-| `struct __attribute__((__may_alias__))` | 解析器在 struct/enum 名之前跳过属性 |
+| `struct __attribute__((__may_alias__))` | 解析器完整支持 `may_alias` 类型属性：struct/union/enum 名前、体后、typedef 均可；存储于 `ParsedAttrs.may_alias`，禁用 TBAA，内核 `__bitwise` 类型 (`__le32`/`__be32`) 依赖此属性进行安全类型双关 |
 | 兼容 typedef 重定义 | glibc/linux 头重复 `dev_t`/`uint64_t` 等 → `register_typedef` |
 | 局部遮蔽 libc 名 | `index`/`basename` 等不再 E0007 |
 | `typeof(_Generic(...))` | READ_ONCE 类宏；声明初始化 `sizeof(*v)` |

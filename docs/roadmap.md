@@ -38,7 +38,7 @@
 | 原子内存序 | P3 | ✅ `__ATOMIC_*` 宏定义 | ✅ mfence(seq_cst) | ✅ atomic_test.c |
 | __builtin__ 语义 | P1 | ✅ expect/constant_p/memcpy 等 | ✅ codegen 层内建函数处理 | ✅ examples/dev/builtins.c |
 | __attribute__ 语义 | P1 | ✅ packed/aligned/noreturn/unused | ✅ 解析器静默剥离 | ✅ examples/dev/builtins.c |
-| __may_alias__ 类型属性 | P1 | ✅ struct/enum 名前的 `__attribute__((__may_alias__))` | ✅ 不影响 codegen | ✅ may_alias_struct.c |
+| __may_alias__ 类型属性 | P1 | ✅ struct/union/enum/typedef 完整支持 `__attribute__((__may_alias__))` | ✅ 解析并存储于 `ParsedAttrs.may_alias`，禁用 TBAA，内核 `__bitwise` 类型 (`__le32`/`__be32`) 安全类型双关 | ✅ tests/fixtures/c/may_alias.c |
 | sizeof(expr) 修复 | P2 | ✅ 计算实际表达式类型大小 | ✅ | ✅ examples/dev/builtins.c |
 | _Alignof 对齐查询 | P2 | ✅ _Alignof(type)/_Alignof(expr) | ✅ 返回对齐值 | ✅ examples/dev/builtins.c |
 | typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ examples/dev/builtins.c |
