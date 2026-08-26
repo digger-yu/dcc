@@ -1608,6 +1608,8 @@ impl Codegen {
             // _Complex float/double: 两个 eightbyte 均为 SSE (SysV,
             // 与 gcc ubsan.cc 一致), 保持初始 [Sse, Sse]
             Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {}
+            // _Imaginary float/double: 单个 SSE eightbyte (同普通浮点)
+            Type::Imaginary(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {}
             Type::Struct(_, fields, _) => {
                 for field in fields.iter() {
                     if !Self::classify_at(&field.ty, base + field.offset, classes) {
@@ -5334,6 +5336,9 @@ impl Codegen {
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                                 } else if let Type::Complex(inner) = &v.ty {
                                     self.gen_complex_init(&v.name.name, inner, init);
+                                } else if let Type::Imaginary(ref inner) = &v.ty {
+                                    // _Imaginary 变量初始化: 存储单个浮点值 (虚部)
+                                    self.gen_imaginary_init(&v.name.name, inner, init);
                                 } else if matches!(
                                     &v.ty,
                                     Type::Float | Type::Double | Type::LongDouble
@@ -6189,6 +6194,8 @@ impl Codegen {
                                 self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                             } else if let Type::Complex(inner) = &v.ty {
                                 self.gen_complex_init(&v.name.name, inner, init);
+                            } else if let Type::Imaginary(ref inner) = &v.ty {
+                                self.gen_imaginary_init(&v.name.name, inner, init);
                             } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble)
                             {
                                 // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
@@ -6246,12 +6253,16 @@ impl Codegen {
                     // 浮点全局变量加载到 xmm0 (浮点值约定, 同局部变量);
                     // 整数路径 emit_global_load 会把 double 装进 GP 寄存器,
                     // 与 gen_float_binop 期望的 xmm0 不符 (TLS/普通全局都受影响)
-                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+                        || matches!(ty, Type::Imaginary(_))
+                    {
                         self.emit_global_float_load_to_xmm(0, &name.name, ty);
                     } else {
                         self.emit_global_load(dst, &name.name);
                     }
-                } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+                    || matches!(ty, Type::Imaginary(_))
+                {
                     self.gen_float_load(&name.name, ty);
                 } else if self.current_func_is_nested
                     && self.upvar_offsets.contains_key(&name.name)
@@ -6357,6 +6368,11 @@ impl Codegen {
                 // P2-14: _Complex 算术运算 (任一操作数为复数, 标量隐式提升)
                 if matches!(l.ty(), Type::Complex(_)) || matches!(r.ty(), Type::Complex(_)) {
                     self.gen_complex_binop(*op, l, r, dst);
+                    return;
+                }
+                // _Imaginary 算术运算
+                if matches!(l.ty(), Type::Imaginary(_)) || matches!(r.ty(), Type::Imaginary(_)) {
+                    self.gen_imaginary_binop(*op, l, r, dst);
                     return;
                 }
                 // 指针/数组运算缩放: ptr ± n 步进 sizeof(*ptr), ptr - ptr 返回元素数
@@ -6579,7 +6595,9 @@ impl Codegen {
                             self.store_upvar(dst, parent_off, l_ty.size());
                         } else if matches!(l_ty, Type::Vector(_, _)) {
                             self.gen_vector_store(&name.name);
-                        } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
+                            || matches!(l_ty, Type::Imaginary(_))
+                        {
                             self.gen_float_store(&name.name, l_ty);
                         } else {
                             self.mov_to_stack(dst, &name.name);
@@ -6871,12 +6889,17 @@ impl Codegen {
                     let is_real = matches!(lv, Expr::Real { .. });
                     let inner = match ce.ty() {
                         Type::Complex(i) => i.as_ref().clone(),
+                        Type::Imaginary(i) => i.as_ref().clone(),
                         _ => Type::Double,
                     };
+                    let is_imag_var = matches!(ce.ty(), Type::Imaginary(_));
                     let inner_sz = inner.size() as i32;
                     let is_float_inner =
                         matches!(inner, Type::Float | Type::Double | Type::LongDouble);
-                    let part_off = if is_real {
+                    let part_off = if is_imag_var {
+                        // _Imaginary 变量只有一个分量 (虚部), 偏移 0
+                        0
+                    } else if is_real {
                         0
                     } else if matches!(inner, Type::LongDouble) {
                         -8 - inner_sz
@@ -6960,10 +6983,17 @@ impl Codegen {
                 // 浮点取负: 翻转符号位 (XOR with sign mask)
                 // 否则在 gen_expr 之后 emit neg r64 会错把 rax 取反, 而浮点结果在 xmm0.
                 if matches!(op, UnOp::Neg)
-                    && matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble)
+                    && (matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble)
+                        || matches!(e.ty(), Type::Imaginary(_)))
                 {
                     self.gen_expr(e, 0); // xmm0 = e
-                    match e.ty() {
+                    let e_ty = e.ty();
+                    let neg_ty = if let Type::Imaginary(ref inner) = e_ty {
+                        inner.as_ref()
+                    } else {
+                        &e_ty
+                    };
+                    match neg_ty {
                         Type::Float => {
                             // 翻转 32 位符号位: movabs rax, 0x8000_0000
                             //   66 48 0f 6e c8 movq xmm1, rax
@@ -8077,7 +8107,7 @@ impl Codegen {
         }
         if matches!(
             expr.ty(),
-            Type::Float | Type::Double | Type::LongDouble | Type::Complex(_)
+            Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
         ) {
             // 浮点表达式结果已在 xmm0 (Float 字面量 / 浮点变量 /
             // float/double 字段 MemberAccess 均直接加载到 xmm0)
@@ -10834,13 +10864,19 @@ impl Codegen {
     // 浮点变量存储: xmm0 → 栈 (使用 XMM 指令) 或 st(0) → 栈 (x87)
     fn gen_float_store(&mut self, name: &str, ty: &Type) {
         let off = self.var_offset(name);
+        // _Imaginary: 按内型存储
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            inner.as_ref()
+        } else {
+            ty
+        };
         // -mno-sse 模式: 使用 x87 fstp 存储 st(0) 到内存
         if !self.target.sse {
             self.emit_x87_fstp_mem(off);
             return;
         }
-        let is_float = matches!(ty, Type::Float);
-        let is_ld = matches!(ty, Type::LongDouble);
+        let is_float = matches!(effective_ty, Type::Float);
+        let is_ld = matches!(effective_ty, Type::LongDouble);
         if is_ld {
             // long double 16 字节: 分两次 movq 存储 (xmm0 低 8 字节 + 高 8 字节零)
             // movq [r13+off], xmm0: 66 49 0F D6 45|4D off
@@ -11100,6 +11136,25 @@ impl Codegen {
     /// 对标量: __real__ 返回自身, __imag__ 返回 0 (GCC 语义)。
     /// 结果: 浮点分量 → xmm0, 整数分量 → rax (dst)。
     fn gen_complex_part(&mut self, e: &Expr, is_real: bool, ty: &Type, dst: u8) {
+        // _Imaginary 类型: __real__ 返回 0, __imag__ 返回值本身
+        if let Type::Imaginary(ref inner) = e.ty() {
+            if is_real {
+                // __real__ imaginary → 0
+                if matches!(inner.as_ref(), Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(inner.as_ref(), Type::Float) {
+                        self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                    } else {
+                        self.emit(&[0x66, 0x0F, 0x57, 0xC0]); // xorpd xmm0, xmm0
+                    }
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+            } else {
+                // __imag__ imaginary → 值本身
+                self.gen_expr(e, dst);
+            }
+            return;
+        }
         let inner = match &e.ty() {
             Type::Complex(i) => i.as_ref().clone(),
             _ => Type::Double, // 标量路径占位
@@ -11184,8 +11239,14 @@ impl Codegen {
     /// 浮点变量加载: 栈/[r13+off] → 指定 xmm 寄存器
     fn load_float_to_xmm(&mut self, name: &str, ty: &Type, xmm: u8) {
         let off = self.var_offset(name);
-        let is_float = matches!(ty, Type::Float);
-        let is_ld = matches!(ty, Type::LongDouble);
+        // _Imaginary: 按内型加载
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            inner.as_ref().clone()
+        } else {
+            ty.clone()
+        };
+        let is_float = matches!(effective_ty, Type::Float);
+        let is_ld = matches!(effective_ty, Type::LongDouble);
         if is_ld {
             self.emit(&[0xF3]);
             if xmm >= 8 {
@@ -11552,6 +11613,31 @@ impl Codegen {
         }
     }
 
+    /// _Imaginary 变量初始化: 存储单个浮点值 (虚部)
+    /// _Imaginary 大小同内型, 仅存储虚部一个分量
+    fn gen_imaginary_init(&mut self, name: &str, inner: &Type, init: &Expr) {
+        let off = self.var_offset(name);
+        let is_float = matches!(inner, Type::Float | Type::Double | Type::LongDouble);
+        // 虚数字面量 (4.0i / 3j): 取 imag 字段
+        if let Expr::ComplexLit { imag, .. } = init {
+            if is_float {
+                self.gen_float_imm_load(*imag, inner);
+                self.gen_float_store_at(off, inner);
+            } else {
+                self.mov_imm(0, *imag as i128);
+                self.store_stack(0, off);
+            }
+            return;
+        }
+        // 非字面量: 求值后存储
+        self.gen_expr(init, 0);
+        if is_float {
+            self.gen_float_store_at(off, inner);
+        } else {
+            self.store_stack(0, off);
+        }
+    }
+
     // P2-14: _Complex 算术运算 (add/sub/mul/div) 与比较 (==/!=)
     fn gen_complex_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
         let inner_ty = if let Type::Complex(inner) = &l.ty() {
@@ -11708,6 +11794,186 @@ impl Codegen {
         } else {
             // 整数内型: 实部载入 rax (gen_complex_init 直接 store_stack)
             self.load_stack(0, result_off);
+        }
+    }
+
+    /// _Imaginary 算术运算:
+    /// - imag ± imag → imag (单浮点值加减)
+    /// - imag * imag → real (负乘积)
+    /// - imag / imag → real (商)
+    /// - real ± imag → complex (结果在帧临时区: real + imag*i)
+    /// - real * imag → imag (单浮点值乘)
+    fn gen_imaginary_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
+        let l_imag = matches!(l.ty(), Type::Imaginary(_));
+        let r_imag = matches!(r.ty(), Type::Imaginary(_));
+        // 确定内型 (取较宽的)
+        let inner_ty = if l_imag {
+            if let Type::Imaginary(ref i) = l.ty() { i.as_ref().clone() }
+            else { Type::Double }
+        } else if r_imag {
+            if let Type::Imaginary(ref i) = r.ty() { i.as_ref().clone() }
+            else { Type::Double }
+        } else {
+            Type::Double
+        };
+        let is_float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
+        let pfx = if matches!(inner_ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+
+        if l_imag && r_imag {
+            // imag op imag: 两个操作数都是单浮点值
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    // imag ± imag → imag: 结果仍在 xmm0
+                    // 先算 r 保存到 [rsp], 再算 l 到 xmm0, 然后 xmm0 op xmm1
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    // 保存右操作数
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // movss/movsd [rsp], xmm0
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    // 加载右操作数到 xmm1
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // movss/movsd xmm1, [rsp]
+                    let add_sub = if matches!(op, BinOp::Add) { 0x58u8 } else { 0x5Cu8 };
+                    self.emit(&[pfx, 0x0F, add_sub, 0xC1]); // addss/subss xmm0, xmm1 = l op r
+                    // 结果在 xmm0
+                }
+                BinOp::Mul => {
+                    // imag * imag → real (负乘积): (a*i)*(b*i) = -a*b
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    self.emit(&[pfx, 0x0F, 0x59, 0xC1]); // mulss/mulsd xmm0, xmm1
+                    // 取负: xor with sign bit
+                    if matches!(inner_ty, Type::Float) {
+                        // xorps xmm0, [neg_mask_f32]
+                        self.emit_float_neg(&inner_ty);
+                    } else {
+                        self.emit_float_neg(&inner_ty);
+                    }
+                    // 结果在 xmm0 (实数值)
+                }
+                BinOp::Div => {
+                    // imag / imag → real: (a*i)/(b*i) = a/b
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divss/divsd xmm0, xmm1
+                    // 结果在 xmm0 (实数值)
+                }
+                BinOp::EqEq | BinOp::Ne => {
+                    // 比较虚部
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    if matches!(inner_ty, Type::Float) {
+                        self.emit(&[0x0F, 0x2E, 0xC8]); // ucomiss xmm1, xmm0
+                    } else {
+                        self.emit(&[0x66, 0x0F, 0x2E, 0xC8]); // ucomisd xmm1, xmm0
+                    }
+                    let false_label = self.fresh_label();
+                    let end_label = self.fresh_label();
+                    self.jmp_rel32(&false_label, JumpKind::Jne);
+                    self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 1 } else { 0 });
+                    self.jmp_rel32(&end_label, JumpKind::Jmp);
+                    self.label(&false_label);
+                    self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
+                    self.label(&end_label);
+                    return;
+                }
+                _ => {}
+            }
+        } else {
+            // 一个 imaginary + 一个 real
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    // real ± imag → complex: 结果需要存 (real, imag) 对
+                    let result_off = -self.frame_size + 8;
+                    let inner_sz = inner_ty.size() as i32;
+                    let total_sz = inner_sz * 2;
+                    let save_sz = total_sz * 2;
+                    self.emit(&[0x48, 0x83, 0xEC, save_sz as u8]);
+                    if l_imag && !r_imag {
+                        // imag + real: real part = real, imag part = ±imag
+                        // 先算实部 (来自 r)
+                        self.gen_expr(r, dst);
+                        self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                        self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp+0] = real
+                        // 再算虚部 (来自 l)
+                        self.gen_expr(l, dst);
+                        self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                        if matches!(op, BinOp::Sub) {
+                            self.emit_float_neg(&inner_ty);
+                        }
+                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]); // [rsp+inner] = ±imag
+                    } else {
+                        // real ± imag: real part = real, imag part = ±imag
+                        self.gen_expr(l, dst);
+                        self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                        self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp+0] = real
+                        self.gen_expr(r, dst);
+                        self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                        if matches!(op, BinOp::Sub) {
+                            self.emit_float_neg(&inner_ty);
+                        }
+                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]); // [rsp+inner] = ±imag
+                    }
+                    // 加载实部到 xmm0 供后续使用
+                    self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+                    self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
+                }
+                BinOp::Mul => {
+                    // real * imag → imag: 单浮点值乘法
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    self.emit(&[pfx, 0x0F, 0x59, 0xC1]); // mulss/mulsd xmm0, xmm1
+                }
+                BinOp::Div => {
+                    // real / imag → imag: -(real/imag_mag)
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.gen_expr(r, dst);
+                    self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divss/divsd xmm0, xmm1
+                    self.emit_float_neg(&inner_ty);
+                }
+                _ => {}
+            }
+        }
+        let _ = is_float_inner;
+    }
+
+    /// 浮点取负: xmm0 = -xmm0 (翻转符号位)
+    fn emit_float_neg(&mut self, ty: &Type) {
+        match ty {
+            Type::Float => {
+                // movabs rax, 0x80000000; movq xmm1, rax; xorps xmm0, xmm1
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x80000000u64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                self.emit(&[0x0F, 0x57, 0xC1]);
+            }
+            _ => {
+                // movabs rax, 0x8000000000000000; movq xmm1, rax; xorpd xmm0, xmm1
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x8000000000000000u64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
+            }
         }
     }
 
