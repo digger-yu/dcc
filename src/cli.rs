@@ -89,6 +89,7 @@ pub struct Config {
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
     pub m32: bool,               // -m32: 32 位目标, 传 --32 给 as
     pub parallel_codegen: bool,  // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
+    pub jobs: Option<usize>,     // -j<N>: 多文件并行编译线程数 (None=auto)
     pub permissive: bool,        // -fpermissive：未知 typedef 降级为 int
     pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
 
@@ -460,6 +461,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
     let mut m32 = false;
+    let mut jobs: Option<usize> = None; // -j<N>: 多文件并行编译线程数
     let mut relocatable_link = false; // 仅 -r 置位；-c 只产出 .o 不进入 link.rs
     let mut output_kind = LinkerOutputKind::Executable;
     let mut built_link = false;
@@ -536,6 +538,24 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 dump_macros = true;
             }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
+            // -j<N> / -j <N> / --jobs=<N> / --jobs <N>
+            s if s.starts_with("-j") && s.len() > 2 && s[2..].parse::<usize>().is_ok() => {
+                jobs = Some(s[2..].parse().unwrap());
+            }
+            "-j" => {
+                let v = args.get(i + 1).ok_or_else(|| CliError::new("missing arg after -j"))?;
+                jobs = Some(v.parse().map_err(|_| CliError::new("invalid -j value"))?);
+                i += 1;
+            }
+            s if s.starts_with("--jobs=") => {
+                let v = &s[7..];
+                jobs = Some(v.parse().map_err(|_| CliError::new("invalid --jobs value"))?);
+            }
+            "--jobs" => {
+                let v = args.get(i + 1).ok_or_else(|| CliError::new("missing arg after --jobs"))?;
+                jobs = Some(v.parse().map_err(|_| CliError::new("invalid --jobs value"))?);
+                i += 1;
+            }
             "-r" => {
                 relocatable = true;
                 relocatable_link = true;
@@ -1584,6 +1604,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         }
     }
 
+    // -j0 无意义，报错
+    if jobs == Some(0) {
+        return Err(CliError::new("-j must be >= 1"));
+    }
+
     // -E 模式允许没有输入文件 (从 stdin 读取)
     if !preprocess_only {
         if inputs.is_empty() && !link_mode {
@@ -1698,6 +1723,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             as_options,
             m32,
             parallel_codegen,
+            jobs,
             permissive,
             raw_args: args.to_vec(),
             built_link,
@@ -1795,6 +1821,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             as_options,
             m32,
             parallel_codegen,
+            jobs,
             permissive,
             raw_args: args.to_vec(),
             built_link: false,
@@ -1879,8 +1906,10 @@ fn print_help() {
     println!("    dcc -r -flto -o merged.o a.o b.o   merge + .llvm.lto + gc-sections");
     println!();
     println!("LINKING NOTE:");
-    println!("    dcc is not a full linker. Multi-file executables:");
-    println!("      dcc -c a.c -o a.o && dcc -c b.c -o b.o");
+    println!("    dcc supports multi-file parallel compilation with -j:");
+    println!("      dcc -c a.c b.c c.c     # compile each to a.o b.o c.o in parallel");
+    println!("      dcc -c -j4 a.c b.c     # limit to 4 parallel jobs");
+    println!("    Multi-file executables:");
     println!("      gcc a.o b.o -o prog    # or: dcc -r -o all.o a.o b.o");
     println!();
     println!("OPTIONS:");
@@ -1889,6 +1918,7 @@ fn print_help() {
     println!("    -flto               per-function sections + .llvm.lto summary");
     println!("    -O0|-O1|-O2|-O3     optimization level (default O0)");
     println!("    -o <file>           output file (default a.out)");
+    println!("    -j<N>               multi-file parallel compilation jobs (default: auto)");
     println!("    --target <triple>   target triple (e.g. aarch64-linux-gnu)");
     println!("    -std=c99|gnu11|...  C standard (default gnu23)");
     println!("    -ffreestanding      freestanding (no libc)");
