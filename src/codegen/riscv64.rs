@@ -6,6 +6,7 @@ use crate::codegen::asm_constraints::{
 };
 use crate::codegen::elf::{
     self, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
+    STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -81,6 +82,8 @@ pub struct Riscv64Codegen {
     canary_slot_off: i32,
     /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
     mcount_loc_entries: Vec<(u64, String)>,
+    /// TLS 全局变量集合 (名称 -> 偏移), 用于 load_global_addr_a0 分发 TLS 访问序列
+    tls_globals: HashMap<String, u64>,
     _target: Target,
 }
 
@@ -120,6 +123,7 @@ impl Riscv64Codegen {
             diagnostics: Vec::new(),
             canary_slot_off: 0,
             mcount_loc_entries: Vec::new(),
+            tls_globals: HashMap::new(),
             _target: target,
         }
     }
@@ -270,6 +274,10 @@ impl Riscv64Codegen {
         } else {
             self.rodata.resize(self.rodata.len() + size, 0);
         }
+        // TLS 全局变量: 记录到 tls_globals 集合, codegen 在访问时分发 TLS 序列
+        if g.is_tls {
+            self.tls_globals.insert(g.name.clone(), off);
+        }
         if self.relocatable {
             self.symbols.push(ElfSym {
                 name: g.name.clone(),
@@ -277,7 +285,7 @@ impl Riscv64Codegen {
                 value: off,
                 size: size as u64,
                 bind: STB_GLOBAL,
-                ty: STT_OBJECT,
+                ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
                 visibility: elf::STV_DEFAULT,
             });
             self.sym_index
@@ -1629,6 +1637,11 @@ impl Riscv64Codegen {
     }
 
     fn load_global_addr_a0(&mut self, name: &str) {
+        // TLS 全局变量: 分发 TLS 访问序列 (获取 TLS 变量地址到 a0)
+        if self.tls_globals.contains_key(name) {
+            self.emit_tls_le_access(name);
+            return;
+        }
         if self.relocatable {
             let pos = self.pos();
             self.emit_auipc_a0(0);
@@ -1964,6 +1977,58 @@ impl Riscv64Codegen {
     /// BNEZ - 分支非零
     fn emit_bnez(&mut self, rs: u8, label: &str) {
         self.emit_bne(rs, 0, label);
+    }
+
+    // ========================================================================
+    // TLS 访问序列 (Local Exec)
+    // ========================================================================
+
+    /// Local Exec TLS 访问: 直接 TP + offset
+    /// 序列: lui  a0, %tprel_hi20(sym)
+    ///       addi a0, a0, %tprel_add_lo12(sym)
+    ///       add  a0, a0, tp
+    /// 对于小偏移 (fits in 12 bits), 简化为:
+    ///       addi a0, tp, %tprel_add_lo12(sym)
+    fn emit_tls_le_access(&mut self, sym: &str) {
+        // 获取 TLS 变量偏移
+        let off = self.tls_globals.get(sym).copied().unwrap_or(0);
+        let idx = self.ensure_sym(sym);
+
+        if off < 2048 {
+            // 小偏移: 直接用 addi tp, a0
+            // addi a0, tp, imm (I-type)
+            let imm = (off as u32) & 0xfff;
+            let insn = (imm << 20) | (4u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x13;
+            self.emit(&insn.to_le_bytes());
+        } else {
+            // 大偏移: lui + addi + add
+            // lui a0, %tprel_hi20(sym)
+            let hi20 = ((off as i64 + 0x800) >> 12) as u32;
+            let insn_lui = (hi20 << 12) | (10u32 << 7) | 0x37;
+            self.emit(&insn_lui.to_le_bytes());
+            let lui_pos = self.pos() - 4;
+            self.relocations.push(ElfRela {
+                offset: lui_pos,
+                sym_index: idx,
+                rel_type: elf::R_RISCV_TPREL_HI20,
+                addend: 0,
+            });
+            // addi a0, a0, %tprel_add_lo12(sym)
+            let lo12 = (off as i32) & 0xfff;
+            let insn_addi = ((lo12 as u32) << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x13;
+            self.emit(&insn_addi.to_le_bytes());
+            let addi_pos = self.pos() - 4;
+            self.relocations.push(ElfRela {
+                offset: addi_pos,
+                sym_index: idx,
+                rel_type: elf::R_RISCV_TPREL_LO12_I,
+                addend: 0,
+            });
+            // add a0, a0, tp (x4)
+            // add rd, rs1, rs2: 0x33 | rs2<<20 | rs1<<15 | funct3<<12 | rd<<7
+            let insn_add = (4u32 << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x33;
+            self.emit(&insn_add.to_le_bytes());
+        }
     }
 
     fn alloc_local(&mut self, name: &str, bytes: i32) -> i32 {
