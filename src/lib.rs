@@ -18,6 +18,7 @@ pub mod diagnostics;
 pub mod driver;
 pub mod fixdep;
 pub mod format_check;
+pub mod incremental;
 pub mod ipa_sra;
 pub mod ir;
 pub mod link;
