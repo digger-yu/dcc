@@ -1944,6 +1944,8 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         no_semantic_interposition: cfg.no_semantic_interposition,
         fuse_ld: cfg.fuse_ld.clone(),
         version_table: link::symver::VersionTable::new(),
+        // target_clones: 内置链接器从目标文件的 IFUNC 符号自动检测,
+        // 无需从 AST 显式注册 (codegen 已生成 resolver 和 STT_GNU_IFUNC 符号)
         target_clones: link::target_clones::TargetClonesTable::new(),
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
         arch: arch_from_target(&cfg.target),

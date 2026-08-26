@@ -8783,6 +8783,59 @@ fn attr_flatten_asm_no_call_to_inlined() {
     );
 }
 
+// __attribute__((target_clones(...)))): 验证 IFUNC 符号和变体符号生成
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_ifunc_symbols() {
+    let src = include_str!("fixtures/c/attr_target_clones.c");
+    let src_path = std::env::temp_dir().join(format!(
+        "dcc-target-clones-{}.c",
+        std::process::id()
+    ));
+    let obj = std::env::temp_dir().join(format!(
+        "dcc-target-clones-{}.o",
+        std::process::id()
+    ));
+    fs::write(&src_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -c for target_clones");
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 验证 ELF 符号: compute/multiply 应为 IFUNC (type 10),
+    // 变体符号 (compute.sse4.2, compute.default 等) 应为 FUNC
+    let readelf = Command::new("readelf")
+        .arg("-s")
+        .arg(&obj)
+        .output()
+        .expect("readelf");
+    let syms = String::from_utf8_lossy(&readelf.stdout);
+    // IFUNC 符号类型为 10 (STT_GNU_IFUNC)
+    assert!(
+        syms.contains("10") && syms.contains("compute"),
+        "compute should be IFUNC: {syms}"
+    );
+    assert!(
+        syms.contains("10") && syms.contains("multiply"),
+        "multiply should be IFUNC: {syms}"
+    );
+    // 变体符号
+    assert!(syms.contains("compute.sse4.2"), "missing compute.sse4.2: {syms}");
+    assert!(syms.contains("compute.default"), "missing compute.default: {syms}");
+    assert!(syms.contains("multiply.avx"), "missing multiply.avx: {syms}");
+    assert!(syms.contains("multiply.sse4.2"), "missing multiply.sse4.2: {syms}");
+    assert!(syms.contains("multiply.default"), "missing multiply.default: {syms}");
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj);
+}
+
 // __attribute__((deprecated("msg"))): 仅声明, 解析/编译不应报错
 #[test]
 #[cfg(unix)]

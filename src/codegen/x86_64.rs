@@ -3801,8 +3801,10 @@ impl Codegen {
                             } else {
                                 STB_GLOBAL
                             },
-                            // ifunc 属性: 函数符号类型为 STT_GNU_IFUNC
-                            ty: if f.ifunc_resolver.is_some() {
+                            // ifunc / target_clones 属性: 函数符号类型为 STT_GNU_IFUNC
+                            ty: if f.ifunc_resolver.is_some()
+                                || !f.target_clones.is_empty()
+                            {
                                 STT_GNU_IFUNC
                             } else {
                                 STT_FUNC
@@ -3882,6 +3884,40 @@ impl Codegen {
                             visibility: STV_DEFAULT,
                         };
                         global_syms.push(alias_sym);
+                    }
+                }
+            }
+        }
+
+        // __attribute__((target_clones(...))): 创建变体符号别名
+        // 对每个 target_clones 函数 foo("sse4.2,default")，
+        // 创建 foo.sse4.2 和 foo.default 作为 foo 的别名符号。
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if !f.target_clones.is_empty() {
+                    if let Some(func_sym) = global_syms
+                        .iter()
+                        .find(|s| s.name == f.name.name)
+                        .or_else(|| local_syms.iter().find(|s| s.name == f.name.name))
+                    {
+                        // 克隆字段以避免借用冲突
+                        let sec = func_sym.section;
+                        let val = func_sym.value;
+                        let sz = func_sym.size;
+                        for variant in &f.target_clones {
+                            let variant_name =
+                                format!("{}.{}", f.name.name, variant);
+                            let variant_sym = ElfSym {
+                                name: variant_name,
+                                section: sec,
+                                value: val,
+                                size: sz,
+                                bind: STB_GLOBAL,
+                                ty: STT_FUNC,
+                                visibility: STV_DEFAULT,
+                            };
+                            global_syms.push(variant_sym);
+                        }
                     }
                 }
             }
@@ -16914,10 +16950,22 @@ impl Codegen {
                     .decls
                     .iter()
                     .any(|d| matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static));
+                let is_ifunc = prog
+                    .decls
+                    .iter()
+                    .any(|d| {
+                        matches!(d, Decl::Func(f) if f.name.name == *name 
+                            && (f.ifunc_resolver.is_some() || !f.target_clones.is_empty()))
+                    });
                 if !is_static {
                     out.push_str(&format!("\t.globl {name}\n"));
                 }
-                out.push_str(&format!("\t.type {name}, @function\n"));
+                let sym_type = if is_ifunc {
+                    "@gnu_indirect_function"
+                } else {
+                    "@function"
+                };
+                out.push_str(&format!("\t.type {name}, {}\n", sym_type));
                 if self.emit_cfi {
                     out.push_str("\t.cfi_startproc\n");
                 }
@@ -16954,6 +17002,22 @@ impl Codegen {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // __attribute__((target_clones(...))): emit .set for variant aliases
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if !f.target_clones.is_empty() {
+                    for variant in &f.target_clones {
+                        let variant_name =
+                            format!("{}.{}", f.name.name, variant);
+                        out.push_str(&format!(
+                            "\t.globl {}\n\t.set {}, {}\n",
+                            variant_name, variant_name, f.name.name
+                        ));
+                    }
+                }
             }
         }
         out
