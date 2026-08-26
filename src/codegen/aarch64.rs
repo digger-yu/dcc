@@ -1289,6 +1289,11 @@ impl Aarch64Codegen {
             self.mov_w0_imm(0);
             return;
         }
+        // __atomic_* 内建函数特殊处理 (生成 ARM 原子指令)
+        let args = &expr.children[1..];
+        if callee.starts_with("__atomic_") && self.gen_atomic_builtin(&callee, args) {
+            return;
+        }
         let args = &expr.children[1..];
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)
@@ -2321,6 +2326,16 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// MOV Xd, Xs — general 64-bit register-to-register move
+    /// 编码: ORR Xd, XZR, Xs (alias of MOV)
+    fn mov_x_reg(&mut self, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
+        let insn = 0xaa0003e0u32 | ((src as u32 & 0x1f) << 16) | ((dst as u32 & 0x1f) << 0);
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// Load a local variable from stack into an arbitrary GP register (32-bit W)
     fn asm_load_var_to_reg(&mut self, var_name: &str, reg_idx: u8) {
         if let Some(&off) = self.locals.get(var_name) {
@@ -3131,6 +3146,30 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// LDR Xt, [Xn, #imm] - 按尺寸无符号偏移加载 (用于解引用指针)
+    fn emit_ldr_x(&mut self, rt: u8, rn: u8, imm: u32, sz: usize) {
+        let imm12 = (imm / sz as u32) & 0xfff;
+        let insn = match sz {
+            1 => 0x39400000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x79400000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0xb9400000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xf9400000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// STR Xt, [Xn, #imm] - 按尺寸无符号偏移存储
+    fn emit_str_x(&mut self, rt: u8, rn: u8, imm: u32, sz: usize) {
+        let imm12 = (imm / sz as u32) & 0xfff;
+        let insn = match sz {
+            1 => 0x39000000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x79000000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0xb9000000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xf9000000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// 32 位后置索引: str wt, [xn], #imm
     fn emit_str_w_post_index(&mut self, rt: u8, rn: u8, imm9: i32) {
         let imm9_u = (imm9 as u32) & 0x1ff;
@@ -3417,6 +3456,42 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// sub xd, xn, xm — 64 位寄存器减法
+    fn emit_sub_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0xcb000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// and xd, xn, xm — 64 位寄存器与
+    fn emit_and_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0x8a000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// orr xd, xn, xm — 64 位寄存器或
+    fn emit_or_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0xaa000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// eor xd, xn, xm — 64 位寄存器异或
+    fn emit_eor_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0xca000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// 将 HFA 从 v 寄存器组存储到栈 [sp+off] (用于 HFA 返回/传参)
     fn store_hfa_from_vregs(&mut self, off: i32, hfa: HfaInfo, base_reg: u8) {
         let elem_bytes = (hfa.elem_bits / 8) as i32;
@@ -3633,6 +3708,342 @@ impl Aarch64Codegen {
         self.emit(&0xd53bd041u32.to_le_bytes());
         // add x0, x0, x1
         self.emit(&0x8b010000u32.to_le_bytes());
+    }
+
+    // ========================================================================
+    // 原子操作内建函数 (__atomic_* 系列)
+    // ========================================================================
+
+    /// 获取指针参数所指元素的大小
+    fn atomic_elem_size(&self, args: &[TypedExpr], idx: usize) -> usize {
+        if idx >= args.len() {
+            return 8;
+        }
+        match &args[idx].ty {
+            ValueType::Pointer(inner) => value_type_size(inner),
+            ValueType::Array(inner, _) => value_type_size(inner),
+            _ => 8,
+        }
+    }
+
+    /// 原子内建函数 codegen: 返回 true 表示已处理
+    /// 参数约定: args[0]=ptr, args[1]=val (对于 store/exchange/cmpxchg 有不同)
+    /// 结果返回在 x0
+    fn gen_atomic_builtin(&mut self, name: &str, args: &[TypedExpr]) -> bool {
+        match name {
+            "__atomic_load_n" => {
+                if args.len() < 2 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(1, 0); // x1 = ptr (保存)
+                // ldar x0, [x1] (Load-Acquire)
+                self.emit_ldar(sz, 0, 1);
+                true
+            }
+            "__atomic_store_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(1, 0); // x1 = ptr
+                // x0 = val
+                self.gen_expr(&args[1]);
+                // stlr x0, [x1] (Store-Release)
+                self.emit_stlr(sz, 0, 1);
+                true
+            }
+            "__atomic_exchange_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                // x0 = val
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0); // x1 = val
+                // ldaxr x0, [x2] (Load-Acquire Exclusive, 旧值→x0)
+                self.emit_ldaxr(sz, 0, 2);
+                // stlxr w3, x1, [x2] (Store-Release Exclusive)
+                self.emit_stlxr(sz, 3, 1, 2);
+                // cbnz w3, retry (如果 store 失败则重试)
+                let l_retry = self.fresh_label("atomic_xchg");
+                let l_done = self.fresh_label("atomic_xchg_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);
+                self.emit_stlxr(sz, 3, 1, 2);
+                self.emit_cbnz(3, &l_retry);
+                self.label(&l_done);
+                // x0 已包含旧值
+                true
+            }
+            "__atomic_fetch_add" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                // x0 = val
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0); // x1 = val
+                // CAS loop: x0 = old value
+                let l_retry = self.fresh_label("atomic_add");
+                let l_done = self.fresh_label("atomic_add_done");
+                self.label(&l_retry);
+                // ldaxr x0, [x2]
+                self.emit_ldaxr(sz, 0, 2);
+                // x3 = x0 + x1 (new = old + val)
+                self.emit_add_x_reg(3, 0, 1);
+                // stlxr w4, x3, [x2]
+                self.emit_stlxr(sz, 4, 3, 2);
+                // cbnz w4, retry
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                // x0 已包含旧值
+                true
+            }
+            "__atomic_fetch_sub" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                // x0 = val
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0); // x1 = val
+                // CAS loop
+                let l_retry = self.fresh_label("atomic_sub");
+                let l_done = self.fresh_label("atomic_sub_done");
+                self.label(&l_retry);
+                // ldaxr x0, [x2]
+                self.emit_ldaxr(sz, 0, 2);
+                // x3 = x0 - x1 (new = old - val)
+                self.emit_sub_x_reg(3, 0, 1);
+                // stlxr w4, x3, [x2]
+                self.emit_stlxr(sz, 4, 3, 2);
+                // cbnz w4, retry
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_fetch_and" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0);
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0);
+                let l_retry = self.fresh_label("atomic_and");
+                let l_done = self.fresh_label("atomic_and_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);
+                // x3 = x0 & x1
+                self.emit_and_x_reg(3, 0, 1);
+                self.emit_stlxr(sz, 4, 3, 2);
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_fetch_or" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0);
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0);
+                let l_retry = self.fresh_label("atomic_or");
+                let l_done = self.fresh_label("atomic_or_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);
+                // x3 = x0 | x1
+                self.emit_or_x_reg(3, 0, 1);
+                self.emit_stlxr(sz, 4, 3, 2);
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_fetch_xor" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0);
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0);
+                let l_retry = self.fresh_label("atomic_xor");
+                let l_done = self.fresh_label("atomic_xor_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);
+                // x3 = x0 ^ x1
+                self.emit_eor_x_reg(3, 0, 1);
+                self.emit_stlxr(sz, 4, 3, 2);
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_compare_exchange_n" => {
+                // args: (ptr, expected, desired, weak, success_order, failure_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                // x0 = *expected (解引用 expected 指针)
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(4, 0); // x4 = expected_ptr
+                // 加载 *expected 到 x1
+                self.emit_ldr_x(1, 4, 0, sz); // x1 = *expected_ptr
+                // x0 = desired
+                self.gen_expr(&args[2]);
+                self.mov_x_reg(3, 0); // x3 = desired
+                // CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                // ldaxr x0, [x2] (加载当前值)
+                self.emit_ldaxr(sz, 0, 2);
+                // cmp x0, x1 (比较当前值与期望值)
+                self.emit_cmp_x_reg(0, 1);
+                // b.ne fail
+                self.emit_bcond(&l_fail, 1); // NE = 1
+                // stlxr w5, x3, [x2] (store desired)
+                self.emit_stlxr(sz, 5, 3, 2);
+                // cbnz w5, retry
+                self.emit_cbnz(5, &l_retry);
+                // 成功: x0 = 1
+                self.mov_w0_imm(1);
+                // b done
+                self.b(&l_done);
+                // 失败: 将当前值写入 *expected, x0 = 0
+                self.label(&l_fail);
+                // stlxr 失败, 需要清除 exclusive monitor
+                // 重新加载当前值并写入 expected
+                self.emit_ldxr(sz, 0, 2); // 读取当前值 (非 atomic, 仅清除 monitor)
+                self.emit_clrex(); // 清除 exclusive monitor
+                self.emit_str_x(0, 4, 0, sz); // *expected_ptr = current
+                self.mov_w0_imm(0);
+                self.label(&l_done);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // ===== 原子操作辅助指令 =====
+
+    /// LDAR (Load-Acquire) - 按尺寸选 8/16/32/64 位
+    fn emit_ldar(&mut self, sz: usize, rt: u8, rn: u8) {
+        let insn = match sz {
+            1 => 0x08dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x48dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0x88dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xc8dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// STLR (Store-Release) - 按尺寸选 8/16/32/64 位
+    fn emit_stlr(&mut self, sz: usize, rt: u8, rn: u8) {
+        let insn = match sz {
+            1 => 0x089ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x489ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0x889ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xc89ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LDAXR (Load-Acquire Exclusive) - 按尺寸选 8/16/32/64 位
+    fn emit_ldaxr(&mut self, sz: usize, rt: u8, rn: u8) {
+        let insn = match sz {
+            1 => 0x085ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x485ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0x885ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xc85ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LDXR (Load Exclusive) - 按尺寸选 8/16/32/64 位
+    fn emit_ldxr(&mut self, sz: usize, rt: u8, rn: u8) {
+        let insn = match sz {
+            1 => 0x085f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            2 => 0x485f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            4 => 0x885f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+            _ => 0xc85f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// STLXR (Store-Release Exclusive) - 按尺寸选 8/16/32/64 位
+    /// rs = status register, rt = value to store, rn = base register
+    fn emit_stlxr(&mut self, sz: usize, rs: u8, rt: u8, rn: u8) {
+        let insn = match sz {
+            1 => 0x0800fc00u32
+                | ((rs as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rt as u32 & 0x1f),
+            2 => 0x4800fc00u32
+                | ((rs as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rt as u32 & 0x1f),
+            4 => 0x8800fc00u32
+                | ((rs as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rt as u32 & 0x1f),
+            _ => 0xc800fc00u32
+                | ((rs as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rt as u32 & 0x1f),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CLREX - 清除 exclusive monitor
+    fn emit_clrex(&mut self) {
+        self.emit(&0xd5033f5fu32.to_le_bytes());
+    }
+
+    /// CBNZ - Compare and Branch Non-Zero (32-bit)
+    fn emit_cbnz(&mut self, rt: u8, label: &str) {
+        let pos = self.pos();
+        // cbnz w<rt>, #0 (placeholder)
+        let insn = 0x35000000u32 | (rt as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_cbnz(pos, target, rt);
+        } else {
+            self.pending_bcond.push((pos, label.to_string(), 0x10)); // 0x10 = CBNZ marker
+        }
+    }
+
+    /// 修补 CBNZ 偏移
+    fn patch_cbnz(&mut self, at: u64, target: u64, rt: u8) {
+        let pc = at + 4;
+        let imm19 = (((target as i64 - pc as i64) >> 2) as u32) & 0x7ffff;
+        let insn = 0x35000000u32 | (imm19 << 5) | (rt as u32 & 0x1f);
+        let off = at as usize;
+        if off + 4 <= self.code.len() {
+            self.code[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+        }
     }
 
     // ========================================================================
