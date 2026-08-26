@@ -741,6 +741,11 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
             byte_size: value_type_to_dwarf(inner).byte_size * 2,
             kind: debug::DwarfTypeKind::Struct { members: vec![] },
         },
+        ValueType::Imaginary(inner) => debug::DwarfType {
+            name: format!("_Imaginary {}", value_type_to_dwarf(inner).name),
+            byte_size: value_type_to_dwarf(inner).byte_size,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
     }
 }
 
@@ -944,6 +949,11 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             name: format!("_Complex {}", ast_type_to_dwarf(inner).name),
             byte_size: ast_type_to_dwarf(inner).byte_size * 2,
             kind: debug::DwarfTypeKind::Struct { members: vec![] },
+        },
+        Type::Imaginary(inner) => debug::DwarfType {
+            name: format!("_Imaginary {}", ast_type_to_dwarf(inner).name),
+            byte_size: ast_type_to_dwarf(inner).byte_size,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },
         Type::Atomic(inner) => ast_type_to_dwarf(inner),
         Type::Fract => debug::DwarfType {

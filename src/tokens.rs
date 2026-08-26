@@ -67,9 +67,10 @@ pub enum TokKind {
     KwChar32, // char32_t (C11)
     KwFract,
     KwAccum,   // _Fract, _Accum (定点数)
-    KwComplex, // _Complex
-    KwReal,    // __real__ / __real (取复数实部)
-    KwImag,    // __imag__ / __imag (取复数虚部)
+    KwComplex,   // _Complex
+    KwImaginary, // _Imaginary (C99)
+    KwReal,      // __real__ / __real (取复数实部)
+    KwImag,      // __imag__ / __imag (取复数虚部)
     KwDecimal32,
     KwDecimal64,
     KwDecimal128, // _Decimal32/64/128
@@ -275,6 +276,7 @@ impl<'a> Lexer<'a> {
                 "_Fract" => TokKind::KwFract,
                 "_Accum" => TokKind::KwAccum,
                 "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
+                "_Imaginary" | "__imaginary" => TokKind::KwImaginary,
                 "__real__" | "__real" => TokKind::KwReal,
                 "__imag__" | "__imag" => TokKind::KwImag,
                 "_Decimal32" => TokKind::KwDecimal32,

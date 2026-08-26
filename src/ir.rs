@@ -30,6 +30,7 @@ pub enum ValueType {
     },
     Vector(Box<ValueType>, usize),
     Complex(Box<ValueType>),
+    Imaginary(Box<ValueType>), // _Imaginary: 仅虚部, 大小同内型
 }
 
 /// 编译期可确定的标量字面量（供多架构 IR lowering 使用）。
@@ -313,6 +314,7 @@ fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Array(_, None) => 8,
         ValueType::Aggregate { size, .. } => *size,
         ValueType::Complex(inner) => value_type_size(inner) * 2,
+        ValueType::Imaginary(inner) => value_type_size(inner),
     }
 }
 
@@ -613,6 +615,9 @@ impl Lowering {
             },
             Type::Vector(inner, n) => ValueType::Vector(Box::new(self.lower_type(inner, span)), *n),
             Type::Complex(inner) => ValueType::Complex(Box::new(self.lower_type(inner, span))),
+            Type::Imaginary(inner) => {
+                ValueType::Imaginary(Box::new(self.lower_type(inner, span)))
+            }
             Type::Atomic(inner) => self.lower_type(inner, span),
             Type::Named(name) => {
                 self.diagnostics.push(Diagnostic::err(

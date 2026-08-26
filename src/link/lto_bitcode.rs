@@ -287,6 +287,10 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
             out.push(8);
             encode_type(out, inner);
         }
+        ValueType::Imaginary(inner) => {
+            out.push(9);
+            encode_type(out, inner);
+        }
     }
 }
 
@@ -547,6 +551,10 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
         8 => {
             let inner = decode_type(data, cur)?;
             Ok(ValueType::Complex(Box::new(inner)))
+        }
+        9 => {
+            let inner = decode_type(data, cur)?;
+            Ok(ValueType::Imaginary(Box::new(inner)))
         }
         _ => Err(format!("bad type tag {}", tag)),
     }

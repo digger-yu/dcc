@@ -4514,6 +4514,7 @@ impl<'a> Parser<'a> {
         }
         // 基本类型
         let mut is_complex = false;
+        let mut is_imaginary = false;
         loop {
             // 注意: 浮点类 (float / double / long double / decimal) 与 _Complex
             // 复合 (例 `double _Complex z`), 故其 arm 不带 `break`, 让第二 loop
@@ -4523,6 +4524,10 @@ impl<'a> Parser<'a> {
             match self.cur.kind {
                 TokKind::KwComplex => {
                     is_complex = true;
+                    self.advance();
+                }
+                TokKind::KwImaginary => {
+                    is_imaginary = true;
                     self.advance();
                 }
                 TokKind::KwInt => {
@@ -4662,9 +4667,15 @@ impl<'a> Parser<'a> {
         {
             self.advance();
         }
-        if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex {
+        if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex || is_imaginary {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
-            let ty = if is_complex { Type::Complex(Box::new(ty)) } else { ty };
+            let ty = if is_complex {
+                Type::Complex(Box::new(ty))
+            } else if is_imaginary {
+                Type::Imaginary(Box::new(ty))
+            } else {
+                ty
+            };
             Some(self.finish_type(ty, specifiers_only))
         } else {
             self.err_here(
@@ -5778,6 +5789,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwFract
                 | TokKind::KwAccum
                 | TokKind::KwComplex
+                | TokKind::KwImaginary
                 | TokKind::KwDecimal32
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
@@ -5846,6 +5858,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwFract
                 | TokKind::KwAccum
                 | TokKind::KwComplex
+                | TokKind::KwImaginary
                 | TokKind::KwDecimal32
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
@@ -6441,6 +6454,8 @@ impl<'a> Parser<'a> {
                 } else {
                     let is_ca = matches!(&lt, Type::Complex(_));
                     let is_cb = matches!(&rt, Type::Complex(_));
+                    let is_ia = matches!(&lt, Type::Imaginary(_));
+                    let is_ib = matches!(&rt, Type::Imaginary(_));
                     let is_va = matches!(&lt, Type::Vector(_, _));
                     let is_vb = matches!(&rt, Type::Vector(_, _));
                     let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble);
@@ -6457,6 +6472,31 @@ impl<'a> Parser<'a> {
                             lt
                         } else {
                             rt
+                        }
+                    } else if is_ia || is_ib {
+                        // _Imaginary 算术类型推导
+                        let inner_a = if let Type::Imaginary(ref i) = lt { i.as_ref().clone() } else { lt.clone() };
+                        let inner_b = if let Type::Imaginary(ref i) = rt { i.as_ref().clone() } else { rt.clone() };
+                        // 取较宽的内型
+                        let wider = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
+                        match op {
+                            BinOp::Add | BinOp::Sub if is_ia && is_ib => {
+                                // imag ± imag → imag
+                                Type::Imaginary(Box::new(wider))
+                            }
+                            BinOp::Mul | BinOp::Div if is_ia && is_ib => {
+                                // imag * imag → real (负), imag / imag → real
+                                wider
+                            }
+                            BinOp::Add | BinOp::Sub => {
+                                // real ± imag → complex
+                                Type::Complex(Box::new(wider))
+                            }
+                            BinOp::Mul | BinOp::Div => {
+                                // real * imag → imag, real / imag → imag
+                                Type::Imaginary(Box::new(wider))
+                            }
+                            _ => wider,
                         }
                     } else if is_fa || is_fb {
                         if matches!(&lt, Type::LongDouble) || matches!(&rt, Type::LongDouble) {
@@ -6651,6 +6691,7 @@ impl<'a> Parser<'a> {
                 let e = self.parse_unary()?;
                 let ty = match &e.ty() {
                     Type::Complex(inner) => (**inner).clone(),
+                    Type::Imaginary(inner) => (**inner).clone(),
                     t => t.clone(),
                 };
                 Some(Expr::Real {
@@ -6665,6 +6706,7 @@ impl<'a> Parser<'a> {
                 let e = self.parse_unary()?;
                 let ty = match &e.ty() {
                     Type::Complex(inner) => (**inner).clone(),
+                    Type::Imaginary(inner) => (**inner).clone(),
                     t => t.clone(),
                 };
                 Some(Expr::Imag {
@@ -7307,7 +7349,7 @@ impl<'a> Parser<'a> {
                                 | Type::Accum => 2,
                                 Type::Ptr(_) | Type::Func(_, _) => 3,
                                 Type::Float | Type::Double | Type::LongDouble => 4,
-                                Type::Complex(_) => 5,
+                                Type::Complex(_) | Type::Imaginary(_) => 5,
                                 Type::Struct(_, _, _) | Type::Union(_, _, _) => 6,
                                 Type::Array(_, _) => 7,
                                 Type::Vector(_, _) => 9,

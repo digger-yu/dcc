@@ -3568,6 +3568,7 @@ fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Function { .. } => 8,
         ValueType::Vector(inner, lanes) => value_type_size(inner) * lanes,
         ValueType::Complex(inner) => value_type_size(inner) * 2,
+        ValueType::Imaginary(inner) => value_type_size(inner),
     }
 }
 

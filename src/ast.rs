@@ -550,7 +550,8 @@ pub enum Type {
     LongDouble,
     Fract,
     Accum,              // 定点数: _Fract (1.31格式), _Accum (16.16格式)
-    Complex(Box<Type>), // _Complex float/double: (real, imag) 两部分
+    Complex(Box<Type>),    // _Complex float/double: (real, imag) 两部分
+    Imaginary(Box<Type>),  // _Imaginary float/double: 仅虚部, 大小同内型
     Ptr(Box<Type>),
     Array(Box<Type>, ArraySize),
     Vector(Box<Type>, usize), // SIMD 向量: (元素类型, 元素个数)
@@ -651,6 +652,7 @@ impl Type {
             Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.size() * 2,
+            Type::Imaginary(inner) => inner.size(),
             Type::Atomic(inner) => inner.size(),
             Type::Struct(_, fields, align) => {
                 let size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
@@ -697,6 +699,7 @@ impl Type {
             Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.align(),
+            Type::Imaginary(inner) => inner.align(),
             Type::Atomic(inner) => inner.align(),
             Type::Struct(_, _, align) => *align,
             Type::Union(_, _, align) => *align,
@@ -738,6 +741,7 @@ impl Type {
                     | Type::Fract
                     | Type::Accum
                     | Type::Complex(_)
+                    | Type::Imaginary(_)
             )
     }
 
@@ -927,6 +931,7 @@ impl std::fmt::Display for Type {
             Type::Fract => write!(f, "_Fract"),
             Type::Accum => write!(f, "_Accum"),
             Type::Complex(inner) => write!(f, "_Complex {}", inner),
+            Type::Imaginary(inner) => write!(f, "_Imaginary {}", inner),
             Type::Ptr(inner) => write!(f, "{}*", inner),
             Type::Array(inner, sz) => match sz {
                 ArraySize::Const(n) => write!(f, "{}[{}]", inner, n),
