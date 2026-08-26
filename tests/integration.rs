@@ -3430,6 +3430,67 @@ fn attr_propagation_compiles_and_runs() {
     let _ = fs::remove_file(exe);
 }
 
+/// noreturn / _Noreturn: 函数末尾插入 ud2 防止落入后续代码
+/// 覆盖 C11 _Noreturn、GCC __attribute__((noreturn/__noreturn__/_Noreturn))、
+/// stdnoreturn.h 的 noreturn 宏、__declspec(noreturn) 等所有变体.
+#[test]
+fn noreturn_trap_emits_ud2_compiles() {
+    let src = include_str!("fixtures/c/noreturn_trap.c");
+    let (out, asm) = run_asm_output_test("noreturn-trap", src);
+    assert!(
+        out.status.success(),
+        "noreturn_trap compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 按函数名检查: noreturn 函数必须在 ret 之前有 ud2.
+    // 提取函数体: 从 `funcname:` 到下一个 `.size funcname, .-funcname`
+    let noreturn_fns = [
+        "c11_noreturn_exit",
+        "gcc_noreturn_abort",
+        "gcc_noreturn_alias",
+        "std_noreturn_loop",
+        "declspec_noreturn_handler",
+    ];
+    for fname in &noreturn_fns {
+        let body = extract_function_body(&asm, fname);
+        assert!(
+            !body.is_empty(),
+            "function {fname} not found in asm output"
+        );
+        // 找 ret 位置, 确认前面有 ud2
+        let ret_pos = body.find("\n\tret").expect("ret not found in noreturn fn");
+        let pre = &body[..ret_pos];
+        assert!(
+            pre.contains("ud2"),
+            "function {fname} is noreturn but missing ud2 before ret; body=\n{body}"
+        );
+    }
+    // 控制对照: 普通函数 ret 前不应有 ud2
+    let regular_body = extract_function_body(&asm, "regular_add");
+    assert!(!regular_body.is_empty(), "regular_add not found in asm");
+    let ret_pos = regular_body.find("\n\tret").expect("ret not found in regular fn");
+    let pre = &regular_body[..ret_pos];
+    assert!(
+        !pre.contains("ud2"),
+        "regular_add should NOT have ud2 but does; pre=\n{pre}"
+    );
+}
+
+/// 从汇编文本中提取 `funcname:` 到下一个 `.size funcname, .-funcname` 的内容
+fn extract_function_body(asm: &str, name: &str) -> String {
+    let label = format!("\n{name}:\n");
+    let start = match asm.find(&label) {
+        Some(s) => s + 1, // skip the leading '\n'
+        None => return String::new(),
+    };
+    let end_marker = format!(".size {name}, .-{name}");
+    let end = asm[start..]
+        .find(&end_marker)
+        .map(|i| start + i)
+        .unwrap_or(asm.len());
+    asm[start..end].to_string()
+}
+
 /// 语句表达式内 typeof 局部声明
 #[test]
 fn vfs_pressure_stmt_expr_compiles() {
