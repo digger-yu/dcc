@@ -6581,6 +6581,7 @@ impl Codegen {
                             if matches!(l_ty, Type::Vector(_, _)) {
                                 self.gen_vector_store(&name.name);
                             } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
+                                || matches!(l_ty, Type::Imaginary(_))
                             {
                                 // 浮点全局: 值在 xmm0, 用 movsd/movss 存储
                                 self.emit_global_float_store(&name.name, l_ty);
@@ -11364,7 +11365,13 @@ impl Codegen {
 
     /// 全局浮点变量 RIP-relative 加载到 xmm
     fn emit_global_float_load_to_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
-        let is_float = matches!(ty, Type::Float);
+        // _Imaginary: 按内型加载
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            inner.as_ref()
+        } else {
+            ty
+        };
+        let is_float = matches!(effective_ty, Type::Float);
         let mut rex = 0u8;
         if xmm >= 8 {
             rex |= 0x04;
@@ -11857,13 +11864,14 @@ impl Codegen {
                 }
                 BinOp::Div => {
                     // imag / imag → real: (a*i)/(b*i) = a/b
-                    self.gen_expr(l, dst);
-                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
-                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divss/divsd xmm0, xmm1
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp] = r
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // xmm1 = r
+                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divsd xmm0, xmm1 = l/r
                     // 结果在 xmm0 (实数值)
                 }
                 BinOp::EqEq | BinOp::Ne => {
@@ -11928,6 +11936,8 @@ impl Codegen {
                     }
                     // 加载实部到 xmm0 供后续使用
                     self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+                    // 将 (real, imag) 对拷贝到帧临时区供后续 complex 操作使用
+                    self.store_complex_pair_from_rsp(result_off, inner_sz, true);
                     self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
                 }
                 BinOp::Mul => {
@@ -11942,13 +11952,14 @@ impl Codegen {
                 }
                 BinOp::Div => {
                     // real / imag → imag: -(real/imag_mag)
-                    self.gen_expr(l, dst);
-                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
-                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divss/divsd xmm0, xmm1
+                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp] = r
+                    self.gen_expr(l, dst);
+                    self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
+                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // xmm1 = r
+                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divsd xmm0, xmm1 = l/r
                     self.emit_float_neg(&inner_ty);
                 }
                 _ => {}
