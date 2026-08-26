@@ -1190,6 +1190,21 @@ fn build_dwarf_cu(
     }
 }
 
+/// Return the absolute 64-bit (or 32-bit for 32-bit archs) relocation
+/// type used for DWARF debug sections.  Each architecture defines its
+/// own absolute relocation type in the ELF specification.
+fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
+    use crate::cli::Arch;
+    match arch {
+        Arch::X86_64 => elf::R_X86_64_64,
+        Arch::AArch64 => elf::R_AARCH64_ABS64,
+        Arch::RiscV64 => elf::R_RISCV_64,
+        Arch::Mips64 => elf::R_MIPS_64,
+        Arch::Mips => elf::R_MIPS_32,
+        Arch::Arm => elf::R_ARM_ABS32,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn emit(
     module: &Module,
@@ -1307,7 +1322,7 @@ pub fn emit(
                             Some(elf::ElfRela {
                                 offset: *off,
                                 sym_index: sym_idx,
-                                rel_type: elf::R_X86_64_64,
+                                rel_type: debug_abs_reloc_type(target.arch),
                                 addend: 0,
                             })
                         })
@@ -1336,7 +1351,7 @@ pub fn emit(
                             Some(elf::ElfRela {
                                 offset: *off,
                                 sym_index: sym_idx,
-                                rel_type: elf::R_X86_64_64,
+                                rel_type: debug_abs_reloc_type(target.arch),
                                 addend: 0,
                             })
                         })
@@ -1365,7 +1380,7 @@ pub fn emit(
                             Some(elf::ElfRela {
                                 offset: *off,
                                 sym_index: sym_idx,
-                                rel_type: elf::R_X86_64_64,
+                                rel_type: debug_abs_reloc_type(target.arch),
                                 addend: 0,
                             })
                         })
