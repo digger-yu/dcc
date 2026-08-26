@@ -1479,6 +1479,11 @@ impl Preprocessor {
                 active_source.push_str(&phase3);
                 active_source.push('\n');
                 active_spans.push((ll.phys_start, ll.phys_end));
+                // 检测 _Pragma 操作符: 如果当前行包含 _Pragma, 立即刷新
+                // 以确保 _Pragma 效果能影响后续行
+                if trimmed.starts_with("_Pragma") && !self.has_unclosed_paren(&active_source) {
+                    self.flush_active_source(&mut active_source, &mut active_spans);
+                }
             } else {
                 self.preserve_lines(ll.phys_start, ll.phys_end);
             }
@@ -1503,15 +1508,16 @@ impl Preprocessor {
     /// `spans` 与 `src` 中的行一一对应: (phys_start, phys_end)。
     /// 展开结果逐行写出; 空行/注释行跳过, 不输出空行填充。
     /// 行号追踪由 line_map 负责, 不再保持输出行号与源行号物理对齐。
+    /// _Pragma 字符串在展开后立即应用, 以确保后续指令能正确感知其效果。
     fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
+        // 立即应用展开阶段累积的 _Pragma 字符串, 以确保后续 # 指令能感知其效果
+        let pending: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        for (p, line_no) in pending {
+            self.apply_pragma_string(&p, line_no);
+        }
         let lines: Vec<&str> = expanded.split('\n').collect();
-        // 收集含 _Pragma 的源行号 (展开后变空), 需要输出占位行以保持行号同步
-        let pragma_lines: std::collections::HashSet<u32> = {
-            let pending = self.pending_pragmas.borrow();
-            pending.iter().map(|&(_, line_no)| line_no).collect()
-        };
         for (i, &(phys_start, _phys_end)) in spans.iter().enumerate() {
             let line = lines.get(i).copied().unwrap_or("");
             // 始终输出占位行以保持输出行号与源行号同步
@@ -1546,11 +1552,6 @@ impl Preprocessor {
                     count: 1,
                 });
             }
-        }
-        // 把展开阶段累积的 _Pragma 字符串批量应用
-        let pending: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
-        for (p, line_no) in pending {
-            self.apply_pragma_string(&p, line_no);
         }
         src.clear();
         spans.clear();
@@ -1711,8 +1712,8 @@ impl Preprocessor {
         if let Some(rest) = text.strip_prefix("pack") {
             self.handle_pragma_pack(rest.trim(), line_no);
         } else {
-            // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
-            let pseudo = format!("pragma {}", pragma_text);
+            // 构造 "#pragma ..." 形式的伪指令, 复用 process_directive
+            let pseudo = format!("#pragma {}", pragma_text);
             self.process_directive(&pseudo, line_no);
         }
     }
@@ -3166,19 +3167,19 @@ impl Preprocessor {
                 self.diag_state = prev;
             }
         } else if let Some(rest) = text.strip_prefix("ignored") {
-            let diag_name = rest.trim().trim_start_matches("-W");
+            let diag_name = rest.trim().trim_matches('"').trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.insert(diag_name.to_string());
                 self.diag_state.as_error.remove(diag_name);
             }
         } else if let Some(rest) = text.strip_prefix("warning") {
-            let diag_name = rest.trim().trim_start_matches("-W");
+            let diag_name = rest.trim().trim_matches('"').trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.remove(diag_name);
                 self.diag_state.as_error.remove(diag_name);
             }
         } else if let Some(rest) = text.strip_prefix("error") {
-            let diag_name = rest.trim().trim_start_matches("-W");
+            let diag_name = rest.trim().trim_matches('"').trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.remove(diag_name);
                 self.diag_state.as_error.insert(diag_name.to_string());
