@@ -4499,8 +4499,10 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident {
             if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() {
                 self.advance();
-                // 跳过 typedef 名后的 __attribute__: 如 asmlinkage = __attribute__((aligned(4)))
-                self.skip_attributes();
+                // typedef 名后的 __attribute__: 如 asmlinkage = __attribute__((aligned(4)))
+                // 解析并存入 decl_attrs 供后续声明使用
+                let td_attrs = self.parse_attributes();
+                self.decl_attrs.merge(td_attrs);
                 return Some(self.finish_type(ty, specifiers_only));
             }
             if self.allow_named_type {
