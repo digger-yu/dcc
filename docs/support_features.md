@@ -79,7 +79,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解 |
 | `__COUNTER__` | 单调递增，跨宏嵌套共享 preproc 状态；在 `#if` 中可被求值 |
 | `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量 |
-| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `once` / `comment` / `locale` |
+| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `GCC system_header` / `GCC visibility push/pop/set(...)` / `once` / `comment` / `locale` |
 | `#pragma pack` 影响 struct 布局 | `preproc.pack_history` 携带行号；`Parser::pack_at_line(line)` 二分查找；`layout_struct_with_pack(max_align)` cap 到 `min(nat, n)` |
 | `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；ON 时 opt 禁用浮点常量折叠/GVN-CSE（舍入模式可被运行时修改） |
 | `#pragma STDC FP_CONTRACT` | ON/OFF/DEFAULT 三态；ON 时 x86_64 后端把 `a*b+c` / `a*b-c` 收缩为 `fma` / `fmaf` / `fmal` 调用，OFF/DEFAULT 保持独立乘加 |

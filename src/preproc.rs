@@ -122,6 +122,13 @@ pub struct Preprocessor {
     once_guard: HashMap<String, (u64, Option<String>)>,
     /// 宏展开深度上限是否已发出警告 (每 TU 仅警告一次, 避免刷屏)
     depth_limit_warned: RefCell<bool>,
+    /// #pragma GCC system_header: 剩余文件视为系统头文件, 抑制警告
+    system_header: bool,
+    /// #pragma GCC visibility 栈: 栈顶是当前符号可见性
+    visibility_stack: Vec<String>,
+    /// #pragma GCC visibility 变更历史: (行号, 可见性).
+    /// 供 codegen 按位置查询符号可见性设置
+    pub visibility_history: Vec<(u32, String)>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -205,6 +212,9 @@ pub struct PreprocessOutput {
     /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true, OFF/DEFAULT 为 false.
     /// 供 codegen 切换 _Complex 除法的有限范围公式.
     pub cx_limited_range: bool,
+    /// #pragma GCC visibility 变更历史: (行号, 可见性).
+    /// 供 codegen 按位置查询符号可见性设置
+    pub visibility_history: Vec<(u32, String)>,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -500,6 +510,9 @@ pub fn preprocess(
         dep_hashes: Vec::new(),
         once_guard: HashMap::new(),
         depth_limit_warned: RefCell::new(false),
+        system_header: false,
+        visibility_stack: vec!["default".to_string()],
+        visibility_history: Vec::new(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -1009,6 +1022,7 @@ pub fn preprocess(
         fenv_access: pp.fenv_access,
         fp_contract: pp.fp_contract,
         cx_limited_range: pp.cx_limited_range,
+        visibility_history: pp.visibility_history.clone(),
     }
 }
 
@@ -1310,6 +1324,15 @@ impl Preprocessor {
             d = d.with_source(src.clone());
         }
         d
+    }
+
+    /// 添加一条警告诊断, 但如果当前处于 system_header 模式则抑制。
+    /// GCC #pragma GCC system_header 语义: 剩余文件视为系统头文件,
+    /// 抑制警告但不抑制错误。
+    fn push_warning(&mut self, diag: Diagnostic) {
+        if !self.system_header {
+            self.diags.push(diag);
+        }
     }
 
     /// 检查文本中是否存在未闭合的 ( (忽略字符串/字符字面量内的括号)。
@@ -1776,6 +1799,18 @@ impl Preprocessor {
                     .insert(canonical.to_string_lossy().to_string());
             } else if let Some(rest) = pragma_text.strip_prefix("GCC diagnostic") {
                 self.handle_gcc_diagnostic(rest.trim(), line_no);
+            } else if let Some(rest) = pragma_text.strip_prefix("GCC system_header") {
+                // #pragma GCC system_header
+                // 将剩余文件视为系统头文件, 抑制所有警告
+                // (与 GCC 行为一致: 不影响错误, 仅抑制警告)
+                if rest.trim().is_empty() {
+                    self.system_header = true;
+                }
+            } else if let Some(rest) = pragma_text.strip_prefix("GCC visibility") {
+                // #pragma GCC visibility push
+                // #pragma GCC visibility pop
+                // #pragma GCC visibility set(default|hidden|protected|internal)
+                self.handle_gcc_visibility(rest.trim(), line_no);
             } else if let Some(rest) = pragma_text.strip_prefix("pack") {
                 // #pragma pack() / pack(1) / pack(2) / pack(4) / pack(8) / pack(16)
                 // #pragma pack(push[, n]) / #pragma pack(pop[, n])
@@ -1846,8 +1881,7 @@ impl Preprocessor {
         } else if let Some(rest) = directive.strip_prefix("warning") {
             if self.is_active() {
                 let msg = rest.trim();
-                self.diags
-                    .push(self.warn_at("W0200", format!("#warning {}", msg), line_no));
+                self.push_warning(self.warn_at("W0200", format!("#warning {}", msg), line_no));
             }
         } else if directive.starts_with("embed") && self.is_active() {
             self.do_embed(directive[5..].trim(), line_no);
@@ -2790,6 +2824,63 @@ impl Preprocessor {
         }
     }
 
+    /// 处理 #pragma GCC visibility push/pop/set(...)
+    ///
+    /// 可见性值: default / hidden / protected / internal
+    /// push: 保存当前可见性到栈
+    /// pop:  从栈恢复可见性
+    /// set(X): 直接设置可见性为 X
+    fn handle_gcc_visibility(&mut self, text: &str, line_no: u32) {
+        let text = text.trim();
+        if text == "push" {
+            // push: 保存当前可见性
+            let current = self
+                .visibility_stack
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
+            self.visibility_stack.push(current);
+        } else if text == "pop" {
+            // pop: 恢复可见性 (至少保留初始 "default")
+            if self.visibility_stack.len() > 1 {
+                self.visibility_stack.pop();
+            }
+            let current = self
+                .visibility_stack
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
+            self.visibility_history.push((line_no, current));
+        } else if let Some(rest) = text.strip_prefix("set") {
+            // set(default) / set(hidden) / set(protected) / set(internal)
+            let inner = rest
+                .trim_start()
+                .strip_prefix('(')
+                .and_then(|s| s.strip_prefix(')'))
+                .or_else(|| {
+                    rest.trim_start()
+                        .strip_prefix('(')
+                        .and_then(|s| s.split(')').next())
+                });
+            if let Some(vis) = inner {
+                let vis = vis.trim();
+                match vis {
+                    "default" | "hidden" | "protected" | "internal" => {
+                        // 设置栈顶可见性
+                        if let Some(top) = self.visibility_stack.last_mut() {
+                            *top = vis.to_string();
+                        }
+                        self.visibility_history
+                            .push((line_no, vis.to_string()));
+                    }
+                    _ => {
+                        // 未知可见性值, 静默忽略 (GCC 兼容)
+                    }
+                }
+            }
+        }
+    }
+
     // ===== 宏展开 =====
     /// 顶层入口: 对一行文本做完全宏展开
     ///
@@ -2925,7 +3016,7 @@ impl Preprocessor {
                 *self.depth_limit_warned.borrow_mut() = true;
                 let line = map.line(0);
                 let hdr = &text[..text.len().min(60)];
-                self.diags.push(self.warn_at(
+                self.push_warning(self.warn_at(
                     "W0201",
                     format!(
                         "macro expansion depth limit (128) reached; \
@@ -7936,6 +8027,73 @@ int ok = 1;\n";
             out.text.contains("int ok = 1;"),
             "output: {}",
             out.text
+        );
+    }
+
+    /// #pragma GCC system_header: 抑制后续警告
+    #[test]
+    fn gcc_system_header_suppresses_warnings() {
+        let out = preprocess(
+            b"#warning before system_header\n\
+             #pragma GCC system_header\n\
+             #warning after system_header\n\
+             int x;\n",
+            "sys-header.h",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        // 只有第一个 #warning 应该产生 W0200,
+        // system_header 后的 #warning 应被抑制
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 1,
+            "expected 1 W0200 (before system_header), got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// #pragma GCC visibility push/pop/set 栈式管理
+    #[test]
+    fn gcc_visibility_push_pop_set() {
+        let out = preprocess(
+            b"#pragma GCC visibility push\n\
+             #pragma GCC visibility set(hidden)\n\
+             void hidden_func(void);\n\
+             #pragma GCC visibility pop\n\
+             void default_func(void);\n",
+            "vis-test.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        // 检查 visibility_history 记录了变化
+        assert!(
+            !out.visibility_history.is_empty(),
+            "expected visibility history, got empty"
+        );
+        // pop 后应恢复到 default
+        let last_vis = out.visibility_history.last();
+        assert!(
+            last_vis.is_some() && last_vis.unwrap().1 == "default",
+            "expected last visibility to be 'default', got: {:?}",
+            last_vis
         );
     }
 }
