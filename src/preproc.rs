@@ -2,7 +2,7 @@
 // 第一性原理: 预处理 = 文本变换 + 宏展开。在词法分析之前运行。
 // suckless 准则: 行级处理 #include/#define/#if, 然后 token 级宏展开。
 
-use crate::cli::StdMode;
+use crate::cli::{Arch, Os, StdMode, TargetTriple};
 use crate::diagnostics::{Diagnostic, Span};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -461,6 +461,7 @@ pub fn preprocess(
     pch_opts: &PchOptions,
     kernel_code_model: bool,
     short_wchar: bool,
+    target: &TargetTriple,
 ) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
@@ -526,9 +527,81 @@ pub fn preprocess(
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
-    pp.define_builtin("__x86_64__", "1");
-    pp.define_builtin("__linux__", "1");
-    pp.define_builtin("__LP64__", "1");
+    // === 架构相关宏 (根据 target 动态定义) ===
+    let is_lp64 = matches!(
+        target.arch,
+        Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64
+    );
+    let is_big_endian = matches!(target.arch, Arch::Mips | Arch::Mips64);
+    // 架构标识宏
+    match target.arch {
+        Arch::X86_64 => {
+            pp.define_builtin("__x86_64__", "1");
+            pp.define_builtin("__x86_64", "1");
+            pp.define_builtin("__amd64__", "1");
+            pp.define_builtin("__amd64", "1");
+            pp.define_builtin("__k8__", "1");
+            pp.define_builtin("__k8", "1");
+        }
+        Arch::AArch64 => {
+            pp.define_builtin("__aarch64__", "1");
+            pp.define_builtin("__ARM_ARCH", "8");
+            pp.define_builtin("__ARM_NEON", "1");
+            pp.define_builtin("__AARCH64EL__", "1");
+        }
+        Arch::RiscV64 => {
+            pp.define_builtin("__riscv", "1");
+            pp.define_builtin("__riscv_xlen", "64");
+            pp.define_builtin("__riscv_integer_extension", "64");
+        }
+        Arch::Mips64 => {
+            pp.define_builtin("__mips__", "1");
+            pp.define_builtin("__mips64", "1");
+            pp.define_builtin("__mips64__", "1");
+            pp.define_builtin("__mips", "1");
+            pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS64");
+            pp.define_builtin("__MIPSEB__", "1");
+            pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS64");
+        }
+        Arch::Mips => {
+            pp.define_builtin("__mips__", "1");
+            pp.define_builtin("__mips", "1");
+            pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS32");
+            pp.define_builtin("__MIPSEB__", "1");
+        }
+        Arch::Arm => {
+            pp.define_builtin("__arm__", "1");
+            pp.define_builtin("__arm", "1");
+            pp.define_builtin("__ARM_ARCH", "7");
+            pp.define_builtin("__ARMEL__", "1");
+            pp.define_builtin("__ARM_NEON", "1");
+        }
+    }
+    // OS 宏
+    match target.os {
+        Os::Linux => {
+            pp.define_builtin("__linux__", "1");
+            pp.define_builtin("__unix__", "1");
+        }
+        Os::Freestanding => {
+            // freestanding: 不定义 OS 宏
+        }
+        Os::Windows => {
+            pp.define_builtin("_WIN32", "1");
+            pp.define_builtin("__WIN32__", "1");
+        }
+        Os::Macos => {
+            pp.define_builtin("__APPLE__", "1");
+            pp.define_builtin("__MACH__", "1");
+        }
+    }
+    // 数据模型宏
+    if is_lp64 {
+        pp.define_builtin("__LP64__", "1");
+    } else {
+        pp.define_builtin("__ILP32__", "1");
+    }
+    pp.define_builtin("__ELF__", "1");
     pp.define_builtin("__STDC__", "1");
     // __STDC_VERSION__ 根据选择的 C 标准设置
     let stc_version = match std_mode {
@@ -541,11 +614,15 @@ pub fn preprocess(
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);
     }
-    // C23 字节序宏 (C23 7.1.1): 仅 C23 模式定义; 小端主机
+    // C23 字节序宏 (C23 7.1.1): 仅 C23 模式定义; 根据 target 字节序设置
     if matches!(std_mode, StdMode::C23 | StdMode::Gnu23) {
         pp.define_builtin("__STDC_ENDIAN_LITTLE__", "1234");
         pp.define_builtin("__STDC_ENDIAN_BIG__", "4321");
-        pp.define_builtin("__STDC_ENDIAN_NATIVE__", "__STDC_ENDIAN_LITTLE__");
+        if is_big_endian {
+            pp.define_builtin("__STDC_ENDIAN_NATIVE__", "__STDC_ENDIAN_BIG__");
+        } else {
+            pp.define_builtin("__STDC_ENDIAN_NATIVE__", "__STDC_ENDIAN_LITTLE__");
+        }
     }
     if freestanding {
         // 独立 (freestanding) 实现: C11 § 4/6 允许省略 <stdatomic.h>,
@@ -572,28 +649,53 @@ pub fn preprocess(
     pp.define_builtin("__SCHAR_MAX__", "127");
     pp.define_builtin("__SHRT_MAX__", "32767");
     pp.define_builtin("__INT_MAX__", "2147483647");
-    pp.define_builtin("__LONG_MAX__", "9223372036854775807L");
+    // 根据数据模型设置 long/pointer/size_t 相关极限值
+    if is_lp64 {
+        pp.define_builtin("__LONG_MAX__", "9223372036854775807L");
+        pp.define_builtin("__ULONG_MAX__", "18446744073709551615UL");
+        pp.define_builtin("__SIZE_MAX__", "18446744073709551615UL");
+        pp.define_builtin("__PTRDIFF_MAX__", "9223372036854775807L");
+    } else {
+        pp.define_builtin("__LONG_MAX__", "2147483647L");
+        pp.define_builtin("__ULONG_MAX__", "4294967295UL");
+        pp.define_builtin("__SIZE_MAX__", "4294967295U");
+        pp.define_builtin("__PTRDIFF_MAX__", "2147483647");
+    }
     pp.define_builtin("__LONG_LONG_MAX__", "9223372036854775807LL");
     pp.define_builtin("__UINT_MAX__", "4294967295U");
-    pp.define_builtin("__ULONG_MAX__", "18446744073709551615UL");
-    pp.define_builtin("__SIZE_MAX__", "18446744073709551615UL");
-    pp.define_builtin("__PTRDIFF_MAX__", "9223372036854775807L");
     pp.define_builtin("__ORDER_LITTLE_ENDIAN__", "1234");
     pp.define_builtin("__ORDER_BIG_ENDIAN__", "4321");
-    pp.define_builtin("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
-    pp.define_builtin("__SIZEOF_POINTER__", "8");
-    pp.define_builtin("__SIZEOF_LONG__", "8");
+    if is_big_endian {
+        pp.define_builtin("__BYTE_ORDER__", "__ORDER_BIG_ENDIAN__");
+    } else {
+        pp.define_builtin("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+    }
+    // 根据数据模型设置大小宏
+    if is_lp64 {
+        pp.define_builtin("__SIZEOF_POINTER__", "8");
+        pp.define_builtin("__SIZEOF_LONG__", "8");
+    } else {
+        pp.define_builtin("__SIZEOF_POINTER__", "4");
+        pp.define_builtin("__SIZEOF_LONG__", "4");
+    }
     pp.define_builtin("__SIZEOF_INT__", "4");
     pp.define_builtin("__SIZEOF_SHORT__", "2");
     pp.define_builtin("__SIZEOF_LONG_LONG__", "8");
-    pp.define_builtin("__SIZEOF_SIZE_T__", "8");
-    pp.define_builtin("__SIZEOF_PTRDIFF_T__", "8");
-    pp.define_builtin("__SIZEOF_INT128__", "16");
+    if is_lp64 {
+        pp.define_builtin("__SIZEOF_SIZE_T__", "8");
+        pp.define_builtin("__SIZEOF_PTRDIFF_T__", "8");
+        pp.define_builtin("__SIZEOF_INT128__", "16");
+        pp.define_builtin("__INT128_TYPE__", "__int128");
+        pp.define_builtin("__UINT128_TYPE__", "__uint128_t");
+        pp.define_builtin("__SIZE_TYPE__", "long unsigned int");
+        pp.define_builtin("__PTRDIFF_TYPE__", "long int");
+    } else {
+        pp.define_builtin("__SIZEOF_SIZE_T__", "4");
+        pp.define_builtin("__SIZEOF_PTRDIFF_T__", "4");
+        pp.define_builtin("__SIZE_TYPE__", "unsigned int");
+        pp.define_builtin("__PTRDIFF_TYPE__", "int");
+    }
     pp.define_builtin("__SIZEOF_FLOAT128__", "16");
-    pp.define_builtin("__INT128_TYPE__", "__int128");
-    pp.define_builtin("__UINT128_TYPE__", "__uint128_t");
-    pp.define_builtin("__SIZE_TYPE__", "long unsigned int");
-    pp.define_builtin("__PTRDIFF_TYPE__", "long int");
     pp.define_builtin("__WCHAR_TYPE__", if short_wchar { "short unsigned int" } else { "int" });
     pp.define_builtin("__WINT_TYPE__", "unsigned int");
     if short_wchar {
@@ -603,10 +705,17 @@ pub fn preprocess(
         pp.define_builtin("__WCHAR_MAX__", "2147483647");
         pp.define_builtin("__WCHAR_MIN__", "(-2147483647 - 1)");
     }
-    pp.define_builtin("__INTMAX_TYPE__", "long int");
-    pp.define_builtin("__UINTMAX_TYPE__", "long unsigned int");
-    pp.define_builtin("__INT64_TYPE__", "long int");
-    pp.define_builtin("__UINT64_TYPE__", "long unsigned int");
+    if is_lp64 {
+        pp.define_builtin("__INTMAX_TYPE__", "long int");
+        pp.define_builtin("__UINTMAX_TYPE__", "long unsigned int");
+        pp.define_builtin("__INT64_TYPE__", "long int");
+        pp.define_builtin("__UINT64_TYPE__", "long unsigned int");
+    } else {
+        pp.define_builtin("__INTMAX_TYPE__", "long long int");
+        pp.define_builtin("__UINTMAX_TYPE__", "long long unsigned int");
+        pp.define_builtin("__INT64_TYPE__", "long long int");
+        pp.define_builtin("__UINT64_TYPE__", "long long unsigned int");
+    }
     pp.define_builtin("__INT32_TYPE__", "int");
     pp.define_builtin("__UINT32_TYPE__", "unsigned int");
     pp.define_builtin("__INT16_TYPE__", "short int");
@@ -618,7 +727,11 @@ pub fn preprocess(
     pp.define_builtin("__INT8_MAX__", "127");
     pp.define_builtin("__INT16_MAX__", "32767");
     pp.define_builtin("__INT32_MAX__", "2147483647");
-    pp.define_builtin("__INT64_MAX__", "9223372036854775807L");
+    if is_lp64 {
+        pp.define_builtin("__INT64_MAX__", "9223372036854775807L");
+    } else {
+        pp.define_builtin("__INT64_MAX__", "9223372036854775807LL");
+    }
     // 固定宽度有符号最小值 (GCC 风格: 用减法避免词法分析歧义)
     pp.define_builtin("__INT8_MIN__", "(-__INT8_MAX__ - 1)");
     pp.define_builtin("__INT16_MIN__", "(-__INT16_MAX__ - 1)");
@@ -628,47 +741,78 @@ pub fn preprocess(
     pp.define_builtin("__UINT8_MAX__", "255");
     pp.define_builtin("__UINT16_MAX__", "65535");
     pp.define_builtin("__UINT32_MAX__", "4294967295U");
-    pp.define_builtin("__UINT64_MAX__", "18446744073709551615UL");
-    // intmax_t / uintmax_t 极限 (x86_64 LP64: long int)
-    pp.define_builtin("__INTMAX_MAX__", "9223372036854775807L");
+    if is_lp64 {
+        pp.define_builtin("__UINT64_MAX__", "18446744073709551615UL");
+    } else {
+        pp.define_builtin("__UINT64_MAX__", "18446744073709551615ULL");
+    }
+    // intmax_t / uintmax_t 极限
+    if is_lp64 {
+        pp.define_builtin("__INTMAX_MAX__", "9223372036854775807L");
+        pp.define_builtin("__UINTMAX_MAX__", "18446744073709551615UL");
+    } else {
+        pp.define_builtin("__INTMAX_MAX__", "9223372036854775807LL");
+        pp.define_builtin("__UINTMAX_MAX__", "18446744073709551615ULL");
+    }
     pp.define_builtin("__INTMAX_MIN__", "(-__INTMAX_MAX__ - 1)");
-    pp.define_builtin("__UINTMAX_MAX__", "18446744073709551615UL");
-    // intptr_t / uintptr_t 极限 (x86_64 LP64: long int)
-    pp.define_builtin("__INTPTR_MAX__", "9223372036854775807L");
+    // intptr_t / uintptr_t 极限
+    if is_lp64 {
+        pp.define_builtin("__INTPTR_MAX__", "9223372036854775807L");
+        pp.define_builtin("__UINTPTR_MAX__", "18446744073709551615UL");
+    } else {
+        pp.define_builtin("__INTPTR_MAX__", "2147483647");
+        pp.define_builtin("__UINTPTR_MAX__", "4294967295U");
+    }
     pp.define_builtin("__INTPTR_MIN__", "(-__INTPTR_MAX__ - 1)");
-    pp.define_builtin("__UINTPTR_MAX__", "18446744073709551615UL");
     // wint_t 极限 (x86_64: unsigned int)
     pp.define_builtin("__WINT_MAX__", "4294967295U");
     pp.define_builtin("__WINT_MIN__", "0U");
-    // least 系列 (x86_64: int_leastN = intN)
+    // least 系列 (int_leastN = intN 在所有架构上)
     pp.define_builtin("__INT_LEAST8_MAX__", "127");
     pp.define_builtin("__INT_LEAST8_MIN__", "(-__INT_LEAST8_MAX__ - 1)");
     pp.define_builtin("__INT_LEAST16_MAX__", "32767");
     pp.define_builtin("__INT_LEAST16_MIN__", "(-__INT_LEAST16_MAX__ - 1)");
     pp.define_builtin("__INT_LEAST32_MAX__", "2147483647");
     pp.define_builtin("__INT_LEAST32_MIN__", "(-__INT_LEAST32_MAX__ - 1)");
-    pp.define_builtin("__INT_LEAST64_MAX__", "9223372036854775807L");
+    if is_lp64 {
+        pp.define_builtin("__INT_LEAST64_MAX__", "9223372036854775807L");
+    } else {
+        pp.define_builtin("__INT_LEAST64_MAX__", "9223372036854775807LL");
+    }
     pp.define_builtin("__INT_LEAST64_MIN__", "(-__INT_LEAST64_MAX__ - 1)");
     pp.define_builtin("__UINT_LEAST8_MAX__", "255");
     pp.define_builtin("__UINT_LEAST16_MAX__", "65535");
     pp.define_builtin("__UINT_LEAST32_MAX__", "4294967295U");
-    pp.define_builtin("__UINT_LEAST64_MAX__", "18446744073709551615UL");
-    // fast 系列 (x86_64: int_fast8 = signed char,
-    // int_fast16/32/64 = long int)
+    if is_lp64 {
+        pp.define_builtin("__UINT_LEAST64_MAX__", "18446744073709551615UL");
+    } else {
+        pp.define_builtin("__UINT_LEAST64_MAX__", "18446744073709551615ULL");
+    }
+    // fast 系列: LP64 上 int_fast16/32/64 = long int; ILP32 上 = long long
     pp.define_builtin("__INT_FAST8_MAX__", "127");
     pp.define_builtin("__INT_FAST8_MIN__", "(-__INT_FAST8_MAX__ - 1)");
-    pp.define_builtin("__INT_FAST16_MAX__", "9223372036854775807L");
+    if is_lp64 {
+        pp.define_builtin("__INT_FAST16_MAX__", "9223372036854775807L");
+        pp.define_builtin("__INT_FAST32_MAX__", "9223372036854775807L");
+        pp.define_builtin("__INT_FAST64_MAX__", "9223372036854775807L");
+    } else {
+        pp.define_builtin("__INT_FAST16_MAX__", "9223372036854775807LL");
+        pp.define_builtin("__INT_FAST32_MAX__", "9223372036854775807LL");
+        pp.define_builtin("__INT_FAST64_MAX__", "9223372036854775807LL");
+    }
     pp.define_builtin("__INT_FAST16_MIN__", "(-__INT_FAST16_MAX__ - 1)");
-    pp.define_builtin("__INT_FAST32_MAX__", "9223372036854775807L");
     pp.define_builtin("__INT_FAST32_MIN__", "(-__INT_FAST32_MAX__ - 1)");
-    pp.define_builtin("__INT_FAST64_MAX__", "9223372036854775807L");
     pp.define_builtin("__INT_FAST64_MIN__", "(-__INT_FAST64_MAX__ - 1)");
     pp.define_builtin("__UINT_FAST8_MAX__", "255");
-    pp.define_builtin("__UINT_FAST16_MAX__", "18446744073709551615UL");
-    pp.define_builtin("__UINT_FAST32_MAX__", "18446744073709551615UL");
-    pp.define_builtin("__UINT_FAST64_MAX__", "18446744073709551615UL");
-    pp.define_builtin("__ELF__", "1");
-    pp.define_builtin("__unix__", "1");
+    if is_lp64 {
+        pp.define_builtin("__UINT_FAST16_MAX__", "18446744073709551615UL");
+        pp.define_builtin("__UINT_FAST32_MAX__", "18446744073709551615UL");
+        pp.define_builtin("__UINT_FAST64_MAX__", "18446744073709551615UL");
+    } else {
+        pp.define_builtin("__UINT_FAST16_MAX__", "18446744073709551615ULL");
+        pp.define_builtin("__UINT_FAST32_MAX__", "18446744073709551615ULL");
+        pp.define_builtin("__UINT_FAST64_MAX__", "18446744073709551615ULL");
+    }
     // 原子内存序常量 (GCC __atomic 内置函数用)
     pp.define_builtin("__ATOMIC_RELAXED", "0");
     pp.define_builtin("__ATOMIC_CONSUME", "1");
@@ -677,20 +821,17 @@ pub fn preprocess(
     pp.define_builtin("__ATOMIC_ACQ_REL", "4");
     pp.define_builtin("__ATOMIC_SEQ_CST", "5");
     // GCC 兼容的额外预定义宏 (M19 补齐)
-    // x86_64 架构别名 (匹配 GCC/clang 命名)
-    pp.define_builtin("__amd64", "1");
-    pp.define_builtin("__amd64__", "1");
-    pp.define_builtin("__x86_64", "1");
-    pp.define_builtin("__k8", "1");
-    pp.define_builtin("__k8__", "1");
-    // x86_64 默认启用 SSE2 (需要 __SSE2__ 才能让 CET / _mm_* / setssbsy 路径编译过)
-    pp.define_builtin("__SSE2__", "1");
-    pp.define_builtin("__SSE2_MATH__", "1");
-    pp.define_builtin("__SSE_MATH__", "1");
-    pp.define_builtin("__SSE__", "1");
-    pp.define_builtin("__MMX__", "1");
-    // CET 头 (cet.h) 依赖这个 feature 宏
-    pp.define_builtin("__CET__", "0");
+    // x86_64 架构别名已在上方架构宏部分定义
+    // x86_64 特有特性宏 (SSE/MMX/CET)
+    if target.arch == Arch::X86_64 {
+        pp.define_builtin("__SSE2__", "1");
+        pp.define_builtin("__SSE2_MATH__", "1");
+        pp.define_builtin("__SSE_MATH__", "1");
+        pp.define_builtin("__SSE__", "1");
+        pp.define_builtin("__MMX__", "1");
+        // CET 头 (cet.h) 依赖这个 feature 宏
+        pp.define_builtin("__CET__", "0");
+    }
     // 链接/平台相关
     pp.define_builtin("__USER_LABEL_PREFIX__", "");
     pp.define_builtin("__VERSION__", "dcc 0.1 (M19)");
@@ -707,8 +848,11 @@ pub fn preprocess(
     } else {
         pp.define_builtin("__code_model_small__", "1");
     }
-    pp.define_builtin("__SEG_GS", "1");
-    pp.define_builtin("__SEG_FS", "1");
+    // x86_64 段寄存器宏
+    if target.arch == Arch::X86_64 {
+        pp.define_builtin("__SEG_GS", "1");
+        pp.define_builtin("__SEG_FS", "1");
+    }
     // __GLIBC__ / __GLIBC_MINOR__ 由 libc 头自动提供, 但 dcc 不强制
     // (内核构建通常带 nolibc, 不需要); 用户可在 -D 中手动设置
     // __COUNTER__ / __INCLUDE_LEVEL__ 在宏展开阶段特殊处理
@@ -737,16 +881,25 @@ pub fn preprocess(
         pp.define_builtin("atomic_schar", "signed char");
         pp.define_builtin("atomic_uchar", "unsigned char");
         pp.define_builtin("atomic_bool", "_Bool");
-        pp.define_builtin("atomic_intptr", "long");
-        pp.define_builtin("atomic_uintptr", "unsigned long");
-        pp.define_builtin("atomic_size_t", "unsigned long");
-        pp.define_builtin("atomic_ptrdiff_t", "long");
         pp.define_builtin("atomic_wchar_t", "int");
         // C11 7.17.6 其余强制类型宏 (与 __INTMAX_TYPE__/__UINTMAX_TYPE__ 对应)
         pp.define_builtin("atomic_char16_t", "unsigned short");
         pp.define_builtin("atomic_char32_t", "unsigned int");
-        pp.define_builtin("atomic_intmax_t", "long int");
-        pp.define_builtin("atomic_uintmax_t", "long unsigned int");
+        if is_lp64 {
+            pp.define_builtin("atomic_intptr", "long");
+            pp.define_builtin("atomic_uintptr", "unsigned long");
+            pp.define_builtin("atomic_size_t", "unsigned long");
+            pp.define_builtin("atomic_ptrdiff_t", "long");
+            pp.define_builtin("atomic_intmax_t", "long int");
+            pp.define_builtin("atomic_uintmax_t", "long unsigned int");
+        } else {
+            pp.define_builtin("atomic_intptr", "int");
+            pp.define_builtin("atomic_uintptr", "unsigned int");
+            pp.define_builtin("atomic_size_t", "unsigned int");
+            pp.define_builtin("atomic_ptrdiff_t", "int");
+            pp.define_builtin("atomic_intmax_t", "long long int");
+            pp.define_builtin("atomic_uintmax_t", "long long unsigned int");
+        }
         pp.define_builtin("atomic_float", "float");
         pp.define_builtin("atomic_double", "double");
         pp.define_builtin("atomic_long_double", "long double");
@@ -5732,8 +5885,18 @@ impl Preprocessor {
 mod tests {
     use super::preprocess;
     use super::{MacroDef, PchBundle, PchOptions};
-    use crate::cli::StdMode;
+    use crate::cli::{Abi, Arch, Os, StdMode, TargetTriple};
     use std::path::PathBuf;
+
+    /// Default x86_64 target for tests
+    fn x86_target() -> TargetTriple {
+        TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: Os::Linux,
+            abi: Abi::Gnu,
+        }
+    }
 
     #[test]
     fn include_unquoted_absolute_path() {
@@ -5754,6 +5917,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -5781,6 +5945,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5811,6 +5976,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5842,6 +6008,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5865,6 +6032,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5887,6 +6055,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let diags = out.diags;
 
@@ -5914,6 +6083,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5935,6 +6105,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5959,6 +6130,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -5990,6 +6162,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6029,6 +6202,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6052,6 +6226,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6077,6 +6252,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6110,6 +6286,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6138,6 +6315,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6167,6 +6345,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6196,6 +6375,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6222,6 +6402,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6253,6 +6434,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6283,6 +6465,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6313,6 +6496,7 @@ mod tests {
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6344,6 +6528,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6374,6 +6559,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6399,6 +6585,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -6424,6 +6611,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_off.diags.is_empty(),
@@ -6443,6 +6631,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_on.diags.is_empty(),
@@ -6462,6 +6651,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_def.diags.is_empty(),
@@ -6481,6 +6671,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_lower.diags.is_empty(),
@@ -6521,6 +6712,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 至少一个 W0001 警告
         assert!(
@@ -6556,6 +6748,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             on.diags.is_empty(),
@@ -6579,6 +6772,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             default.diags.is_empty(),
@@ -6632,6 +6826,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -6646,6 +6841,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
@@ -6676,6 +6872,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -6692,6 +6889,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -6708,6 +6906,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert_eq!(out.charset, "UTF-8");
     }
@@ -6845,6 +7044,7 @@ n\
             &create_opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_create.diags.is_empty(),
@@ -6874,6 +7074,7 @@ n\
             &include_opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out_with_pch.diags.is_empty(),
@@ -6905,6 +7106,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
         assert!(
@@ -6957,6 +7159,7 @@ n\
             &create_opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(pch_path.exists());
 
@@ -6978,6 +7181,7 @@ n\
             &include_opts,
             false,
             false,
+            &x86_target(),
         );
         // 应有 warning (W0400) 但不致命
         let has_warn = out.diags.iter().any(|d| d.code == "W0400");
@@ -7007,6 +7211,7 @@ n\
             &include_opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -7047,6 +7252,7 @@ n\
             &include_opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -7086,6 +7292,7 @@ n\
             &opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0402"),
@@ -7126,6 +7333,7 @@ n\
             &opts,
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0203"),
@@ -7161,6 +7369,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             !pch_path.exists(),
@@ -7196,6 +7405,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let err = out
             .diags
@@ -7244,6 +7454,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let err = out
             .diags
@@ -7317,6 +7528,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
@@ -7333,6 +7545,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out2.text.contains("(52 + 10)"),
@@ -7366,6 +7579,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7396,6 +7610,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7423,6 +7638,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7453,6 +7669,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7483,6 +7700,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0200"),
@@ -7517,6 +7735,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7546,6 +7765,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7573,6 +7793,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7599,6 +7820,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7631,6 +7853,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7664,6 +7887,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7698,6 +7922,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7731,6 +7956,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7768,6 +7994,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7795,6 +8022,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7831,6 +8059,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7858,6 +8087,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7884,6 +8114,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7917,6 +8148,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7944,6 +8176,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7970,6 +8203,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -7996,6 +8230,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -8025,6 +8260,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8054,6 +8290,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags
@@ -8083,6 +8320,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
     }
@@ -8102,6 +8340,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.diags
@@ -8142,6 +8381,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -8178,6 +8418,7 @@ n\
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let has_w0201 = out
             .diags
@@ -8326,6 +8567,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 不应有任何 #error 触发的诊断
         let errors: Vec<_> = out
@@ -8376,6 +8618,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let diags = &out.diags;
         let errors: Vec<_> = diags
@@ -8413,6 +8656,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 只有第一个 #warning 应该产生 W0200,
         // system_header 后的 #warning 应被抑制
@@ -8466,6 +8710,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_file(hdr);
         let _ = fs::remove_file(&src_path);
@@ -8515,6 +8760,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&sys_dir);
@@ -8561,6 +8807,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&user_dir);
@@ -8595,6 +8842,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let w0200_count = out
             .diags
@@ -8646,6 +8894,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_file(&inner_hdr);
         let _ = fs::remove_file(&mid_hdr);
@@ -8692,6 +8941,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 检查 visibility_history 记录了变化
         assert!(
@@ -8745,6 +8995,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -8786,6 +9037,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -8840,6 +9092,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -8893,6 +9146,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -8938,6 +9192,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -8977,6 +9232,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let e0210_count = out
             .diags
@@ -9008,6 +9264,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let e0210_count = out
             .diags
@@ -9038,6 +9295,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let e0210_count = out
             .diags
@@ -9067,6 +9325,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let e0210_count = out
             .diags
@@ -9098,6 +9357,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let w0200_count = out
             .diags
@@ -9131,6 +9391,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let w0200_count = out
             .diags
@@ -9161,6 +9422,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         // 应该被升级为错误 (Severity::Error)
         let promoted = out
@@ -9195,6 +9457,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let w0200_count = out
             .diags
@@ -9224,6 +9487,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         let e0210_count = out
             .diags
@@ -9253,6 +9517,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(out.fenv_access, "fenv_access should be ON via _Pragma");
         assert!(
@@ -9278,6 +9543,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.weak_symbols.contains("my_weak_sym"),
@@ -9303,6 +9569,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.text.contains("f(0)"),
@@ -9327,6 +9594,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.text.contains("f(0 , 1, 2)") || out.text.contains("f(0, 1, 2)"),
@@ -9351,6 +9619,7 @@ int ok = 1;\n";
             &PchOptions::default(),
             false,
             false,
+            &x86_target(),
         );
         assert!(
             out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),
