@@ -169,6 +169,8 @@ pub struct Config {
     pub short_wchar: bool,
     /// -fno-common: 公共符号处理
     pub no_common: bool,
+    /// -fcached: 增量编译 (基于源文件哈希跳过未变更文件的编译)
+    pub incremental: bool,
     /// CLI 解析期间收集的警告 (未知/忽略的标志等)
     pub cli_warnings: Vec<String>,
 }
@@ -660,6 +662,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut strict_overflow = true;
     let mut short_wchar = false;
     let mut no_common = false;
+    let mut incremental = false;
     let mut cli_warnings: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -1464,6 +1467,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fshort-wchar" => short_wchar = true,
             // Common symbol handling
             "-fno-common" => no_common = true,
+            // Incremental compilation (source hash cache)
+            "-fcached" | "--incremental" => incremental = true,
+            "-fno-cached" | "--no-incremental" => incremental = false,
             "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables" => {
                 unwind_tables = false;
             }
@@ -1972,6 +1978,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             strict_overflow,
             short_wchar,
             no_common,
+            incremental,
             cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;
@@ -2072,6 +2079,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             strict_overflow,
             short_wchar,
             no_common,
+            incremental,
             cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;

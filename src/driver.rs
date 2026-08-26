@@ -5,6 +5,7 @@ use crate::cli::{Config, InputLang, LinkerOutputKind};
 use crate::codegen;
 use crate::diagnostics::{enrich_diags, Diagnostic, DiagnosticsConfig, Severity};
 use crate::format_check;
+use crate::incremental::{self, CacheResult, IncrementalCache};
 use crate::ir;
 use crate::link;
 use crate::lto;
@@ -247,6 +248,21 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             eprintln!("dcc: -flto");
         }
     }
+
+    // 增量编译: 检查源文件是否未变更, 若缓存命中则跳过编译.
+    // 在 -fcached 模式下, 基于 (源内容 + 编译标志) 的哈希判断是否需要重编译.
+    let incr_cache = IncrementalCache::new(cfg.verbose);
+    let incr_entry_path = if incremental::should_use_incremental(&cfg, input) {
+        match incr_cache.check(&cfg, input) {
+            CacheResult::Hit => {
+                // 缓存命中: 输出已是最新, 直接返回
+                return Ok(());
+            }
+            CacheResult::Miss { entry_path } => Some(entry_path),
+        }
+    } else {
+        None
+    };
 
     // 读源：mmap（ADR-006）或 stdin
     let (mapped, file_name) = if input.as_os_str() == "-" {
@@ -955,6 +971,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 eprintln!("dcc: bootstrap compare error: {e}");
             }
         }
+    }
+
+    // 增量编译: 编译成功后更新缓存条目
+    if let Some(entry_path) = incr_entry_path {
+        incr_cache.update(&cfg, input, &entry_path);
     }
 
     Ok(())
