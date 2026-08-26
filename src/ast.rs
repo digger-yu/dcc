@@ -517,7 +517,7 @@ pub enum UnOp {
 }
 
 // ===== 类型系统 =====
-/// 数组大小: 编译期常量 或 运行时表达式 (VLA)
+// 数组大小: 编译期常量 或 运行时表达式 (VLA)
 #[derive(Debug, Clone)]
 pub enum ArraySize {
     Const(usize),
@@ -533,6 +533,300 @@ impl PartialEq for ArraySize {
     }
 }
 impl Eq for ArraySize {}
+
+/// C 类型限定符位标志 (const / volatile / restrict / _Atomic).
+///
+/// 仿照 Clang Qualifiers 模式: 一组无符号位标志, 通过按位或组合.
+/// 由于 dcc 不引入 bitflags 外部依赖, 这里手写一组位运算 helper.
+///
+/// 编码 (u8):
+///   bit 0 (Q_CONST)    = 0x01  const
+///   bit 1 (Q_VOLATILE) = 0x02  volatile
+///   bit 2 (Q_RESTRICT) = 0x04  restrict
+///   bit 3 (Q_ATOMIC)   = 0x08  _Atomic (顶层; _Atomic(T) 走 Atomic 变体)
+///   bit 4 (Q_NODEREF)  = 0x10  GCC __attribute__((nodederef)) 内部使用
+///
+/// Address-space 限定符 (__seg_gs / __seg_fs 等) 不进入此位标志,
+/// 因为它们的取值空间大于 1 bit, 走 qualifier 解析阶段的独立字段.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct QualifierFlags(pub u8);
+impl QualifierFlags {
+    pub const NONE: Self = Self(0);
+    pub const CONST: Self = Self(0x01);
+    pub const VOLATILE: Self = Self(0x02);
+    pub const RESTRICT: Self = Self(0x04);
+    pub const ATOMIC: Self = Self(0x08);
+    pub const NODEREF: Self = Self(0x10);
+
+    #[inline]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    #[inline]
+    pub const fn is_const(self) -> bool {
+        (self.0 & Self::CONST.0) != 0
+    }
+
+    #[inline]
+    pub const fn is_volatile(self) -> bool {
+        (self.0 & Self::VOLATILE.0) != 0
+    }
+
+    #[inline]
+    pub const fn is_restrict(self) -> bool {
+        (self.0 & Self::RESTRICT.0) != 0
+    }
+
+    #[inline]
+    pub const fn is_atomic(self) -> bool {
+        (self.0 & Self::ATOMIC.0) != 0
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// 任意非 const 限定符 (volatile / restrict / atomic / nodederef).
+    /// 用于 codegen 判断"是否需要把存储视为有副作用 (volatile) /
+    /// 别名优化禁用 (restrict)".
+    #[inline]
+    pub const fn has_non_const(self) -> bool {
+        (self.0 & !Self::CONST.0) != 0
+    }
+
+    /// 把所有非标准 C 限定符 (atomic / nodederef) 剔除,
+    /// 保留 ISO C 11.2.6 规定的 const / volatile / restrict 三件套.
+    /// BTF/DWARF 输出时使用标准化形式.
+    #[inline]
+    pub const fn iso_c(self) -> Self {
+        Self(self.0 & (Self::CONST.0 | Self::VOLATILE.0 | Self::RESTRICT.0))
+    }
+}
+
+impl std::ops::BitOr for QualifierFlags {
+    type Output = Self;
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for QualifierFlags {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for QualifierFlags {
+    type Output = Self;
+    #[inline]
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl std::fmt::Display for QualifierFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return Ok(());
+        }
+        if self.is_const() {
+            write!(f, "const ")?;
+        }
+        if self.is_volatile() {
+            write!(f, "volatile ")?;
+        }
+        if self.is_restrict() {
+            write!(f, "restrict ")?;
+        }
+        if self.is_atomic() {
+            write!(f, "_Atomic ")?;
+        }
+        if (self.0 & Self::NODEREF.0) != 0 {
+            write!(f, "__nodederef__ ")?;
+        }
+        Ok(())
+    }
+}
+
+/// QualType: Clang 风格的"带限定符类型"包装.
+///
+/// `base` 是原来的扁平 `Type` 枚举 (内部表示不变), `quals` 是该类型
+/// 上附着的限定符 (const / volatile / restrict). 仿照 Clang `QualType`:
+/// 只在 AST 节点边界 / 公共 API 上包装; 后端匹配仍对 `&qt.base` 进行,
+/// 限定符在 codegen / BTF / DWARF 阶段按需读取.
+///
+/// 通过 `From<Type>` 隐式转换, 现有 `Type` 表达式可以零成本升级到
+/// `QualType` (quals = QualifierFlags::NONE); 通过 `qt.base` 取回底层
+/// `Type`. 旧的 `is_ptr()` / `is_int()` / `is_arith()` / `size()` /
+/// `align()` / Display 等查询接口在 `QualType` 上转发, 业务代码无需
+/// 关心当前拿到的是 `Type` 还是 `QualType`.
+///
+/// 优势:
+///   * 限定符完整传播 — `const int *` 表现为 `Ptr(Box<QualType { base: Int, quals: const }>)`,
+///     多级指针限定符自然落点.
+///   * BTF 可输出限定符节点 (BTF_KIND_CONST/VOLATILE/RESTRICT), 调试信息
+///     / vmlinux BTF 校验完整.
+///   * 字段级 / 形参级 / 返回值级 const 正确传递, alias 分析可利用.
+///
+/// 设计选择 (2026-08-26):
+///   * `Type` 枚举的内部 Box<Type> 在 Ptr/Array/Func 等变体中后续会
+///     改为 Box<QualType>, 以便多级限定符传播; `Type` 本身的"内部结构"
+///     (变体 / 字段) 不变.
+///   * 不引入外部 `bitflags` 依赖, QualifierFlags 用手写 u8 wrapper 实现.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualType {
+    /// 底层类型 (扁平枚举)
+    pub base: Type,
+    /// 限定符位标志
+    pub quals: QualifierFlags,
+}
+
+impl QualType {
+    /// 构造一个无限定符的 QualType (从 Type 直接包装)
+    #[inline]
+    pub fn new(base: Type) -> Self {
+        Self {
+            base,
+            quals: QualifierFlags::NONE,
+        }
+    }
+
+    /// 构造带限定符的 QualType
+    #[inline]
+    pub fn with_quals(base: Type, quals: QualifierFlags) -> Self {
+        Self { base, quals }
+    }
+
+    /// 替换底层类型, 保留限定符
+    #[inline]
+    pub fn with_base(mut self, base: Type) -> Self {
+        self.base = base;
+        self
+    }
+
+    /// 替换限定符, 保留底层类型
+    #[inline]
+    pub fn with_quals_set(mut self, quals: QualifierFlags) -> Self {
+        self.quals = quals;
+        self
+    }
+
+    /// 添加限定符 (按位或)
+    #[inline]
+    pub fn add_quals(mut self, q: QualifierFlags) -> Self {
+        self.quals |= q;
+        self
+    }
+
+    /// 是否无限定符
+    #[inline]
+    pub fn is_unqualified(&self) -> bool {
+        self.quals.is_empty()
+    }
+
+    /// 是否带 const
+    #[inline]
+    pub fn is_const(&self) -> bool {
+        self.quals.is_const()
+    }
+
+    /// 是否带 volatile
+    #[inline]
+    pub fn is_volatile(&self) -> bool {
+        self.quals.is_volatile()
+    }
+
+    /// 是否带 restrict
+    #[inline]
+    pub fn is_restrict(&self) -> bool {
+        self.quals.is_restrict()
+    }
+
+    /// 底层类型是否指针 (限定符不参与)
+    #[inline]
+    pub fn is_ptr(&self) -> bool {
+        self.base.is_ptr()
+    }
+
+    /// 底层类型是否整数 (限定符不参与)
+    #[inline]
+    pub fn is_int(&self) -> bool {
+        self.base.is_int()
+    }
+
+    /// 底层类型是否算术 (限定符不参与)
+    #[inline]
+    pub fn is_arith(&self) -> bool {
+        self.base.is_arith()
+    }
+
+    /// 底层类型大小 (限定符不改变存储大小)
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.base.size()
+    }
+
+    /// 底层类型对齐 (限定符不改变对齐)
+    #[inline]
+    pub fn align(&self) -> usize {
+        self.base.align()
+    }
+}
+
+impl Default for QualType {
+    #[inline]
+    fn default() -> Self {
+        Self::new(Type::Int)
+    }
+}
+
+impl From<Type> for QualType {
+    #[inline]
+    fn from(base: Type) -> Self {
+        Self::new(base)
+    }
+}
+
+impl From<&Type> for QualType {
+    #[inline]
+    fn from(base: &Type) -> Self {
+        Self::new(base.clone())
+    }
+}
+
+/// `QualType` 的 C 风格字符串化: 限定符在前, 类型名在后.
+/// 例: `const int *` 在最外层 QualType 上输出为 `const int *`;
+/// `int * const` 则在 Ptr(...) 节点上输出 `int * const`.
+impl std::fmt::Display for QualType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 限定符放在 base 显示之前. 但对于 Ptr 变体, C 风格习惯
+        // 是 `int * const` (const 紧贴 *), 所以限定符的精确位置
+        // 仍依赖变体; 简单形式: 全部前缀输出.
+        if !self.quals.is_empty() {
+            write!(f, "{}", self.quals)?;
+        }
+        write!(f, "{}", self.base)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
