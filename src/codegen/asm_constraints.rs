@@ -198,6 +198,9 @@ pub enum ConstraintKind {
     MemoryClobber,
     /// `"cc"` clobber — 条件码
     CcClobber,
+    /// x86 固定寄存器约束 (a/b/c/d/S/D/q/Q)
+    /// 包含约束字母和对应的固定寄存器索引 (None 表示从池中分配)
+    FixedReg { letter: char, fixed_reg: Option<u8> },
     /// 其他 / 未知
     Other,
 }
@@ -251,6 +254,9 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             match rest.chars().next() {
                 Some('r') => ConstraintKind::OutputReg,
                 Some('m') => ConstraintKind::OutputMem,
+                Some(l) if matches!(l, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q') => {
+                    ConstraintKind::OutputReg
+                }
                 _ => ConstraintKind::OutputReg, // 默认按寄存器
             }
         }
@@ -259,11 +265,22 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             match rest.chars().next() {
                 Some('r') => ConstraintKind::InOutReg,
                 Some('m') => ConstraintKind::InOutMem,
+                Some(l) if matches!(l, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q') => {
+                    ConstraintKind::InOutReg
+                }
                 _ => ConstraintKind::InOutReg,
             }
         }
         'r' => ConstraintKind::InputReg,
-        'q' => ConstraintKind::InputReg, // x86: a/b/c/d registers
+        'q' => ConstraintKind::FixedReg { letter: 'q', fixed_reg: None },
+        'Q' => ConstraintKind::FixedReg { letter: 'Q', fixed_reg: None },
+        'a' => ConstraintKind::FixedReg { letter: 'a', fixed_reg: Some(0) },
+        'b' => ConstraintKind::FixedReg { letter: 'b', fixed_reg: Some(3) },
+        'c' => ConstraintKind::FixedReg { letter: 'c', fixed_reg: Some(1) },
+        'd' => ConstraintKind::FixedReg { letter: 'd', fixed_reg: Some(2) },
+        'S' => ConstraintKind::FixedReg { letter: 'S', fixed_reg: Some(6) },
+        'D' => ConstraintKind::FixedReg { letter: 'D', fixed_reg: Some(7) },
+        'p' => ConstraintKind::InputReg, // 合法地址 → 按寄存器处理
         'm' => ConstraintKind::InputMem,
         'i' => ConstraintKind::Immediate,
         'g' => ConstraintKind::InputReg, // "g" 通用 → 按寄存器处理
@@ -278,6 +295,21 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
                 ConstraintKind::InputMem
             } else if c.contains('i') || c.contains('n') {
                 ConstraintKind::Immediate
+            } else if c.contains('a') || c.contains('b') || c.contains('c')
+                || c.contains('d') || c.contains('S') || c.contains('D')
+                || c.contains('q') || c.contains('Q')
+            {
+                // x86 固定寄存器约束在多重约束中
+                let letter = c.chars().find(|ch| {
+                    matches!(ch, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q')
+                }).unwrap();
+                let fixed = match letter {
+                    'a' => Some(0), 'b' => Some(3),
+                    'c' => Some(1), 'd' => Some(2),
+                    'S' => Some(6), 'D' => Some(7),
+                    _ => None,
+                };
+                ConstraintKind::FixedReg { letter, fixed_reg: fixed }
             } else {
                 ConstraintKind::Other
             }
@@ -325,7 +357,7 @@ pub fn validate_constraint(c: &str) -> Option<String> {
         }
         // Supported single-letter constraints
         'r' | 'm' | 'i' | 'g' | 'n' | 'X' | 'o' | 'V' | 'p' | 's' |
-        'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' | 'q' |
+        'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' | 'q' | 'Q' |
         'a' | 'b' | 'c' | 'd' | 'S' | 'D' => None,
         // Multi-character constraints
         _ if c.len() > 1 => {
@@ -392,6 +424,21 @@ pub fn resolve_asm_operands(
                     op.reg = Some(r);
                 }
             }
+            ConstraintKind::FixedReg { fixed_reg, .. } => {
+                // 固定寄存器约束: 尝试分配指定寄存器, 或从池中分配
+                if let Some(fixed_idx) = fixed_reg {
+                    if let Some(r) = pool.scratch_gp.iter().find(|r| r.idx == *fixed_idx) {
+                        used_regs.push(r.idx);
+                        op.reg = Some(r.clone());
+                    } else if let Some(r) = alloc_reg(pool, &used_regs) {
+                        used_regs.push(r.idx);
+                        op.reg = Some(r);
+                    }
+                } else if let Some(r) = alloc_reg(pool, &used_regs) {
+                    used_regs.push(r.idx);
+                    op.reg = Some(r);
+                }
+            }
             _ => {}
         }
         result.push(op);
@@ -412,6 +459,20 @@ pub fn resolve_asm_operands(
         match &kind {
             ConstraintKind::InputReg | ConstraintKind::InOutReg => {
                 if let Some(r) = alloc_reg(pool, &used_regs) {
+                    used_regs.push(r.idx);
+                    op.reg = Some(r);
+                }
+            }
+            ConstraintKind::FixedReg { fixed_reg, .. } => {
+                if let Some(fixed_idx) = fixed_reg {
+                    if let Some(r) = pool.scratch_gp.iter().find(|r| r.idx == *fixed_idx) {
+                        used_regs.push(r.idx);
+                        op.reg = Some(r.clone());
+                    } else if let Some(r) = alloc_reg(pool, &used_regs) {
+                        used_regs.push(r.idx);
+                        op.reg = Some(r);
+                    }
+                } else if let Some(r) = alloc_reg(pool, &used_regs) {
                     used_regs.push(r.idx);
                     op.reg = Some(r);
                 }
@@ -900,5 +961,207 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert!(errors[0].contains("ZH"));
         assert!(errors[1].contains("WL"));
+    }
+
+    // -----------------------------------------------------------------------
+    // x86 特定寄存器约束测试
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_x86_fixed_reg_a() {
+        // 'a' → eax/rax (reg 0)
+        assert_eq!(
+            parse_single_constraint("a"),
+            ConstraintKind::FixedReg { letter: 'a', fixed_reg: Some(0) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_fixed_reg_b() {
+        // 'b' → ebx/rbx (reg 3)
+        assert_eq!(
+            parse_single_constraint("b"),
+            ConstraintKind::FixedReg { letter: 'b', fixed_reg: Some(3) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_fixed_reg_c() {
+        // 'c' → ecx/rcx (reg 1)
+        assert_eq!(
+            parse_single_constraint("c"),
+            ConstraintKind::FixedReg { letter: 'c', fixed_reg: Some(1) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_fixed_reg_d() {
+        // 'd' → edx/rdx (reg 2)
+        assert_eq!(
+            parse_single_constraint("d"),
+            ConstraintKind::FixedReg { letter: 'd', fixed_reg: Some(2) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_fixed_reg_s() {
+        // 'S' → esi/rsi (reg 6)
+        assert_eq!(
+            parse_single_constraint("S"),
+            ConstraintKind::FixedReg { letter: 'S', fixed_reg: Some(6) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_fixed_reg_d_cap() {
+        // 'D' → edi/rdi (reg 7)
+        assert_eq!(
+            parse_single_constraint("D"),
+            ConstraintKind::FixedReg { letter: 'D', fixed_reg: Some(7) }
+        );
+    }
+
+    #[test]
+    fn parse_x86_q_constraint() {
+        // 'q' → byte-addressable regs (a/b/c/d), no fixed index
+        assert_eq!(
+            parse_single_constraint("q"),
+            ConstraintKind::FixedReg { letter: 'q', fixed_reg: None }
+        );
+    }
+
+    #[test]
+    fn parse_x86_q_cap_constraint() {
+        // 'Q' → broader byte-addressable regs, no fixed index
+        assert_eq!(
+            parse_single_constraint("Q"),
+            ConstraintKind::FixedReg { letter: 'Q', fixed_reg: None }
+        );
+    }
+
+    #[test]
+    fn parse_x86_address_constraint() {
+        // 'p' → valid address → treated as InputReg
+        assert_eq!(parse_single_constraint("p"), ConstraintKind::InputReg);
+    }
+
+    #[test]
+    fn parse_x86_output_fixed_reg() {
+        // '=a' → output with eax/rax
+        assert_eq!(parse_single_constraint("=a"), ConstraintKind::OutputReg);
+        // '=b' → output with ebx/rbx
+        assert_eq!(parse_single_constraint("=b"), ConstraintKind::OutputReg);
+        // '=S' → output with esi/rsi
+        assert_eq!(parse_single_constraint("=S"), ConstraintKind::OutputReg);
+        // '=D' → output with edi/rdi
+        assert_eq!(parse_single_constraint("=D"), ConstraintKind::OutputReg);
+    }
+
+    #[test]
+    fn parse_x86_inout_fixed_reg() {
+        // '+a' → inout with eax/rax
+        assert_eq!(parse_single_constraint("+a"), ConstraintKind::InOutReg);
+        // '+c' → inout with ecx/rcx
+        assert_eq!(parse_single_constraint("+c"), ConstraintKind::InOutReg);
+        // '+d' → inout with edx/rdx
+        assert_eq!(parse_single_constraint("+d"), ConstraintKind::InOutReg);
+        // '+q' → inout with byte reg
+        assert_eq!(parse_single_constraint("+q"), ConstraintKind::InOutReg);
+    }
+
+    #[test]
+    fn parse_x86_multi_constraint_with_fixed() {
+        // "am" → multi-constraint with 'a' → FixedReg
+        let kind = parse_single_constraint("am");
+        match kind {
+            ConstraintKind::FixedReg { letter, fixed_reg } => {
+                assert_eq!(letter, 'a');
+                assert_eq!(fixed_reg, Some(0));
+            }
+            _ => panic!("expected FixedReg, got {:?}", kind),
+        }
+    }
+
+    #[test]
+    fn validate_x86_fixed_reg_constraints() {
+        // All x86 fixed register constraints should be valid
+        assert!(validate_constraint("a").is_none());
+        assert!(validate_constraint("b").is_none());
+        assert!(validate_constraint("c").is_none());
+        assert!(validate_constraint("d").is_none());
+        assert!(validate_constraint("S").is_none());
+        assert!(validate_constraint("D").is_none());
+        assert!(validate_constraint("q").is_none());
+        assert!(validate_constraint("Q").is_none());
+        assert!(validate_constraint("p").is_none());
+        // Output/inout variants
+        assert!(validate_constraint("=a").is_none());
+        assert!(validate_constraint("=b").is_none());
+        assert!(validate_constraint("+c").is_none());
+        assert!(validate_constraint("+d").is_none());
+        assert!(validate_constraint("=S").is_none());
+        assert!(validate_constraint("=D").is_none());
+        assert!(validate_constraint("=q").is_none());
+        assert!(validate_constraint("=Q").is_none());
+    }
+
+    #[test]
+    fn resolve_x86_fixed_reg_output() {
+        // Use aarch64 pool as a generic pool for testing resolve logic
+        let pool = aarch64_reg_pool();
+        let ops = resolve_asm_operands(
+            &["=r".to_string()],
+            &["a".to_string()], // input with 'a' → fixed reg 0
+            &[None],
+            &[None],
+            &pool,
+        );
+        assert_eq!(ops.len(), 2);
+        // Input 'a' should try to find reg 0 in pool (x0 has idx=0)
+        let input_op = &ops[1];
+        assert!(input_op.is_input);
+        assert!(input_op.reg.is_some());
+        assert_eq!(input_op.reg.as_ref().unwrap().idx, 0);
+    }
+
+    #[test]
+    fn resolve_x86_fixed_reg_all_letters() {
+        let pool = aarch64_reg_pool();
+        // Test that each fixed reg constraint resolves to the expected index
+        let constraints = vec![
+            ("a", 0u8),  // eax → reg 0
+            ("c", 1),    // ecx → reg 1
+            ("d", 2),    // edx → reg 2
+            ("b", 3),    // ebx → reg 3
+            ("S", 6),    // esi → reg 6
+            ("D", 7),    // edi → reg 7
+        ];
+        for (c_str, expected_idx) in constraints {
+            let ops = resolve_asm_operands(
+                &[],
+                &[c_str.to_string()],
+                &[],
+                &[None],
+                &pool,
+            );
+            assert_eq!(ops.len(), 1, "constraint '{}'", c_str);
+            let reg_idx = ops[0].reg.as_ref().unwrap().idx;
+            assert_eq!(reg_idx, expected_idx, "constraint '{}': expected reg {}, got {}", c_str, expected_idx, reg_idx);
+        }
+    }
+
+    #[test]
+    fn resolve_x86_q_allocates_from_legacy_pool() {
+        let pool = aarch64_reg_pool();
+        let ops = resolve_asm_operands(
+            &[],
+            &["q".to_string()],
+            &[],
+            &[None],
+            &pool,
+        );
+        assert_eq!(ops.len(), 1);
+        // 'q' has no fixed_reg, so it gets first available from pool
+        assert!(ops[0].reg.is_some());
     }
 }

@@ -16176,6 +16176,19 @@ impl Codegen {
                 continue;
             }
 
+            // 固定 GP 字母约束 (a/b/c/d/S/D/q/Q)
+            if let Some((chosen, _fixed)) =
+                planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Output)
+            {
+                let name = Self::gp_reg_name(chosen as usize);
+                self.prepare_asm_binding(op, chosen, !is_inout);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(chosen, name));
+                meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
+                idx += 1;
+                continue;
+            }
+
             // 内存地址 (p): lea 到一个 GP 寄存器, 模板里就是 %reg
             if Self::asm_constraint_is_address(raw) {
                 let chosen = planner.alloc_gp(idx, AsmRegUse::Output);

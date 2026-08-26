@@ -4139,6 +4139,20 @@ fn asm_q_constraint_compiles_and_runs() {
     );
 }
 
+/// x86-specific register constraints: a/b/c/d/S/D/q/Q/p
+/// Ensures all fixed-register constraints compile without errors
+#[test]
+fn asm_x86_reg_constraints_compile_and_run() {
+    let source = include_str!("fixtures/c/asm_x86_reg_constraints.c");
+    let (output, _obj) = run_object_test("asm-x86-reg-constraints", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("unsupported constraint"),
+        "x86 reg constraints should be supported: {stderr}"
+    );
+}
+
 /// Nested .pushsection/.popsection: kernel exception table with nested .fixup
 #[test]
 fn asm_nested_pushsection_compiles_with_sections() {
