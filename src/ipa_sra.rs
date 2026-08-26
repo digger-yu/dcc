@@ -1181,6 +1181,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         };
 
         let analyses = analyze_function(&func);
@@ -1266,6 +1267,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         };
 
         let analyses = analyze_function(&func);
@@ -1383,6 +1385,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         };
 
         let analyses = analyze_function(&func);
@@ -1480,6 +1483,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         });
 
         // main(): 调用 f(Point{1, 2})
@@ -1563,6 +1567,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         });
 
         let mut prog = Program {

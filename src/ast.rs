@@ -142,6 +142,10 @@ pub struct FuncDecl {
     pub is_host: bool,
     /// __attribute__((naked)): 不生成 prologue/epilogue，函数体完全由内联汇编组成
     pub is_naked: bool,
+    /// __attribute__((noreturn)) / C11 _Noreturn: 函数不会正常返回
+    /// 编译器应在函数末尾插入 trap 指令（ud2 / brk / 等价指令）防止
+    /// 执行流落入后续代码；优化器可利用此信息进行死代码消除。
+    pub is_noreturn: bool,
 }
 
 #[derive(Debug, Clone)]

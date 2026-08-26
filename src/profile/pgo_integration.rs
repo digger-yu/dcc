@@ -423,6 +423,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         }));
         let names = collect_func_names(&prog);
         assert_eq!(names, vec!["foo"]);

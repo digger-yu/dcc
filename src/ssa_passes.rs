@@ -1960,6 +1960,7 @@ mod tests {
             is_device: false,
             is_host: false,
             is_naked: false,
+            is_noreturn: false,
         }
     }
 
