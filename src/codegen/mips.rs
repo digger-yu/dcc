@@ -415,6 +415,37 @@ impl MipsCodegen {
     // ===== 函数生成 =====
 
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        // -fpatchable-function-entry: emit NOPs before and after label
+        let func_start: u64;
+        if let Some((n, m)) = self._target.patchable_function_entry {
+            let prefix_len = m.min(n);
+            let suffix_len = n.saturating_sub(prefix_len);
+            for _ in 0..prefix_len {
+                // MIPS NOP: SLL $zero, $zero, 0 = 0x00000000
+                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+            }
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+            for _ in 0..suffix_len {
+                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+            }
+        } else {
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+        }
+
+        // __attribute__((naked)): 不生成 prologue/epilogue
+        if ast.map(|f| f.is_naked).unwrap_or(false) {
+            self.emitted_return = false;
+            if let Some(body) = ast.and_then(|f| f.body.as_ref()) {
+                for item in &body.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item {
+                        self.gen_naked_asm_expr(e);
+                    }
+                }
+            }
+            return;
+        }
         self.plan_locals(ast);
         self.current_return_ty = Some(func.return_type.clone());
         self.emitted_return = false;
@@ -435,25 +466,6 @@ impl MipsCodegen {
             self.stack_bytes += 16;
         } else {
             self.va_save_base_off = 0;
-        }
-
-        // -fpatchable-function-entry: emit NOPs before and after label
-        let func_start: u64;
-        if let Some((n, m)) = self._target.patchable_function_entry {
-            let prefix_len = m.min(n);
-            let suffix_len = n.saturating_sub(prefix_len);
-            for _ in 0..prefix_len {
-                // MIPS NOP: SLL $zero, $zero, 0 = 0x00000000
-                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
-            }
-            func_start = self.code.len() as u64;
-            self.labels.insert(func.name.clone(), func_start);
-            for _ in 0..suffix_len {
-                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
-            }
-        } else {
-            func_start = self.code.len() as u64;
-            self.labels.insert(func.name.clone(), func_start);
         }
 
         // 函数序言: 分配帧空间 (至少保存 $ra, $fp + 局部变量)
@@ -591,6 +603,38 @@ impl MipsCodegen {
         for i in 0..words {
             let fp_off = -((frame_size - (i as usize) * 4) as i16);
             self.emit_sw(0, 30, fp_off); // sw $zero, fp_off($fp)
+        }
+    }
+
+    /// naked 函数中处理表达式: 仅处理 AsmExpr，其他忽略
+    fn gen_naked_asm_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                span,
+                ..
+            } => {
+                self.emit_inline_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
+                );
+            }
+            _ => {}
         }
     }
 

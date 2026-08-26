@@ -551,6 +551,18 @@ impl Riscv64Codegen {
     }
 
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        // __attribute__((naked)): 不生成 prologue/epilogue
+        if ast.map(|f| f.is_naked).unwrap_or(false) {
+            self.emitted_return = false;
+            if let Some(body) = ast.and_then(|f| f.body.as_ref()) {
+                for item in &body.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item {
+                        self.gen_naked_asm_expr(e);
+                    }
+                }
+            }
+            return;
+        }
         self.plan_locals(ast);
         // 记录当前函数返回类型 (sret/HFA 判定)
         self.current_return_ty = Some(func.return_type.clone());
@@ -628,6 +640,38 @@ impl Riscv64Codegen {
             self.ret();
         }
         self.current_return_ty = None;
+    }
+
+    /// naked 函数中处理表达式: 仅处理 AsmExpr，其他忽略
+    fn gen_naked_asm_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                span,
+                ..
+            } => {
+                self.emit_inline_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
+                );
+            }
+            _ => {}
+        }
     }
 
     fn plan_locals(&mut self, ast: Option<&FuncDecl>) {
