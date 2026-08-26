@@ -4609,11 +4609,12 @@ impl Preprocessor {
     }
 
     // ===== __has_* 特殊宏求值 (在宏展开之前执行) =====
-    /// 替换 __has_include/__has_attribute/__has_builtin/__has_feature/
-    /// __has_embed/__has_c_attribute 为实际值
+    /// 替换 __has_include/__has_include_next/__has_attribute/__has_builtin/
+    /// __has_feature/__has_embed/__has_c_attribute 为实际值
     fn replace_has_macros(&self, expr: &str) -> String {
         let mut result = expr.to_string();
         result = self.replace_has_include(&result);
+        result = self.replace_has_include_next(&result);
         result = self.replace_has_embed(&result);
         result = self.replace_has_attr_like(&result, "__has_attribute", Self::is_known_attribute);
         result =
@@ -4741,6 +4742,63 @@ impl Preprocessor {
         result
     }
 
+    /// 替换 __has_include_next(...) 为 1 或 0
+    /// 与 __has_include 类似, 但跳过 base_dir (当前文件所在目录)
+    fn replace_has_include_next(&self, expr: &str) -> String {
+        let mut result = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            // 检查 __has_include_next (18 字符)
+            if i + 18 <= bytes.len()
+                && &bytes[i..i + 18] == b"__has_include_next"
+                && (i == 0
+                    || !bytes[i - 1].is_ascii_alphanumeric()
+                        && bytes[i - 1] != b'_')
+                && (i + 18 >= bytes.len()
+                    || !bytes[i + 18].is_ascii_alphanumeric()
+                        && bytes[i + 18] != b'_')
+            {
+                let mut j = i + 18;
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    let path_start = j;
+                    // 跳过到 )
+                    let mut depth = 1;
+                    while j < bytes.len() && depth > 0 {
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
+                    }
+                    let path = expr[path_start..j]
+                        .trim()
+                        .trim_matches(|c| c == '<' || c == '>' || c == '"');
+                    let found = self.find_has_include_next(path);
+                    result.push_str(if found { "1" } else { "0" });
+                    if j < bytes.len() {
+                        j += 1;
+                    } // skip )
+                    i = j;
+                    continue;
+                }
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
+    }
+
     fn replace_has_attr_like<F>(&self, expr: &str, macro_name: &str, check: F) -> String
     where
         F: Fn(&str) -> bool,
@@ -4804,6 +4862,47 @@ impl Preprocessor {
         if p.exists() {
             return true;
         }
+        // -I 路径
+        for dir in &self.include_paths {
+            if dir.join(path).exists() {
+                return true;
+            }
+        }
+        // -isystem 路径
+        for dir in &self.system_paths {
+            if dir.join(path).exists() {
+                return true;
+            }
+        }
+        // 标准系统路径
+        let system_dirs = [
+            "/usr/local/include",
+            "/usr/include",
+            "/usr/include/x86_64-linux-gnu",
+            "/usr/include/aarch64-linux-gnu",
+            "/usr/include/linux",
+            "/usr/include/asm",
+            "/usr/include/asm-generic",
+        ];
+        for dir in &system_dirs {
+            if Path::new(dir).join(path).exists() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// __has_include_next 搜索: 跳过 base_dir (当前文件所在目录),
+    /// 仅搜索 -I / -isystem / 标准系统路径。
+    /// GCC 语义: 从当前文件的 include 路径的下一个位置开始搜索,
+    /// 用于包装头文件中查找 "下一个" 同名头文件。
+    fn find_has_include_next(&self, path: &str) -> bool {
+        let path = path.trim();
+        let abs = Path::new(path);
+        if abs.is_absolute() {
+            return abs.exists();
+        }
+        // 注意: 跳过 base_dir (与 find_has_include 的唯一区别)
         // -I 路径
         for dir in &self.include_paths {
             if dir.join(path).exists() {
@@ -8094,6 +8193,61 @@ int ok = 1;\n";
             last_vis.is_some() && last_vis.unwrap().1 == "default",
             "expected last visibility to be 'default', got: {:?}",
             last_vis
+        );
+    }
+
+    /// __has_include_next: 搜索 -I 路径但跳过 base_dir
+    #[test]
+    fn has_include_next_searches_include_paths() {
+        use std::fs;
+        use std::io::Write;
+        // 创建临时目录结构:
+        // dir/a/header.h  (base_dir 中的文件)
+        // dir/b/header.h  (-isystem 路径中的文件)
+        let dir =
+            std::env::temp_dir().join(format!("dcc_has_incl_next_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        // 在 dir/a 中创建源文件
+        let src = dir.join("a/test.c");
+        let mut f = fs::File::create(&src).unwrap();
+        // __has_include_next 应找到 dir/b/header.h 但跳过 dir/a
+        writeln!(
+            f,
+            "#if __has_include_next(\"header.h\")\nint found = 1;\n\
+             #else\nint found = 0;\n#endif\n"
+        )
+        .unwrap();
+        drop(f);
+        // 在 dir/b 中创建 header.h
+        fs::write(dir.join("b/header.h"), "// header\n").unwrap();
+        let out = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[],
+            &[dir.join("b")], // -isystem dir/b
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let diags = &out.diags;
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(d.sev, crate::diagnostics::Severity::Error)
+            })
+            .collect();
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert!(
+            out.text.contains("int found = 1;"),
+            "expected __has_include_next to find header.h in -isystem path, output: {}",
+            out.text
         );
     }
 }
