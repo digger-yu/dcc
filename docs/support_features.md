@@ -318,6 +318,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `__attribute__((weak(...)))` / `#pragma weak` | codegen 写 `STB_WEAK` 绑定 |
 | `__attribute__((constructor/destructor(priority)))` | 按 priority 排序 |
 | `__attribute__((alias/ifunc/retain/used/flatten/error/warning/deprecated))` | 全部实装 |
+| `__attribute__((naked))` | 不生成 prologue/epilogue，函数体完全由内联汇编组成；x86_64/aarch64/riscv64/arm/mips/mips64 全后端支持；用于内核异常向量、系统调用入口等低级入口点 |
 | const_eval 完整化 | `ConstValue` 枚举；浮点算术；字符串字面量 FNV-1a；`&ident` / `&arr[i]` / `&&label`；`#embed` 字节数；`sizeof`/`alignof`/`offsetof` 常量折叠；二元算术/位运算/比较折叠；三元条件求值；类型转换截断/符号扩展；一元运算 (Neg/Not/BitNot/Plus)；语句表达式 `({...})` 求值；`__real__`/`__imag__` 复数常量提取；`ComplexLit` 常量求值；内建函数折叠 (`__builtin_clz/ctz/popcount/ffs/bswap`) |
 | 运行时检查 | `-fbounds-check` 数组下标边界检查；`-ftrapv` 有符号算术溢出 trap |
 | 严格类型检查 | `-Wint-truncation` / `-Wint-conversion`；仅 warning 不阻塞 |
