@@ -2157,14 +2157,42 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     cfg.output = tmp_o.clone();
     cfg.relocatable = true;
     let sanitizer_flags = host_sanitizer_flags(&cfg);
-    // 强制走内置链接器 ≠ 1 路径是上面“递归后”需走的；现在 cfg.built_link
+    // 保存 cfg 副本, 以便后续 IFUNC 检测后可能走内置链接器
+    let cfg_saved = cfg.clone();
+    // 强制走内置链接器 ≠ 1 路径是上面"递归后"需走的；现在 cfg.built_link
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
     let result = run(cfg);
     if result.is_err() {
         let _ = fs::remove_file(&tmp_o);
         return result;
     }
-    // 2) 调 host cc 链接
+    // 2) 检测 .o 中是否包含 IFUNC 符号 (target_clones / __attribute__((ifunc)))
+    //    宿主 cc/ld 无法处理 dcc 生成的 IFUNC resolver (resolver 代码在
+    //    内置链接器中生成), 此时必须走内置链接器路径.
+    let has_ifunc = fs::read(&tmp_o)
+        .ok()
+        .map(|bytes| elf_has_ifunc_symbols(&bytes))
+        .unwrap_or(false);
+    if has_ifunc {
+        if verbose {
+            eprintln!(
+                "dcc: IFUNC symbols detected in {}, using builtin linker",
+                tmp_o.display()
+            );
+        }
+        let mut link_cfg = cfg_saved.clone();
+        link_cfg.inputs = vec![tmp_o.clone()];
+        link_cfg.output = final_output.clone();
+        link_cfg.built_link = true;
+        link_cfg.relocatable = false;
+        let link_result = run_builtin_linker(&link_cfg);
+        let _ = fs::remove_file(&tmp_o);
+        if link_result.is_ok() {
+            eprintln!("dcc: {} (via builtin linker, IFUNC)", final_output.display());
+        }
+        return link_result;
+    }
+    // 3) 无 IFUNC: 调 host cc 链接
     let link_result = link_with_host_cc(
         &tmp_o,
         &final_output,
@@ -2178,6 +2206,66 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         eprintln!("dcc: {} (via host cc)", final_output.display());
     }
     link_result
+}
+
+/// 检测 ELF 对象文件是否包含 STT_GNU_IFUNC 类型符号.
+fn elf_has_ifunc_symbols(elf: &[u8]) -> bool {
+    use crate::codegen::elf::{ELFCLASS64, ELFMAG, SHT_SYMTAB};
+    if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
+        return false;
+    }
+    let shoff = u64::from_le_bytes(
+        elf.get(40..48)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 8]),
+    ) as usize;
+    let shentsize = u16::from_le_bytes(
+        elf.get(58..60)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    let shnum = u16::from_le_bytes(
+        elf.get(60..62)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    if shnum == 0 || shentsize < 64 || shoff + shnum * shentsize > elf.len() {
+        return false;
+    }
+    // 找 .symtab
+    for i in 0..shnum {
+        let base = shoff + i * shentsize;
+        if base + 64 > elf.len() {
+            break;
+        }
+        let sh_type = u32::from_le_bytes(elf[base + 4..base + 8].try_into().unwrap());
+        if sh_type != SHT_SYMTAB {
+            continue;
+        }
+        let data_off =
+            u64::from_le_bytes(elf[base + 24..base + 32].try_into().unwrap()) as usize;
+        let data_size =
+            u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
+        let entsize =
+            u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap()) as usize;
+        if entsize < 24 || data_off + data_size > elf.len() {
+            return false;
+        }
+        let sym_count = data_size / entsize;
+        for j in 0..sym_count {
+            let sym_base = data_off + j * entsize;
+            if sym_base + 24 > elf.len() {
+                break;
+            }
+            let st_info = elf[sym_base + 4];
+            let st_type = st_info & 0xf;
+            if st_type == 10 {
+                // STT_GNU_IFUNC = 10
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn add_unique_string(v: &mut Vec<String>, value: impl Into<String>) {
