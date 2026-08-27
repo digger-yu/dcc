@@ -381,7 +381,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `--compress-debug-sections=zlib\|zstd` | miniz_oxide / zstd 压缩 .debug_* 节 |
 | `SHF_GNU_RETAIN` 节标志 | 元数据节自动打 `0x200000` |
 | `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序；`.init_array` / `.fini_array` / `.preinit_array` 输出使用正确 ELF 节类型 (SHT_INIT_ARRAY=14 / SHT_FINI_ARRAY=15 / SHT_PREINIT_ARRAY=16) 而非 SHT_PROGBITS |
-| `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
+| `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable`；完全替代 host `ld -r` + `objcopy`，包括 LTO 模式；`inject_lto_section_from_bundle()` 从输入提取 `.dcc.lto` 节、运行跨 TU 优化、将合并位码直接嵌入输出节，无需外部工具 |
 | DSO 缓存与 -lxxx 解析 | `DsoCache` 按 (path, mtime, size) 三元组去重缓存 .so 解析结果；`resolve_library()` 支持 -L 搜索路径、sysroot 前缀和标准系统路径；`parse_dso_file()` 提取动态符号表；`resolve_and_load()` 结合搜索+缓存+解析；链接时自动将 DSO 动态符号加入允许未定义列表 |
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |

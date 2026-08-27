@@ -48,7 +48,7 @@ fn collect_global_roots(inputs: &[PathBuf]) -> Vec<String> {
 }
 
 /// 合并多个 ET_REL 目标文件；启用 LTO 时合并 dcc.lto 摘要。
-/// 优先使用内置链接器路径，仅在 host ld 不可用时回退。
+/// 完全使用内置链接器路径，不再回退 host ld -r。
 pub fn link_relocatable(
     inputs: &[PathBuf],
     output: &Path,
@@ -62,12 +62,8 @@ pub fn link_relocatable(
             Span::point("", 0, 0),
         )]);
     }
-    // 优先使用内置 relocatable 路径 (不依赖 host ld)
-    if !lto_enabled || std::env::var("DCC_USE_BUILTIN_RELOCATABLE").ok().as_deref() == Some("1") {
-        return link_relocatable_builtin(inputs, output, lto_enabled, verbose);
-    }
-    // 回退到 host ld -r 路径
-    link_relocatable_legacy(inputs, output, lto_enabled, verbose)
+    // 始终使用内置 relocatable 路径 (不依赖 host ld / objcopy)
+    link_relocatable_builtin(inputs, output, lto_enabled, verbose)
 }
 
 /// 内置 relocatable 路径: 完全自研，不依赖 host ld / objcopy
@@ -263,5 +259,52 @@ mod tests {
         let err = link_relocatable(&[], Path::new("out.o"), false, false)
             .expect_err("empty link must fail");
         assert_eq!(err[0].code, "E0200");
+    }
+
+    #[test]
+    fn builtin_r_always_used_regardless_of_lto() {
+        // 验证 link_relocatable 始终使用内置路径, 不因 LTO 回退 host ld
+        use crate::codegen::elf;
+        let dir = std::env::temp_dir();
+        let text = &[0xc3u8]; // ret
+        let sym1 = elf::ElfSym {
+            name: "foo_a".into(),
+            section: 1,
+            value: 0,
+            size: 1,
+            bind: elf::STB_GLOBAL,
+            ty: elf::STT_FUNC,
+            visibility: elf::STV_DEFAULT,
+        };
+        let sym2 = elf::ElfSym {
+            name: "foo_b".into(),
+            section: 1,
+            value: 0,
+            size: 1,
+            bind: elf::STB_GLOBAL,
+            ty: elf::STT_FUNC,
+            visibility: elf::STV_DEFAULT,
+        };
+        let obj1 = elf::build_elf_rel_x86_64(
+            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
+            &[sym1], &[], &[], &[], &[], &[],
+        );
+        let obj2 = elf::build_elf_rel_x86_64(
+            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
+            &[sym2], &[], &[], &[], &[], &[],
+        );
+        let p1 = dir.join("dcc-r-lto-1.o");
+        let p2 = dir.join("dcc-r-lto-2.o");
+        let out = dir.join("dcc-r-lto-out.o");
+        std::fs::write(&p1, &obj1).unwrap();
+        std::fs::write(&p2, &obj2).unwrap();
+        // LTO enabled: 应该使用内置路径
+        let result = link_relocatable(&[p1.clone(), p2.clone()], &out, true, false);
+        assert!(result.is_ok(), "builtin -r with LTO: {:?}", result.err());
+        let out_bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&out_bytes[0..4], b"\x7fELF");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+        let _ = std::fs::remove_file(&out);
     }
 }

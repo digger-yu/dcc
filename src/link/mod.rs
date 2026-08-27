@@ -472,6 +472,10 @@ pub fn link_from_bundle(
     }
     // 4. 应用重定位
     let _dyn = apply_relocations(&mut layout).map_err(|e| diag("E0304", e.to_string()))?;
+    // 4.5 -r + LTO: 合并输入 .dcc.lto 节并嵌入输出
+    if cfg.output_kind == OutputKind::Relocatable && cfg.lto {
+        inject_lto_section_from_bundle(&mut layout, bundle, cfg.verbose);
+    }
     // 5. 输出 (按格式和架构分发)
     let bytes = if cfg.output_format == OutputFormat::Pe {
         // PE output (Windows)
@@ -954,6 +958,80 @@ fn embed_vdso(
     }
 
     Ok(())
+}
+
+/// -r + LTO 模式: 从输入对象中提取 .dcc.lto 节, 运行跨 TU 优化,
+/// 将合并后的位码作为 .dcc.lto 节嵌入输出 (替代 host objcopy).
+fn inject_lto_section_from_bundle(
+    layout: &mut layout::Layout,
+    bundle: &InputBundle,
+    verbose: bool,
+) {
+    use crate::codegen::elf::SHT_PROGBITS;
+    use crate::link::layout::{OutputSection, OutputSectionKind};
+
+    // 1. 从 bundle 提取所有 .dcc.lto 节并反序列化
+    let mut bc_modules: Vec<lto_bitcode::BitcodeModule> = Vec::new();
+    for obj in &bundle.objects {
+        for sec in &obj.sections {
+            if sec.name == ".dcc.lto" && !sec.data.is_empty() {
+                if let Some(bc) = lto_bitcode::deserialize_module(&sec.data).ok() {
+                    bc_modules.push(bc);
+                }
+            }
+        }
+    }
+    if bc_modules.is_empty() {
+        if verbose {
+            eprintln!("dcc-link: -r LTO: no .dcc.lto sections found in inputs");
+        }
+        return;
+    }
+
+    // 2. 运行跨 TU LTO 优化
+    lto_bitcode::run_cross_tu_lto(&mut bc_modules);
+
+    if verbose {
+        eprintln!(
+            "dcc-link: -r LTO: merged {} bitcode module(s)",
+            bc_modules.len()
+        );
+    }
+
+    // 3. 序列化合并后的位码
+    let mut merged_payload = Vec::new();
+    for m in &bc_modules {
+        let payload = lto_bitcode::serialize_module_from_bc(m);
+        merged_payload.extend_from_slice(&payload);
+    }
+
+    // 4. 作为 .dcc.lto 节加入 layout
+    let sec_idx = layout.sections.len() as u32;
+    let lto_section = OutputSection {
+        kind: OutputSectionKind::Named(".dcc.lto".to_string()),
+        name: ".dcc.lto".to_string(),
+        sh_name_off: 0,
+        ty: SHT_PROGBITS,
+        flags: 0, // 不加载, 仅 LTO 元数据
+        align: 1,
+        data: merged_payload.clone(),
+        size: merged_payload.len() as u64,
+        entsize: 0,
+        output_index: sec_idx,
+        load_segment: 0,
+        vaddr: 0,
+        file_off: 0,
+        input_offsets: Vec::new(),
+        input_sections: Vec::new(),
+    };
+    layout.sections.push(lto_section);
+
+    if verbose {
+        eprintln!(
+            "dcc-link: -r LTO: embedded .dcc.lto section ({} bytes)",
+            merged_payload.len()
+        );
+    }
 }
 
 #[cfg(test)]
