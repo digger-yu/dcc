@@ -3527,6 +3527,14 @@ impl<'a> CppParser<'a> {
     /// depth 随递归递增; 超过 MAX_TEMPLATE_DEPTH 时报错,
     /// 避免超深嵌套模板 (T<T<...>>) 挂起解析器 (见 template_depth.rs).
     fn parse_mangle_type_depth(&mut self, depth: u32) -> Result<MangleType, CppParseError> {
+        // 提前检查深度限制，避免在深度递归后才检测
+        if depth > MAX_TEMPLATE_DEPTH {
+            return Err(CppParseError::TemplateDepthExceeded {
+                depth,
+                max: MAX_TEMPLATE_DEPTH,
+                span: self.span(),
+            });
+        }
         // M17.0: `decltype(expr)` 是类型, 需要整体解析
         // 形式: decltype ( expr )
         // 注: C++ lexer 把 decltype 映射为 CppTok::Kw(CppKw::Decltype),
