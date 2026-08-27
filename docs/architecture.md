@@ -758,8 +758,11 @@ cmp -s "$cp1" "$cp2"   # 字节级确定性
 # 阶段 3: 语义级对比 (--bootstrap-compare)
 ./target/release/dcc -c -O0 -std=gnu23 \
   --bootstrap-compare="$cp1" \
-  tests/fixtures/c/bootstrap_selftest.c -o "$cp2"
+  tests/fixtures/c/bootstrap_selftest.c -o "$cp3"
 # 输出 "byte + semantic identical" 即收敛
+
+# 阶段 4: 多文件编译一致性
+# 对 examples/ 下多个 C 文件各编译两次, 确认字节一致
 
 # 一键验证: make bootstrap
 ```

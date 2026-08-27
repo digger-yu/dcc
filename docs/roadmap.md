@@ -9,7 +9,7 @@
 | **M2** | struct/union/enum + 指针 | ✅ 完成 | examples/struct_test.c |
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (~1.5x, 100K vs 99K 行) |
-| **M5** | **自举 (dcc 编 dcc)** | ✅ 完成 | `scripts/bootstrap.sh` 4 阶段流程: dcc0 构建 → 编译自举测试 (14 组) → 运行验证 → 确定性对比 (byte + semantic)；`tests/fixtures/c/bootstrap_selftest.c` 覆盖 struct/func_ptr/recursion/linked_list/bitops/enum+union/string/long_long/inline_asm/variadic_macro/_Static_assert/stmt_expr/goto/switch_range/static_array；`src/bootstrap.rs` 三层对比基础设施；`make bootstrap` 一键验证 |
+| **M5** | **自举 (dcc 编 dcc)** | ✅ 完成 | `scripts/bootstrap.sh` 5 阶段流程: dcc0 构建 → 编译自举测试 (14 组) → 运行验证 → 确定性对比 (byte + semantic) → 多文件一致性; `tests/fixtures/c/bootstrap_selftest.c` 覆盖 struct/func_ptr/recursion/linked_list/bitops/enum+union/string/long_long/inline_asm/variadic_macro/_Static_assert/stmt_expr/goto/switch_range/static_array；`src/bootstrap.rs` 三层对比基础设施；`make bootstrap` 一键验证 |
 | **M6** | Linux 内核 benchmark | ✅ 完成 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M6b** | GCC libiberty（短期） | ✅ 完成 | 本地 125/129 OK；见 `docs/gcc_build_guide.md` |
 | **M6c** | 内核全树验收脚本 | ✅ 完成 | Rust fixdep；modpost_link / prepare0_full / kernel_phase_b_check |
