@@ -164,7 +164,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-ffreestanding` | 不假设标准库存在 | off (假设 hosted) |
 | `-fno-builtin` | 不使用 builtin | off |
 | `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store（含 `(*p)++` 读-改-写）前 + codegen 级栈/全局变量红区插桩 | off |
-| `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径；AArch64 目标上 codegen 启用 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程） | off |
+| `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径但使用 `__hwasan_loadN/storeN`；AArch64 目标上 codegen 启用 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程）；内核模式 (`kernel-hwaddress`) 发内联 tag 检查（指针 tag vs 内存 tag），不匹配调 `__hwasan_tag_mismatch{size}` | off |
 | `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow / VLA bound / null deref / float cast 前 `__ubsan_handle_*` | off |
 | `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry + 每次访存独立 `__kcsan_check_access(addr, size, is_write)`，可与 KASAN 共存 | off |
 | `-fsanitize=kernel-address` | 内联 shadow 检查（多架构 shadow 偏移：x86_64 `0xdffffc0000000000` / AArch64 `0xdfff600000000000` / RISC-V 64 `0xdffffe0000000000`）+ `__asan_report_loadN/storeN`，无用户态运行时依赖 | off |

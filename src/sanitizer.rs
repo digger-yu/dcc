@@ -1453,7 +1453,11 @@ fn make_mem_check_calls(
         if flags.kasan && flags.kernel_mode {
             // 内核模式 KASAN: 内联 shadow 地址计算 (架构感知)
             out.push(make_kernel_kasan_check(addr, size, is_write, span, arch));
+        } else if flags.hwasan && flags.kernel_mode {
+            // 内核模式 HWASAN: 内联 tag 检查 (AArch64 MTE 软件 tag)
+            out.push(make_kernel_hwasan_check(addr, size, is_write, span));
         } else {
+            // 用户态 KASAN/HWASAN: 调运行时函数
             out.push(make_asan_call(addr, size, is_write, span, flags));
         }
     }
@@ -1748,6 +1752,121 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span,
             span: span.clone(),
             ty: Type::Int,
         })),
+        then_: Box::new(report_call),
+        else_: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    }
+}
+
+/// 内核模式 HWASAN 内联 tag 检查 (AArch64 MTE 软件 tag 模式)。
+///
+/// HWASAN 使用指针顶字节作为 tag (4 bit, 存储在 bits 56..59),
+/// 内核模式通过内联代码检查指针 tag 与内存 tag 是否匹配:
+/// 1. 提取指针 tag: `(addr >> 56) & 0xF`
+/// 2. 读取内存 tag: `*(u8*)((addr & 0x00FFFFFFFFFFFFFF) >> 4)`
+///    (内存 tag 存储在每 16 字节 granule 的独立 tag 内存中)
+/// 3. 比较: 不匹配则调 `__hwasan_tag_mismatch{size}(addr, size, is_write)`
+///
+/// 这与 KASAN-kernel 的 shadow 检查不同:
+/// - KASAN: 检查 shadow 字节是否毒化 (越界/UAF)
+/// - HWASAN: 检查指针 tag 与内存 tag 是否匹配 (类型安全/Use-after-free)
+fn make_kernel_hwasan_check(addr: Expr, size: usize, is_write: bool, span: &Span) -> Expr {
+    let ul = |v: i128| Expr::Int {
+        v,
+        span: span.clone(),
+        ty: Type::ULong,
+    };
+    let bop = |op: BinOp, l: Expr, r: Expr, ty: Type| Expr::Binop {
+        op,
+        l: Box::new(l),
+        r: Box::new(r),
+        span: span.clone(),
+        ty,
+    };
+    let cmp = |op: BinOp, l: Expr, r: Expr| bop(op, l, r, Type::Int);
+
+    // 统一把地址转成无符号整型
+    let addr_u = Expr::Cast {
+        e: Box::new(addr.clone()),
+        ty: Type::ULong,
+        span: span.clone(),
+    };
+
+    // 提取指针 tag: (addr >> 56) & 0xF
+    let ptr_tag = bop(
+        BinOp::And,
+        bop(BinOp::Shr, addr_u.clone(), ul(56), Type::ULong),
+        ul(0xF),
+        Type::ULong,
+    );
+
+    // 读取内存 tag: *(u8*)(untagged_addr >> 4)
+    // untagged_addr = addr & 0x00FFFFFFFFFFFFFF
+    let untagged = bop(
+        BinOp::And,
+        addr_u.clone(),
+        ul(0x00FFFFFFFFFFFFFFu64 as i128),
+        Type::ULong,
+    );
+    let tag_addr = bop(BinOp::Shr, untagged, ul(4), Type::ULong);
+    let mem_tag = Expr::Deref {
+        e: Box::new(Expr::Cast {
+            e: Box::new(tag_addr),
+            ty: Type::Ptr(Box::new(Type::UChar.into())),
+            span: span.clone(),
+        }),
+        span: span.clone(),
+        ty: Type::UChar,
+    };
+
+    // 比较: ptr_tag != (mem_tag & 0xF)
+    let mem_tag_u = Expr::Cast {
+        e: Box::new(mem_tag),
+        ty: Type::ULong,
+        span: span.clone(),
+    };
+    let mem_tag_trimmed = bop(BinOp::And, mem_tag_u, ul(0xF), Type::ULong);
+    let tag_mismatch = cmp(BinOp::Ne, ptr_tag, mem_tag_trimmed);
+
+    // 报告函数名: 区分 size
+    let report_name = format!("__hwasan_tag_mismatch{}", size);
+    let report_call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: report_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    Type::ULong.into(),
+                    Type::Int.into(),
+                ],
+            ),
+        }),
+        args: vec![
+            addr,
+            ul(size as i128),
+            Expr::Int {
+                v: if is_write { 1 } else { 0 },
+                span: span.clone(),
+                ty: Type::Int,
+            },
+        ],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+
+    // tag_mismatch ? report_call(addr, size, is_write) : 0
+    Expr::Cond {
+        cond: Box::new(tag_mismatch),
         then_: Box::new(report_call),
         else_: Box::new(Expr::Int {
             v: 0,
@@ -4840,6 +4959,122 @@ mod tests {
         assert_eq!(
             kasan_shadow_offset_for_arch(Arch::Mips64),
             0xdffffc0000000000u64 as i128
+        );
+    }
+
+    // ── HWASAN kernel inline tag check ────────────────────────────────
+
+    #[test]
+    fn kernel_hwasan_generates_inline_tag_check() {
+        // kernel-hwaddress load should NOT call __hwasan_load4 (user-mode)
+        // but should call __hwasan_tag_mismatch4 (inline tag check report)
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                hwasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+            Arch::AArch64,
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            !names.iter().any(|n| n == "__hwasan_load4"),
+            "kernel-hwaddress must not call user-mode __hwasan_load4"
+        );
+        assert!(
+            names.iter().any(|n| n == "__hwasan_tag_mismatch4"),
+            "kernel-hwaddress should call __hwasan_tag_mismatch4, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kernel_hwasan_store_uses_tag_mismatch() {
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Assign {
+                    op: BinOp::Add,
+                    l: Box::new(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "p".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    r: Box::new(Expr::Int {
+                        v: 42,
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                hwasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+            Arch::AArch64,
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n.starts_with("__hwasan_tag_mismatch")),
+            "kernel-hwaddress store should call __hwasan_tag_mismatch*, got: {:?}",
+            names
         );
     }
 }
