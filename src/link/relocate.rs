@@ -74,7 +74,7 @@ use crate::codegen::elf::{
     R_RISCV_SUB6, R_RISCV_SUB8, R_RISCV_TPOFF64, R_RISCV_TPREL64,
     R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S,
     R_X86_64_16, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_8,
-    R_X86_64_DTPMOD64, R_X86_64_DTPOFF32, R_X86_64_DTPOFF64,
+    R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_DTPOFF32, R_X86_64_DTPOFF64,
     R_X86_64_GLOB_DAT, R_X86_64_GOT64, R_X86_64_GOTOFF64,
     R_X86_64_GOTPC32, R_X86_64_GOTPC32_TLSDESC, R_X86_64_GOTPC64,
     R_X86_64_GOTPCREL, R_X86_64_GOTPCREL64, R_X86_64_GOTPLT64,
@@ -1443,6 +1443,7 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
             rel_type,
             R_X86_64_NONE
                 | R_X86_64_64
+                | R_X86_64_COPY
                 | R_X86_64_PC32
                 | R_X86_64_PLT32
                 | R_X86_64_GLOB_DAT
@@ -1628,7 +1629,7 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
 fn relocation_patch_width(arch: ArchKind, rel_type: u32) -> usize {
     match arch {
         ArchKind::X86_64 => match rel_type {
-            R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64
+            R_X86_64_64 | R_X86_64_COPY | R_X86_64_GOT64 | R_X86_64_GOTOFF64
             | R_X86_64_TPOFF64 | R_X86_64_PC64 | R_X86_64_GOTPC64
             | R_X86_64_GOTPCREL64 | R_X86_64_GOTPLT64 | R_X86_64_PLTOFF64
             | R_X86_64_DTPOFF64 | R_X86_64_SIZE64 => 8,
@@ -1679,8 +1680,8 @@ fn apply_one(sec: &mut OutputSection, r: OutputRela, layout: &Layout) -> Result<
     let a = r.addend;
 
     match r.rel_type {
-        R_X86_64_64 => {
-            // S + A
+        R_X86_64_64 | R_X86_64_COPY => {
+            // S + A (COPY reloc: static link treats same as absolute 64-bit)
             let value = s_vaddr.wrapping_add(a as u64);
             write_u64(sec, place, value)?;
         }
@@ -2248,6 +2249,7 @@ mod tests {
             R_X86_64_TLSGD,
             R_X86_64_TLSLD,
             R_X86_64_NONE,
+            R_X86_64_COPY,
         ];
         for &rt in &kernel_relocs {
             assert!(
