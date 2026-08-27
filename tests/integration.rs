@@ -18716,7 +18716,7 @@ fn vdso_auto_detect_and_embed() {
         eprintln!("skip: no system vDSO found");
         return;
     }
-    let vdso_path = vdso_path.unwrap();
+    let _vdso_path = vdso_path.unwrap();
 
     // 编译一个简单程序
     let src = r#"
@@ -18793,9 +18793,9 @@ fn vdso_embed_note_section_verification() {
     let strtab_off = 1usize;
 
     let mut out = vec![0u8; 64];
-    let text_off = out.len();
+    let _text_off = out.len();
     out.extend_from_slice(text);
-    let symtab_off = out.len();
+    let _symtab_off = out.len();
     out.resize(out.len() + 24, 0);
     out.extend_from_slice(&(strtab_off as u32).to_le_bytes());
     out.push((1 << 4) | 2);
@@ -18804,9 +18804,9 @@ fn vdso_embed_note_section_verification() {
     out.extend_from_slice(&0u64.to_le_bytes());
     out.extend_from_slice(&5u64.to_le_bytes());
 
-    let strtab_data_off = out.len();
+    let _strtab_data_off = out.len();
     out.extend_from_slice(&strtab);
-    let shstrtab_off = out.len();
+    let _shstrtab_off = out.len();
     out.extend_from_slice(shstrtab);
     while !out.len().is_multiple_of(8) {
         out.push(0);
@@ -18844,7 +18844,7 @@ fn vdso_embed_note_section_verification() {
 /// 生成 `.text.ifunc` 节, 包含 CPUID 检测机器码.
 #[test]
 fn target_clones_resolver_code_generation() {
-    use dcc::link::target_clones::{TargetClonesTable, TargetClonesFunc, TargetVariant};
+    use dcc::link::target_clones::TargetClonesTable;
 
     let mut table = TargetClonesTable::new();
     table.parse("my_func", "sse4.2,avx2,default");

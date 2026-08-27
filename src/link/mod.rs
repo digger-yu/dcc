@@ -652,7 +652,7 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
                     cfg.target_clones.parse(func_name, &attr);
                     // 设置变体 vaddr (稍后在 layout 中更新)
                     if let Some(tcf) = cfg.target_clones.funcs.get_mut(func_name) {
-                        for (sym_name, arch, vaddr) in &variants {
+                        for (sym_name, _arch, vaddr) in &variants {
                             if let Some(variant) = tcf.variants.iter_mut().find(|v| &v.name == sym_name) {
                                 variant.vaddr = *vaddr;
                             }

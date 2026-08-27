@@ -1,4 +1,8 @@
 # 第一性原理: e2e 验证——每个 example 编译+运行，验证退出码
+#
+# 优化: 拆分为 build → test + e2e 三个 job, 并行执行.
+#   - test 失败不阻塞 e2e 验证, 反之亦然.
+#   - e2e 各步骤 continue-on-error, 确保全部执行并汇总到 Summary.
 
 name: dcc-e2e
 
@@ -13,58 +17,109 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  e2e:
-    name: "End-to-end compile and run"
+  build:
+    name: "Build dcc"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build dcc
+      - name: Build dcc (release)
         run: |
           cargo build --release
           mkdir -p bin && cp target/release/dcc bin/dcc
           ./bin/dcc --version
 
+      - name: Upload dcc binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin/dcc
+          retention-days: 1
+
+  test:
+    name: "Unit + integration tests"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Run cargo tests (unit + integration + error snapshots)
         run: cargo test --release
 
+  e2e:
+    name: "End-to-end compile and run"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Prepare dcc
+        run: |
+          chmod +x bin/dcc
+          ./bin/dcc --version
+
       - name: Compile hello.c
+        continue-on-error: true
+        id: hello
         run: |
           ./bin/dcc -std=gnu23 -o hello examples/basics/hello.c
           chmod +x hello
           rc=0; ./hello || rc=$?
           echo "exit code: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           test $rc -eq 42
 
       - name: Compile arith.c
+        continue-on-error: true
+        id: arith
         run: |
           ./bin/dcc -std=gnu23 -o arith examples/basics/arith.c
           chmod +x arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           test $rc -eq 23
 
       - name: Compile control.c
+        continue-on-error: true
+        id: control
         run: |
           ./bin/dcc -std=gnu23 -o control examples/basics/control_flow.c
           chmod +x control
           rc=0; ./control || rc=$?
           echo "control exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           test $rc -eq 100
 
       - name: Compile call.c
+        continue-on-error: true
+        id: call
         run: |
           ./bin/dcc -std=gnu23 -o call examples/pointers/call_by_assign.c
           chmod +x call
           rc=0; ./call || rc=$?
           echo "call exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           test $rc -eq 20
 
       - name: Test error diagnostics
+        continue-on-error: true
+        id: errdiag
         run: |
           out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/advanced/bad_syntax.c 2>&1 || true)
           echo "$out" | head -20
@@ -78,11 +133,23 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Example | Expected | Got | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|----------|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          hello_rc=0; ./hello || hello_rc=$?  || true
-          arith_rc=0; ./arith || arith_rc=$?   || true
-          control_rc=0; ./control || control_rc=$? || true
-          call_rc=0; ./call || call_rc=$?      || true
-          echo "| hello.c | 42 | $hello_rc | $([ $hello_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| arith.c | 23 | $arith_rc | $([ $arith_rc -eq 23 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| control.c | 100 | $control_rc | $([ $control_rc -eq 100 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| call.c | 20 | $call_rc | $([ $call_rc -eq 20 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+
+          hello_rc="${{ steps.hello.outputs.rc }}"
+          arith_rc="${{ steps.arith.outputs.rc }}"
+          control_rc="${{ steps.control.outputs.rc }}"
+          call_rc="${{ steps.call.outputs.rc }}"
+
+          # 处理步骤完全失败 (未产生输出) 的情况
+          hello_rc="${hello_rc:-ERR}"
+          arith_rc="${arith_rc:-ERR}"
+          control_rc="${control_rc:-ERR}"
+          call_rc="${call_rc:-ERR}"
+
+          echo "| hello.c | 42 | $hello_rc | $([ "$hello_rc" = "42" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| arith.c | 23 | $arith_rc | $([ "$arith_rc" = "23" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| control.c | 100 | $control_rc | $([ "$control_rc" = "100" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| call.c | 20 | $call_rc | $([ "$call_rc" = "20" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+
+          errdiag_status="${{ steps.errdiag.outcome }}"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Error diagnostics | - | - | $([ "$errdiag_status" = "success" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
