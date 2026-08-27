@@ -167,7 +167,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径；AArch64 目标上 codegen 启用 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程） | off |
 | `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow / VLA bound / null deref / float cast 前 `__ubsan_handle_*` | off |
 | `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry + 每次访存独立 `__kcsan_check_access(addr, size, is_write)`，可与 KASAN 共存 | off |
-| `-fsanitize=kernel-address` | 内联 shadow 检查（x86_64: shadow = (addr >> 3) + 0xdffffc0000000000）+ `__asan_report_loadN/storeN`，无用户态运行时依赖 | off |
+| `-fsanitize=kernel-address` | 内联 shadow 检查（多架构 shadow 偏移：x86_64 `0xdffffc0000000000` / AArch64 `0xdfff600000000000` / RISC-V 64 `0xdffffe0000000000`）+ `__asan_report_loadN/storeN`，无用户态运行时依赖 | off |
 | `-fsanitize=fuzzer` | Fuzzer：KCOV + `__sanitizer_cov_trace_cmpN` + `__sanitizer_cov_trace_switch` | off |
 | `-fsanitize-coverage` | KCOV：`__sanitizer_cov_trace_pc` + 边覆盖 guard 计数器 | off |
 

@@ -39,7 +39,7 @@ use crate::ast::{
     ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, QualType, Stmt, Type,
     UnOp, VarDecl,
 };
-use crate::cli::CliError;
+use crate::cli::{Arch, CliError};
 use crate::diagnostics::Span;
 
 /// 启用的 sanitizer 标志 (与 GCC `-fsanitize=*` 子集对应)。
@@ -283,14 +283,17 @@ struct InstrumentCtx {
     guard_counter: usize,
     /// TU 全局的 guard 计数,用于每函数后置基础值。
     next_guard_id: u32,
+    /// 目标架构 (影响 KASAN shadow 偏移)。
+    arch: Arch,
 }
 
 impl InstrumentCtx {
-    fn new() -> Self {
+    fn new(arch: Arch) -> Self {
         Self {
             tu_init_pending: false,
             guard_counter: 0,
             next_guard_id: 0,
+            arch,
         }
     }
 
@@ -310,13 +313,13 @@ impl InstrumentCtx {
 }
 
 /// 顶层入口:在 driver parse 之后、IR lower 之前调用。
-pub fn instrument_program(prog: &mut Program, flags: SanitizerFlags) {
+pub fn instrument_program(prog: &mut Program, flags: SanitizerFlags, arch: Arch) {
     if !flags.any() {
         return;
     }
     let mut ctx = InstrumentCtx {
         tu_init_pending: flags.needs_tu_init(),
-        ..InstrumentCtx::new()
+        ..InstrumentCtx::new(arch)
     };
     for decl in prog.decls.iter_mut() {
         if let Decl::Func(f) = decl {
@@ -868,7 +871,7 @@ fn instrument_expr(
         }
         ExprKind::Deref(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -886,7 +889,7 @@ fn instrument_expr(
         }
         ExprKind::Index(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -904,7 +907,7 @@ fn instrument_expr(
         }
         ExprKind::ArrowMember(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -930,7 +933,7 @@ fn instrument_expr(
                 None
             };
             if let Some(l) = lhs_clone {
-                let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags);
+                let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             // MSAN store check on assign target
@@ -982,7 +985,7 @@ fn instrument_expr(
         ExprKind::IncDec(Some(check_kind), lhs) => {
             // 对 ++/-- 内存目标 (Deref/Index/ArrowMember) 补 store 检查:
             // 用插桩前 lvalue 的地址作入参, 检查在自增/自减求值前执行。
-            let wrapped = wrap_with_mem_check_assign(&lhs, expr, check_kind, &span, flags);
+            let wrapped = wrap_with_mem_check_assign(&lhs, expr, check_kind, &span, flags, ctx.arch);
             *expr = wrapped;
         }
         ExprKind::IncDec(None, _) => {}
@@ -1366,6 +1369,7 @@ fn wrap_with_mem_check(
     kind: MemCheckKind,
     span: &Span,
     flags: SanitizerFlags,
+    arch: Arch,
 ) -> Expr {
     let inner_ty = expr.ty();
     // AddrOf(&expr) → codegen 支持 Deref/Index/Member/Ident,
@@ -1379,7 +1383,7 @@ fn wrap_with_mem_check(
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
     let is_write = matches!(kind, MemCheckKind::Store(_));
-    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags);
+    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags, arch);
     chain_mem_checks(checks, expr.clone(), span, inner_ty)
 }
 
@@ -1392,6 +1396,7 @@ fn wrap_with_mem_check_assign(
     kind: MemCheckKind,
     span: &Span,
     flags: SanitizerFlags,
+    arch: Arch,
 ) -> Expr {
     let inner_ty = assign.ty();
     let addr_expr = Expr::AddrOf {
@@ -1403,7 +1408,7 @@ fn wrap_with_mem_check_assign(
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
     let is_write = matches!(kind, MemCheckKind::Store(_));
-    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags);
+    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags, arch);
     chain_mem_checks(checks, assign.clone(), span, inner_ty)
 }
 
@@ -1434,6 +1439,7 @@ fn make_mem_check_calls(
     is_write: bool,
     span: &Span,
     flags: SanitizerFlags,
+    arch: Arch,
 ) -> Vec<Expr> {
     let mut out = Vec::new();
     if flags.kcsan {
@@ -1445,8 +1451,8 @@ fn make_mem_check_calls(
     }
     if flags.kasan || flags.hwasan {
         if flags.kasan && flags.kernel_mode {
-            // 内核模式 KASAN: 内联 shadow 地址计算 (x86_64)
-            out.push(make_kernel_kasan_check(addr, size, is_write, span));
+            // 内核模式 KASAN: 内联 shadow 地址计算 (架构感知)
+            out.push(make_kernel_kasan_check(addr, size, is_write, span, arch));
         } else {
             out.push(make_asan_call(addr, size, is_write, span, flags));
         }
@@ -1593,7 +1599,23 @@ fn make_asan_call(
     }
 }
 
-/// 内核模式 KASAN 内联 shadow 检查 (x86_64)。
+/// KASAN-kernel shadow 偏移量按架构选择。
+///
+/// 每个架构的内核虚拟地址空间布局不同, shadow 基址也不同:
+/// - x86_64:     `(addr >> 3) + 0xdffffc0000000000`
+/// - AArch64:    `(addr >> 3) + 0xdfff600000000000` (VA_BITS=48)
+/// - RISC-V 64:  `(addr >> 3) + 0xdffffe0000000000` (SV39/SV48)
+/// - 其他:        回退到 x86_64 偏移
+pub fn kasan_shadow_offset_for_arch(arch: Arch) -> i128 {
+    match arch {
+        Arch::X86_64 => 0xdffffc0000000000u64 as i128,
+        Arch::AArch64 => 0xdfff600000000000u64 as i128,
+        Arch::RiscV64 => 0xdffffe0000000000u64 as i128,
+        _ => 0xdffffc0000000000u64 as i128,
+    }
+}
+
+/// 内核模式 KASAN 内联 shadow 检查。
 ///
 /// 每个 shadow 字节覆盖 8 字节 granule:
 /// - `0`: 整 granule 可访问
@@ -1606,9 +1628,14 @@ fn make_asan_call(
 /// `poisoned_g = (need > 8g) && (v_g >= 128 || (v_g > 0 && need - 8g > v_g))`。
 /// (`v_g >= 128` 即负值毒化;`v_g > 0` 且覆盖超过可达前缀即部分毒化越界)
 /// 任一 granule 毒化即调 `__asan_report_loadN/storeN(addr)`。
-fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span) -> Expr {
-    // KASAN shadow offset for x86_64 kernel
-    const KASAN_SHADOW_OFFSET: i128 = 0xdffffc0000000000u64 as i128;
+///
+/// shadow 偏移按架构选择:
+/// - x86_64:     `0xdffffc0000000000`
+/// - AArch64:    `0xdfff600000000000` (VA_BITS=48)
+/// - RISC-V 64:  `0xdffffe0000000000` (SV39/SV48)
+/// - 其他:        回退到 x86_64 偏移
+fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span, arch: Arch) -> Expr {
+    let shadow_offset = kasan_shadow_offset_for_arch(arch);
 
     let ul = |v: i128| Expr::Int {
         v,
@@ -1632,7 +1659,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span)
     };
     // shadow_addr = (addr >> 3) + KASAN_SHADOW_OFFSET
     let shadow_idx = bop(BinOp::Shr, addr_u.clone(), ul(3), Type::ULong);
-    let shadow_base = bop(BinOp::Add, shadow_idx, ul(KASAN_SHADOW_OFFSET), Type::ULong);
+    let shadow_base = bop(BinOp::Add, shadow_idx, ul(shadow_offset), Type::ULong);
     // need = (addr & 7) + size
     let need = bop(
         BinOp::Add,
@@ -2616,7 +2643,7 @@ mod tests {
             kcov: true,
             ..Default::default()
         };
-        instrument_program(&mut prog, flags);
+        instrument_program(&mut prog, flags, Arch::X86_64);
         let Decl::Func(f0) = &prog.decls[0] else {
             panic!()
         };
@@ -2647,6 +2674,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         for decl in &prog.decls {
             let Decl::Func(f) = decl else { continue };
@@ -2731,6 +2759,7 @@ mod tests {
                 kcov: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -2822,7 +2851,7 @@ mod tests {
             kcov: true,
             ..Default::default()
         };
-        instrument_program(&mut prog, flags);
+        instrument_program(&mut prog, flags, Arch::X86_64);
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
         };
@@ -2879,6 +2908,7 @@ mod tests {
                 ubsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -2931,6 +2961,7 @@ mod tests {
                 ubsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -2976,6 +3007,7 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3025,6 +3057,7 @@ mod tests {
                 fuzzer: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3113,6 +3146,7 @@ mod tests {
                 ubsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3163,6 +3197,7 @@ mod tests {
                 ubsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3211,6 +3246,7 @@ mod tests {
                 ubsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3263,6 +3299,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3357,6 +3394,7 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         )
         .into_iter()
         .next()
@@ -3394,6 +3432,7 @@ mod tests {
                     kasan: true,
                     ..Default::default()
                 },
+                Arch::X86_64,
             )
             .into_iter()
             .next()
@@ -3447,6 +3486,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3504,6 +3544,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3563,6 +3604,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3591,6 +3633,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3682,6 +3725,7 @@ mod tests {
                 hwasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3753,6 +3797,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         )
         .into_iter()
         .next()
@@ -3799,6 +3844,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         )
         .into_iter()
         .next()
@@ -3853,6 +3899,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3910,6 +3957,7 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -3973,6 +4021,7 @@ mod tests {
                 kernel_mode: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4035,6 +4084,7 @@ mod tests {
                 fuzzer: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4107,6 +4157,7 @@ mod tests {
                 kcov: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4198,6 +4249,7 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4261,6 +4313,7 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4343,6 +4396,7 @@ mod tests {
                 msan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4369,6 +4423,7 @@ mod tests {
                 msan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         for decl in &prog.decls {
             let Decl::Func(f) = decl else { continue };
@@ -4396,6 +4451,7 @@ mod tests {
                 msan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4462,6 +4518,7 @@ mod tests {
                 dfsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4488,6 +4545,7 @@ mod tests {
                 dfsan: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4570,6 +4628,7 @@ mod tests {
                 cfi_icall: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4635,6 +4694,7 @@ mod tests {
                 cfi_icall: true,
                 ..Default::default()
             },
+            Arch::X86_64,
         );
         let Decl::Func(f) = &prog.decls[0] else {
             panic!()
@@ -4747,5 +4807,39 @@ mod tests {
             ..Default::default()
         }
         .any());
+    }
+
+    // ── KASAN shadow offset per architecture ────────────────────────────
+
+    #[test]
+    fn kasan_shadow_offset_x86_64() {
+        assert_eq!(
+            kasan_shadow_offset_for_arch(Arch::X86_64),
+            0xdffffc0000000000u64 as i128
+        );
+    }
+
+    #[test]
+    fn kasan_shadow_offset_aarch64() {
+        assert_eq!(
+            kasan_shadow_offset_for_arch(Arch::AArch64),
+            0xdfff600000000000u64 as i128
+        );
+    }
+
+    #[test]
+    fn kasan_shadow_offset_riscv64() {
+        assert_eq!(
+            kasan_shadow_offset_for_arch(Arch::RiscV64),
+            0xdffffe0000000000u64 as i128
+        );
+    }
+
+    #[test]
+    fn kasan_shadow_offset_fallback() {
+        assert_eq!(
+            kasan_shadow_offset_for_arch(Arch::Mips64),
+            0xdffffc0000000000u64 as i128
+        );
     }
 }

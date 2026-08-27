@@ -601,7 +601,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
-    sanitizer::instrument_program(&mut prog, cfg.sanitizers);
+    sanitizer::instrument_program(&mut prog, cfg.sanitizers, cfg.target.arch);
 
     // IPA-SRA: 跨过程标量替换 (仅 static 函数, 在 IR lower 之前)
     // -O2 及以上默认启用; -fipa-sra / -fno-ipa-sra 显式控制
