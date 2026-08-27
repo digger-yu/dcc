@@ -1,6 +1,6 @@
 // src/codegen/riscv64.rs - RISC-V 64 后端 (M8 完整化)
 
-use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
+use crate::ast::{find_field, BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
@@ -1003,31 +1003,60 @@ impl Riscv64Codegen {
         if is_vector_ty(&expr.ty) {
             return self.gen_vector_expr(expr);
         }
-        // Handle Assign and Member before float/complex dispatch
-        // to avoid infinite recursion
-        match &expr.kind {
-            ExprKind::Assign if expr.children.len() >= 2 => {
+        // Handle Assign before float/complex dispatch to avoid
+        // infinite recursion (Assign node ty may be float/aggregate).
+        if let ExprKind::Assign = &expr.kind {
+            if expr.children.len() >= 2
+                && !is_float_ty(&expr.children[1].ty)
+                && !is_complex_ty(&expr.children[1].ty)
+                && !is_vector_ty(&expr.children[1].ty)
+            {
+                // Evaluate rhs -> a0
                 self.gen_expr(&expr.children[1]);
-                match &expr.children[0].kind {
+                // Save rhs value to stack
+                let save_off = self.alloc_local("<asgn>", 8);
+                self.emit_sd(10, 2, save_off); // sd a0, [sp+save_off]
+                let lhs = &expr.children[0];
+                match &lhs.kind {
                     ExprKind::Local(ref name) => {
+                        // Reload rhs
+                        self.emit_ld(10, 2, save_off); // a0 = rhs
                         if let Some(&off) = self.locals.get(name) {
-                            self.store_a0(off);
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(10, 2, off, sz);
+                        } else if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_a0(name); // a0 = global addr
+                            self.emit_ld(11, 2, save_off); // a1 = rhs
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(11, 10, 0, sz);
                         }
                     }
-                    ExprKind::Member(_) => {
-                        // TODO: struct member assignment
+                    _ => {
+                        self.gen_lvalue_addr(lhs); // a0 = addr
+                        self.emit_addi(12, 10, 0); // a2 = addr (save)
+                        self.emit_ld(11, 2, save_off); // a1 = rhs
+                        let sz = value_type_size(&expr.ty).max(1);
+                        if sz <= 8 {
+                            self.emit_store_sz(11, 12, 0, sz);
+                        } else {
+                            // Aggregate: word-by-word copy
+                            let mut off: i32 = 0;
+                            while (off as usize) + 8 <= sz {
+                                self.emit_ld(13, 11, off);
+                                self.emit_sd(13, 12, off);
+                                off += 8;
+                            }
+                            if (off as usize) < sz {
+                                self.emit_ld(13, 11, off);
+                                self.emit_store_sz(13, 12, off, sz - off as usize);
+                            }
+                        }
                     }
-                    _ => {}
                 }
+                // Result of assignment is the rhs value
+                self.emit_ld(10, 2, save_off); // a0 = rhs
                 return true;
             }
-            ExprKind::Member(ref _name) if !expr.children.is_empty() => {
-                // Simplified: load base address, then load member
-                self.gen_expr(&expr.children[0]);
-                // TODO: proper member offset calculation
-                return true;
-            }
-            _ => {}
         }
         // expr.ty 自身是 float/vector 时走 gen_float_expr.
         // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
@@ -1139,18 +1168,86 @@ impl Riscv64Codegen {
                 return true;
             }
             ExprKind::Address if !expr.children.is_empty() => {
-                // &local / &global: 计算变量地址到 a0
-                if let ExprKind::Local(ref name) = &expr.children[0].kind {
-                    if let Some(&off) = self.locals.get(name) {
-                        self.mov_a0_sp_off(off);
-                        return true;
+                // Extended: support &member, &deref, &index via gen_lvalue_addr
+                match &expr.children[0].kind {
+                    ExprKind::Local(ref name) => {
+                        if let Some(&off) = self.locals.get(name) {
+                            self.mov_a0_sp_off(off);
+                            return true;
+                        }
+                        if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_a0(name);
+                            return true;
+                        }
                     }
-                    if self.global_rodata.contains_key(name) {
-                        self.load_global_addr_a0(name);
+                    _ => {
+                        self.gen_lvalue_addr(&expr.children[0]);
                         return true;
                     }
                 }
                 self.li_a0(0);
+                return true;
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                // *ptr: evaluate pointer, load value
+                self.gen_expr(&expr.children[0]);
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
+                return true;
+            }
+            ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    // ptr->field: evaluate inner pointer
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    // s.field: compute address of struct
+                    self.gen_lvalue_addr(child);
+                }
+                // a0 = base address
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                let field_off = struct_name.and_then(|n| {
+                    self.aggregate_fields.get(&n).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                    })
+                }).unwrap_or(0);
+                if field_off != 0 {
+                    self.emit_addi(10, 10, field_off as i32); // a0 += off
+                }
+                // Now a0 = address of field, load value
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                let idx = &expr.children[1];
+                match &arr.ty {
+                    ValueType::Array(_, _) => { self.gen_lvalue_addr(arr); }
+                    _ => { self.gen_expr(arr); }
+                }
+                // a0 = base address
+                self.emit_addi(12, 10, 0); // a2 = base (save)
+                self.gen_expr(idx); // a0 = index
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                if elem_sz != 1 {
+                    self.emit_addi(11, 10, 0); // a1 = index
+                    self.li_a0(elem_sz as i32);
+                    self.emit_mul(10, 11, 10); // a0 = idx * elem_sz
+                }
+                // a2 = base, a0 = scaled offset
+                self.emit_add(10, 12, 10); // a0 = base + offset
+                // Load value
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
                 return true;
             }
             _ => {
@@ -1173,6 +1270,74 @@ impl Riscv64Codegen {
             }
         }
         false
+    }
+
+    /// Compute the address of an lvalue expression into a0 (x10).
+    fn gen_lvalue_addr(&mut self, expr: &TypedExpr) {
+        match &expr.kind {
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.mov_a0_sp_off(off);
+                } else if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_a0(name);
+                } else {
+                    self.li_a0(0);
+                }
+            }
+            ExprKind::Member(ref field_name) => {
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    self.gen_lvalue_addr(child);
+                }
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                let off = struct_name.and_then(|n| {
+                    self.aggregate_fields.get(&n).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                    })
+                }).unwrap_or(0);
+                if off != 0 {
+                    self.emit_addi(10, 10, off as i32);
+                }
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                match &arr.ty {
+                    ValueType::Array(_, _) => { self.gen_lvalue_addr(arr); }
+                    _ => { self.gen_expr(arr); }
+                }
+                self.emit_addi(12, 10, 0); // a2 = base
+                self.gen_expr(&expr.children[1]); // a0 = index
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                if elem_sz != 1 {
+                    self.emit_addi(11, 10, 0); // a1 = index
+                    self.li_a0(elem_sz as i32);
+                    self.emit_mul(10, 11, 10); // a0 = idx * elem_sz
+                }
+                self.emit_add(10, 12, 10); // a0 = base + offset
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                self.gen_expr(&expr.children[0]);
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
+            }
+            ExprKind::Address if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
+            }
+            _ => {
+                self.li_a0(0);
+            }
+        }
     }
 
     fn gen_call(&mut self, expr: &TypedExpr) {

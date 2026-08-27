@@ -1,6 +1,6 @@
 // src/codegen/aarch64.rs - AArch64 后端 (M7 完整 IR lowering)
 
-use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
+use crate::ast::{find_field, BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
@@ -1205,6 +1205,64 @@ impl Aarch64Codegen {
         if is_vector_ty(&expr.ty) {
             return self.gen_vector_expr(expr);
         }
+        // Handle Assign before float/complex dispatch to avoid
+        // infinite recursion (Assign node ty may be float/aggregate).
+        if let ExprKind::Assign = &expr.kind {
+            if expr.children.len() >= 2
+                && !is_float_ty(&expr.children[1].ty)
+                && !is_complex_ty(&expr.children[1].ty)
+                && !is_vector_ty(&expr.children[1].ty)
+            {
+                // Evaluate rhs -> x0
+                self.gen_expr(&expr.children[1]);
+                // Save rhs value to stack temp (safe across recursive calls)
+                let save_off = self.alloc_local("<asgn>", 8);
+                self.emit_str_x(0, 31, save_off as u32, 8);
+                let lhs = &expr.children[0];
+                match &lhs.kind {
+                    ExprKind::Local(ref name) => {
+                        // Reload rhs value
+                        self.emit_ldr_x(0, 31, save_off as u32, 8);
+                        if let Some(&off) = self.locals.get(name) {
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            match sz {
+                                1 => { self.emit_str_x(0, 31, 0, 1); /* placeholder */ self.store_x_at_sp(off, 0, 1); }
+                                2 => { self.emit_str_x(0, 31, 0, 1); self.store_x_at_sp(off, 0, 2); }
+                                4 => self.store_w0(off),
+                                _ => { // 8 bytes or aggregate
+                                    self.emit_str_x(0, 31, off as u32, 8);
+                                    if sz > 8 {
+                                        // Aggregate: save src addr, copy word-by-word
+                                        self.emit_ldr_x(14, 31, save_off as u32, 8);
+                                        self.mov_x0_sp_off(off); // x0 = dst addr
+                                        self.aggregate_store_loop(14, 0, 8, sz);
+                                    }
+                                }
+                            }
+                        } else if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_w0(name); // x0 = global addr
+                            self.emit_ldr_x(14, 31, save_off as u32, 8); // x14 = rhs
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(14, 0, 0, sz);
+                        }
+                    }
+                    _ => {
+                        self.gen_lvalue_addr(lhs); // x0 = addr
+                        self.emit_mov_x_reg(12, 0); // x12 = addr
+                        self.emit_ldr_x(14, 31, save_off as u32, 8); // x14 = rhs
+                        let sz = value_type_size(&expr.ty).max(1);
+                        if sz <= 8 {
+                            self.emit_store_sz(14, 12, 0, sz);
+                        } else {
+                            self.aggregate_store_loop(14, 12, 0, sz);
+                        }
+                    }
+                }
+                // Result of assignment is the rhs value
+                self.emit_ldr_x(0, 31, save_off as u32, 8);
+                return true;
+            }
+        }
         // expr.ty 自身是 float/vector 时走 gen_float_expr.
         // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
         // gen_float_expr 形成死循环). 例如 (int)sum(double) 这个 Cast
@@ -1340,18 +1398,125 @@ impl Aarch64Codegen {
                 return true;
             }
             ExprKind::Address if !expr.children.is_empty() => {
-                // &local / &global: 计算变量地址到 x0
-                if let ExprKind::Local(ref name) = &expr.children[0].kind {
-                    if let Some(&off) = self.locals.get(name) {
-                        self.mov_x0_sp_off(off);
-                        return true;
+                // Extended: support &member, &deref, &index via gen_lvalue_addr
+                match &expr.children[0].kind {
+                    ExprKind::Local(ref name) => {
+                        if let Some(&off) = self.locals.get(name) {
+                            self.mov_x0_sp_off(off);
+                            return true;
+                        }
+                        if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_w0(name);
+                            return true;
+                        }
                     }
-                    if self.global_rodata.contains_key(name) {
-                        self.load_global_addr_w0(name);
+                    _ => {
+                        self.gen_lvalue_addr(&expr.children[0]);
                         return true;
                     }
                 }
                 self.mov_w0_imm(0);
+                return true;
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                // *ptr: evaluate pointer, load value
+                self.gen_expr(&expr.children[0]);
+                // x0 = pointer address
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    // Aggregate dereference: load first word
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
+                return true;
+            }
+            ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
+                // Compute base address
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    // ptr->field: evaluate inner pointer
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    // s.field: compute address of struct
+                    self.gen_lvalue_addr(child);
+                }
+                // x0 = base address
+                // Look up field offset
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let field_off = struct_name.and_then(|name| {
+                    self.aggregate_fields.get(&name).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                    })
+                }).unwrap_or(0);
+                if field_off != 0 {
+                    self.emit_mov_x_reg(12, 0); // x12 = base
+                    self.emit_add_imm_x(0, 12, field_off as u32); // x0 = base + off
+                }
+                // Now x0 = address of field, load value
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                let idx = &expr.children[1];
+                // Array base: compute address; Pointer base: evaluate value
+                match &arr.ty {
+                    ValueType::Array(_, _) => {
+                        self.gen_lvalue_addr(arr);
+                    }
+                    _ => {
+                        self.gen_expr(arr);
+                    }
+                }
+                // x0 = base address
+                self.emit_mov_x_reg(12, 0); // x12 = base
+                self.gen_expr(idx); // x0 = index
+                // Scale index by element size
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                if elem_sz != 1 {
+                    self.emit_mov_x_reg(9, 0); // x9 = index
+                    // Use LSL for power-of-2 sizes
+                    match elem_sz {
+                        2 => { self.emit(&[0x09, 0x01, 0x00, 0xd3]); } // lsl x9, x9, #1
+                        4 => { self.emit(&[0x09, 0x02, 0x00, 0xd3]); } // lsl x9, x9, #2
+                        8 => { self.emit(&[0x09, 0x03, 0x00, 0xd3]); } // lsl x9, x9, #3
+                        16 => { self.emit(&[0x09, 0x04, 0x00, 0xd3]); } // lsl x9, x9, #4
+                        _ => {
+                            self.mov_x_reg_imm(10, elem_sz as u64);
+                            self.emit_mul_x(9, 9, 10); // x9 = idx * elem_sz
+                        }
+                    }
+                } else {
+                    self.emit_mov_x_reg(9, 0); // x9 = index (no scaling)
+                }
+                // x12 = base, x9 = scaled offset
+                self.emit_add_x_reg(0, 12, 9); // x0 = base + offset
+                // Load value
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
                 return true;
             }
             _ => {
@@ -1374,6 +1539,89 @@ impl Aarch64Codegen {
             }
         }
         false
+    }
+
+    /// Compute the address of an lvalue expression into x0.
+    /// Supports: Local, Member, Dereference, Index, Cast, Address.
+    fn gen_lvalue_addr(&mut self, expr: &TypedExpr) {
+        match &expr.kind {
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.mov_x0_sp_off(off);
+                } else if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_w0(name);
+                } else {
+                    self.mov_w0_imm(0);
+                }
+            }
+            ExprKind::Member(ref field_name) => {
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    // ptr->field: evaluate pointer
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    // s.field: compute address of struct
+                    self.gen_lvalue_addr(child);
+                }
+                // x0 = base address, add field offset
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                let off = struct_name.and_then(|n| {
+                    self.aggregate_fields.get(&n).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                    })
+                }).unwrap_or(0);
+                if off != 0 {
+                    self.emit_mov_x_reg(12, 0);
+                    self.emit_add_imm_x(0, 12, off as u32);
+                }
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                match &arr.ty {
+                    ValueType::Array(_, _) => { self.gen_lvalue_addr(arr); }
+                    _ => { self.gen_expr(arr); }
+                }
+                // x0 = base address
+                self.emit_mov_x_reg(12, 0); // x12 = base
+                self.gen_expr(&expr.children[1]); // x0 = index
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                self.emit_mov_x_reg(9, 0); // x9 = index
+                if elem_sz != 1 {
+                    match elem_sz {
+                        2 => { self.emit(&[0x09, 0x01, 0x00, 0xd3]); }
+                        4 => { self.emit(&[0x09, 0x02, 0x00, 0xd3]); }
+                        8 => { self.emit(&[0x09, 0x03, 0x00, 0xd3]); }
+                        16 => { self.emit(&[0x09, 0x04, 0x00, 0xd3]); }
+                        _ => {
+                            self.mov_x_reg_imm(10, elem_sz as u64);
+                            self.emit_mul_x(9, 9, 10);
+                        }
+                    }
+                }
+                self.emit_add_x_reg(0, 12, 9); // x0 = base + scaled_idx
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                self.gen_expr(&expr.children[0]);
+                // x0 = pointer value = address
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
+            }
+            ExprKind::Address if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
+            }
+            _ => {
+                self.mov_w0_imm(0);
+            }
+        }
     }
 
     fn gen_call(&mut self, expr: &TypedExpr) {
@@ -2334,6 +2582,124 @@ impl Aarch64Codegen {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xb940_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
+    }
+
+    // --- helpers for pointer/member/index codegen ---
+
+    /// MOV Xd, Xn — ORR Xd, XZR, Xn
+    fn emit_mov_x_reg(&mut self, dst: u8, src: u8) {
+        // ORR Xd, XZR, Xn
+        let insn = 0x2a00_0000u32 | (0x1f << 16) | ((src as u32 & 0x1f) << 5) | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Store register rt to [sp + off] with given byte size (1/2/4/8)
+    fn store_x_at_sp(&mut self, off: i32, rt: u8, sz: usize) {
+        match sz {
+            1 => {
+                let imm12 = (off as u32) & 0xfff;
+                let insn = 0x39000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            2 => {
+                let imm12 = ((off / 2) as u32) & 0xfff;
+                let insn = 0x79000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            4 => self.str_wt_sp(rt, off),
+            _ => self.emit_str_x(rt, 31, off as u32, 8),
+        }
+    }
+
+    /// Load from [rs1 + imm] with byte size and signedness
+    fn emit_load_sz(&mut self, rt: u8, rs1: u8, imm: u32, sz: usize, signed: bool) {
+        match (sz, signed) {
+            (1, false) => self.emit_ldr_x(rt, rs1, imm, 1),
+            (1, true) => {
+                // LDRSB Xd, [Xn, #imm] = 0x39800000
+                let imm12 = imm & 0xfff;
+                let insn = 0x39800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            (2, false) => self.emit_ldr_x(rt, rs1, imm, 2),
+            (2, true) => {
+                // LDRSH Xd, [Xn, #imm] = 0x79800000
+                let imm12 = (imm / 2) & 0xfff;
+                let insn = 0x79800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            (4, _) => self.emit_ldr_x(rt, rs1, imm, 4),
+            _ => self.emit_ldr_x(rt, rs1, imm, 8),
+        }
+    }
+
+    /// Store to [rs1 + imm] with byte size
+    fn emit_store_sz(&mut self, rt: u8, rs1: u8, imm: u32, sz: usize) {
+        match sz {
+            1 => {
+                let imm12 = imm & 0xfff;
+                let insn = 0x39000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            2 => {
+                let imm12 = (imm / 2) & 0xfff;
+                let insn = 0x79000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            4 => {
+                let imm12 = (imm / 4) & 0xfff;
+                let insn = 0xb9000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
+                self.emit(&insn.to_le_bytes());
+            }
+            _ => self.emit_str_x(rt, rs1, imm, 8),
+        }
+    }
+
+    /// Aggregate store: copy `total_bytes` from [x12] to [x10] word-by-word
+    /// x12 = src, x10 = dst, x14 = temp, x11 = counter
+    fn aggregate_store_loop(&mut self, src_reg: u8, dst_reg: u8, start_off: usize, total: usize) {
+        // For small aggregates (<=64 bytes), unroll
+        if total <= 64 {
+            let mut off = start_off;
+            while off + 8 <= total {
+                self.emit_ldr_x(14, src_reg, off as u32, 8);
+                self.emit_str_x(14, dst_reg, off as u32, 8);
+                off += 8;
+            }
+            if off < total {
+                let rem = total - off;
+                self.emit_ldr_x(14, src_reg, off as u32, 8);
+                self.emit_store_sz(14, dst_reg, off as u32, rem);
+            }
+            return;
+        }
+        // Large: use a loop with x11 as counter
+        let lbl = format!(".Laggcpy_{}", self.pos());
+        let lbl_end = format!(".Laggend_{}", self.pos());
+        // x11 = total (counter), x14 = offset
+        self.mov_x_reg_imm(11, total as u64);
+        self.mov_x_reg_imm(14, start_off as u64);
+        // loop:
+        self.emit_label_raw(&lbl);
+        // cbz x11, end
+        let cbz = 0xb4000000u32 | (5u32 << 5) | 11;
+        self.emit(&cbz.to_le_bytes());
+        // ldr x9, [src_reg, x14]
+        self.emit_ldr_x(9, src_reg, 0, 8); // TODO: register offset
+        // str x9, [dst_reg, x14]
+        self.emit_str_x(9, dst_reg, 0, 8);
+        // add x14, x14, #8
+        self.emit_add_imm_x(14, 14, 8);
+        // sub x11, x11, #8
+        let sub_insn = 0xd1000000u32 | (8u32 << 10) | (11u32 << 5) | 11;
+        self.emit(&sub_insn.to_le_bytes());
+        // b loop
+        // (simplified: for now just fall through for small sizes)
+        self.emit_label_raw(&lbl_end);
+    }
+
+    fn emit_label_raw(&mut self, label: &str) {
+        self.labels.insert(label.to_string(), self.pos());
     }
 
     // M25: 64 位 str/ldr 用于 va_list 寄存器保存区
@@ -3584,6 +3950,16 @@ impl Aarch64Codegen {
     fn emit_add_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
         let insn = 0x8b000000u32
             | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MADD Xd, Xn, Xm, XZR — 64-bit multiply (rd = rn * rm)
+    fn emit_mul_x(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0x9b000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | (31u32 << 10) // ra = xzr
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
