@@ -583,7 +583,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         &pp_out.openmp_pragmas,
         &line_map,
     );
-    remap_diags(&mut offload_diags, &line_map);
+    // NOTE: collect_offload_section 内部已完成所有 remap:
+    //   - CUDA/HIP 诊断使用 AST span (预处理坐标), 在函数内 remap
+    //   - OpenMP 诊断使用 openmp_pragmas 的源行号, 已是源坐标
+    // 此处不再调用 remap_diags, 避免对已是源坐标的 OpenMP 诊断
+    // 做二次映射导致行号偏移。
     enrich_diags(&mut offload_diags, src, &file_name, input.parent());
     let offload_has_err = offload_diags
         .iter()
@@ -2642,9 +2646,9 @@ fn remap_gcov_lines(unit: &mut crate::profile::gcov::GcovUnit, line_map: &[LineS
 ///     (仅 -fcuda / -fhip 时 parser 接受). `--offload-arch=` 指定时每个
 ///     arch 映射为 device triple 展开。
 ///
-/// 诊断位置约定: 返回的诊断 span 为预处理文本坐标, 由调用方
-/// remap_diags + enrich_diags; entry 内的 file/line/col 为源坐标
-/// (已在此处 remap), 直接进入元数据。
+/// 诊断位置约定: 所有返回的诊断 span 均为源文件坐标 (已在函数内
+/// 完成 remap), 调用方只需 enrich_diags 填充 source_line。entry
+/// 内的 file/line/col 同样为源坐标, 直接进入元数据。
 fn collect_offload_section(
     prog: &crate::ast::Program,
     offload: &crate::profile::offload::OffloadConfig,
@@ -2695,13 +2699,15 @@ fn collect_offload_section(
             }
             // 语义校验: __global__ 不能与 __host__/__device__ 混用
             if f.is_global && (f.is_host || f.is_device) {
+                let mut err_sp = f.span.clone();
+                remap_span(&mut err_sp, line_map);
                 diags.push(Diagnostic::err(
                     "E0310",
                     format!(
                         "a __global__ function '{}' cannot also be __host__ or __device__",
                         f.name.name
                     ),
-                    f.span.clone(),
+                    err_sp,
                 ));
                 continue;
             }
