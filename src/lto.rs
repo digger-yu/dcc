@@ -261,6 +261,7 @@ mod tests {
             }],
             &[],
             &[],
+            &[], // comdat_groups
         );
         let parsed = extract_from_object(&obj).expect("extract LTO from ELF");
         assert_eq!(parsed.path, "unit.c");
@@ -335,6 +336,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         );
         let mut merged = build_unit("caller.c", &[("caller", 16, true)]);
         mark_references_from_objects(&mut merged, &[&caller_obj]);

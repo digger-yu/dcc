@@ -1069,6 +1069,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         );
         let parsed = parse_object(&obj, "min.o").expect("parse");
         assert_eq!(parsed.machine, 62);
@@ -1103,6 +1104,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         );
         let p2 = parse_object(&empty, "empty.o").expect("parse empty");
         assert!(p2.symbols.is_empty());
@@ -1119,7 +1121,7 @@ mod tests {
 
         let x86_64 = elf::build_elf_rel_x86_64(
             &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
-            &[], &[], &[], &[], &[],
+            &[], &[], &[], &[], &[], &[],
         );
         assert!(parse_object(&x86_64, "x86_64.o").is_ok());
 
@@ -1139,7 +1141,7 @@ mod tests {
         // Craft an ELF64 with an unknown e_machine (e.g. 999)
         let mut bad = elf::build_elf_rel_x86_64(
             &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
-            &[], &[], &[], &[], &[],
+            &[], &[], &[], &[], &[], &[],
         );
         bad[18..20].copy_from_slice(&999u16.to_le_bytes());
         let err = parse_object(&bad, "bad.o").unwrap_err();
@@ -1178,6 +1180,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         );
         let parsed = parse_object(&obj, "rela.o").expect("parse");
         assert!(!parsed.relocations.is_empty());

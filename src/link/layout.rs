@@ -543,8 +543,67 @@ impl LayoutBuilder {
             });
         }
 
-        // 段映射
-        let segments = self.build_segments(&sections);
+        // 段映射: 优先使用脚本定义的段，否则回退到默认 2-segment
+        let segments = if !script_result.segments.is_empty() {
+            // 使用脚本 PHDRS 块生成的段信息
+            let mut segs = Vec::new();
+            for script_seg in &script_result.segments {
+                let mut sec_indices = Vec::new();
+                for &idx in &script_seg.section_indices {
+                    if idx < sections.len() {
+                        sec_indices.push(sections[idx].output_index);
+                    }
+                }
+                if sec_indices.is_empty() && script_seg.ty != 1 {
+                    // 非 PT_LOAD 空段仍保留 (如 PT_GNU_STACK)
+                    segs.push(OutputSegment {
+                        ty: script_seg.ty,
+                        flags: script_seg.flags,
+                        vaddr: script_seg.vma,
+                        file_off: 0,
+                        filesz: 0,
+                        memsz: 0,
+                        align: if script_seg.ty == 1 { 0x1000 } else { 8 },
+                        section_indices: vec![],
+                    });
+                    continue;
+                }
+                if sec_indices.is_empty() {
+                    continue;
+                }
+                // 计算段的 vaddr/file_off/filesz/memsz
+                let mut lo_vaddr = u64::MAX;
+                let mut lo_file_off = u64::MAX;
+                let mut hi_vaddr = 0u64;
+                let mut hi_file_off = 0u64;
+                for &si in &sec_indices {
+                    let s = &sections[si as usize];
+                    lo_vaddr = lo_vaddr.min(s.vaddr);
+                    lo_file_off = lo_file_off.min(s.file_off);
+                    let v_end = s.vaddr + s.size.max(1);
+                    let f_end = if s.ty != SHT_NOBITS {
+                        s.file_off + s.data.len() as u64
+                    } else {
+                        s.file_off
+                    };
+                    hi_vaddr = hi_vaddr.max(v_end);
+                    hi_file_off = hi_file_off.max(f_end);
+                }
+                segs.push(OutputSegment {
+                    ty: script_seg.ty,
+                    flags: script_seg.flags,
+                    vaddr: lo_vaddr,
+                    file_off: lo_file_off,
+                    filesz: hi_file_off.saturating_sub(lo_file_off),
+                    memsz: hi_vaddr.saturating_sub(lo_vaddr),
+                    align: if script_seg.ty == 1 { 0x1000 } else { 8 },
+                    section_indices: sec_indices,
+                });
+            }
+            segs
+        } else {
+            self.build_segments(&sections)
+        };
 
         // 入口地址
         let entry = script_result

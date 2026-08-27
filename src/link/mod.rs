@@ -892,6 +892,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         )
     }
 
@@ -958,6 +959,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         );
         std::fs::write(&p1, &a).unwrap();
         std::fs::write(&p2, &b).unwrap();

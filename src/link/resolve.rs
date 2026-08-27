@@ -432,6 +432,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[], // comdat_groups
         )
     }
 

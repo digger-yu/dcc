@@ -2106,7 +2106,7 @@ impl Parser {
             }
             Token::Absolute | Token::Addr | Token::Sizeof | Token::Align
             | Token::Max | Token::Min | Token::Defined | Token::Length
-            | Token::Assert => {
+            | Token::Assert | Token::Next | Token::Log2Ceil => {
                 let name = match self.next() {
                     Token::Absolute => "ABSOLUTE",
                     Token::Addr => "ADDR",
@@ -2117,6 +2117,8 @@ impl Parser {
                     Token::Defined => "DEFINED",
                     Token::Length => "LENGTH",
                     Token::Assert => "ASSERT",
+                    Token::Next => "NEXT",
+                    Token::Log2Ceil => "LOG2CEIL",
                     _ => unreachable!(),
                 };
                 self.expect(&Token::LParen)?;
@@ -4238,13 +4240,197 @@ mod tests {
         // 降序：32, 16, 4, 1
         assert_eq!(aligns, vec![32, 16, 4, 1]);
     }
+
+    // ─── Linker Script Execution Verification Tests ───────────────────
+
+    /// Helper: build a minimal InputBundle with given section names/data.
+    fn make_bundle(sections: &[(&str, u32, u32, u64, usize)]) -> InputBundle {
+        use super::super::object::{FlatSection, InputObject};
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+            comdat_groups: vec![],
+        };
+        for (name, ty, flags, align, data_len) in sections {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: *ty,
+                flags: *flags,
+                align: *align,
+                data: vec![0xAB; *data_len],
+                size: *data_len as u64,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            });
+        }
+        bundle
+    }
+
+    /// Verify NEXT() rounds up to 8-byte alignment during execution
+    #[test]
+    fn exec_next_alignment() {
+        let bundle = make_bundle(&[(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 1, 16)]);
+        let resolved: Vec<ResolvedSymbol> = vec![];
+        let text = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) }
+                . = NEXT(.);
+                .data : { *(.data) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+        // After .text (16 bytes at 0x1000), NEXT(0x1010) = 0x1010 (already aligned)
+        let data_sec = result.sections.iter().find(|s| s.name == ".data").unwrap();
+        assert_eq!(data_sec.vma & 7, 0, "NEXT() result should be 8-byte aligned");
+        assert!(data_sec.vma >= 0x1010);
+    }
+
+    /// Verify LOG2CEIL() for various values during execution
+    #[test]
+    fn exec_log2ceil_range() {
+        let ctx = EvalContext::new();
+        let cases = [
+            (0u64, 0u64),
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (7, 3),
+            (8, 3),
+            (9, 4),
+            (1024, 10),
+            (1025, 11),
+        ];
+        for (input, expected) in cases {
+            let expr = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(input)]);
+            let val = ctx.eval(&expr).unwrap();
+            assert_eq!(val, expected, "LOG2CEIL({}) should be {}", input, expected);
+        }
+    }
+
+    /// Verify ASSERT pass and fail paths during execution
+    #[test]
+    fn exec_assert_pass_fail() {
+        let bundle = make_bundle(&[(".text", SHT_PROGBITS, SHF_ALLOC, 1, 16)]);
+        let resolved: Vec<ResolvedSymbol> = vec![];
+
+        // Passing assertion
+        let text_pass = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) }
+                ASSERT(SIZEOF(.text) > 0, "text should be non-empty")
+            }
+        "#;
+        let script = LinkerScript::parse(text_pass).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+        assert!(result.assert_failures.is_empty(),
+            "passing ASSERT should not produce failures: {:?}", result.assert_failures);
+
+        // Failing assertion
+        let text_fail = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) }
+                ASSERT(SIZEOF(.text) == 0, "text should be empty")
+            }
+        "#;
+        let script2 = LinkerScript::parse(text_fail).unwrap();
+        let result2 = execute_script(&script2, &bundle, &resolved).unwrap();
+        assert_eq!(result2.assert_failures.len(), 1,
+            "failing ASSERT should produce exactly one failure");
+        assert!(result2.assert_failures[0].contains("text should be empty"));
+    }
+
+    /// Verify SORT execution in a full script context
+    #[test]
+    fn exec_sort_by_name_integration() {
+        let bundle = make_bundle(&[
+            (".text.c", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 1, 8),
+            (".text.a", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 1, 8),
+            (".text.b", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 1, 8),
+        ]);
+        let resolved: Vec<ResolvedSymbol> = vec![];
+        let text = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(SORT_BY_NAME(.text.*)) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+        let text_sec = result.sections.iter().find(|s| s.name == ".text").unwrap();
+        // Input sections should be sorted by name: .text.a, .text.b, .text.c
+        let names: Vec<&str> = text_sec.input_sections.iter()
+            .map(|m| bundle.sections[m.input_index as usize].name.as_str())
+            .collect();
+        assert_eq!(names, vec![".text.a", ".text.b", ".text.c"]);
+    }
+
+    /// Verify PHDRS definitions generate correct segment information
+    #[test]
+    fn exec_phdr_segment_generation() {
+        let bundle = make_bundle(&[
+            (".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 16, 32),
+            (".data", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 16),
+        ]);
+        let resolved: Vec<ResolvedSymbol> = vec![];
+        let text = r#"
+            PHDRS {
+                text PT_LOAD FLAGS(5);
+                data PT_LOAD FLAGS(6);
+                note PT_NOTE FLAGS(0);
+            }
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) } :text
+                .data : { *(.data) } :data
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+
+        // Should have 3 segments
+        assert_eq!(result.segments.len(), 3, "expected 3 segments from PHDRS");
+
+        // Verify text segment
+        let text_seg = result.segments.iter().find(|s| s.name == "text").unwrap();
+        assert_eq!(text_seg.ty, 1); // PT_LOAD
+        assert_eq!(text_seg.flags, 5); // PF_R | PF_X
+        assert!(!text_seg.section_indices.is_empty(), "text segment should have sections");
+
+        // Verify data segment
+        let data_seg = result.segments.iter().find(|s| s.name == "data").unwrap();
+        assert_eq!(data_seg.ty, 1); // PT_LOAD
+        assert_eq!(data_seg.flags, 6); // PF_R | PF_W
+
+        // Verify note segment (empty but present)
+        let note_seg = result.segments.iter().find(|s| s.name == "note").unwrap();
+        assert_eq!(note_seg.ty, 4); // PT_NOTE
+        assert_eq!(note_seg.flags, 0);
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
 
 use super::object::InputBundle;
 use super::resolve::ResolvedSymbol;
-use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_WRITE};
+use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
 
 /// 链接脚本执行结果
 pub struct ScriptLayoutResult {
@@ -4258,6 +4444,30 @@ pub struct ScriptLayoutResult {
     pub assert_failures: Vec<String>,
     /// COMMON 符号放置信息（*(COMMON) 模式处理结果）
     pub common_placements: Vec<CommonPlacement>,
+    /// 脚本定义的段 (来自 PHDRS 块执行)
+    pub segments: Vec<ScriptSegment>,
+}
+
+/// 脚本 PHDRS 块执行后生成的段描述
+///
+/// 每个 ScriptSegment 对应一个 PHDRS 定义，包含该段应覆盖的
+/// 输出节索引列表。当脚本未定义 PHDRS 时此向量为空，
+/// layout 层回退到默认 2-segment 模型。
+pub struct ScriptSegment {
+    /// PHDR 名称
+    pub name: String,
+    /// 段类型 (PT_LOAD=1, PT_DYNAMIC=2, ...)
+    pub ty: u32,
+    /// 段标志 (PF_R=4, PF_W=2, PF_X=1)
+    pub flags: u32,
+    /// 该段包含的输出节索引 (在 result.sections 中的位置)
+    pub section_indices: Vec<usize>,
+    /// 段虚拟地址 (首节 VMA)
+    pub vma: u64,
+    /// 段文件大小
+    pub filesz: u64,
+    /// 段内存大小
+    pub memsz: u64,
 }
 
 /// 脚本定义的输出节
@@ -4319,6 +4529,7 @@ pub fn execute_script(
         entry: None,
         assert_failures: Vec::new(),
         common_placements: Vec::new(),
+        segments: Vec::new(),
     };
     // 跟踪已匹配的输入节，避免重复匹配
     let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -4472,6 +4683,80 @@ pub fn execute_script(
     if let Some(ref entry_name) = script.entry {
         if let Some(&addr) = ctx.symbols.get(entry_name) {
             result.entry = Some(addr);
+        }
+    }
+
+    // 5. 根据 PHDRS 块构建段信息
+    //    仅当脚本定义了 PHDRS 时才生成 ScriptSegment；
+    //    否则 layout 层使用默认 2-segment 模型。
+    if !script.phdrs.is_empty() {
+        for phdr in &script.phdrs {
+            let pt = phdr.ty.to_pt();
+            // 计算 flags: 显式 FLAGS(N) 优先，否则根据段类型推断
+            let flags = phdr.flags.unwrap_or_else(|| match phdr.ty {
+                PhdrType::PtLoad => {
+                    // 扫描所有映射到此 PHDR 的节来推断 flags
+                    let mut f = 4u32; // PF_R
+                    for sec in &result.sections {
+                        if sec.is_none_phdr {
+                            continue;
+                        }
+                        if sec.phdrs.contains(&phdr.name) {
+                            if sec.flags & SHF_WRITE != 0 {
+                                f |= 2; // PF_W
+                            }
+                            if sec.flags & SHF_EXECINSTR != 0 {
+                                f |= 1; // PF_X
+                            }
+                        }
+                    }
+                    f
+                }
+                PhdrType::PtGnuStack => 6, // PF_R | PF_W
+                PhdrType::PtPhdr => 4,     // PF_R
+                _ => 4,
+            });
+
+            // 收集映射到此 PHDR 的输出节索引
+            let mut section_indices = Vec::new();
+            for (i, sec) in result.sections.iter().enumerate() {
+                if sec.is_none_phdr {
+                    continue;
+                }
+                // 如果节显式映射到此 PHDR
+                if sec.phdrs.contains(&phdr.name) {
+                    section_indices.push(i);
+                } else if sec.phdrs.is_empty() && pt == 1 {
+                    // 无显式 PHDR 映射的节默认属于 PT_LOAD
+                    section_indices.push(i);
+                }
+            }
+
+            // 计算 VMA / filesz / memsz
+            let vma = section_indices
+                .first()
+                .map(|&i| result.sections[i].vma)
+                .unwrap_or(0);
+            let mut filesz = 0u64;
+            let mut memsz = 0u64;
+            for &idx in &section_indices {
+                let sec = &result.sections[idx];
+                let end = sec.vma.wrapping_add(sec.size).wrapping_sub(vma);
+                if sec.ty != SHT_NOBITS {
+                    filesz = filesz.max(end);
+                }
+                memsz = memsz.max(end);
+            }
+
+            result.segments.push(ScriptSegment {
+                name: phdr.name.clone(),
+                ty: pt,
+                flags,
+                section_indices,
+                vma,
+                filesz,
+                memsz,
+            });
         }
     }
 

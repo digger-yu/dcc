@@ -404,12 +404,13 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 未定义符号输出 .symtab | 允许列表中的未定义符号和弱未定义符号均写入输出 `.symtab`，`nm` 显示为 `U` (undefined)；ELF `st_shndx = SHN_UNDEF (0)` |
 | 链接器脚本 MEMORY 块 | `MEMORY { name [(attr)] : ORIGIN = expr, LENGTH = expr }` 定义内存区域及属性；支持内核 vmlinux.lds 物理内存区域映射 |
 | 链接器脚本 ORIGIN()/ORG()/LENGTH() | `ORIGIN(region)` / `ORG(region)` 获取内存区域起始地址；`LENGTH(region)` 获取内存区域长度；用于节起始地址计算和断言检查 |
-| 链接器脚本 NEXT()/LOG2CEIL() | `NEXT(expr)` 对齐到下一个空闲地址；`LOG2CEIL(x)` 向上取整 log2，用于计算对齐粒度 |
+| 链接器脚本 NEXT()/LOG2CEIL() | `NEXT(expr)` 对齐到下一个 8 字节边界；`LOG2CEIL(x)` 向上取整 log2；两者均在脚本执行阶段正确求值，已通过 `exec_next_alignment` / `exec_log2ceil_range` 验证 |
 | 链接器脚本 EXCLUDE_FILE | `*(EXCLUDE_FILE(file_pattern) section_patterns)` 排除特定文件的输入节；内核按文件过滤节广泛使用 |
 | 链接器脚本 SORT 完整支持 | `SORT(pattern)` / `SORT_BY_NAME(pattern)` 按节名升序排序；`SORT_BY_ALIGNMENT(pattern)` 按对齐值降序排序；支持组合嵌套如 `SORT_BY_NAME(SORT_BY_ALIGNMENT(...))` 实现多级排序（先按对齐值，再按节名）；支持多层嵌套 `SORT(SORT_BY_NAME(SORT_BY_ALIGNMENT(...)))`；与 `KEEP` 正确交互：`KEEP(*(SORT(...)))` 和 `*(KEEP(SORT(...)))` 均正确设置 keep 标志；每个模式独立排序后按模式顺序追加，未包裹 SORT 的模式保持文件出现顺序；initcall 节通过脚本定义顺序保证正确初始化顺序 |
 | 链接器脚本浮点表达式 | 表达式求值器支持浮点字面量 (`3.14`/`1e3`/`2.5E-2`) 和浮点算术运算；整数与浮点混合运算时自动提升为浮点；最终结果截断为 `u64`；位运算在混合类型时回退为整数操作 |
 | 链接器脚本 COMMON 符号 | `*(COMMON)` 特殊处理 COMMON 符号（`SHN_COMMON` tentative definitions）；识别 `st_shndx == 0xfff2` 的 COMMON 符号，跨 TU 合并取最大 size，在输出节中分配 NOBITS 空间并更新符号地址 |
 | 链接器脚本 :NONE PHDR 映射 | `:NONE` 表示输出节不属于任何程序头（LOAD 段）；解析器将 `NONE` 作为特殊 PHDR 名收集，执行器设置 `is_none_phdr` 标记，布局时该节被排除在所有 LOAD 段之外；用于将调试节等排除在加载段外 |
+| 链接器脚本 PHDRS 执行 | `PHDRS { name PT_type FLAGS(N); }` 解析后在执行阶段生成 `ScriptSegment`，包含段类型/标志/包含节列表/VMA/filesz/memsz；layout 层优先使用脚本定义的段而非默认 2-segment 模型；已通过 `exec_phdr_segment_generation` 验证 PT_LOAD/PT_NOTE 等类型和 FLAGS 正确传播 |
 | 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
 | 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
 | 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
