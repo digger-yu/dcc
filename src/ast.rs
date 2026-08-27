@@ -80,6 +80,9 @@ pub struct VarDecl {
     /// ISO C 限定符 (const/volatile/restrict) 附着在该变量声明上.
     /// 用于优化 pass 检测 volatile 变量，防止其读写被消除.
     pub quals: QualifierFlags,
+    /// 地址空间 (x86 段寄存器: __seg_gs / __seg_fs).
+    /// 用于 per-cpu 变量访问: 变量本身位于特定段地址空间.
+    pub addr_space: AddrSpace,
 }
 
 #[derive(Debug, Clone)]
@@ -701,6 +704,8 @@ pub struct QualType {
     pub base: Type,
     /// 限定符位标志
     pub quals: QualifierFlags,
+    /// 地址空间 (x86 段寄存器: __seg_gs / __seg_fs)
+    pub addr_space: AddrSpace,
 }
 
 impl QualType {
@@ -710,23 +715,45 @@ impl QualType {
         Self {
             base,
             quals: QualifierFlags::NONE,
+            addr_space: AddrSpace::None,
         }
     }
 
     /// 构造带限定符的 QualType
     #[inline]
     pub fn with_quals(base: Type, quals: QualifierFlags) -> Self {
-        Self { base, quals }
+        Self {
+            base,
+            quals,
+            addr_space: AddrSpace::None,
+        }
     }
 
-    /// 替换底层类型, 保留限定符
+    /// 构造带地址空间的 QualType
+    #[inline]
+    pub fn with_addr_space(base: Type, addr_space: AddrSpace) -> Self {
+        Self {
+            base,
+            quals: QualifierFlags::NONE,
+            addr_space,
+        }
+    }
+
+    /// 设置地址空间, 返回新的 QualType
+    #[inline]
+    pub fn with_addr_space_set(mut self, addr_space: AddrSpace) -> Self {
+        self.addr_space = addr_space;
+        self
+    }
+
+    /// 替换底层类型, 保留限定符和地址空间
     #[inline]
     pub fn with_base(mut self, base: Type) -> Self {
         self.base = base;
         self
     }
 
-    /// 替换限定符, 保留底层类型
+    /// 替换限定符, 保留底层类型和地址空间
     #[inline]
     pub fn with_quals_set(mut self, quals: QualifierFlags) -> Self {
         self.quals = quals;
@@ -740,10 +767,16 @@ impl QualType {
         self
     }
 
-    /// 是否无限定符
+    /// 是否无限定符且无地址空间
     #[inline]
     pub fn is_unqualified(&self) -> bool {
-        self.quals.is_empty()
+        self.quals.is_empty() && !self.addr_space.is_segment()
+    }
+
+    /// 是否带地址空间 (段寄存器限定)
+    #[inline]
+    pub fn has_addr_space(&self) -> bool {
+        self.addr_space.is_segment()
     }
 
     /// 是否带 const
@@ -816,6 +849,54 @@ impl From<&Type> for QualType {
     }
 }
 
+/// x86 段寄存器地址空间标识.
+///
+/// GCC 扩展 `__seg_gs` / `__seg_fs` 等限定符把指针关联到特定段寄存器.
+/// Linux 内核用此实现 per-cpu 变量访问: `int __seg_gs *p` 解引用时
+/// 生成 `mov (%gs:rax), eax` 而非普通 `mov (%rax), eax`.
+///
+/// dcc 当前仅实现 x86_64 的 GS/FS 段 (内核 per-cpu 访问所需).
+/// 其他段 (CS/DS/ES/SS) 解析器接受但降级为 Generic (不生成段前缀).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AddrSpace {
+    /// 默认地址空间 (无段前缀)
+    #[default]
+    None,
+    /// x86_64 %gs 段前缀 (Linux 内核 per-cpu 基址)
+    GS,
+    /// x86_64 %fs 段前缀 (TLS 基址)
+    FS,
+    /// 其他段 (CS/DS/ES/SS) — 解析接受但不生成段前缀
+    Generic,
+}
+
+impl AddrSpace {
+    /// 从标识符文本解析地址空间
+    pub fn from_ident(text: &str) -> Self {
+        match text {
+            "__seg_gs" => AddrSpace::GS,
+            "__seg_fs" => AddrSpace::FS,
+            "__seg_cs" | "__seg_ds" | "__seg_es" | "__seg_ss" => AddrSpace::Generic,
+            _ => AddrSpace::None,
+        }
+    }
+
+    /// 是否为有效段 (非 None)
+    #[inline]
+    pub fn is_segment(self) -> bool {
+        !matches!(self, AddrSpace::None)
+    }
+
+    /// x86_64 段前缀字节 (GS=0x65, FS=0x64)
+    pub fn prefix_byte(self) -> Option<u8> {
+        match self {
+            AddrSpace::GS => Some(0x65),
+            AddrSpace::FS => Some(0x64),
+            _ => None,
+        }
+    }
+}
+
 /// `QualType` 的 C 风格字符串化: 限定符在前, 类型名在后.
 /// 例: `const int *` 在最外层 QualType 上输出为 `const int *`;
 /// `int * const` 则在 Ptr(...) 节点上输出 `int * const`.
@@ -826,6 +907,15 @@ impl std::fmt::Display for QualType {
         // 仍依赖变体; 简单形式: 全部前缀输出.
         if !self.quals.is_empty() {
             write!(f, "{}", self.quals)?;
+        }
+        if self.addr_space.is_segment() {
+            let seg = match self.addr_space {
+                AddrSpace::GS => "__seg_gs ",
+                AddrSpace::FS => "__seg_fs ",
+                AddrSpace::Generic => "__seg ",
+                AddrSpace::None => "",
+            };
+            write!(f, "{}", seg)?;
         }
         write!(f, "{}", self.base)
     }
