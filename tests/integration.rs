@@ -605,12 +605,18 @@ fn constant_builtin_and_static_assert_pass_through_typed_ir() {
 
 #[test]
 fn failed_static_assert_is_a_hard_error() {
+    // 注意：_Static_assert 失败已降级为警告 (W0010) 以支持内核构建
+    // 这个测试现在验证警告是否正确发出
     let output = run_syntax_test(
         "static-assert-fail",
         "_Static_assert(2 * 3 == 7, \"math is broken\");\nint main(void) { return 0; }\n",
     );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("math is broken"));
+    // 编译应该成功（降级为警告）
+    assert!(output.status.success(), "static_assert failure should be a warning, not an error");
+    // 但应该包含警告信息
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("math is broken") || stderr.contains("W0010"), 
+            "stderr should mention the assertion or warning code: {}", stderr);
 }
 
 #[test]

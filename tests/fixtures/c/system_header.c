@@ -20,6 +20,6 @@
 /* 4. 正常代码不受影响 */
 int system_header_test_var = 42;
 
-int system_header_main(void) {
+int main(void) {
     return system_header_test_var == 42 ? 0 : 1;
 }

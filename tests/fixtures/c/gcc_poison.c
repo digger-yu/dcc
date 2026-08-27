@@ -16,6 +16,6 @@
 /* 3. 正常代码不使用被 poison 的标识符 */
 int poison_test_var = 42;
 
-int poison_test_main(void) {
+int main(void) {
     return poison_test_var == 42 ? 0 : 1;
 }
