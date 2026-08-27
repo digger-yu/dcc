@@ -201,7 +201,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | object_size FORTIFY | `__builtin_object_size` + `__builtin___memcpy_chk` 等 |
 | apply/return | `__builtin_apply` / `__builtin_return` |
 | return thunk | `-mfunction-return=thunk-extern` 将 C 函数尾声、空 global asm 函数和 mini-asm `ret`/`retq` 发射为外部 `__x86_return_thunk` 跳转；`-mfunction-return=keep` 保留裸 `ret` |
-| prefetch | `__builtin_prefetch` no-op |
+| prefetch | `__builtin_prefetch(addr, rw, locality)` 生成实际 prefetch 指令：`prefetchnta` (locality=0) / `prefetcht2` (locality=1) / `prefetcht1` (locality=2) / `prefetcht0` (locality=3) / `prefetchw` (rw=1) |
 | unknown expression fallback | unsupported expression / 非标量 InitList rvalue 输出带源位置 warning，并发射 `ud2` 后清零目标寄存器，避免静默返回 0 |
 | `-mno-sse` x87 FPU 回退 | 内核中断上下文禁用 XMM 寄存器，浮点运算使用 x87 FPU 指令 (fld/fstp/faddp/fsubrp/fmulp/fdivrp/fucomip)；降级为 W0300 警告而非硬错误 |
 | `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；函数和数据符号地址均使用直接 PC-relative (R_X86_64_PC32/PLT32) 而非 GOT 间接寻址；全局变量 load/store/取地址均走 RIP-relative 路径，不经过 GOT |

@@ -14250,8 +14250,33 @@ impl Codegen {
                 self.emit_func_epilogue();
                 true
             }
-            // __builtin_prefetch 及变体：void 提示，编译为 no-op
-            n if n.starts_with("__builtin_prefetch") => true,
+            // __builtin_prefetch(addr, rw=0, locality=3): emit actual prefetch instructions
+            n if n.starts_with("__builtin_prefetch") => {
+                if args.is_empty() {
+                    return true;
+                }
+                // Evaluate address argument to rax
+                self.gen_expr(&args[0], 0);
+                // Determine rw (0=read, 1=write) and locality (0-3)
+                let rw = args.get(1).and_then(|e| const_eval::eval(e).ok()).unwrap_or(0);
+                let locality = args.get(2).and_then(|e| const_eval::eval(e).ok()).unwrap_or(3);
+                // Emit prefetch instruction based on rw and locality
+                // prefetchw for write, otherwise prefetchnta/t0/t1/t2 based on locality
+                if rw == 1 {
+                    // prefetchw [rax]: 0x0F 0x0D 0x08
+                    self.emit(&[0x0F, 0x0D, 0x08]);
+                } else {
+                    // locality 0 -> prefetchnta, 1 -> prefetcht2, 2 -> prefetcht1, 3 -> prefetcht0
+                    let modrm = match locality {
+                        0 => 0x00, // prefetchnta [rax]
+                        1 => 0x18, // prefetcht2 [rax]
+                        2 => 0x10, // prefetcht1 [rax]
+                        _ => 0x08, // prefetcht0 [rax] (default)
+                    };
+                    self.emit(&[0x0F, 0x18, modrm]);
+                }
+                true
+            }
             // __builtin_add_overflow(a, b, &result): 溢出检测
             // 策略: 计算 64 位结果, 截断到操作数类型, 比较检测溢出
             "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {

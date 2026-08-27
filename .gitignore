@@ -32,6 +32,7 @@ perf.data
 # DCC artifacts
 bin/
 .dcc-cache/
+initramfs/
 *.o
 !tests/fixtures/corpus/**/*.o
 *.exe

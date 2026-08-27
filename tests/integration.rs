@@ -18490,3 +18490,47 @@ fn symver_end_to_end() {
         "expected versioned symbols foo@v1 and foo@@v2 in output, dump:\n{dump}"
     );
 }
+
+/// Verify that __builtin_prefetch generates actual prefetch instructions
+/// (prefetchnta/prefetcht0/prefetcht1/prefetcht2/prefetchw) instead of no-op.
+#[test]
+#[cfg(unix)]
+fn builtin_prefetch_emits_instructions() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("tests/fixtures/c/prefetch_test.c");
+    if !src.exists() {
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-prefetch-{}.o", std::process::id()));
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        compile.status.success(),
+        "dcc compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    // Disassemble and verify prefetch instructions exist
+    let objdump = Command::new("objdump")
+        .args(["-d", "--no-show-raw-insn"])
+        .arg(&obj)
+        .output()
+        .expect("run objdump");
+    let _ = fs::remove_file(&obj);
+    assert!(objdump.status.success(), "objdump failed");
+    let dump = String::from_utf8_lossy(&objdump.stdout);
+    // Check for prefetch instructions in the disassembly
+    let has_prefetch = dump.contains("prefetchnta")
+        || dump.contains("prefetcht0")
+        || dump.contains("prefetcht1")
+        || dump.contains("prefetcht2")
+        || dump.contains("prefetchw");
+    assert!(
+        has_prefetch,
+        "expected prefetch instructions in disassembly:\n{dump}"
+    );
+}
