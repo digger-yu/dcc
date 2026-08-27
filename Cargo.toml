@@ -23,7 +23,7 @@ debug     = true
 
 [dependencies]
 # 最小外部依赖: miniz_oxide 用于 DWARF 压缩节 (zlib/deflate)
-miniz_oxide = "0.7"
+miniz_oxide = "0.8"
 # zstd 压缩 debug sections (--compress-debug-sections=zstd)
 zstd = "0.13"
 
