@@ -118,6 +118,9 @@ pub struct Preprocessor {
     /// `#pragma omp ...` 指令收集: (源文件, 源行号, 指令文本)
     openmp_pragmas: Vec<(String, u32, String)>,
     /// 已读入的 include 依赖: (canonical path, content hash)。
+    /// 汇编模式: 若主文件为 .S/.s, 预处理时保留续接行的换行符,
+    /// 使 GAS .macro 体内的语句边界不被合并到单行.
+    asm_mode: bool,
     /// 供头文件缓存的传递依赖校验 (include 图缓存): 缓存条目记录其
     /// 依赖闭包, 命中前逐个重读比对, 任一依赖变更即失效重处理。
     dep_hashes: Vec<(String, u64)>,
@@ -532,6 +535,7 @@ pub fn preprocess(
         base_file: file.to_string(),
         include_level: 0,
         poisoned_ids: HashSet::new(),
+        asm_mode: file.ends_with(".S") || file.ends_with(".s"),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -1553,7 +1557,8 @@ impl Preprocessor {
 
         // 行续接: 合并以 \ 结尾的行, 同时记录每个逻辑行的物理行号范围
         // (SourceLoc 追踪: 诊断/__LINE__/输出行号一律以物理行为准)
-        let logical = Self::logical_lines(text);
+        // 汇编模式下保留换行符, 使 GAS .macro 体内语句边界不被合并到单行.
+        let logical = Self::logical_lines(text, self.asm_mode);
 
         let mut active_source = String::new();
         // 与 active_source 中每行对应的物理行号范围 (逻辑行跨度)
@@ -1974,20 +1979,23 @@ impl Preprocessor {
 
     /// 将物理行合并为逻辑行 (行尾 \ 与下一行拼接, \ 替换为空格),
     /// 同时记录每个逻辑行覆盖的物理行号范围。
-    fn logical_lines(text: &str) -> Vec<LogicalLine> {
+    fn logical_lines(text: &str, asm_mode: bool) -> Vec<LogicalLine> {
         let mut out = Vec::new();
         let mut phys = 1u32;
         let mut continued: Option<(String, u32)> = None; // (累积文本, 起始物理行)
+        // In asm_mode, join continuation lines with newlines (not spaces) so that
+        // GAS .macro bodies preserve statement boundaries.
+        let joiner = if asm_mode { "\n" } else { " " };
         for line in text.split('\n') {
             let line = line.strip_suffix('\r').unwrap_or(line);
             if let Some(prefix) = line.strip_suffix('\\') {
                 match &mut continued {
                     Some((acc, _)) => {
                         acc.push_str(prefix);
-                        acc.push(' ');
+                        acc.push_str(joiner);
                     }
                     None => {
-                        continued = Some((format!("{} ", prefix), phys));
+                        continued = Some((format!("{}{}", prefix, joiner), phys));
                     }
                 }
             } else if let Some((mut acc, start)) = continued.take() {
@@ -7630,7 +7638,7 @@ n\
     /// 续接行合并时记录覆盖的物理行范围 (phys_start/phys_end)
     #[test]
     fn logical_lines_track_physical_spans() {
-        let lines = super::Preprocessor::logical_lines("a\\\nb\nc\n");
+        let lines = super::Preprocessor::logical_lines("a\\\nb\nc\n", false);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].text, "a b");
         assert_eq!(lines[0].phys_start, 1);
