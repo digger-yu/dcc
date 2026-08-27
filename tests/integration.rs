@@ -18436,3 +18436,57 @@ fn fno_flags_accepted() {
     }
     let _ = fs::remove_file(&src);
 }
+
+/// End-to-end verification that .symver directives produce versioned
+/// symbols in the linked output's symbol table.
+#[test]
+#[cfg(unix)]
+fn symver_end_to_end() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("tests/fixtures/c/symver_e2e.c");
+    if !src.exists() {
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-symver-{}.o", std::process::id()));
+    let exe = dir.join(format!("dcc-symver-{}", std::process::id()));
+    // Compile with gcc to produce .o with .symver directives
+    let compile = Command::new("gcc")
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run gcc");
+    assert!(
+        compile.status.success(),
+        "gcc compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    // Link with dcc's built-in linker
+    let link = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fbuiltin-linker", "-nostdlib", "-o"])
+        .arg(&exe)
+        .arg(&obj)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&obj);
+    assert!(
+        link.status.success(),
+        "dcc link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    // Verify versioned symbols exist in the output symbol table
+    let readelf = Command::new("readelf")
+        .args(["-s", "-W"])
+        .arg(&exe)
+        .output()
+        .expect("run readelf");
+    let _ = fs::remove_file(&exe);
+    assert!(readelf.status.success(), "readelf -s failed");
+    let dump = String::from_utf8_lossy(&readelf.stdout);
+    // Check that versioned symbol names appear in the symbol table
+    assert!(
+        dump.contains("foo@v1") && dump.contains("foo@@v2"),
+        "expected versioned symbols foo@v1 and foo@@v2 in output, dump:\n{dump}"
+    );
+}
