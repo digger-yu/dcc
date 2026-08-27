@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::elf::{
-    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_GROUP, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
     SHT_NOBITS, SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
     STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };
@@ -137,6 +137,21 @@ pub struct Layout {
     pub needed: Vec<String>,
     /// 自定义动态链接器路径 (-Wl,--dynamic-linker=)
     pub dynamic_linker: Option<String>,
+    /// 保留的 COMDAT 组: 每个保留组生成一个 SHT_GROUP 输出节,
+    /// `member_sec_indices` 存储成员在 `sections` 中的 0-based 索引。
+    pub comdat_groups: Vec<OutputComdatGroup>,
+}
+
+/// 输出 COMDAT 组 (对应一个 SHT_GROUP 节)。
+#[derive(Debug, Clone)]
+pub struct OutputComdatGroup {
+    /// 组签名 (通常是被包装的符号名)
+    pub signature: String,
+    /// 组标志 (通常 GRP_COMDAT = 1)
+    pub flags: u32,
+    /// 成员节在 `Layout.sections` 中的 0-based 索引;
+    /// 这些成员节的 sh_flags 应包含 SHF_GROUP。
+    pub member_sec_indices: Vec<u32>,
 }
 
 /// 输出重定位（应用于输出节，目标是合并后的符号）。
@@ -425,6 +440,7 @@ impl LayoutBuilder {
             output_relas,
             needed: self.needed.clone(),
             dynamic_linker: self.dynamic_linker.clone(),
+            comdat_groups: Vec::new(),
         })
     }
 
@@ -641,6 +657,7 @@ impl LayoutBuilder {
             output_relas,
             needed: self.needed.clone(),
             dynamic_linker: self.dynamic_linker.clone(),
+            comdat_groups: Vec::new(),
         })
     }
 

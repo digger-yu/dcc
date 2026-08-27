@@ -575,6 +575,7 @@ mod tests {
             output_relas: vec![],
             needed: vec![],
             dynamic_linker: None,
+            comdat_groups: vec![],
         }
     }
 

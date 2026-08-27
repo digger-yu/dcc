@@ -29,12 +29,20 @@ pub fn write_elf_pie_arm(layout: &Layout) -> Vec<u8> {
 
 fn write_elf_pie(layout: &Layout, machine: u16) -> Vec<u8> {
     let mut out = Vec::new();
-    let shstrtab = build_shstrtab(layout);
+    let (shstrtab, comdat_groups) = build_shstrtab(layout);
     let (strtab, strtab_offsets) = build_strtab(layout);
     let symtab = build_symtab(layout, &strtab_offsets);
     let gnu_hash = build_gnu_hash(layout);
     write_elf_internal(
-        layout, machine, ET_DYN, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash,
+        layout,
+        machine,
+        ET_DYN,
+        &mut out,
+        &shstrtab,
+        &strtab,
+        &symtab,
+        &gnu_hash,
+        &comdat_groups,
     );
     out
 }
@@ -63,7 +71,7 @@ fn write_elf_shared(layout: &Layout, machine: u16) -> Vec<u8> {
     let mut layout_clone = layout.clone();
     layout_clone.entry = 0;
     let mut out = Vec::new();
-    let shstrtab = build_shstrtab(&layout_clone);
+    let (shstrtab, comdat_groups) = build_shstrtab(&layout_clone);
     let (strtab, strtab_offsets) = build_strtab(&layout_clone);
     let symtab = build_symtab(&layout_clone, &strtab_offsets);
     let gnu_hash = build_gnu_hash(&layout_clone);
@@ -76,18 +84,27 @@ fn write_elf_shared(layout: &Layout, machine: u16) -> Vec<u8> {
         &strtab,
         &symtab,
         &gnu_hash,
+        &comdat_groups,
     );
     out
 }
 
-fn build_shstrtab(layout: &Layout) -> Vec<u8> {
+fn build_shstrtab(layout: &Layout) -> (Vec<u8>, Vec<(u32, u32, Vec<u32>)>) {
     let mut s = vec![0u8];
     for sec in &layout.sections {
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
     }
     s.extend_from_slice(b".symtab\0.strtab\0.shstrtab\0");
-    s
+    // COMDAT group section names (".group.<signature>")
+    let mut comdat_groups: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+    for grp in &layout.comdat_groups {
+        let name = format!(".group.{}\0", grp.signature);
+        let name_off = s.len() as u32;
+        s.extend_from_slice(name.as_bytes());
+        comdat_groups.push((name_off, grp.flags, grp.member_sec_indices.clone()));
+    }
+    (s, comdat_groups)
 }
 
 fn build_strtab(layout: &Layout) -> (Vec<u8>, Vec<u32>) {

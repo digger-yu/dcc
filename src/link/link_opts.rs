@@ -623,6 +623,7 @@ mod tests {
             needed: vec![],
             dynamic_linker: None,
             arch: crate::debug::ArchKind::X86_64,
+            comdat_groups: vec![],
         };
         let before_len = layout.sections[0].data.len();
         let compressed = compress_debug_sections(&mut layout, "zstd");

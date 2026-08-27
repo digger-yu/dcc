@@ -1848,6 +1848,7 @@ mod tests {
             needed: vec![],
             dynamic_linker: None,
             arch: crate::debug::ArchKind::X86_64,
+            comdat_groups: vec![],
         };
         apply_relocations(&mut layout).expect("apply");
         layout
@@ -1937,6 +1938,7 @@ mod tests {
             needed: vec![],
             dynamic_linker: None,
             arch,
+            comdat_groups: vec![],
         };
         apply_relocations(&mut layout)
     }
@@ -2172,6 +2174,7 @@ mod tests {
                 needed: vec![],
                 dynamic_linker: None,
                 arch: ArchKind::X86_64,
+                comdat_groups: vec![],
             };
             l
         };

@@ -220,6 +220,52 @@ fn diag(code: &'static str, msg: impl Into<String>) -> Vec<Diagnostic> {
     vec![Diagnostic::err(code, msg.into(), Span::point("", 0, 0))]
 }
 
+/// Populate `layout.comdat_groups` from the bundle's retained COMDAT groups,
+/// converting FlatSection indices to output section indices. Also sets
+/// `SHF_GROUP` on each member output section.
+fn populate_output_comdat_groups(
+    layout: &mut layout::Layout,
+    bundle: &InputBundle,
+    comdat_discarded: &std::collections::HashSet<u32>,
+) {
+    let retained = resolve::retained_comdat_groups(bundle);
+    if retained.is_empty() {
+        return;
+    }
+    // Build flat_idx -> output_idx mapping from each output section's
+    // input_sections list.
+    let mut flat_to_output: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for (out_idx, sec) in layout.sections.iter().enumerate() {
+        for &flat_idx in &sec.input_sections {
+            flat_to_output.insert(flat_idx, out_idx as u32);
+        }
+    }
+    for grp in &retained {
+        let grp: &resolve::RetainedComdatGroup = grp;
+        let mut member_sec_indices: Vec<u32> = Vec::new();
+        for &flat_idx in &grp.member_flat_indices {
+            if comdat_discarded.contains(&flat_idx) {
+                continue;
+            }
+            if let Some(&out_idx) = flat_to_output.get(&flat_idx) {
+                member_sec_indices.push(out_idx);
+            }
+        }
+        if member_sec_indices.is_empty() {
+            continue;
+        }
+        // Mark member sections with SHF_GROUP.
+        for &out_idx in &member_sec_indices {
+            layout.sections[out_idx as usize].flags |= crate::codegen::elf::SHF_GROUP;
+        }
+        layout.comdat_groups.push(layout::OutputComdatGroup {
+            signature: grp.signature.clone(),
+            flags: grp.flags,
+            member_sec_indices,
+        });
+    }
+}
+
 /// 主入口：链接多个 .o 文件
 pub fn link_multi_tu(
     inputs: &[PathBuf],
@@ -318,10 +364,12 @@ pub fn link_from_bundle(
     builder.dynamic_linker = cfg.dynamic_linker.clone();
     builder.needed = cfg.needed.clone();
     builder.linker_script = cfg.linker_script.clone();
-    builder.comdat_discarded = comdat_discarded;
+    builder.comdat_discarded = comdat_discarded.clone();
     let mut layout = builder
         .build(bundle, &resolved)
         .map_err(|e| diag("E0303", e))?;
+    // 2.4 COMDAT 组: 保留组提升到 layout, 成员节打 SHF_GROUP 标志
+    populate_output_comdat_groups(&mut layout, bundle, &comdat_discarded);
     // 2.5 SHF_GNU_RETAIN 标记 (M12+ 链接器补洞)
     link_opts::apply_retain_flags(&mut layout);
     // 2.5.1 压缩调试节 (--compress-debug-sections)
@@ -1139,6 +1187,7 @@ mod tests {
             output_relas: Vec::new(),
             needed: Vec::new(),
             dynamic_linker: None,
+            comdat_groups: Vec::new(),
         };
 
         // 调用 embed_vdso

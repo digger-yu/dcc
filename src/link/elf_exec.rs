@@ -12,8 +12,9 @@
 use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use super::link_opts;
 use crate::codegen::elf::{
-    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
-    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB, SHT_SYMTAB,
+    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, GRP_COMDAT, PF_R, PF_W, PF_X,
+    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_GROUP, SHT_NOBITS, SHT_PROGBITS,
+    SHT_STRTAB, SHT_SYMTAB,
 };
 
 pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
@@ -25,6 +26,14 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
         shstrtab.push(0);
     }
     shstrtab.extend_from_slice(b".symtab\0.strtab\0.shstrtab\0");
+    // COMDAT group section names (".group.<signature>")
+    let mut comdat_group_shnames: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+    for grp in &layout.comdat_groups {
+        let name = format!(".group.{}\0", grp.signature);
+        let name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(name.as_bytes());
+        comdat_group_shnames.push((name_off, grp.flags, grp.member_sec_indices.clone()));
+    }
 
     let mut strtab = vec![0u8];
     let mut strtab_offsets = vec![0u32; layout.symbols.len()];
@@ -65,7 +74,15 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
 
     let mut out = Vec::new();
     write_elf_internal(
-        layout, machine, ET_EXEC, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash,
+        layout,
+        machine,
+        ET_EXEC,
+        &mut out,
+        &shstrtab,
+        &strtab,
+        &symtab,
+        &gnu_hash,
+        &comdat_group_shnames,
     );
     out
 }
@@ -125,6 +142,7 @@ pub fn write_elf_internal(
     strtab: &[u8],
     symtab: &[u8],
     gnu_hash: &[u8],
+    comdat_groups: &[(u32, u32, Vec<u32>)], // (sh_name, flags, member_sec_indices)
 ) {
     // 1. ELF 头占位
     let _ehdr_off = 0u64;
@@ -168,6 +186,14 @@ pub fn write_elf_internal(
         .map(|(i, s)| section_offsets[i] + if s.ty == SHT_NOBITS { 0 } else { s.size })
         .max()
         .unwrap_or(data_aligned);
+    // COMDAT group data (SHT_GROUP contents: flag word + member section indices)
+    // Each group's data is placed after the user sections and before .gnu.hash.
+    let mut comdat_data_offsets: Vec<u64> = Vec::with_capacity(comdat_groups.len());
+    for (_sh_name, _flags, member_indices) in comdat_groups {
+        comdat_data_offsets.push(cur);
+        // 4 bytes flag word + 4 bytes per member section index
+        cur += (4 + member_indices.len() * 4) as u64;
+    }
     let gnu_hash_off = cur;
     cur += gnu_hash.len() as u64;
     let symtab_off = cur;
@@ -193,6 +219,18 @@ pub fn write_elf_internal(
         let off = section_offsets[i] as usize;
         if sec.ty != SHT_NOBITS && !sec.data.is_empty() {
             out[off..off + sec.data.len()].copy_from_slice(&sec.data);
+        }
+    }
+    // COMDAT group data (SHT_GROUP contents)
+    for (i, (_sh_name, flags, member_indices)) in comdat_groups.iter().enumerate() {
+        let off = comdat_data_offsets[i] as usize;
+        out.resize(off + 4 + member_indices.len() * 4, 0);
+        out[off..off + 4].copy_from_slice(&flags.to_le_bytes());
+        for (j, &member_idx) in member_indices.iter().enumerate() {
+            // ELF section indices are 1-based (slot 0 is SHT_NULL)
+            let elf_idx = member_idx + 1;
+            let pos = off + 4 + j * 4;
+            out[pos..pos + 4].copy_from_slice(&elf_idx.to_le_bytes());
         }
     }
     // .gnu.hash
@@ -356,8 +394,8 @@ pub fn write_elf_internal(
     }
 
     // 7. 节头表
-    // 总数 = SHT_NULL + 用户节 + .gnu.hash + .symtab + .strtab + .shstrtab + .note.GNU-stack
-    let nshdr = layout.sections.len() + 6;
+    // 总数 = SHT_NULL + 用户节 + COMDAT 组 + .gnu.hash + .symtab + .strtab + .shstrtab
+    let nshdr = 1 + layout.sections.len() + comdat_groups.len() + 5;
     // 预留所有节头空间
     out.resize(shdr_off as usize + nshdr * 64, 0);
     let mut shdr_cursor = shdr_off as usize;
@@ -393,6 +431,27 @@ pub fn write_elf_internal(
             sec.entsize,
         );
     }
+    // COMDAT group section headers (SHT_GROUP)
+    // sh_link must point to the .symtab section.
+    // .symtab is at index: 1 (NULL) + N (user) + G (comdat) + 1 (.gnu.hash)
+    let symtab_shdr_idx = (1 + layout.sections.len() + comdat_groups.len() + 1) as u32;
+    for (i, (sh_name, flags, member_indices)) in comdat_groups.iter().enumerate() {
+        let data_size = (4 + member_indices.len() * 4) as u64;
+        write_shdr(
+            out,
+            &mut shdr_cursor,
+            *sh_name,
+            SHT_GROUP,
+            0,
+            0,
+            comdat_data_offsets[i],
+            data_size,
+            symtab_shdr_idx, // sh_link: index of .symtab
+            0, // sh_info: signature symbol index (0 = unnamed group)
+            4, // 4-byte alignment (flag word + section indices)
+            4, // sh_entsize: size of each entry (section index)
+        );
+    }
     // .gnu.hash
     write_shdr(
         out,
@@ -410,7 +469,10 @@ pub fn write_elf_internal(
     );
     // .symtab
     let n_locals = layout.n_locals;
-    let strtab_shdr_idx = (layout.sections.len() + 3) as u32;
+    // Section header indices: SHT_NULL(1) + user_sections(N) + comdat_groups(G)
+    // then .gnu.hash, .symtab, .strtab, .shstrtab, .note.GNU-stack.
+    // .strtab is at index (1 + N + G + 2).
+    let strtab_shdr_idx = (1 + layout.sections.len() + comdat_groups.len() + 2) as u32;
     write_shdr(
         out,
         &mut shdr_cursor,
@@ -441,7 +503,7 @@ pub fn write_elf_internal(
         0,
     );
     // .shstrtab
-    let shstrtab_shdr_idx = (layout.sections.len() + 4) as u32;
+    let shstrtab_shdr_idx = (1 + layout.sections.len() + comdat_groups.len() + 3) as u32;
     write_shdr(
         out,
         &mut shdr_cursor,

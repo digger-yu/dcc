@@ -58,6 +58,43 @@ pub fn resolve_comdat_groups(bundle: &InputBundle) -> HashSet<u32> {
     discarded
 }
 
+/// 保留下来的 COMDAT 组 (每个签名一份)。
+///
+/// `member_flat_indices` 中的索引引用 `InputBundle.sections`。
+/// 链接器在 build() 之后把这些 FlatSection 索引转换为输出节索引,
+/// 再写入 SHT_GROUP 节。
+#[derive(Debug, Clone)]
+pub struct RetainedComdatGroup {
+    pub signature: String,
+    pub flags: u32,
+    pub member_flat_indices: Vec<u32>,
+}
+
+/// 返回每个签名保留的第一份 COMDAT 组 (与 `resolve_comdat_groups` 的选择
+/// 策略一致)。即使没有重复, 所有组也会被返回, 因为链接器需要为它们
+/// 生成 SHT_GROUP 输出节。
+pub fn retained_comdat_groups(bundle: &InputBundle) -> Vec<RetainedComdatGroup> {
+    use super::object::FlatComdatGroup;
+    let mut kept: Vec<RetainedComdatGroup> = Vec::new();
+    if bundle.comdat_groups.is_empty() {
+        return kept;
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (i, grp) in bundle.comdat_groups.iter().enumerate() {
+        let grp: &FlatComdatGroup = grp;
+        if seen.contains_key(&grp.signature) {
+            continue;
+        }
+        seen.insert(grp.signature.clone(), i);
+        kept.push(RetainedComdatGroup {
+            signature: grp.signature.clone(),
+            flags: grp.flags,
+            member_flat_indices: grp.member_indices.clone(),
+        });
+    }
+    kept
+}
+
 /// 解析结果：每个名字最终被解析到的全局符号。
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {
