@@ -315,7 +315,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 |------|------|
 | MS 扩展 | `__declspec(align/noreturn/thread/dllimport/dllexport)` 接受无 codegen 差异 / `_ms_restrict` / `__pragma` 接受无操作 |
 | `__attribute__((cleanup(fn)))` | 变量离开作用域时插入 `cleanup_fn(&var)` |
-| `__attribute__((target_clones(...)))` | 链接期生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位 |
+| `__attribute__((target_clones(...)))` | 链接期生成 `.text.ifunc` 节，包含 x86_64 CPUID 检测机器码；resolver 运行时选择最优变体 (支持 sse4.2/avx/avx2/avx512f/default)；生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位 |
 | `__attribute__((no_sanitize(...)))` | 按通道关闭 sanitizer 插桩 |
 | `__attribute__((copy(fn)))` | 生成 `fn` 的别名符号 |
 | `__attribute__((returns_nonnull))` | codegen 强制非空检查：`test rax, rax; jnz .ok; ud2` |
@@ -365,7 +365,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `.gnu.hash` TIE 压缩 | ELF 64-bit GNU hash（bloom filter + buckets + chain） |
 | `.eh_frame_hdr` 搜索表 | 二分搜索表（按 initial_location 排序） |
 | IFUNC 解析 | `STT_GNU_IFUNC` → `R_X86_64_IRELATIVE` 重定位 |
-| IFUNC `target_clones` 多版本 | STT_GNU_IFUNC + R_X86_64_IRELATIVE，resolver 返回 default 变体 |
+| IFUNC `target_clones` 多版本 | 链接期生成 `.text.ifunc` 节，包含 x86_64 CPUID 检测机器码；resolver 按优先级 (AVX512 > AVX2 > AVX > SSE4.2 > default) 运行时选择最优变体；支持 XCR0/OSXSAVE 检测确保 OS 已启用扩展寄存器 |
 | `--exclude-libs` 隐藏静态库符号 | 被排除归档库中全局符号打 `STV_HIDDEN` |
 | `--build-id=sha1/uuid/md5/none` | 内置 SHA-1 / MD5 / UUID v4 写 `.note.gnu.build-id` |
 | `--no-undefined-version` | 缺版本 `.symver` 引用 → 错误 |

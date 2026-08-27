@@ -18837,3 +18837,96 @@ fn vdso_embed_note_section_verification() {
 
     let _ = std::fs::remove_file(&vdso_path);
 }
+
+// ====== target_clones IFUNC integration tests ======
+
+/// target_clones resolver 代码生成: 验证链接器为 target_clones 函数
+/// 生成 `.text.ifunc` 节, 包含 CPUID 检测机器码.
+#[test]
+fn target_clones_resolver_code_generation() {
+    use dcc::link::target_clones::{TargetClonesTable, TargetClonesFunc, TargetVariant};
+
+    let mut table = TargetClonesTable::new();
+    table.parse("my_func", "sse4.2,avx2,default");
+
+    // 生成 resolver blob
+    let (blob, entries) = dcc::link::target_clones::generate_resolver_blob(&table);
+
+    // 验证生成了代码
+    assert!(!blob.is_empty(), "resolver blob should not be empty");
+    assert_eq!(entries.len(), 1, "should have 1 resolver entry");
+    assert_eq!(entries[0].0, "my_func", "resolver name should be my_func");
+
+    // 验证代码包含 CPUID 指令 (0x0F 0xA2)
+    let cpuid_count = blob
+        .windows(2)
+        .filter(|w| *w == [0x0F, 0xA2])
+        .count();
+    assert!(
+        cpuid_count >= 2,
+        "expected at least 2 CPUID instructions (leaf 1 + leaf 7), got {}",
+        cpuid_count
+    );
+
+    // 验证代码包含 XGETBV 指令 (0x0F 0x01 0xD0) 用于 AVX OS 检测
+    let xgetbv_count = blob
+        .windows(3)
+        .filter(|w| *w == [0x0F, 0x01, 0xD0])
+        .count();
+    assert!(
+        xgetbv_count >= 1,
+        "expected XGETBV for AVX OS check, got {}",
+        xgetbv_count
+    );
+
+    // 验证代码包含 RET (0xC3) 指令 (可能在 padding 之前)
+    assert!(
+        blob.contains(&0xC3),
+        "resolver code should contain RET instruction"
+    );
+}
+
+/// target_clones resolver vaddr 回填: 验证变体地址正确写入 resolver 代码.
+#[test]
+fn target_clones_resolver_vaddr_patching() {
+    use dcc::link::target_clones::{TargetClonesFunc, TargetVariant};
+
+    let tcf = TargetClonesFunc {
+        resolver_name: "test_fn".into(),
+        variants: vec![
+            TargetVariant {
+                name: "test_fn.sse4.2".into(),
+                arch: "sse4.2".into(),
+                vaddr: 0xAAAA_BBBB_CCCC_DDDD,
+            },
+            TargetVariant {
+                name: "test_fn.default".into(),
+                arch: "default".into(),
+                vaddr: 0x1111_2222_3333_4444,
+            },
+        ],
+        default_variant: "test_fn.default".into(),
+    };
+
+    let (mut code, patches) = dcc::link::target_clones::generate_resolver_code(&tcf);
+
+    // 回填 vaddr
+    for (variant_idx, patch_off) in &patches {
+        let vaddr = tcf.variants[*variant_idx].vaddr;
+        code[*patch_off..*patch_off + 8]
+            .copy_from_slice(&vaddr.to_le_bytes());
+    }
+
+    // 验证两个 vaddr 都出现在代码中
+    let sse42_bytes = 0xAAAA_BBBB_CCCC_DDDD_u64.to_le_bytes();
+    let default_bytes = 0x1111_2222_3333_4444_u64.to_le_bytes();
+
+    assert!(
+        code.windows(8).any(|w| w == sse42_bytes),
+        "sse4.2 variant vaddr should be in resolver code"
+    );
+    assert!(
+        code.windows(8).any(|w| w == default_bytes),
+        "default variant vaddr should be in resolver code"
+    );
+}

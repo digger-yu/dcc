@@ -42,6 +42,7 @@ pub mod symver;
 pub mod target_clones;
 pub mod vdso;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::debug::ArchKind;
@@ -427,13 +428,78 @@ pub fn link_from_bundle(
     }
     // 2.9 target_clones IFUNC resolver + IRELATIVE 重定位
     if !cfg.target_clones.funcs.is_empty() {
-        let (new_syms, irel_relas) = cfg.target_clones.gen_irelative_relas(&layout);
-        for s in new_syms {
-            layout.symbols.push(s);
-        }
-        // IRELATIVE 重定位加入 output_relas
-        for r in irel_relas {
-            layout.output_relas.push(r);
+        // 生成 CPUID-based resolver 代码并嵌入 .text.ifunc 节
+        let (resolver_blob, resolver_entries) =
+            target_clones::generate_resolver_blob(&cfg.target_clones);
+
+        if !resolver_blob.is_empty() {
+            use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS};
+            use crate::link::layout::{OutputSection, OutputSectionKind};
+
+            let ifunc_section_name = ".text.ifunc".to_string();
+            let new_idx = layout.sections.len() as u32;
+
+            let ifunc_section = OutputSection {
+                kind: OutputSectionKind::Named(ifunc_section_name.clone()),
+                name: ifunc_section_name,
+                sh_name_off: 0,
+                ty: SHT_PROGBITS,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                align: 16,
+                data: resolver_blob.clone(),
+                size: resolver_blob.len() as u64,
+                entsize: 0,
+                output_index: new_idx,
+                load_segment: 0, // 段 0: R+X
+                vaddr: 0,        // 稍后由 recompute_section_vaddrs 分配
+                file_off: 0,
+                input_offsets: Vec::new(),
+                input_sections: Vec::new(),
+            };
+
+            layout.sections.push(ifunc_section);
+
+            // 重算 section 和 symbol vaddrs (使 .text.ifunc 获得真实 vaddr)
+            recompute_section_vaddrs(&mut layout);
+
+            // 获取 .text.ifunc 的真实 vaddr
+            let ifunc_section_idx = layout.sections.len() - 1;
+            let ifunc_vaddr_base = layout.sections[ifunc_section_idx].vaddr;
+
+            // 回填 resolver 代码中的变体 vaddr
+            target_clones::patch_all_resolvers(
+                &mut layout.sections[ifunc_section_idx].data,
+                &cfg.target_clones,
+                ifunc_vaddr_base,
+                &resolver_entries,
+            );
+
+            // 计算每个 resolver 的真实 vaddr
+            let mut resolver_vaddrs = HashMap::new();
+            for (name, offset, _size) in &resolver_entries {
+                resolver_vaddrs.insert(name.clone(), ifunc_vaddr_base + *offset as u64);
+            }
+
+            // 生成 IRELATIVE 重定位 (使用 resolver 真实地址)
+            let (new_syms, irel_relas) =
+                cfg.target_clones.gen_irelative_relas(&layout, &resolver_vaddrs);
+            for s in new_syms {
+                layout.symbols.push(s);
+            }
+            for r in irel_relas {
+                layout.output_relas.push(r);
+            }
+        } else {
+            // 无 resolver 代码 (仅 default 变体), 使用 default 地址
+            let empty_vaddrs = HashMap::new();
+            let (new_syms, irel_relas) =
+                cfg.target_clones.gen_irelative_relas(&layout, &empty_vaddrs);
+            for s in new_syms {
+                layout.symbols.push(s);
+            }
+            for r in irel_relas {
+                layout.output_relas.push(r);
+            }
         }
     }
     // 2.9b attribute((ifunc("resolver"))) 从 .dcc.ifunc 节收集 IFUNC 映射
@@ -559,9 +625,40 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
             }
         }
         // 扫描 .note.GNU.target_clones (target_clones 通常以 .note 段记录)
+        // 或从 IFUNC 符号自动检测
         for sym in &obj.symbols {
             if sym.name.starts_with("__target_clones__") {
                 // 简化: 跳过; 让 driver 层显式注册
+            }
+            // 自动检测 IFUNC 符号并构建 target_clones 表
+            if sym.ty == 10 {
+                // STT_GNU_IFUNC = 10
+                let func_name = &sym.name;
+                // 查找变体符号 (func_name.variant_arch)
+                let mut variants = Vec::new();
+                for vsym in &obj.symbols {
+                    if vsym.name.starts_with(&format!("{}.", func_name)) {
+                        let arch = vsym.name[func_name.len() + 1..].to_string();
+                        variants.push((vsym.name.clone(), arch, vsym.value));
+                    }
+                }
+                if !variants.is_empty() {
+                    // 构建 target_clones 条目
+                    let attr = variants
+                        .iter()
+                        .map(|(_, arch, _)| arch.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    cfg.target_clones.parse(func_name, &attr);
+                    // 设置变体 vaddr (稍后在 layout 中更新)
+                    if let Some(tcf) = cfg.target_clones.funcs.get_mut(func_name) {
+                        for (sym_name, arch, vaddr) in &variants {
+                            if let Some(variant) = tcf.variants.iter_mut().find(|v| &v.name == sym_name) {
+                                variant.vaddr = *vaddr;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
