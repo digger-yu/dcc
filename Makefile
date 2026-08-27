@@ -1,4 +1,4 @@
-.PHONY: all build test test-all kernel-full-build kernel-full-check clean-cache
+.PHONY: all build test test-all bootstrap kernel-full-build kernel-full-check clean-cache
 
 DCC_REPO ?= $(CURDIR)
 KERNEL_DIR ?= /root/linux-7.1
@@ -25,3 +25,6 @@ kernel-full-check: build
 
 clean-cache:
 	bash scripts/cleanup_disk.sh --all
+
+bootstrap: build
+	DCC="$(DCC)" bash scripts/bootstrap.sh
