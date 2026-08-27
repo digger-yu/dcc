@@ -5115,17 +5115,19 @@ impl Codegen {
             let mut stack_arg_idx = 0usize;
             for p in f.params.iter() {
                 if let Some(nm) = &p.name {
-                    // __int128 / 大聚合体按 8 字节块占用 GP 寄存器或栈槽
+                    // __int128 / 聚合体按 8 字节块占用 GP 寄存器或栈槽
+                    // 所有 struct/union/array 均走聚合路径, 确保 SSE 类
+                    // 小结构体 (<=8B) 也能正确从 XMM 寄存器接收.
                     let is_agg_param =
                         matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
-                            || (matches!(
+                            || matches!(
                                 &p.ty,
                                 Type::Struct(_, _, _)
                                     | Type::Union(_, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                                     | Type::Vector(_, _)
-                            ) && p.ty.size() > 8);
+                            );
                     if is_agg_param {
                         let classes = Self::abi_classes(&p.ty);
                         let chunks = p.ty.size().div_ceil(8);

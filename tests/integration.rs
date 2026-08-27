@@ -7826,6 +7826,23 @@ fn m15_abi16_struct_passing() {
     let _ = fs::remove_file(&exe);
 }
 
+/// Struct ABI 综合测试: 8B SSE / 16B SSE / 16B Integer / 24B Memory
+/// 类结构体传值与返回值, 验证 SysV AMD64 ABI 各分类正确性.
+#[test]
+#[cfg(unix)]
+fn struct_abi_comprehensive() {
+    let src = include_str!("fixtures/c/struct_abi_comprehensive.c");
+    let (out, exe) = run_compile_and_run("struct-abi-comprehensive", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
 /// 浮点存储路径: double/float 数组下标、解引用、struct 字段赋值
 /// (值在 xmm0, 必须用 movss/movsd 而非 GP mov 存储)
 #[test]
