@@ -18762,10 +18762,35 @@ impl Codegen {
             ".asciz" | ".string" => {
                 if let Some(s) = parts.get(1) {
                     let s = s.trim_matches('"');
+                    if self.emit_asm_text {
+                        // 文本模式: 保留为 .s 输出行 (DEFINE() 支持)
+                        self.asm_directives_at
+                            .push((self.pos(), t.to_string()));
+                        self.asm_directives.push(t.to_string());
+                    } else {
+                        for b in s.bytes() {
+                            self.emit(&[b]);
+                        }
+                        self.emit(&[0]);
+                    }
+                }
+                true
+            }
+            ".ascii" => {
+                if self.emit_asm_text {
+                    // 文本模式: 保留 .ascii 指令为 .s 输出行
+                    // 内核 DEFINE() 宏通过 .ascii "->SYMBOL %0 value" 生成
+                    // 结构体偏移常量, 由 Kbuild sed 脚本提取.
+                    self.asm_directives_at
+                        .push((self.pos(), t.to_string()));
+                    self.asm_directives.push(t.to_string());
+                } else {
+                    // 二进制模式: 解析字符串并发射到当前节
+                    let args_str = t[".ascii".len()..].trim();
+                    let s = Self::parse_asm_quoted_string(args_str);
                     for b in s.bytes() {
                         self.emit(&[b]);
                     }
-                    self.emit(&[0]);
                 }
                 true
             }
