@@ -1865,7 +1865,7 @@ impl Preprocessor {
             if chars[i] == '\'' {
                 out.push('\'');
                 i += 1;
-                while i < len && chars[i] != '\'' {
+                while i < len && chars[i] != '\'' && chars[i] != '\n' {
                     if chars[i] == '\\' && i + 1 < len {
                         out.push(chars[i]);
                         i += 1;
@@ -1873,7 +1873,7 @@ impl Preprocessor {
                     out.push(chars[i]);
                     i += 1;
                 }
-                if i < len {
+                if i < len && chars[i] == '\'' {
                     out.push('\'');
                     i += 1;
                 }
@@ -1939,7 +1939,7 @@ impl Preprocessor {
             if chars[i] == '\'' {
                 out.push('\'');
                 i += 1;
-                while i < len && chars[i] != '\'' {
+                while i < len && chars[i] != '\'' && chars[i] != '\n' {
                     if chars[i] == '\\' && i + 1 < len {
                         out.push(chars[i]);
                         i += 1;
@@ -1947,7 +1947,7 @@ impl Preprocessor {
                     out.push(chars[i]);
                     i += 1;
                 }
-                if i < len {
+                if i < len && chars[i] == '\'' {
                     out.push('\'');
                     i += 1;
                 }
@@ -3563,7 +3563,7 @@ impl Preprocessor {
             if chars[i] == '\'' {
                 out.push('\'');
                 i += 1;
-                while i < len && chars[i] != '\'' {
+                while i < len && chars[i] != '\'' && chars[i] != '\n' {
                     if chars[i] == '\\' && i + 1 < len {
                         out.push(chars[i]);
                         i += 1;
@@ -3571,7 +3571,7 @@ impl Preprocessor {
                     out.push(chars[i]);
                     i += 1;
                 }
-                if i < len {
+                if i < len && chars[i] == '\'' {
                     out.push('\'');
                     i += 1;
                 }
