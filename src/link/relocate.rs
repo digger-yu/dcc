@@ -33,10 +33,23 @@ use crate::codegen::elf::{
     R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2,
     R_AARCH64_MOVW_UABS_G3, R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64,
     R_AARCH64_TLSDESC_ADD, R_AARCH64_TLSDESC_ADD_LO12,
-    R_AARCH64_TLSDESC_ADR_PAGE21, R_AARCH64_TLSDESC_CALL,
-    R_AARCH64_TLSDESC_LD64_LO12, R_AARCH64_TLSDESC_LDR,
+    R_AARCH64_TLSDESC_ADR_PAGE21, R_AARCH64_TLSDESC_ADR_PREL21,
+    R_AARCH64_TLSDESC_CALL, R_AARCH64_TLSDESC_LD64_LO12,
+    R_AARCH64_TLSDESC_LD_PREL19, R_AARCH64_TLSDESC_LDR,
     R_AARCH64_TLSDESC_OFF_G0_NC, R_AARCH64_TLSDESC_OFF_G1,
-    R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
+    R_AARCH64_TLSGD_ADR_PAGE21, R_AARCH64_TLSGD_ADR_PREL21,
+    R_AARCH64_TLSGD_ADD_LO12_NC, R_AARCH64_TLSGD_MOVW_G0_NC,
+    R_AARCH64_TLSGD_MOVW_G1,
+    R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21,
+    R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
+    R_AARCH64_TLSIE_LD_GOTTPREL_PREL19,
+    R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC,
+    R_AARCH64_TLSIE_MOVW_GOTTPREL_G1,
+    R_AARCH64_TLSLD_ADR_PAGE21, R_AARCH64_TLSLD_ADR_PREL21,
+    R_AARCH64_TLSLD_ADD_LO12_NC, R_AARCH64_TLSLD_MOVW_G0_NC,
+    R_AARCH64_TLSLD_MOVW_G1,
+    R_AARCH64_TPREL64, R_AARCH64_DTPREL64,
+    R_AARCH64_GOT_LD_PREL19, R_AARCH64_GOTREL64,
     R_AARCH64_TLSLE_ADD_TPREL_HI12, R_AARCH64_TLSLE_ADD_TPREL_LO12,
     R_AARCH64_TLSLE_ADD_TPREL_LO12_NC, R_AARCH64_TLSLE_MOVW_TPREL_G0,
     R_AARCH64_TLSLE_MOVW_TPREL_G0_NC, R_AARCH64_TLSLE_MOVW_TPREL_G1,
@@ -541,6 +554,112 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 }
                 R_AARCH64_TLSDESC_LDR | R_AARCH64_TLSDESC_ADD | R_AARCH64_TLSDESC_CALL => {
                     // Marker relocations: ld.so 识别用, 静态链接无需修改指令
+                }
+                R_AARCH64_TLSDESC_ADR_PREL21 => {
+                    // TLSDESC ADR: S+A-P, 21-bit signed
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let imm = (s.wrapping_sub(p)) as i64;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let immlo = ((imm >> 29) & 0x3) as u32;
+                    let immhi = ((imm >> 3) & 0x7ffff) as u32;
+                    let new_inst = (inst & 0x9f00001f) | (immlo << 29) | (immhi << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_LD_PREL19 => {
+                    // TLSDESC LDR: S+A-P, 19-bit signed, scaled by 8
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let imm = ((s.wrapping_sub(p)) as i64) >> 3;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let imm19 = (imm & 0x7ffff) as u32;
+                    let new_inst = (inst & 0xff00001f) | (imm19 << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                // TLS GD/LD: static linking treats these as no-ops
+                // (the TLS LE model is used instead)
+                R_AARCH64_TLSGD_ADR_PREL21
+                | R_AARCH64_TLSGD_ADR_PAGE21
+                | R_AARCH64_TLSGD_ADD_LO12_NC
+                | R_AARCH64_TLSGD_MOVW_G1
+                | R_AARCH64_TLSGD_MOVW_G0_NC
+                | R_AARCH64_TLSLD_ADR_PREL21
+                | R_AARCH64_TLSLD_ADR_PAGE21
+                | R_AARCH64_TLSLD_ADD_LO12_NC
+                | R_AARCH64_TLSLD_MOVW_G1
+                | R_AARCH64_TLSLD_MOVW_G0_NC => {
+                    // TLS GD/LD relocations: for static linking,
+                    // the linker relaxes these to LE model.
+                    // No instruction patching needed.
+                }
+                // TLS IE additional variants
+                R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 => {
+                    // MOVW: bits[31:16] of GOTTPREL(S+A)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xffe0001f) | (imm16 << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC => {
+                    // MOVK: bits[15:0] of GOTTPREL(S+A)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xffe0001f) | (imm16 << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSIE_LD_GOTTPREL_PREL19 => {
+                    // LDR: S+A-P, 19-bit signed, scaled by 8
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let imm = ((s.wrapping_sub(p)) as i64) >> 3;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let imm19 = (imm & 0x7ffff) as u32;
+                    let new_inst = (inst & 0xff00001f) | (imm19 << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                // TLS static data relocations
+                R_AARCH64_TPREL64 => {
+                    // 64-bit TP relative: S+A+TP
+                    let val = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&val.to_le_bytes());
+                }
+                R_AARCH64_DTPREL64 => {
+                    // 64-bit DTP relative: S+A (no TP offset)
+                    let val = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&val.to_le_bytes());
+                }
+                // GOT relocations
+                R_AARCH64_GOT_LD_PREL19 => {
+                    // GOT LDR: GOT(S+A)-P, 19-bit signed, scaled by 8
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let imm = ((s.wrapping_sub(p)) as i64) >> 3;
+                    let inst = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let imm19 = (imm & 0x7ffff) as u32;
+                    let new_inst = (inst & 0xff00001f) | (imm19 << 5);
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_GOTREL64 => {
+                    // 64-bit GOT relative: S+A-GOT_BASE
+                    let val = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&val.to_le_bytes());
                 }
                 R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 => {
                     // TLS IE adrp: page(GOTTPREL(S+A)) - page(P)
@@ -1384,15 +1503,34 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
                 | R_AARCH64_MOVW_SABS_G1
                 | R_AARCH64_MOVW_SABS_G2
                 | R_AARCH64_TLSDESC_ADR_PAGE21
+                | R_AARCH64_TLSDESC_ADR_PREL21
                 | R_AARCH64_TLSDESC_LD64_LO12
+                | R_AARCH64_TLSDESC_LD_PREL19
                 | R_AARCH64_TLSDESC_ADD_LO12
                 | R_AARCH64_TLSDESC_OFF_G1
                 | R_AARCH64_TLSDESC_OFF_G0_NC
                 | R_AARCH64_TLSDESC_LDR
                 | R_AARCH64_TLSDESC_ADD
                 | R_AARCH64_TLSDESC_CALL
+                | R_AARCH64_TLSGD_ADR_PREL21
+                | R_AARCH64_TLSGD_ADR_PAGE21
+                | R_AARCH64_TLSGD_ADD_LO12_NC
+                | R_AARCH64_TLSGD_MOVW_G1
+                | R_AARCH64_TLSGD_MOVW_G0_NC
+                | R_AARCH64_TLSLD_ADR_PREL21
+                | R_AARCH64_TLSLD_ADR_PAGE21
+                | R_AARCH64_TLSLD_ADD_LO12_NC
+                | R_AARCH64_TLSLD_MOVW_G1
+                | R_AARCH64_TLSLD_MOVW_G0_NC
                 | R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21
                 | R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+                | R_AARCH64_TLSIE_MOVW_GOTTPREL_G1
+                | R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC
+                | R_AARCH64_TLSIE_LD_GOTTPREL_PREL19
+                | R_AARCH64_TPREL64
+                | R_AARCH64_DTPREL64
+                | R_AARCH64_GOT_LD_PREL19
+                | R_AARCH64_GOTREL64
                 | R_AARCH64_TLSLE_MOVW_TPREL_G2
                 | R_AARCH64_TLSLE_MOVW_TPREL_G1
                 | R_AARCH64_TLSLE_MOVW_TPREL_G1_NC
