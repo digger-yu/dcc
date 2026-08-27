@@ -39,6 +39,12 @@ impl IncrementalCache {
         }
     }
 
+    /// 创建使用自定义缓存目录的增量编译缓存 (测试用).
+    #[cfg(test)]
+    fn with_cache_dir(cache_dir: PathBuf, verbose: bool) -> Self {
+        Self { cache_dir, verbose }
+    }
+
     /// 检查源文件是否需要重编译.
     ///
     /// 判定逻辑:
@@ -411,7 +417,9 @@ mod tests {
         fs::write(&src, "int main(void) { return 0; }\n").unwrap();
         let _ = fs::remove_file(&out);
 
-        let cache = IncrementalCache::new(false);
+        let cache_dir = dir.join(format!("dcc-incr-test-cache-{pid}"));
+        let _ = fs::remove_dir_all(&cache_dir);
+        let cache = IncrementalCache::with_cache_dir(cache_dir.clone(), false);
         let cfg = make_test_config(&src, &out);
 
         match cache.check(&cfg, &src) {
@@ -421,6 +429,7 @@ mod tests {
 
         let _ = fs::remove_file(&src);
         let _ = fs::remove_file(&out);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
@@ -434,7 +443,9 @@ mod tests {
         // 创建输出文件 (模拟编译完成)
         fs::write(&out, b"\x7fELF").unwrap();
 
-        let cache = IncrementalCache::new(false);
+        let cache_dir = dir.join(format!("dcc-incr-hit-cache-{pid}"));
+        let _ = fs::remove_dir_all(&cache_dir);
+        let cache = IncrementalCache::with_cache_dir(cache_dir.clone(), false);
         let cfg = make_test_config(&src, &out);
 
         // 首次: 无缓存条目 → miss
@@ -455,7 +466,7 @@ mod tests {
         // 清理
         let _ = fs::remove_file(&src);
         let _ = fs::remove_file(&out);
-        let _ = fs::remove_dir_all(&cache.cache_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
@@ -468,7 +479,9 @@ mod tests {
         fs::write(&src, "int v1(void) { return 1; }\n").unwrap();
         fs::write(&out, b"\x7fELF").unwrap();
 
-        let cache = IncrementalCache::new(false);
+        let cache_dir = dir.join(format!("dcc-incr-chg-cache-{pid}"));
+        let _ = fs::remove_dir_all(&cache_dir);
+        let cache = IncrementalCache::with_cache_dir(cache_dir.clone(), false);
         let cfg = make_test_config(&src, &out);
 
         // 首次 miss + update
@@ -489,7 +502,7 @@ mod tests {
 
         let _ = fs::remove_file(&src);
         let _ = fs::remove_file(&out);
-        let _ = fs::remove_dir_all(&cache.cache_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
@@ -502,7 +515,9 @@ mod tests {
         fs::write(&src, "int x(void) { return 0; }\n").unwrap();
         fs::write(&out, b"\x7fELF").unwrap();
 
-        let cache = IncrementalCache::new(false);
+        let cache_dir = dir.join(format!("dcc-incr-flag-cache-{pid}"));
+        let _ = fs::remove_dir_all(&cache_dir);
+        let cache = IncrementalCache::with_cache_dir(cache_dir.clone(), false);
         let mut cfg = make_test_config(&src, &out);
 
         // 首次: -O0
@@ -523,7 +538,7 @@ mod tests {
 
         let _ = fs::remove_file(&src);
         let _ = fs::remove_file(&out);
-        let _ = fs::remove_dir_all(&cache.cache_dir);
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 
     #[test]
