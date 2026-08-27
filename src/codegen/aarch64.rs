@@ -490,6 +490,7 @@ impl Aarch64Codegen {
                     ty: SHT_PROGBITS,
                     flags: SHF_ALLOC | SHF_GNU_RETAIN,
                     align: 1,
+                    group_name: None,
                 };
                 self.extra_sections.push(sec);
             }
@@ -550,6 +551,7 @@ impl Aarch64Codegen {
                 ty: elf::SHT_PROGBITS,
                 flags: elf::SHF_ALLOC,
                 align: 8,
+                group_name: None,
             });
         }
         // Retpoline/thunk extern: add undefined symbols for Spectre mitigations

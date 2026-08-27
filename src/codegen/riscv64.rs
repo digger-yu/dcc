@@ -230,6 +230,7 @@ impl Riscv64Codegen {
                 ty: elf::SHT_PROGBITS,
                 flags: elf::SHF_ALLOC,
                 align: 8,
+                group_name: None,
             });
         }
     }

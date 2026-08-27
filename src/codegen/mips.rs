@@ -275,6 +275,7 @@ impl MipsCodegen {
                 ty: elf::SHT_PROGBITS,
                 flags: elf::SHF_ALLOC,
                 align: 4,
+                group_name: None,
             });
         }
     }
@@ -610,6 +611,7 @@ impl MipsCodegen {
                 ty: SHT_PROGBITS,
                 flags: SHF_ALLOC | SHF_GNU_RETAIN,
                 align: 1,
+                group_name: None,
             };
             self.extra_sections.push(sec);
         }

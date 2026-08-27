@@ -179,6 +179,8 @@ pub struct Codegen {
     cleanup_vars: Vec<(String, String)>,
     // 额外 .rela 节 (用于 .init_array/.fini_array 等)
     pub extra_rela_sections: Vec<elf::ExtraRelaSection>,
+    // COMDAT group 定义
+    pub comdat_groups: Vec<elf::ComdatGroup>,
     // .debug_info relocations: (offset_in_section, symbol_name)
     pub pending_debug_info_relocs: Vec<(u64, String)>,
     // .pushsection 非文本节数据收集
@@ -1358,6 +1360,7 @@ impl Codegen {
             data_relocations: vec![],
             cleanup_vars: vec![],
             extra_rela_sections: vec![],
+            comdat_groups: vec![],
             pending_debug_info_relocs: vec![],
             pushsection_stack: vec![],
             pending_custom_sec_rels: vec![],
@@ -1811,6 +1814,7 @@ impl Codegen {
             ty: SHT_PROGBITS,
             flags,
             align: if is_exec { 16 } else { 8 },
+            group_name: None,
         });
         self.custom_sec_indices.insert(name.to_string(), idx);
         idx
@@ -2519,6 +2523,7 @@ impl Codegen {
             ty: SHT_PROGBITS,
             flags: SHF_ALLOC,
             align: 4,
+            group_name: None,
         });
         self.extra_rela_sections.push(elf::ExtraRelaSection {
             name: ".rela.orc_unwind_ip".to_string(),
@@ -2531,6 +2536,7 @@ impl Codegen {
             ty: SHT_PROGBITS,
             flags: SHF_ALLOC,
             align: 2,
+            group_name: None,
         });
     }
 
@@ -3697,6 +3703,7 @@ impl Codegen {
                 ty: elf::SHT_PROGBITS,
                 flags: elf::SHF_ALLOC,
                 align: 8,
+                group_name: None,
             });
             // Create relocations: each entry is R_X86_64_64 relative to .text section
             // .text section symbol will be at sym_index 1 (after null symbol)
@@ -4408,6 +4415,7 @@ impl Codegen {
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC | elf::SHF_WRITE,
                     align: 8,
+                    group_name: None,
                 });
                 self.extra_rela_sections.push(elf::ExtraRelaSection {
                     name: ".rela.init_array".to_string(),
@@ -4437,6 +4445,7 @@ impl Codegen {
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC | elf::SHF_WRITE,
                     align: 8,
+                    group_name: None,
                 });
                 self.extra_rela_sections.push(elf::ExtraRelaSection {
                     name: ".rela.fini_array".to_string(),

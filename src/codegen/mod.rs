@@ -1401,6 +1401,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 4,
+                        group_name: None,
                     });
                 }
             }
@@ -1418,6 +1419,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 8,
+                    group_name: None,
                 });
             }
             // ORC unwind 信息: 由 objtool --orc 生成, dcc 不再生成
@@ -1432,6 +1434,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1442,6 +1445,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1469,6 +1473,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 1,
+                        group_name: None,
                     });
                 }
             }
@@ -1489,6 +1494,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 // 同时输出 .llvm.lto 文本摘要，兼容：
                 //   1) GC-sections 探测（外部工具检查 .llvm.lto 判断是否有 LTO 信息）
@@ -1517,6 +1523,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if relocatable {
@@ -1557,6 +1564,7 @@ pub fn emit(
                         &cg.extra_sections,
                         &cg.data_relocations,
                         &cg.extra_rela_sections,
+                        &cg.comdat_groups,
                     )
                 }
             } else {
@@ -1613,6 +1621,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
@@ -1625,6 +1634,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 4,
+                        group_name: None,
                     });
                 }
             }
@@ -1637,6 +1647,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1647,6 +1658,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1657,6 +1669,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1701,6 +1714,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
@@ -1713,6 +1727,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 4,
+                        group_name: None,
                     });
                 }
             }
@@ -1725,6 +1740,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1735,6 +1751,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1745,6 +1762,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1789,6 +1807,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
@@ -1803,6 +1822,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 4,
+                        group_name: None,
                     });
                 }
             }
@@ -1813,6 +1833,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1823,6 +1844,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1867,6 +1889,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
@@ -1881,6 +1904,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1891,6 +1915,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1901,6 +1926,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }
@@ -1945,6 +1971,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
@@ -1959,6 +1986,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 4,
+                        group_name: None,
                     });
                 }
             }
@@ -1969,6 +1997,7 @@ pub fn emit(
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
+                    group_name: None,
                 });
             }
             if let Some(o) = offload {
@@ -1979,6 +2008,7 @@ pub fn emit(
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 8,
+                        group_name: None,
                     });
                 }
             }

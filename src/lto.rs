@@ -257,6 +257,7 @@ mod tests {
                 ty: SHT_PROGBITS,
                 flags: 0,
                 align: 1,
+                group_name: None,
             }],
             &[],
             &[],

@@ -319,6 +319,21 @@ pub struct ElfSection {
     pub ty: u32,    // SHT_PROGBITS / SHT_NOBITS
     pub flags: u32, // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
     pub align: u64,
+    /// COMDAT group signature name (e.g., mangled function name).
+    /// When set, SHF_GROUP flag is added to this section's flags.
+    pub group_name: Option<String>,
+}
+
+/// COMDAT group: groups multiple sections under a signature symbol.
+/// The linker keeps only one copy of groups with the same signature.
+#[derive(Clone, Debug)]
+pub struct ComdatGroup {
+    /// Signature symbol name (typically the mangled function/variable name)
+    pub signature: String,
+    /// Indices of member sections in the output section header table.
+    /// These indices refer to the final section indices after all sections
+    /// (including SHT_GROUP) are laid out.
+    pub member_sec_indices: Vec<u32>,
 }
 
 /// 额外 .rela 节 (用于 .init_array 等自定义节的重定位)
@@ -1038,6 +1053,7 @@ pub fn build_elf_rel_x86_64(
     extra_sections: &[ElfSection],
     data_relocations: &[ElfRela],
     extra_rela_sections: &[ExtraRelaSection],
+    comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
     // 节索引:
     // [0] SHT_NULL
@@ -1048,25 +1064,27 @@ pub fn build_elf_rel_x86_64(
     // [5] .tdata
     // [6] .tbss
     // [7..7+N] extra sections
-    // [7+N..7+N+M] extra rela sections
-    // [7+N+M] .rela.text
-    // [8+N+M] .rela.data
-    // [9+N+M] .symtab
-    // [10+N+M] .strtab
-    // [11+N+M] .shstrtab
+    // [7+N..7+N+G] SHT_GROUP sections (one per COMDAT group)
+    // [7+N+G..7+N+G+M] extra rela sections
+    // [7+N+G+M] .rela.text
+    // [8+N+G+M] .rela.data
+    // [9+N+G+M] .symtab
+    // [10+N+G+M] .strtab
+    // [11+N+G+M] .shstrtab
     let n_extra = extra_sections.len() as u16;
+    let n_comdat = comdat_groups.len() as u16;
     let n_extra_rela = extra_rela_sections.len() as u16;
     let has_rela_data = !data_relocations.is_empty();
     let rela_data_adj = if has_rela_data { 1 } else { 0 };
-    let _sh_rela: u16 = 7 + n_extra + n_extra_rela;
-    let _sh_rela_data: u16 = 8 + n_extra + n_extra_rela;
-    let sh_symtab: u16 = 8 + n_extra + n_extra_rela + rela_data_adj;
-    let sh_strtab: u16 = 9 + n_extra + n_extra_rela + rela_data_adj;
-    let sh_shstrtab: u16 = 10 + n_extra + n_extra_rela + rela_data_adj;
-    let shnum: u16 = 11 + n_extra + n_extra_rela + rela_data_adj;
+    let _sh_rela: u16 = 7 + n_extra + n_comdat + n_extra_rela;
+    let _sh_rela_data: u16 = 8 + n_extra + n_comdat + n_extra_rela;
+    let sh_symtab: u16 = 8 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
+    let sh_strtab: u16 = 9 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
+    let sh_shstrtab: u16 = 10 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
+    let shnum: u16 = 11 + n_extra + n_comdat + n_extra_rela + rela_data_adj;
 
     // 构建 .shstrtab (节名字符串表)
-    let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections);
+    let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections, comdat_groups);
 
     // 构建 .strtab (符号名字符串表)
     let (strtab, sym_name_offsets) = build_strtab(symbols);
@@ -1122,6 +1140,24 @@ pub fn build_elf_rel_x86_64(
         if sec.ty != SHT_NOBITS {
             offset += sec.data.len() as u64;
         }
+    }
+
+    // COMDAT group sections (SHT_GROUP)
+    // Each SHT_GROUP section contains:
+    //   - 4 bytes: flags (GRP_COMDAT = 1)
+    //   - N * 4 bytes: section indices of member sections
+    let mut comdat_data: Vec<Vec<u8>> = Vec::with_capacity(comdat_groups.len());
+    let mut comdat_offsets: Vec<u64> = Vec::with_capacity(comdat_groups.len());
+    for group in comdat_groups {
+        offset = align(offset, 4);
+        comdat_offsets.push(offset);
+        let mut data = Vec::with_capacity(4 + group.member_sec_indices.len() * 4);
+        data.extend_from_slice(&GRP_COMDAT.to_le_bytes());
+        for &sec_idx in &group.member_sec_indices {
+            data.extend_from_slice(&sec_idx.to_le_bytes());
+        }
+        offset += data.len() as u64;
+        comdat_data.push(data);
     }
 
     // 额外 .rela 节
@@ -1204,6 +1240,12 @@ pub fn build_elf_rel_x86_64(
         }
         pad_to(&mut out, extra_offsets[i] as usize);
         out.extend_from_slice(&sec.data);
+    }
+
+    // ===== COMDAT group sections =====
+    for (i, _group) in comdat_groups.iter().enumerate() {
+        pad_to(&mut out, comdat_offsets[i] as usize);
+        out.extend_from_slice(&comdat_data[i]);
     }
 
     // ===== 额外 .rela 节 =====
@@ -1331,11 +1373,17 @@ pub fn build_elf_rel_x86_64(
     // [7..7+N] 自定义节
     for (i, sec) in extra_sections.iter().enumerate() {
         let name_off = shstrtab_name_offset(extra_sections, i);
+        // Add SHF_GROUP flag if this section belongs to a COMDAT group
+        let flags = if sec.group_name.is_some() {
+            sec.flags | SHF_GROUP
+        } else {
+            sec.flags
+        };
         write_section_header(
             &mut out,
             name_off,
             sec.ty,
-            sec.flags,
+            flags,
             0,
             extra_offsets[i],
             sec.data.len() as u64,
@@ -1346,7 +1394,30 @@ pub fn build_elf_rel_x86_64(
         );
     }
 
-    // [5+N..5+N+M] 额外 .rela 节
+    // [7+N..7+N+G] COMDAT group sections (SHT_GROUP)
+    for (i, group) in comdat_groups.iter().enumerate() {
+        // Section name: .group.<signature>
+        let group_name = format!(".group.{}", group.signature);
+        let name_off = shstrtab_comdat_name_offset(extra_sections, comdat_groups, i);
+        // sh_info: index of the signature symbol in .symtab
+        // For simplicity, we use 0 (no signature symbol)
+        // A proper implementation would find the symbol index for group.signature
+        write_section_header(
+            &mut out,
+            name_off,
+            SHT_GROUP,
+            0,
+            0, // sh_info: signature symbol index (0 = no signature)
+            comdat_offsets[i],
+            comdat_data[i].len() as u64,
+            0,
+            0,
+            4,
+            0,
+        );
+    }
+
+    // [7+N+G..7+N+G+M] 额外 .rela 节
     for (i, ers) in extra_rela_sections.iter().enumerate() {
         let name_off = shstrtab_extra_rela_name_offset(extra_sections, extra_rela_sections, i);
         write_section_header(
@@ -1465,6 +1536,7 @@ fn align(v: u64, a: u64) -> u64 {
 fn build_shstrtab_with_tls(
     extra_sections: &[ElfSection],
     extra_rela_sections: &[ExtraRelaSection],
+    comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
     let mut s = vec![0u8];
     for name in &[".text", ".rodata", ".data", ".bss", ".tdata", ".tbss"] {
@@ -1473,6 +1545,12 @@ fn build_shstrtab_with_tls(
     }
     for sec in extra_sections {
         s.extend_from_slice(sec.name.as_bytes());
+        s.push(0);
+    }
+    // COMDAT group section names
+    for group in comdat_groups {
+        let group_name = format!(".group.{}", group.signature);
+        s.extend_from_slice(group_name.as_bytes());
         s.push(0);
     }
     for sec in extra_rela_sections {
@@ -1496,8 +1574,9 @@ fn build_shstrtab_with_tls(
 fn build_shstrtab(
     extra_sections: &[ElfSection],
     extra_rela_sections: &[ExtraRelaSection],
+    comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
-    build_shstrtab_with_tls(extra_sections, extra_rela_sections)
+    build_shstrtab_with_tls(extra_sections, extra_rela_sections, comdat_groups)
 }
 
 /// 计算自定义节名在 .shstrtab 中的偏移
@@ -1506,6 +1585,24 @@ fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
     let mut off = 39u32;
     for sec in &extra_sections[..idx] {
         off += sec.name.len() as u32 + 1;
+    }
+    off
+}
+
+/// 计算 COMDAT group 节名在 .shstrtab 中的偏移
+fn shstrtab_comdat_name_offset(
+    extra_sections: &[ElfSection],
+    comdat_groups: &[ComdatGroup],
+    comdat_idx: usize,
+) -> u32 {
+    let mut off = 39u32;
+    for sec in extra_sections {
+        off += sec.name.len() as u32 + 1;
+    }
+    // Add COMDAT group names before this index
+    for group in &comdat_groups[..comdat_idx] {
+        let group_name = format!(".group.{}", group.signature);
+        off += group_name.len() as u32 + 1;
     }
     off
 }

@@ -465,6 +465,7 @@ impl DebugSections {
                 ty: SHT_PROGBITS,
                 flags: if alloc { SHF_ALLOC } else { 0 },
                 align: 1,
+                group_name: None,
             });
         };
         push(&mut v, ".debug_abbrev", &self.abbrev, false);
