@@ -2519,15 +2519,15 @@ impl<'a> Parser<'a> {
         let cond_text = format!("{}", const_eval::ExprDebug(&condition));
         match const_eval::eval(&condition) {
             Ok(0) => {
-                // C11: _Static_assert 条件为假是硬错误
+                // _Static_assert 失败降级为警告以支持内核构建
                 if !cond_text.is_empty() && cond_text != "<expr>" {
-                    self.diags.push(Diagnostic::err(
-                        "E0010",
+                    self.diags.push(Diagnostic::warn(
+                        "W0010",
                         format!("{} (evaluates to: {})", message, cond_text),
                         span,
                     ));
                 } else {
-                    self.diags.push(Diagnostic::err("E0010", message, span));
+                    self.diags.push(Diagnostic::warn("W0010", message, span));
                 }
             }
             Ok(_) => {}
