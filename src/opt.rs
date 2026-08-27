@@ -1125,7 +1125,7 @@ fn dce_block_in_stmt(s: &mut Stmt) {
 ///
 /// `level` 控制内联激进程度:
 ///   - O0: 仅 `always_inline` / `flatten`
-///   - O1-O2: 同 O0 (未来计划加入成本模型驱动)
+///   - O1-O2: 同 O0, 但 hot caller (profile-guided) 享受放宽阈值
 ///   - O3: 额外启发式小型 static 零参函数 (cost ≤ 20 AST nodes)
 fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
@@ -1144,9 +1144,11 @@ fn function_inline(module: &mut Module, level: u8) {
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             let caller_flatten = f.is_flatten;
+            let caller_is_hot = f.is_hot;
             if let Some(body) = &mut f.body {
                 inline_calls_in_block(
-                    body, &funcs, level, caller_flatten, fenv_access, 0,
+                    body, &funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, 0,
                 );
             }
         }
@@ -1318,18 +1320,21 @@ fn inline_calls_in_block(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    caller_is_hot: bool,
     fenv_access: bool,
     depth: u32,
 ) {
     for item in &mut body.items {
         match item {
             BlockItem::Stmt(s) => inline_calls_in_stmt(
-                s, funcs, level, caller_flatten, fenv_access, depth,
+                s, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
             ),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
                     inline_calls_in_block(
-                        b, funcs, level, caller_flatten, fenv_access, depth,
+                        b, funcs, level, caller_flatten, caller_is_hot,
+                        fenv_access, depth,
                     );
                 }
             }
@@ -1343,30 +1348,52 @@ fn inline_calls_in_stmt(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    caller_is_hot: bool,
     fenv_access: bool,
     depth: u32,
 ) {
     match s {
         Stmt::Return { val: Some(e), .. } => {
-            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access, depth);
+            *e = inline_expr(
+                e.clone(), funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            );
         }
         Stmt::Expr { e, .. } => {
-            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access, depth)
+            *e = inline_expr(
+                e.clone(), funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )
         }
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten, fenv_access, depth);
-            inline_calls_in_stmt(then_, funcs, level, caller_flatten, fenv_access, depth);
+            *cond = inline_expr(
+                cond.clone(), funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            );
+            inline_calls_in_stmt(
+                then_, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            );
             if let Some(e) = else_ {
-                inline_calls_in_stmt(e, funcs, level, caller_flatten, fenv_access, depth);
+                inline_calls_in_stmt(
+                    e, funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, depth,
+                );
             }
         }
         Stmt::Block { b, .. } => {
-            inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access, depth)
+            inline_calls_in_block(
+                b, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )
         }
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access, depth)
+            inline_calls_in_stmt(
+                body, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )
         }
         Stmt::For {
             init,
@@ -1376,15 +1403,27 @@ fn inline_calls_in_stmt(
             ..
         } => {
             if let Some(c) = cond {
-                *c = inline_expr(c.clone(), funcs, level, caller_flatten, fenv_access, depth);
+                *c = inline_expr(
+                    c.clone(), funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, depth,
+                );
             }
             if let Some(st) = step {
-                *st = inline_expr(st.clone(), funcs, level, caller_flatten, fenv_access, depth);
+                *st = inline_expr(
+                    st.clone(), funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, depth,
+                );
             }
             if let Some(i) = init {
-                inline_calls_in_stmt(i, funcs, level, caller_flatten, fenv_access, depth);
+                inline_calls_in_stmt(
+                    i, funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, depth,
+                );
             }
-            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access, depth);
+            inline_calls_in_stmt(
+                body, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            );
         }
         _ => {}
     }
@@ -1507,8 +1546,9 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
 ///   4. O0 级别: 拒绝所有非强制内联
 ///   5. 深度超限: 拒绝
 ///   6. 直接递归: 拒绝 (callee 名与函数名相同)
-///   7. O3 启发式: static + 零参 + cost ≤ INLINE_COST_THRESHOLD
-///   8. 其他: 拒绝
+///   7. Profile-guided (hot caller, O2+): 放宽阈值 (cost ≤ 40, 不要求 static)
+///   8. O3 启发式: static + 零参 + cost ≤ INLINE_COST_THRESHOLD (20)
+///   9. 其他: 拒绝
 ///
 /// 当 DCC_INLINE_TRACE=1 时, 每个决策均输出到 stderr.
 fn try_inline_call(
@@ -1517,6 +1557,7 @@ fn try_inline_call(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    caller_is_hot: bool,
     depth: u32,
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
@@ -1567,13 +1608,26 @@ fn try_inline_call(
     }
 
     // --- O3 启发式: 小型 static 零参函数, 使用成本模型 ---
+    // Profile-guided: hot caller 在 O2+ 享受放宽阈值:
+    //   - 不要求 static
+    //   - 允许有参数
+    //   - 成本阈值从 20 提升到 40
     let cost = estimate_inline_cost(f, body, args);
-    if !(f.is_static && f.params.is_empty() && level >= 3
-        && cost <= INLINE_COST_THRESHOLD)
-    {
+    let profile_relaxed = caller_is_hot && level >= 2;
+    let heuristic_ok = if profile_relaxed {
+        cost <= INLINE_COST_THRESHOLD * 2
+    } else {
+        f.is_static && f.params.is_empty() && level >= 3
+            && cost <= INLINE_COST_THRESHOLD
+    };
+    if !heuristic_ok {
         trace_inline_decision(
             name, "REJECT",
-            &format!("cost {} > {} or not O3-static", cost, INLINE_COST_THRESHOLD),
+            &format!(
+                "cost {} > {} or not O3-static{}",
+                cost, INLINE_COST_THRESHOLD,
+                if profile_relaxed { " (profile-relaxed)" } else { "" },
+            ),
         );
         return None;
     }
@@ -1585,7 +1639,11 @@ fn try_inline_call(
     }
     trace_inline_decision(
         name, "INLINE",
-        &format!("O3 heuristic, cost={}", cost),
+        &format!(
+            "O3 heuristic, cost={}{}",
+            cost,
+            if profile_relaxed { " (profile-relaxed)" } else { "" },
+        ),
     );
     Some(substitute_call(f, ret, args))
 }
@@ -1609,6 +1667,7 @@ fn inline_expr(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    caller_is_hot: bool,
     fenv_access: bool,
     depth: u32,
 ) -> Expr {
@@ -1621,23 +1680,28 @@ fn inline_expr(
         } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if let Some(inlined) = try_inline_call(
-                    &name.name, &args, funcs, level, caller_flatten, depth,
+                    &name.name, &args, funcs, level, caller_flatten,
+                    caller_is_hot, depth,
                 ) {
                     // 内联后继续递归内联替换结果中的嵌套调用
                     return inline_expr(
-                        inlined, funcs, level, caller_flatten, fenv_access,
-                        depth + 1,
+                        inlined, funcs, level, caller_flatten, caller_is_hot,
+                        fenv_access, depth + 1,
                     );
                 }
             }
             Expr::Call {
                 callee: Box::new(inline_expr(
-                    *callee, funcs, level, caller_flatten, fenv_access, depth,
+                    *callee, funcs, level, caller_flatten, caller_is_hot,
+                    fenv_access, depth,
                 )),
                 args: args
                     .into_iter()
                     .map(|a| {
-                        inline_expr(a, funcs, level, caller_flatten, fenv_access, depth)
+                        inline_expr(
+                            a, funcs, level, caller_flatten, caller_is_hot,
+                            fenv_access, depth,
+                        )
                     })
                     .collect(),
                 span,
@@ -1646,14 +1710,23 @@ fn inline_expr(
         }
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(inline_expr(*l, funcs, level, caller_flatten, fenv_access, depth)),
-            r: Box::new(inline_expr(*r, funcs, level, caller_flatten, fenv_access, depth)),
+            l: Box::new(inline_expr(
+                *l, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )),
+            r: Box::new(inline_expr(
+                *r, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(inline_expr(*e, funcs, level, caller_flatten, fenv_access, depth)),
+            e: Box::new(inline_expr(
+                *e, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
+            )),
             span,
             ty,
         },
@@ -1665,13 +1738,16 @@ fn inline_expr(
             ty,
         } => Expr::Cond {
             cond: Box::new(inline_expr(
-                *cond, funcs, level, caller_flatten, fenv_access, depth,
+                *cond, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
             )),
             then_: Box::new(inline_expr(
-                *then_, funcs, level, caller_flatten, fenv_access, depth,
+                *then_, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
             )),
             else_: Box::new(inline_expr(
-                *else_, funcs, level, caller_flatten, fenv_access, depth,
+                *else_, funcs, level, caller_flatten, caller_is_hot,
+                fenv_access, depth,
             )),
             span,
             ty,
@@ -2403,5 +2479,115 @@ mod tests {
         } else {
             panic!("expected FuncDecl");
         }
+    }
+
+    /// Profile-guided inline: hot caller at O2 should relax the
+    /// heuristic (allow non-static, higher cost threshold).
+    #[test]
+    fn profile_guided_inline_hot_caller_relaxed_threshold() {
+        let sp = Span::point("t.c", 1, 1);
+        // callee: non-static, 2 params, body cost = 3 (return x+y)
+        let callee = FuncDecl {
+            ret_ty: int_ty(),
+            name: Ident { name: "add".into(), span: sp.clone() },
+            params: vec![
+                crate::ast::Param {
+                    name: Some(Ident { name: "x".into(), span: sp.clone() }),
+                    ty: int_ty(),
+                    span: sp.clone(),
+                },
+                crate::ast::Param {
+                    name: Some(Ident { name: "y".into(), span: sp.clone() }),
+                    ty: int_ty(),
+                    span: sp.clone(),
+                },
+            ],
+            body: Some(Block {
+                items: vec![BlockItem::Stmt(Stmt::Return {
+                    val: Some(Expr::Binop {
+                        op: BinOp::Add,
+                        l: Box::new(Expr::Ident {
+                            name: Ident { name: "x".into(), span: sp.clone() },
+                            span: sp.clone(),
+                            ty: int_ty(),
+                        }),
+                        r: Box::new(Expr::Ident {
+                            name: Ident { name: "y".into(), span: sp.clone() },
+                            span: sp.clone(),
+                            ty: int_ty(),
+                        }),
+                        span: sp.clone(),
+                        ty: int_ty(),
+                    }),
+                    span: sp.clone(),
+                })],
+                span: sp.clone(),
+            }),
+            span: sp.clone(),
+            is_static: false,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            is_hot: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
+            ifunc_resolver: None,
+            asm_output_template: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
+            is_naked: false,
+            is_noreturn: false,
+        };
+
+        let mut funcs = HashMap::new();
+        funcs.insert("add".into(), callee.clone());
+        let args = vec![
+            Expr::Int { v: 1, span: sp.clone(), ty: int_ty() },
+            Expr::Int { v: 2, span: sp.clone(), ty: int_ty() },
+        ];
+
+        // O2 + caller_is_hot=false: non-static with params should REJECT
+        let result_cold = try_inline_call(
+            "add", &args, &funcs, 2, false, false, 0,
+        );
+        assert!(
+            result_cold.is_none(),
+            "O2 cold caller should reject non-static callee with params"
+        );
+
+        // O2 + caller_is_hot=true: profile-relaxed should ACCEPT
+        let result_hot = try_inline_call(
+            "add", &args, &funcs, 2, false, true, 0,
+        );
+        assert!(
+            result_hot.is_some(),
+            "O2 hot caller should inline non-static callee (profile-relaxed)"
+        );
     }
 }
