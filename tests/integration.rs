@@ -4793,7 +4793,7 @@ fn asm_global_asm_compiles_without_nop_fallback() {
     );
 }
 
-/// 扩展操作数形式: rdrand/rdseed 内存 / 远控制流间接+反序 / TSX rel32 / AVX-imm 内存源 / MMX pshufw 内存 / AMX vextractps 内存目标
+/// 扩展操作数形式: rdrand/rdseed 内存 / ljmp/lcall 无后缀 / retf/lret imm16 / TSX / AVX-imm 内存源 / pinsr*/pextr* 内存 / vpinsr*/vpextr*/vcvtps2ph 内存 / vextractpd XMM / MMX pshufw / AMX tilezero
 #[test]
 fn asm_extended_forms_compiles_without_nop_fallback() {
     let source = include_str!("fixtures/c/asm_extended_forms.c");
