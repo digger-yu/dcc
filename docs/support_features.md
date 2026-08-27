@@ -277,19 +277,20 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ GCC 兼容运行时 | `__cxa_guard_acquire/release/abort` / `__dynamic_cast` / `initializer_list`（均 weak，多 TU 安全） |
 | dcc++ operator-> 重载链 | 类型名含 `Ptr` / `Wrapper` / `Iter` 识别 |
 | dcc++ 完整 RTTI dynamic_cast | 跨虚继承通过 vtable RTTI 查找 |
-| dcc++ typeid(e) 真 RTTI | `expr_static_class` 推断静态类，生成 `(&__dcc_ti_<class>)` 符号引用 |
+| dcc++ typeid(e) 真 RTTI | M27: 多态表达式通过 vtable RTTI slot (`__vptr[0]`) 获取运行时真实类型；非多态表达式用静态 `(&__dcc_ti_<class>)` |
 | dcc++ 构造委托 / 继承链 ctor | `using Base::Base;` 转发 |
 | dcc++ 成员函数指针 | `&Class::method` 降级为 `&_member_fn_<Class>_<method>` |
-| dcc++ `obj.*ptr_to_member` | `.*` 与 `->*` 语法，走 `__dcc_mbr_<class>_<member>` 偏移（weak，多 TU 安全） |
+| dcc++ `obj.*ptr_to_member` | M27: `.*` 与 `->*` 解引类型不再硬编码 `int*`，而是查找字段真实类型（weak，多 TU 安全） |
 | dcc++ vtable/typeinfo 多文件链接 | `_ZTV` / `_ZTI` / `__dcc_mbr_*` 均 weak，多 TU 包含相同类定义不报 multiple definition |
 | dcc++ `__cxa_guard_*` 线程安全 init guard | 静态局部变量状态机 0/1/2 |
 | dcc++ std::initializer_list | `{1, 2, 3}` 降级为复合字面量 |
-| dcc++ 模板完整单态化 | `TemplateRegistry` 注册 + 缓存 + 偏特化匹配；模板-id `T<U>` 解析 |
+| dcc++ 模板完整单态化 | `TemplateRegistry` 注册 + 缓存 + 偏特化匹配；模板-id `T<U>` 解析；M27: `mangle_to_c_ns` Template 分支直接走 `instantiated_class_name`，与 template.rs 单态化完全对接 |
+| dcc++ 模板偏特化排序 | M27: GCC/Clang 风格 specialization 排序，多候选时选最特化（精确匹配 > 指针模式 > 通配符） |
 | dcc++ 模板基类 | `class Derived : public Base<int>` 模板基类实例化 + 嵌入继承 |
 | dcc++ 模板友元 | `friend class Foo<T>` 模板友元声明解析 + 跳过 |
 | dcc++ `export template` | `export template <T> class Foo` 模板导出 + BMF 序列化 |
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
-| dcc++ module ODR 检查 | `OdrChecker` 跨模块重复定义检测 + 冲突报告 |
+| dcc++ module ODR 检查 | M27: `OdrChecker` 跨模块重复定义检测 + 冲突报告；`load_imported_modules` 加载 BMF 后自动执行 ODR 检查，冲突时输出 warning |
 | dcc++ `virtual` 继承完整布局 | 传递虚基 DFS 去重、`__vbptr` + `__vbt_<C>` vbtable（vbase_offset 项）、虚基子对象嵌入对象尾部、自动默认 ctor 初始化 vbptr 并调用虚基 ctor、成员访问与上转型经 vbtable 运行时 this-adjust；同时修复 dcc C 后端 `ptr->field` 成员访问偏移 bug |
 | dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 + 局部变量声明支持；std::vector<T> 为真正类模板，单态化由 `TemplateRegistry` 完成 |
 | dcc++ 动态 RTTI | typeinfo/vtable 生成 + 继承虚方法检测 + RTTI slot |
@@ -301,7 +302,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ `new T[n]` 数组分配 | `CppExpr::NewArr` + `_Znam` |
 | dcc++ `placement new` | `new (ptr) T(args)` 原地构造 |
 | dcc++ `static` 类成员 | C `static` 字段 + Itanium ABI mangling |
-| C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛） / `final` / `override` / `mutable` / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
+| C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛） / `final` / `override` / `mutable`（M27: 跟踪 mutable 字段，C 端输出 `/* mutable */` 注释标记，const 方法中可写） / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
 | 模板嵌套深度 | `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认一致（Clang 为 1024），含深度超限诊断 |
 | `if constexpr` | 编译期分支：const_eval 在 lower 端选分支 |
 | C++ 标准库扩展 | `<chrono>` / `<thread>` / `<mutex>` / `<condition_variable>` / `<filesystem>` / `<expected>` / `<flat_map>` / `<regex>` / `<ranges>` |

@@ -28,6 +28,7 @@ use crate::cpp::parser::CppDecl;
 ///   - `import foo;`    -> `foo.bmf`
 ///   - `import :part;`  -> `<当前模块名>.part.bmf`
 /// 找不到时静默跳过 (lower 端回退为 include / 注释占位).
+/// M27: 加载后执行 ODR 检查, 检测跨模块重复定义冲突.
 pub fn load_imported_modules(
     decls: &[CppDecl],
     search_dirs: &[std::path::PathBuf],
@@ -75,6 +76,16 @@ pub fn load_imported_modules(
                 }
                 break;
             }
+        }
+    }
+    // M27: ODR 检查 - 检测加载模块间的重复定义冲突
+    if out.len() > 1 {
+        let mut checker = OdrChecker::new();
+        for m in &out {
+            checker.register_module(&m.name, &m.exports);
+        }
+        if let Some(msg) = checker.check_and_format() {
+            eprintln!("warning: {}", msg);
         }
     }
     out

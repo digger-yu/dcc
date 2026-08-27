@@ -118,6 +118,9 @@ pub struct Lower {
     pub class_aligns: std::collections::HashMap<String, i64>,
     /// M26.3: 多态类 (有虚函数/虚析构, 或继承多态基类) - 决定 __vptr 布局
     pub class_polymorphic: std::collections::HashSet<String>,
+    /// M27: mutable 成员跟踪 (class -> [field_name, ...])
+    /// const 方法中 mutable 字段仍可写, C 端通过注释标记 + const-cast 实现
+    pub mutable_fields: std::collections::HashMap<String, Vec<String>>,
     /// M26.4: 导入的模块接口 (BMF), 由 driver 预加载; `import foo;` 据此
     /// 生成 extern 声明并注册名字, 而非当作 `#include <foo>`
     pub imported_modules: Vec<crate::cpp::bmf::BmfModule>,
@@ -304,6 +307,11 @@ impl Lower {
             MangleType::Pointer(t) | MangleType::Reference(t) => {
                 format!("{}*", self.mangle_to_c_ns(t))
             }
+            // M27: Template 类型直接走 instantiated_class_name, 确保与
+            // template.rs 单态化生成的类名一致 (不再走占位 typedef)
+            MangleType::Template { name, args } => {
+                format!("struct {}", instantiated_class_name(name, args))
+            }
             _ => mangle_to_c(ty),
         }
     }
@@ -346,6 +354,7 @@ impl Lower {
             class_sizes: std::collections::HashMap::new(),
             class_aligns: std::collections::HashMap::new(),
             class_polymorphic: std::collections::HashSet::new(),
+            mutable_fields: std::collections::HashMap::new(),
             imported_modules: vec![],
             module_partition: None,
             module_part_imports: vec![],
@@ -2000,13 +2009,22 @@ impl Lower {
                 name,
                 is_mutable,
             } => {
-                // M17.0: mutable 成员 - C 端不区分, 但 C++ 端 const 方法中可写.
-                // 我们已经在 const 方法中把 this 视作 const, 但为支持 mutable,
-                // emit 时仍按非 const 处理; 正确做法是 lower_const_method 用 const-cast.
-                // 当前简化: mutable 视为普通字段, 不做差异 - 留待 M17.x 完善.
-                let _ = is_mutable;
-                self.out
-                    .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
+                // M27: mutable 成员跟踪 + C 端注释标记
+                // C 语言无 mutable 概念, 但语义上 mutable 字段在 const 方法中可写.
+                // 我们跟踪 mutable 字段, 并在输出中添加注释标记.
+                if *is_mutable {
+                    if let Some(cls) = &self.current_class {
+                        self.mutable_fields
+                            .entry(cls.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    self.out
+                        .push_str(&format!("    {} {}; /* mutable */\n", self.mangle_to_c_ns(ty), name));
+                } else {
+                    self.out
+                        .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
+                }
             }
             CppDecl::Namespace { name, body } => {
                 if let Some(n) = name {
@@ -3630,14 +3648,26 @@ impl Lower {
                 self.out.push(')');
             }
             CppExpr::Typeid(e) => {
-                // M17.0: 真 RTTI - 取静态类对应的 typeinfo 符号
-                // 真实动态 RTTI (跨多态指针) 需要 vtable 头部 typeinfo 指针;
-                // 当前 dcc ABI 桩无此字段, 这里使用静态类 RTTI. 这与 C++ 标准
-                // 对非多态表达式的 typeid 行为一致.
+                // M27: 动态 RTTI - 多态表达式通过 vtable RTTI slot 获取真实类型
+                // 非多态表达式仍用静态类 RTTI (与 C++ 标准一致)
                 let cls = self.expr_static_class(e);
-                self.out.push_str("(&__dcc_ti_");
-                self.out.push_str(&cls);
-                self.out.push(')');
+                let is_poly = if !cls.is_empty() {
+                    self.class_polymorphic.contains(&cls)
+                } else {
+                    false
+                };
+                if is_poly {
+                    // 多态: 通过 __vptr[0] 读取运行时 typeinfo 指针
+                    // obj.__vptr 是 void*, 强转为 void** 取 [0] 即 typeinfo
+                    self.out.push_str("((void**)((char*)&");
+                    self.emit_expr(e);
+                    self.out.push_str(")[0])");
+                } else {
+                    // 非多态: 静态 RTTI
+                    self.out.push_str("(&__dcc_ti_");
+                    self.out.push_str(&cls);
+                    self.out.push(')');
+                }
             }
             // M17.0: 静态 typeid(T) -> &_ZTI<T>
             CppExpr::TypeidType(ty) => {
@@ -3738,7 +3768,11 @@ impl Lower {
                 // 我们约定: 成员指针 "Class.field" 解析为 offsetof(struct Class, field)
                 // 找出 obj 的类名 (用 lookup_var_class 启发式), 取偏移
                 let class = self.lookup_var_class(obj).unwrap_or_default();
-                self.out.push_str("(*(int*)((char*)(");
+                // M27: 查找字段真实类型, 不再硬编码 int*
+                let field_ty = self.member_field_type(obj, member)
+                    .unwrap_or(MangleType::Int);
+                let c_ty = self.mangle_to_c_ns(&field_ty);
+                self.out.push_str(&format!("(*({}*)((char*)(", c_ty));
                 self.emit_expr(obj);
                 self.out.push_str(") + __dcc_mbr_");
                 self.out.push_str(&class);
@@ -3750,7 +3784,11 @@ impl Lower {
             CppExpr::PtrMemberStar(obj, member) => {
                 // M17.0: `obj->*p` 真解引用 (obj 是指针, 偏移同上)
                 let class = self.lookup_var_class(obj).unwrap_or_default();
-                self.out.push_str("(*(int*)((char*)(");
+                // M27: 查找字段真实类型, 不再硬编码 int*
+                let field_ty = self.member_field_type(obj, member)
+                    .unwrap_or(MangleType::Int);
+                let c_ty = self.mangle_to_c_ns(&field_ty);
+                self.out.push_str(&format!("(*({}*)((char*)(", c_ty));
                 self.emit_expr(obj);
                 self.out.push_str(") + __dcc_mbr_");
                 self.out.push_str(&class);

@@ -8115,6 +8115,76 @@ fn m17_mutable() {
     let _ = fs::remove_file(_obj);
 }
 
+/// M27: mutable 成员 const 方法中可写
+#[test]
+#[cfg(unix)]
+fn m27_mutable_const_method() {
+    let src = include_str!("fixtures/cpp/mutable.cpp");
+    let (out, _obj) = run_cpp_object_test("m27-mutable-const", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(_obj);
+}
+
+/// M27: MemberStar/PtrMemberStar 真实字段类型解引
+#[test]
+#[cfg(unix)]
+fn m27_member_ptr_deref_typed() {
+    let src = include_str!("fixtures/cpp/member_ptr_deref.cpp");
+    let (out, _obj) = run_cpp_object_test("m27-member-ptr-deref", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(_obj);
+}
+
+/// M27: typeid 动态 RTTI (多态类 vtable RTTI slot)
+#[test]
+#[cfg(unix)]
+fn m27_typeid_dynamic_rtti() {
+    let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
+    let (out, _obj) = run_cpp_object_test("m27-typeid-rtti", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(_obj);
+}
+
+/// M27: 模板偏特化 specialization 排序
+#[test]
+#[cfg(unix)]
+fn m27_template_specialization() {
+    let src = include_str!("fixtures/cpp/template_specialization.cpp");
+    let (out, _obj) = run_cpp_object_test("m27-tpl-spec", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(_obj);
+}
+
+/// M27: C++20 Modules ODR 检查
+#[test]
+#[cfg(unix)]
+fn m27_modules_odr() {
+    let src = include_str!("fixtures/cpp/modules_odr.cpp");
+    let (out, _obj) = run_cpp_object_test("m27-modules-odr", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(_obj);
+}
+
 /// M17.0: new T[n] 数组分配 + operator new[]/delete[]
 #[test]
 #[cfg(unix)]

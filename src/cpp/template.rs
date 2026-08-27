@@ -261,41 +261,68 @@ impl TemplateRegistry {
     }
 
     /// 选择偏特化: 若实参匹配某偏特化模式, 返回 (特化声明, 形参名, 实参)
+    /// M27: 实现 GCC/Clang 风格的 specialization 排序:
+    /// 多个偏特化匹配时, 选最特化 (most specialized) 的那个.
+    /// 特化度评分: 精确匹配 > 指针/引用模式匹配 > 通配符匹配.
     pub fn pick_partial(
         &self,
         name: &str,
         args: &[MangleType],
     ) -> Option<(CppDecl, Vec<String>, Vec<MangleType>)> {
+        let arg_keys: Vec<String> = args.iter().map(type_key).collect();
+        let mut candidates: Vec<(usize, &PartialSpecEntry)> = Vec::new();
         for p in &self.partials {
             if p.name != name {
                 continue;
             }
             let patterns: Vec<&str> = p.pattern_text.split(',').collect();
-            let arg_keys: Vec<String> = args.iter().map(type_key).collect();
             if patterns.len() != arg_keys.len() {
                 continue;
             }
-            let all_match = patterns.iter().zip(arg_keys.iter()).all(|(pat, arg)| {
-                // 支持指针/引用模式: `T*` vs `int*`
+            // 计算匹配度和特化度分数
+            let mut specificity: usize = 0;
+            let mut all_match = true;
+            for (pat, arg) in patterns.iter().zip(arg_keys.iter()) {
                 let pat = pat.trim();
                 let pat_key = pat.replace('*', "").trim().to_string();
                 if pat.ends_with('*') && arg.starts_with("p_") {
-                    // `T*` 匹配 `p_<T>` 编码
-                    return pat_key == "T" || arg.contains(&pat_key);
+                    // 指针模式: `T*` 匹配 `p_<T>` 编码
+                    if pat_key == "T" || arg.contains(&pat_key) {
+                        specificity += 2; // 指针模式比通配符更特化
+                    } else {
+                        all_match = false;
+                        break;
+                    }
+                } else if pat_key.is_empty() {
+                    all_match = false;
+                    break;
+                } else if pat_key == *arg {
+                    // 精确匹配: 最特化
+                    specificity += 3;
+                } else if Self::is_param_name(pat, &p.param_names) {
+                    // 通配符: 匹配任意类型, 最不特化
+                    specificity += 1;
+                } else {
+                    all_match = false;
+                    break;
                 }
-                if pat == "T" || pat == "U" || pat == "V" {
-                    return true;
-                }
-                if pat_key.is_empty() {
-                    return false;
-                }
-                pat_key == *arg
-            });
+            }
             if all_match {
-                return Some((p.decl.clone(), p.param_names.clone(), args.to_vec()));
+                candidates.push((specificity, p));
             }
         }
-        None
+        if candidates.is_empty() {
+            return None;
+        }
+        // 选特化度最高的候选 (分数越大越特化)
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        let p = candidates[0].1;
+        Some((p.decl.clone(), p.param_names.clone(), args.to_vec()))
+    }
+
+    /// 判断 pattern 文本是否是形参名 (通配符)
+    fn is_param_name(pat: &str, param_names: &[String]) -> bool {
+        param_names.iter().any(|p| p == pat)
     }
 }
 
