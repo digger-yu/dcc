@@ -18222,3 +18222,62 @@ fn cross_compile_elf_machine_headers() {
         );
     }
 }
+
+/// Verify that `.init_array` / `.fini_array` input sections are emitted
+/// into the linked executable with the correct ELF section types
+/// (SHT_INIT_ARRAY = 14 / SHT_FINI_ARRAY = 15), not SHT_PROGBITS.
+#[test]
+#[cfg(unix)]
+fn elf_section_types_init_fini_array() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let asm_src = manifest.join("tests/fixtures/c/init_fini_array.s");
+    if !asm_src.exists() {
+        return; // fixture absent, skip
+    }
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-initfini-{}.o", std::process::id()));
+    let exe = dir.join(format!("dcc-initfini-{}", std::process::id()));
+    // Assemble with host gcc so the .o has INIT_ARRAY/FINI_ARRAY types.
+    let assemble = Command::new("gcc")
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(&asm_src)
+        .output()
+        .expect("run gcc");
+    assert!(
+        assemble.status.success(),
+        "gcc assemble failed: {}",
+        String::from_utf8_lossy(&assemble.stderr)
+    );
+    // Link with dcc's built-in linker.
+    let link = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fbuiltin-linker", "-nostdlib", "-o"])
+        .arg(&exe)
+        .arg(&obj)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&obj);
+    assert!(
+        link.status.success(),
+        "dcc link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    // Verify section types via readelf -S.
+    let readelf = Command::new("readelf")
+        .arg("-S")
+        .arg(&exe)
+        .output()
+        .expect("run readelf");
+    let _ = fs::remove_file(&exe);
+    assert!(readelf.status.success(), "readelf -S failed");
+    let dump = String::from_utf8_lossy(&readelf.stdout);
+    // readelf prints the type name after the section name.
+    assert!(
+        dump.contains(".init_array") && dump.contains("INIT_ARRAY"),
+        ".init_array should have type INIT_ARRAY, dump:\n{dump}"
+    );
+    assert!(
+        dump.contains(".fini_array") && dump.contains("FINI_ARRAY"),
+        ".fini_array should have type FINI_ARRAY, dump:\n{dump}"
+    );
+}

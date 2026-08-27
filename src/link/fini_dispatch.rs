@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use super::layout::{Layout, OutputSection, OutputSectionKind};
+use crate::codegen::elf::SHT_FINI_ARRAY;
 
 /// __dso_handle 内容: 通常是 .data 中一个隐藏变量
 /// 简化: 直接指向 .data 节起始地址
@@ -131,7 +132,7 @@ pub fn ensure_fini_array_section(layout: &mut Layout) -> u32 {
         kind: OutputSectionKind::FiniArray,
         name: ".fini_array".to_string(),
         sh_name_off: 0,
-        ty: 1,      // SHT_PROGBITS
+        ty: SHT_FINI_ARRAY,
         flags: 0x3, // SHF_ALLOC | SHF_WRITE
         align: 8,
         data: Vec::new(),

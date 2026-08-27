@@ -17,8 +17,9 @@ use std::collections::{HashMap, HashSet};
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::elf::{
-    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, SHT_RELA, SHT_STRTAB,
-    SHT_SYMTAB, STB_LOCAL, STT_NOTYPE, STT_SECTION,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
+    SHT_NOBITS, SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
+    STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };
 use crate::debug::ArchKind;
 
@@ -280,7 +281,7 @@ impl LayoutBuilder {
                         kind: k,
                         name: name.to_string(),
                         sh_name_off: 0,
-                        ty: SHT_PROGBITS,
+                        ty: section_type_for_kind(&k_for_creation, name),
                         flags,
                         align,
                         data: Vec::new(),
@@ -473,7 +474,7 @@ impl LayoutBuilder {
                 kind: OutputSectionKind::Named(script_sec.name.clone()),
                 name: script_sec.name.clone(),
                 sh_name_off: 0,
-                ty: script_sec.ty,
+                ty: section_type_for_kind(&OutputSectionKind::Named(script_sec.name.clone()), &script_sec.name),
                 flags: script_sec.flags,
                 align: script_sec.align,
                 data: script_sec.data.clone(),
@@ -1396,6 +1397,31 @@ fn classify_section(name: &str) -> Option<OutputSectionKind> {
     }
 }
 
+/// Return the ELF sh_type for an output section. Uses the section kind
+/// when it carries a well-known type (init_array/fini_array/bss), and
+/// falls back to name-based detection for `Named(...)` sections so that
+/// script-defined `.init_array`/`.fini_array`/`.preinit_array` still get
+/// the correct ELF section type.
+fn section_type_for_kind(kind: &OutputSectionKind, name: &str) -> u32 {
+    match kind {
+        OutputSectionKind::Bss | OutputSectionKind::Tbss => SHT_NOBITS,
+        OutputSectionKind::InitArray => SHT_INIT_ARRAY,
+        OutputSectionKind::FiniArray => SHT_FINI_ARRAY,
+        OutputSectionKind::Named(n) => match n.as_str() {
+            ".init_array" => SHT_INIT_ARRAY,
+            ".fini_array" => SHT_FINI_ARRAY,
+            ".preinit_array" => SHT_PREINIT_ARRAY,
+            _ => SHT_PROGBITS,
+        },
+        _ => match name {
+            ".init_array" => SHT_INIT_ARRAY,
+            ".fini_array" => SHT_FINI_ARRAY,
+            ".preinit_array" => SHT_PREINIT_ARRAY,
+            _ => SHT_PROGBITS,
+        },
+    }
+}
+
 fn section_flags_for_kind(kind: OutputSectionKind) -> u32 {
     match kind {
         OutputSectionKind::Text
@@ -1525,5 +1551,54 @@ mod tests {
         assert_eq!(classify_section(".data"), Some(OutputSectionKind::Data));
         assert_eq!(classify_section(".bss"), Some(OutputSectionKind::Bss));
         assert_eq!(classify_section(".debug_info"), None);
+        assert_eq!(
+            classify_section(".init_array"),
+            Some(OutputSectionKind::InitArray)
+        );
+        assert_eq!(
+            classify_section(".fini_array"),
+            Some(OutputSectionKind::FiniArray)
+        );
+    }
+
+    #[test]
+    fn section_type_for_kind_maps_array_types() {
+        assert_eq!(
+            section_type_for_kind(&OutputSectionKind::InitArray, ".init_array"),
+            SHT_INIT_ARRAY
+        );
+        assert_eq!(
+            section_type_for_kind(&OutputSectionKind::FiniArray, ".fini_array"),
+            SHT_FINI_ARRAY
+        );
+        assert_eq!(
+            section_type_for_kind(
+                &OutputSectionKind::Named(".init_array".into()),
+                ".init_array"
+            ),
+            SHT_INIT_ARRAY
+        );
+        assert_eq!(
+            section_type_for_kind(
+                &OutputSectionKind::Named(".fini_array".into()),
+                ".fini_array"
+            ),
+            SHT_FINI_ARRAY
+        );
+        assert_eq!(
+            section_type_for_kind(
+                &OutputSectionKind::Named(".preinit_array".into()),
+                ".preinit_array"
+            ),
+            SHT_PREINIT_ARRAY
+        );
+        assert_eq!(
+            section_type_for_kind(&OutputSectionKind::Bss, ".bss"),
+            SHT_NOBITS
+        );
+        assert_eq!(
+            section_type_for_kind(&OutputSectionKind::Text, ".text"),
+            SHT_PROGBITS
+        );
     }
 }

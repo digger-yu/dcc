@@ -380,7 +380,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `--gdb-index` | 最小 `.gdb_index` 节 |
 | `--compress-debug-sections=zlib\|zstd` | miniz_oxide / zstd 压缩 .debug_* 节 |
 | `SHF_GNU_RETAIN` 节标志 | 元数据节自动打 `0x200000` |
-| `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序 |
+| `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序；`.init_array` / `.fini_array` / `.preinit_array` 输出使用正确 ELF 节类型 (SHT_INIT_ARRAY=14 / SHT_FINI_ARRAY=15 / SHT_PREINIT_ARRAY=16) 而非 SHT_PROGBITS |
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |

@@ -54,6 +54,9 @@ pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_NOTE: u32 = 7;
 pub const SHT_NOBITS: u32 = 8;
 pub const SHT_DYNSYM: u32 = 11;
+pub const SHT_INIT_ARRAY: u32 = 14;
+pub const SHT_FINI_ARRAY: u32 = 15;
+pub const SHT_PREINIT_ARRAY: u32 = 16;
 pub const SHT_GROUP: u32 = 17;
 
 // 节标志
