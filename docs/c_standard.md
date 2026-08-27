@@ -84,7 +84,11 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__builtin_add_overflow` / `__builtin_sub_overflow` / `__builtin_mul_overflow` 溢出检测算术
 - `__builtin_offsetof` 结构体成员偏移计算 (支持嵌套结构体)
 - `MODULE_LICENSE` / `MODULE_AUTHOR` / `MODULE_DESCRIPTION` 等内核模块宏
-- `DEFINE_PER_CPU` / `DECLARE_PER_CPU` percpu 变量支持
+- `DEFINE_PER_CPU` / `DECLARE_PER_CPU` / `DEFINE_PER_CPU_SHARED_ALIGNED` percpu 变量声明
+- `__percpu` 类型限定符 (展开为 `.data..percpu` section + `__seg_gs`)
+- `__this_cpu_read` / `__this_cpu_write` / `__this_cpu_add` / `__this_cpu_inc` / `__this_cpu_dec` per-cpu 访问宏
+- `__get_cpu_var` / `per_cpu` / `this_cpu_read` / `this_cpu_write` per-cpu 访问宏
+- `__seg_gs` / `__seg_fs` 地址空间限定符 (存入类型系统, 用于 per-cpu 变量访问)
 - 嵌套函数定义 (GCC 扩展, 含静态链外层变量访问)
 - `__builtin_memcpy` / `__builtin_memset` / `__builtin_memmove` 内联实现 (rep movsb/stosb, freestanding 无需 libc)
 - `__builtin_object_size` 编译期对象大小（`&var`、数组 decay、常量下标/成员、
