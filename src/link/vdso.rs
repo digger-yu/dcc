@@ -257,6 +257,81 @@ pub fn vdso_alias(standard_name: &str) -> Option<&'static str> {
     })
 }
 
+/// 自动检测系统 vDSO ELF 路径.
+///
+/// 搜索顺序:
+///   1. /sys/devices/system/cpu/vdso/vdso64.so (x86_64)
+///   2. /sys/kernel/vdso (旧内核)
+///   3. 从 /proc/self/maps 解析 \[vdso\] 映射的 .so 路径
+///   4. 常见 sysroot 路径下的 vdso64.so
+///
+/// 返回 None 表示系统无可用 vDSO (容器/嵌入式环境).
+pub fn detect_system_vdso(arch: crate::debug::ArchKind) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // 架构对应的常见 vDSO 文件名
+    let vdso_names: &[&str] = match arch {
+        crate::debug::ArchKind::X86_64 => &["vdso64.so", "vdso.so"],
+        crate::debug::ArchKind::AArch64 => &["vdso.so"],
+        _ => &["vdso.so"],
+    };
+
+    // 1. /sys/devices/system/cpu/vdso/
+    let sys_paths = [
+        "/sys/devices/system/cpu/vdso",
+        "/sys/kernel/vdso",
+    ];
+    for dir in &sys_paths {
+        for name in vdso_names {
+            let p = std::path::Path::new(dir).join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+
+    // 2. /proc/self/maps 中找 [vdso] 映射
+    if let Some(p) = detect_vdso_from_proc_maps() {
+        return Some(p);
+    }
+
+    // 3. 常见 sysroot / 调试路径
+    let fallback_paths = [
+        "/usr/lib/debug/vdso64.so.dbg",
+        "/usr/lib64/vdso64.so",
+    ];
+    for path in &fallback_paths {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+/// 从 /proc/self/maps 解析 [vdso] 映射对应的文件路径.
+fn detect_vdso_from_proc_maps() -> Option<std::path::PathBuf> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        // 格式: addr-addr perms offset dev inode pathname [offset]
+        // vDSO 行: ... [vdso]
+        if line.contains("[vdso]") {
+            // [vdso] 通常是匿名映射, 没有文件路径
+            // 但某些内核/调试环境会映射到实际文件
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 6 {
+                let candidate = parts[5..].join(" ");
+                let candidate = candidate.trim();
+                if !candidate.starts_with('[') && std::path::Path::new(candidate).exists() {
+                    return Some(std::path::PathBuf::from(candidate));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +580,21 @@ mod tests {
         assert_eq!(info.source_path, path.display().to_string());
         assert!(info.symbols.contains_key("__vdso_clock_gettime"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detect_system_vdso_returns_option() {
+        // 不要求系统一定有 vDSO, 只验证函数不 panic 且返回类型正确
+        let result = detect_system_vdso(crate::debug::ArchKind::X86_64);
+        // 在 CI / 容器中可能没有 vDSO 文件, 两种结果都合法
+        if let Some(ref path) = result {
+            assert!(path.exists(), "detect returned Some but path missing");
+        }
+    }
+
+    #[test]
+    fn detect_vdso_from_proc_maps_no_panic() {
+        // 验证函数不 panic; 返回值取决于运行环境
+        let _ = detect_vdso_from_proc_maps();
     }
 }

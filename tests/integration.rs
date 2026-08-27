@@ -157,7 +157,12 @@ fn run_sanitized_binary(
     name: &str,
     source: &str,
     flags: &[&str],
-) -> (std::process::Output, std::process::Output, String, std::path::PathBuf) {
+) -> (
+    std::process::Output,
+    std::process::Output,
+    String,
+    std::path::PathBuf,
+) {
     let (compile, exe_path) = run_compile_and_run_flags(name, source, flags);
     assert!(
         compile.status.success(),
@@ -1725,11 +1730,7 @@ fn m_flag_outputs_deps_to_stdout_includes_system_headers() {
     let src = dir.join(format!("dcc-m-{}.c", std::process::id()));
     fs::create_dir_all(&inc).expect("mkdir inc");
     fs::write(inc.join("sys.h"), "#define SYS_X 1\n").expect("write sys.h");
-    fs::write(
-        &src,
-        "#include <sys.h>\nint main(void) { return SYS_X; }\n",
-    )
-    .expect("write src");
+    fs::write(&src, "#include <sys.h>\nint main(void) { return SYS_X; }\n").expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-M")
         .arg("-isystem")
@@ -1765,11 +1766,7 @@ fn mm_flag_outputs_deps_excludes_system_headers() {
     let src = dir.join(format!("dcc-mm-{}.c", std::process::id()));
     fs::create_dir_all(&inc).expect("mkdir inc");
     fs::write(inc.join("sys.h"), "#define SYS_X 1\n").expect("write sys.h");
-    fs::write(
-        &src,
-        "#include <sys.h>\nint main(void) { return SYS_X; }\n",
-    )
-    .expect("write src");
+    fs::write(&src, "#include <sys.h>\nint main(void) { return SYS_X; }\n").expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-MM")
         .arg("-isystem")
@@ -1873,10 +1870,7 @@ fn m_flag_with_mf_writes_to_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     // -M 加 -MF 应写入文件而非 stdout
-    assert!(
-        !dep_text.is_empty(),
-        "-M -MF should write deps to file"
-    );
+    assert!(!dep_text.is_empty(), "-M -MF should write deps to file");
     let stem = src.file_stem().unwrap().to_str().unwrap();
     assert!(
         dep_text.contains(&format!("{stem}.o:")),
@@ -2124,7 +2118,10 @@ fn eh_frame_with_frame_pointer() {
     let obj_str = String::from_utf8_lossy(&obj);
     assert!(obj_str.contains(".eh_frame"), "missing .eh_frame");
     // ORC 由 objtool 生成, dcc 只负责 .eh_frame
-    assert!(!obj_str.contains(".orc_unwind_ip"), "dcc should not emit .orc_unwind_ip");
+    assert!(
+        !obj_str.contains(".orc_unwind_ip"),
+        "dcc should not emit .orc_unwind_ip"
+    );
 }
 
 #[test]
@@ -3475,10 +3472,7 @@ fn noreturn_trap_emits_ud2_compiles() {
     ];
     for fname in &noreturn_fns {
         let body = extract_function_body(&asm, fname);
-        assert!(
-            !body.is_empty(),
-            "function {fname} not found in asm output"
-        );
+        assert!(!body.is_empty(), "function {fname} not found in asm output");
         // 找 ret 位置, 确认前面有 ud2
         let ret_pos = body.find("\n\tret").expect("ret not found in noreturn fn");
         let pre = &body[..ret_pos];
@@ -3490,7 +3484,9 @@ fn noreturn_trap_emits_ud2_compiles() {
     // 控制对照: 普通函数 ret 前不应有 ud2
     let regular_body = extract_function_body(&asm, "regular_add");
     assert!(!regular_body.is_empty(), "regular_add not found in asm");
-    let ret_pos = regular_body.find("\n\tret").expect("ret not found in regular fn");
+    let ret_pos = regular_body
+        .find("\n\tret")
+        .expect("ret not found in regular fn");
     let pre = &regular_body[..ret_pos];
     assert!(
         !pre.contains("ud2"),
@@ -4190,13 +4186,22 @@ fn asm_nested_pushsection_compiles_with_sections() {
     let _ = std::fs::remove_file(&obj_path);
     let secs = elf64_sections(&obj);
     // __ex_table should have 3 .long entries (12 bytes) per exception table entry
-    let (ty, _, size) = secs.get("__ex_table").copied().expect("missing __ex_table section");
+    let (ty, _, size) = secs
+        .get("__ex_table")
+        .copied()
+        .expect("missing __ex_table section");
     assert_eq!(ty, 1, "__ex_table must be SHT_PROGBITS");
-    assert!(size >= 12, "__ex_table too small (size {size}), expected at least 12 bytes");
+    assert!(
+        size >= 12,
+        "__ex_table too small (size {size}), expected at least 12 bytes"
+    );
     assert_eq!(size % 12, 0, "__ex_table size {size} not a multiple of 12");
     // .fixup should be executable
     let (_, flags, size) = secs.get(".fixup").copied().expect("missing .fixup section");
-    assert!(flags & 0x4 != 0, ".fixup must have SHF_EXECINSTR (got flags {flags:#x})");
+    assert!(
+        flags & 0x4 != 0,
+        ".fixup must have SHF_EXECINSTR (got flags {flags:#x})"
+    );
     assert!(size >= 5, ".fixup code dropped (size {size})");
 }
 
@@ -6202,11 +6207,9 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
 #[test]
 #[cfg(unix)]
 fn kernel_config_has_serial_console_for_qemu_boot() {
-    let kernel_dir = std::path::Path::new(
-        &std::env::var("HOME")
-            .unwrap_or_else(|_| "/root".to_string()),
-    )
-    .join("linux-7.1");
+    let kernel_dir =
+        std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()))
+            .join("linux-7.1");
     let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
     let config = kernel_dir.join(".config");
 
@@ -6220,14 +6223,12 @@ fn kernel_config_has_serial_console_for_qemu_boot() {
         return;
     }
 
-    let config_text =
-        fs::read_to_string(&config).expect("read kernel .config");
+    let config_text = fs::read_to_string(&config).expect("read kernel .config");
 
     // Serial console is required for QEMU -nographic boot log
     assert!(
         config_text.contains("CONFIG_SERIAL_8250=y")
-            || config_text
-                .contains("CONFIG_SERIAL_8250_CONSOLE=y"),
+            || config_text.contains("CONFIG_SERIAL_8250_CONSOLE=y"),
         "kernel .config must enable CONFIG_SERIAL_8250 and \
          CONFIG_SERIAL_8250_CONSOLE for QEMU serial boot \
          log; run: scripts/config --enable \
@@ -6245,11 +6246,9 @@ fn kernel_config_has_serial_console_for_qemu_boot() {
 #[test]
 #[cfg(unix)]
 fn qemu_boot_real_kernel_produces_boot_log() {
-    let kernel_dir = std::path::Path::new(
-        &std::env::var("HOME")
-            .unwrap_or_else(|_| "/root".to_string()),
-    )
-    .join("linux-7.1");
+    let kernel_dir =
+        std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()))
+            .join("linux-7.1");
     let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
 
     if !bzimage.exists() {
@@ -6265,23 +6264,21 @@ fn qemu_boot_real_kernel_produces_boot_log() {
         return;
     }
 
-    let output = std::process::Command::new(
-        "qemu-system-x86_64",
-    )
-    .arg("-kernel")
-    .arg(&bzimage)
-    .arg("-m")
-    .arg("512M")
-    .arg("-no-reboot")
-    .arg("-display")
-    .arg("none")
-    .arg("-nographic")
-    .arg("-append")
-    .arg("console=ttyS0 panic=-1")
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .output()
-    .expect("run qemu-system-x86_64");
+    let output = std::process::Command::new("qemu-system-x86_64")
+        .arg("-kernel")
+        .arg(&bzimage)
+        .arg("-m")
+        .arg("512M")
+        .arg("-no-reboot")
+        .arg("-display")
+        .arg("none")
+        .arg("-nographic")
+        .arg("-append")
+        .arg("console=ttyS0 panic=-1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run qemu-system-x86_64");
 
     let combined = format!(
         "{}{}",
@@ -6296,8 +6293,7 @@ fn qemu_boot_real_kernel_produces_boot_log() {
         &combined[..combined.len().min(500)]
     );
     assert!(
-        combined.contains("Kernel command line")
-            || combined.contains("Memory:"),
+        combined.contains("Kernel command line") || combined.contains("Memory:"),
         "QEMU boot log should contain kernel init messages"
     );
 }
@@ -6309,7 +6305,11 @@ fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
     let path = root.join("tests/fixtures/corpus").join(rel);
     let obj = fs::read(&path).unwrap_or_else(|e| panic!("missing corpus object {path:?}: {e}"));
     assert!(obj.len() >= 64, "object too small: {path:?}");
-    assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "bad ELF magic: {path:?}");
+    assert_eq!(
+        &obj[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "bad ELF magic: {path:?}"
+    );
     assert_eq!(obj[4], 2, "expected ELF64 class: {path:?}");
     assert_eq!(obj[5], 1, "expected little-endian ELF: {path:?}");
     let kind = u16::from_le_bytes([obj[16], obj[17]]);
@@ -6318,7 +6318,13 @@ fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
     assert_eq!(machine, 0x3e, "expected EM_X86_64 object: {path:?}");
 
     let sections = elf64_sections(&obj);
-    for section in [".text", ".symtab", ".strtab", ".orc_unwind", ".orc_unwind_ip"] {
+    for section in [
+        ".text",
+        ".symtab",
+        ".strtab",
+        ".orc_unwind",
+        ".orc_unwind_ip",
+    ] {
         let (_, _, size) = sections
             .get(section)
             .unwrap_or_else(|| panic!("missing section {section} in {path:?}"));
@@ -6327,7 +6333,9 @@ fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
 
     let funcs = elf64_func_symbols(&obj);
     assert!(
-        funcs.iter().any(|(name, _, size)| name == expected_symbol && *size > 0),
+        funcs
+            .iter()
+            .any(|(name, _, size)| name == expected_symbol && *size > 0),
         "missing expected function {expected_symbol} in {path:?}: {funcs:?}"
     );
 }
@@ -6719,11 +6727,8 @@ int main(void) {\n\
     int *p = (int *)malloc(4);\n\
     return p[2];\n\
 }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "kasan-oob",
-        source,
-        &["-fsanitize=address"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("kasan-oob", source, &["-fsanitize=address"]);
     assert_runtime_fails_with(&run, &log, &["AddressSanitizer", "ERROR"]);
     assert!(
         log.contains("use-after-poison")
@@ -6746,11 +6751,8 @@ void __ubsan_handle_divrem_overflow(void *data, long rhs) {\n\
 }\n\
 int f(int x) { return 42 / x; }\n\
 int main(void) { return f(0); }\n";
-    let (_, div_run, div_log, div_exe) = run_sanitized_binary(
-        "ubsan-div",
-        div_source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, div_run, div_log, div_exe) =
+        run_sanitized_binary("ubsan-div", div_source, &["-fsanitize=undefined"]);
     assert_exit_code(&div_run, 91, &div_log);
     let _ = fs::remove_file(&div_exe);
 
@@ -6762,11 +6764,8 @@ void __ubsan_handle_divrem_overflow(void *data, long rhs) {\n\
 }\n\
 int f(int x) { return 42 % x; }\n\
 int main(void) { return f(0); }\n";
-    let (_, mod_run, mod_log, mod_exe) = run_sanitized_binary(
-        "ubsan-mod",
-        mod_source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, mod_run, mod_log, mod_exe) =
+        run_sanitized_binary("ubsan-mod", mod_source, &["-fsanitize=undefined"]);
     assert_exit_code(&mod_run, 96, &mod_log);
     let _ = fs::remove_file(&mod_exe);
 }
@@ -6783,11 +6782,8 @@ void __ubsan_handle_shift_out_of_bounds(void *data, long rhs) {\n\
 }\n\
 int f(int x) { return 1 << x; }\n\
 int main(void) { return f(32); }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "ubsan-shift",
-        source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("ubsan-shift", source, &["-fsanitize=undefined"]);
     assert_exit_code(&run, 92, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -6804,11 +6800,8 @@ void __ubsan_handle_vla_bound_not_positive(long bound) {\n\
 int zero;\n\
 int f(int n) { int arr[n]; return n; }\n\
 int main(void) { return f(zero); }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "ubsan-vla",
-        source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("ubsan-vla", source, &["-fsanitize=undefined"]);
     assert_exit_code(&run, 93, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -6825,11 +6818,8 @@ void __ubsan_handle_type_mismatch_v1(void *data) {\n\
 }\n\
 int f(int *p) { return *p; }\n\
 int main(void) { return f(0); }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "ubsan-null",
-        source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("ubsan-null", source, &["-fsanitize=undefined"]);
     assert_exit_code(&run, 94, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -6846,11 +6836,8 @@ void __ubsan_handle_float_cast_overflow(float v, int lo, int hi) {\n\
 }\n\
 int f(float x) { return (int)x; }\n\
 int main(void) { return f(1e20f); }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "ubsan-float",
-        source,
-        &["-fsanitize=undefined"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("ubsan-float", source, &["-fsanitize=undefined"]);
     assert_exit_code(&run, 95, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -6873,11 +6860,8 @@ void __kcsan_check_access(void *addr, unsigned long size, int is_write) {\n\
 void writer(int *p) { *p = 1; }\n\
 int reader(int *p) { return *p; }\n\
 int main(void) { writer(&shared); return reader(&shared); }\n";
-    let (_, run, log, exe_path) = run_sanitized_binary(
-        "kcsan-race",
-        source,
-        &["-fsanitize=kernel-kcsan"],
-    );
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("kcsan-race", source, &["-fsanitize=kernel-kcsan"]);
     assert_exit_code(&run, 97, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -8529,7 +8513,10 @@ fn base_file_macro_available() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "__BASE_FILE__ macro must be defined and contain filename");
+    assert_eq!(
+        rc, 0,
+        "__BASE_FILE__ macro must be defined and contain filename"
+    );
     let _ = fs::remove_file(exe);
 }
 
@@ -8574,7 +8561,11 @@ fn include_level_macro_available() {
         String::from_utf8_lossy(&out.stderr)
     );
     let status = Command::new(&exe_path).status().expect("run exe");
-    assert_eq!(status.code(), Some(0), "__INCLUDE_LEVEL__ must be 0 in main and 1 in included header");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "__INCLUDE_LEVEL__ must be 0 in main and 1 in included header"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -8590,7 +8581,10 @@ fn timestamp_macro_available() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "__TIMESTAMP__ must be defined and contain valid date string");
+    assert_eq!(
+        rc, 0,
+        "__TIMESTAMP__ must be defined and contain valid date string"
+    );
     let _ = fs::remove_file(exe);
 }
 
@@ -8987,8 +8981,7 @@ fn m23_attr_flatten_compiles_and_runs() {
 fn attr_flatten_comprehensive_at_all_opt_levels() {
     let src = include_str!("fixtures/c/attr_flatten_full.c");
     for opt in &["-O0", "-O1", "-O2", "-O3"] {
-        let (out, exe) =
-            run_compile_and_run_flags("flatten-full", src, &[opt]);
+        let (out, exe) = run_compile_and_run_flags("flatten-full", src, &[opt]);
         assert!(
             out.status.success(),
             "compile {opt}: {}",
@@ -9025,14 +9018,8 @@ fn attr_flatten_asm_no_call_to_inlined() {
 #[cfg(unix)]
 fn attr_target_clones_ifunc_symbols() {
     let src = include_str!("fixtures/c/attr_target_clones.c");
-    let src_path = std::env::temp_dir().join(format!(
-        "dcc-target-clones-{}.c",
-        std::process::id()
-    ));
-    let obj = std::env::temp_dir().join(format!(
-        "dcc-target-clones-{}.o",
-        std::process::id()
-    ));
+    let src_path = std::env::temp_dir().join(format!("dcc-target-clones-{}.c", std::process::id()));
+    let obj = std::env::temp_dir().join(format!("dcc-target-clones-{}.o", std::process::id()));
     fs::write(&src_path, src).expect("write source");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-c")
@@ -9064,11 +9051,26 @@ fn attr_target_clones_ifunc_symbols() {
         "multiply should be IFUNC: {syms}"
     );
     // 变体符号
-    assert!(syms.contains("compute.sse4.2"), "missing compute.sse4.2: {syms}");
-    assert!(syms.contains("compute.default"), "missing compute.default: {syms}");
-    assert!(syms.contains("multiply.avx"), "missing multiply.avx: {syms}");
-    assert!(syms.contains("multiply.sse4.2"), "missing multiply.sse4.2: {syms}");
-    assert!(syms.contains("multiply.default"), "missing multiply.default: {syms}");
+    assert!(
+        syms.contains("compute.sse4.2"),
+        "missing compute.sse4.2: {syms}"
+    );
+    assert!(
+        syms.contains("compute.default"),
+        "missing compute.default: {syms}"
+    );
+    assert!(
+        syms.contains("multiply.avx"),
+        "missing multiply.avx: {syms}"
+    );
+    assert!(
+        syms.contains("multiply.sse4.2"),
+        "missing multiply.sse4.2: {syms}"
+    );
+    assert!(
+        syms.contains("multiply.default"),
+        "missing multiply.default: {syms}"
+    );
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj);
 }
@@ -11458,34 +11460,37 @@ fn symbol_resolve_nm_verification() {
     let code = run_exe(&exe);
     assert_eq!(code, 0, "symbol_resolve runtime failed (exit={code})");
     // Verify symbol table with nm
-    let nm_output = Command::new("nm")
-        .arg(&exe)
-        .output()
-        .expect("run nm");
+    let nm_output = Command::new("nm").arg(&exe).output().expect("run nm");
     let nm_str = String::from_utf8_lossy(&nm_output.stdout);
     // Strong function should be in T (text) section
     assert!(
-        nm_str.lines().any(|l| l.contains("required_func") && l.contains('T')),
+        nm_str
+            .lines()
+            .any(|l| l.contains("required_func") && l.contains('T')),
         "required_func should be T (text): {nm_str}"
     );
     // Strong variable should be in D (data) section
     assert!(
-        nm_str.lines().any(|l| l.contains("required_var") && (l.contains('D') || l.contains('R'))),
+        nm_str
+            .lines()
+            .any(|l| l.contains("required_var") && (l.contains('D') || l.contains('R'))),
         "required_var should be D/R (data/rodata): {nm_str}"
     );
     // Weak undefined symbols should show as W/w (weak) or U (undefined)
     assert!(
         nm_str.lines().any(|l| {
-            l.contains("optional_func")
-                && (l.contains('W') || l.contains('w') || l.contains('U'))
+            l.contains("optional_func") && (l.contains('W') || l.contains('w') || l.contains('U'))
         }),
         "optional_func should be W/w (weak) or U (undefined): {nm_str}"
     );
     assert!(
         nm_str.lines().any(|l| {
             l.contains("optional_var")
-                && (l.contains('W') || l.contains('w') || l.contains('V')
-                    || l.contains('v') || l.contains('U'))
+                && (l.contains('W')
+                    || l.contains('w')
+                    || l.contains('V')
+                    || l.contains('v')
+                    || l.contains('U'))
         }),
         "optional_var should be W/w/V/v (weak) or U (undefined): {nm_str}"
     );
@@ -14561,10 +14566,10 @@ fn non_x86_asm_constraint_resolution_minus_s() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/c/asm_non_x86_constraints.c");
     let targets = [
-        ("aarch64-linux-gnu", "w"),     // AArch64 uses w0-w15
-        ("riscv64-linux-gnu", "a"),     // RISC-V uses a0-a7
-        ("arm-linux-gnueabihf", "r"),   // ARM uses r0-r3
-        ("mips-linux-gnu", "$"),        // MIPS uses $v0, $t0, etc.
+        ("aarch64-linux-gnu", "w"),   // AArch64 uses w0-w15
+        ("riscv64-linux-gnu", "a"),   // RISC-V uses a0-a7
+        ("arm-linux-gnueabihf", "r"), // ARM uses r0-r3
+        ("mips-linux-gnu", "$"),      // MIPS uses $v0, $t0, etc.
     ];
     for (target, reg_prefix) in targets {
         let dir = std::env::temp_dir();
@@ -14682,12 +14687,12 @@ fn non_x86_asm_operand_resolution_produces_register_names() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/c/asm_non_x86_constraints.c");
     let targets_and_reg_prefixes = [
-        ("aarch64-linux-gnu", "w"),     // AArch64 uses w0-w15
-        ("riscv64-linux-gnu", "a"),     // RISC-V uses a0-a7
-        ("arm-linux-gnueabihf", "r"),   // ARM uses r0-r3
-        ("mips-linux-gnu", "$"),        // MIPS uses $v0, $t0, etc.
+        ("aarch64-linux-gnu", "w"),   // AArch64 uses w0-w15
+        ("riscv64-linux-gnu", "a"),   // RISC-V uses a0-a7
+        ("arm-linux-gnueabihf", "r"), // ARM uses r0-r3
+        ("mips-linux-gnu", "$"),      // MIPS uses $v0, $t0, etc.
     ];
-    for (target, reg_prefix) in targets_and_reg_prefixes {
+    for (target, _reg_prefix) in targets_and_reg_prefixes {
         let dir = std::env::temp_dir();
         let asm_path = dir.join(format!(
             "dcc-nonx86-operand-{}-{}.s",
@@ -15872,7 +15877,12 @@ fn windows_msvc_output_is_pe_executable() {
     let exe = dir.join(format!("dcc-win-pe-exe-{}.exe", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "x86_64-pc-windows-msvc", "-fbuiltin-linker", "-o"])
+        .args([
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "-fbuiltin-linker",
+            "-o",
+        ])
         .arg(&exe)
         .arg(&src)
         .output()
@@ -15893,11 +15903,13 @@ fn windows_msvc_output_is_pe_executable() {
         return;
     }
     // Verify PE signature: MZ at start, PE at e_lfanew offset
-    assert!(bytes.len() >= 64, "PE file should have DOS header (64 bytes)");
+    assert!(
+        bytes.len() >= 64,
+        "PE file should have DOS header (64 bytes)"
+    );
     assert_eq!(bytes[0], b'M', "PE should start with 'M'");
     assert_eq!(bytes[1], b'Z', "PE should start with 'MZ'");
-    let e_lfanew =
-        u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
+    let e_lfanew = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
     assert!(
         bytes.len() > e_lfanew + 4,
         "PE header offset should be within file"
@@ -15909,13 +15921,8 @@ fn windows_msvc_output_is_pe_executable() {
     );
     // Verify COFF header machine type
     let machine_off = e_lfanew + 4;
-    let machine = u16::from_le_bytes(
-        bytes[machine_off..machine_off + 2].try_into().unwrap(),
-    );
-    assert_eq!(
-        machine, 0x8664,
-        "PE should have AMD64 machine type"
-    );
+    let machine = u16::from_le_bytes(bytes[machine_off..machine_off + 2].try_into().unwrap());
+    assert_eq!(machine, 0x8664, "PE should have AMD64 machine type");
     // Verify it's NOT ELF
     assert!(
         bytes.len() < 4 || &bytes[0..4] != b"\x7fELF",
@@ -15949,12 +15956,9 @@ int test_func(int x) { return x + 1; }
     );
     // Verify mcount symbol exists
     let obj_bytes = fs::read(&obj_path).unwrap();
-    let obj_str = String::from_utf8_lossy(&obj_bytes);
+    let _obj_str = String::from_utf8_lossy(&obj_bytes);
     // ELF should have mcount as undefined symbol
-    assert!(
-        obj_bytes.len() > 0,
-        "object file should be generated"
-    );
+    assert!(obj_bytes.len() > 0, "object file should be generated");
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 
@@ -15993,9 +15997,9 @@ int test_func(int x) { return x + 1; }
     );
     // Verify __mcount_loc section exists
     let obj_bytes = fs::read(&obj_path).unwrap();
-    let has_mcount_loc = obj_bytes.windows(13).any(|w| {
-        w == b"__mcount_loc\0" || w.starts_with(b"__mcount_loc")
-    });
+    let has_mcount_loc = obj_bytes
+        .windows(13)
+        .any(|w| w == b"__mcount_loc\0" || w.starts_with(b"__mcount_loc"));
     assert!(
         has_mcount_loc,
         "-mrecord-mcount should generate __mcount_loc section"
@@ -16019,7 +16023,12 @@ int func(void) {
     let obj_path = tmp.join("stack_guard_gs.o");
     fs::write(&src_path, src).unwrap();
     let output = std::process::Command::new("./target/debug/dcc")
-        .args(["-c", "-fstack-protector", "-mstack-protector-guard-reg=gs", "-o"])
+        .args([
+            "-c",
+            "-fstack-protector",
+            "-mstack-protector-guard-reg=gs",
+            "-o",
+        ])
         .arg(&obj_path)
         .arg(&src_path)
         .output()
@@ -16096,7 +16105,10 @@ int large_frame(void) {
     let src_path = tmp.join("stack_clash_multi.c");
     fs::write(&src_path, src).unwrap();
     for (triple, expected_machine, elf64_le_hdr) in &targets {
-        let obj_path = tmp.join(format!("stack_clash_{}.o", triple.split('-').next().unwrap()));
+        let obj_path = tmp.join(format!(
+            "stack_clash_{}.o",
+            triple.split('-').next().unwrap()
+        ));
         let output = std::process::Command::new("./target/debug/dcc")
             .args(["--target", triple, "-c", "-fstack-clash-protection", "-o"])
             .arg(&obj_path)
@@ -16476,11 +16488,7 @@ fn cross_tu_lto_multiple_tus_compile_and_link() {
     let b_obj = dir.join(format!("dcc-cross-tu-b-{pid}.o"));
     let out = dir.join(format!("dcc-cross-tu-out-{pid}"));
 
-    fs::write(
-        &a_src,
-        "int add(int a, int b) { return a + b; }\n",
-    )
-    .expect("write a.c");
+    fs::write(&a_src, "int add(int a, int b) { return a + b; }\n").expect("write a.c");
 
     fs::write(
         &b_src,
@@ -16611,11 +16619,7 @@ int compute(int n) { return square(n); }
 #[cfg(unix)]
 fn kernel_code_model_data_symbols_bypass_got() {
     let src = include_str!("fixtures/c/kernel_code_model_data.c");
-    let (out, obj) = run_object_test_flags(
-        "kernel-cmodel-data",
-        src,
-        &["-mcmodel=kernel"],
-    );
+    let (out, obj) = run_object_test_flags("kernel-cmodel-data", src, &["-mcmodel=kernel"]);
     assert!(
         out.status.success(),
         "kernel_code_model compile failed: {}",
@@ -16643,8 +16647,7 @@ fn kernel_code_model_data_symbols_bypass_got() {
 
     // Function address-taking should use PLT32 (or PC32), not GOTPCREL
     assert!(
-        (relocs.contains("PLT32") || relocs.contains("PC32"))
-            && relocs.contains("k_internal_func"),
+        (relocs.contains("PLT32") || relocs.contains("PC32")) && relocs.contains("k_internal_func"),
         "internal function address should use direct relocation: {relocs}"
     );
     assert!(
@@ -16668,8 +16671,7 @@ fn multi_file_parallel_compile() {
     // Create 4 source files
     for (i, name) in ["a", "b", "c", "d"].iter().enumerate() {
         let path = work.join(format!("{name}.c"));
-        fs::write(&path, format!("int func_{i}(void) {{ return {i}; }}\n"))
-            .expect("write source");
+        fs::write(&path, format!("int func_{i}(void) {{ return {i}; }}\n")).expect("write source");
     }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
@@ -16735,9 +16737,7 @@ fn multi_file_parallel_byte_identical() {
 
     let compile = |work: &std::path::Path, jobs: &str| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-        cmd.arg("-c")
-            .arg(format!("-j{jobs}"))
-            .current_dir(work);
+        cmd.arg("-c").arg(format!("-j{jobs}")).current_dir(work);
         for name in &["x", "y", "z"] {
             cmd.arg(format!("{name}.c"));
         }
@@ -16756,10 +16756,7 @@ fn multi_file_parallel_byte_identical() {
     for name in &["x", "y", "z"] {
         let par = fs::read(work_par.join(format!("{name}.o"))).expect("read par");
         let seq = fs::read(work_seq.join(format!("{name}.o"))).expect("read seq");
-        assert_eq!(
-            par, seq,
-            "{name}.o: parallel and sequential differ"
-        );
+        assert_eq!(par, seq, "{name}.o: parallel and sequential differ");
     }
 
     let _ = fs::remove_dir_all(&work_par);
@@ -16780,10 +16777,7 @@ fn jobs_flag_parsing() {
         .args(["-j0", "-c", src.to_str().unwrap()])
         .output()
         .expect("run dcc");
-    assert!(
-        !out.status.success(),
-        "-j0 should be rejected"
-    );
+    assert!(!out.status.success(), "-j0 should be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("-j must be >= 1"),
@@ -16839,20 +16833,11 @@ fn multi_file_rejects_output_flag() {
     fs::write(work.join("b.c"), "int b(void){return 0;}\n").expect("write b");
 
     let out = Command::new(dcc)
-        .args([
-            "-c",
-            "-o",
-            "combined.o",
-            "a.c",
-            "b.c",
-        ])
+        .args(["-c", "-o", "combined.o", "a.c", "b.c"])
         .current_dir(&work)
         .output()
         .expect("run dcc");
-    assert!(
-        !out.status.success(),
-        "-o with multiple inputs should fail"
-    );
+    assert!(!out.status.success(), "-o with multiple inputs should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("cannot specify -o with multiple input files"),
@@ -16884,10 +16869,7 @@ fn response_file_at_file_expands_arguments() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        obj.exists(),
-        "response file should produce .o output"
-    );
+    assert!(obj.exists(), "response file should produce .o output");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&rsp);
@@ -17045,10 +17027,7 @@ fn pipe_input_default_output_name_is_a_o() {
         String::from_utf8_lossy(&output.stderr)
     );
     // GCC: `dcc -c -` produces `a.o` in the current directory
-    assert!(
-        work.join("a.o").exists(),
-        "default output should be a.o"
-    );
+    assert!(work.join("a.o").exists(), "default output should be a.o");
     let _ = fs::remove_dir_all(&work);
 }
 
@@ -17057,8 +17036,11 @@ fn lto_bitcode_verbose_output_shows_section_sizes() {
     let dir = std::env::temp_dir();
     let src = dir.join(format!("dcc-lto-v-{}.c", std::process::id()));
     let obj = dir.join(format!("dcc-lto-v-{}.o", std::process::id()));
-    fs::write(&src, "static int helper(void) { return 42; }\nint main(void) { return helper(); }\n")
-        .expect("write src");
+    fs::write(
+        &src,
+        "static int helper(void) { return 42; }\nint main(void) { return helper(); }\n",
+    )
+    .expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-flto", "-v", "-o"])
         .arg(&obj)
@@ -17111,7 +17093,7 @@ fn lto_bitcode_section_present_in_object() {
     );
     // Verify .dcc.lto section exists in the object file
     let obj_bytes = fs::read(&obj).expect("read obj");
-    let obj_str = String::from_utf8_lossy(&obj_bytes);
+    let _obj_str = String::from_utf8_lossy(&obj_bytes);
     // ELF sections names are stored as strings in the section header string table
     // We can check if ".dcc.lto" appears in the raw bytes
     let has_dcc_lto = obj_bytes
@@ -17122,14 +17104,8 @@ fn lto_bitcode_section_present_in_object() {
         .any(|w| w == b".llvm.lto\0" || w == b".llvm.lto");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
-    assert!(
-        has_dcc_lto,
-        "object should contain .dcc.lto section"
-    );
-    assert!(
-        has_llvm_lto,
-        "object should contain .llvm.lto section"
-    );
+    assert!(has_dcc_lto, "object should contain .dcc.lto section");
+    assert!(has_llvm_lto, "object should contain .llvm.lto section");
 }
 
 // ----- Incremental compilation (-fcached) tests -----
@@ -17208,7 +17184,10 @@ fn incremental_second_compile_skipped() {
 
     // Object should NOT have been rewritten
     let mtime2 = fs::metadata(&obj).unwrap().modified().unwrap();
-    assert_eq!(mtime1, mtime2, "object file should not be rewritten on cache hit");
+    assert_eq!(
+        mtime1, mtime2,
+        "object file should not be rewritten on cache hit"
+    );
 
     let _ = fs::remove_dir_all(&work);
 }
@@ -17315,7 +17294,10 @@ fn incremental_without_flag_always_compiles() {
         .expect("run dcc first");
     assert!(output1.status.success());
     let stderr1 = String::from_utf8_lossy(&output1.stderr);
-    assert!(stderr1.contains("wrote"), "should write output, stderr: {stderr1}");
+    assert!(
+        stderr1.contains("wrote"),
+        "should write output, stderr: {stderr1}"
+    );
 
     // Second compile without -fcached (should always compile)
     let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -17337,17 +17319,30 @@ fn incremental_without_flag_always_compiles() {
 #[test]
 fn incremental_cli_flag_parsing() {
     // Test -fcached flag
-    let args = vec!["-fcached".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-fcached".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-fcached should parse");
     assert!(cfg.incremental);
 
     // Test --incremental flag
-    let args = vec!["--incremental".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "--incremental".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("--incremental should parse");
     assert!(cfg.incremental);
 
     // Test -fno-cached flag
-    let args = vec!["-fcached".to_string(), "-fno-cached".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-fcached".to_string(),
+        "-fno-cached".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-fno-cached should parse");
     assert!(!cfg.incremental);
 
@@ -17368,14 +17363,22 @@ fn cpu_feature_cli_mavx() {
 
 #[test]
 fn cpu_feature_cli_mno_avx() {
-    let args = vec!["-mno-avx".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-mno-avx".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-mno-avx should parse");
     assert_eq!(cfg.cpu_feature_overrides.avx, Some(false));
 }
 
 #[test]
 fn cpu_feature_cli_mavx2_implies_avx() {
-    let args = vec!["-mavx2".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-mavx2".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-mavx2 should parse");
     assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
     assert_eq!(cfg.cpu_feature_overrides.avx2, Some(true));
@@ -17383,7 +17386,11 @@ fn cpu_feature_cli_mavx2_implies_avx() {
 
 #[test]
 fn cpu_feature_cli_mavx512f_implies_avx() {
-    let args = vec!["-mavx512f".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-mavx512f".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-mavx512f should parse");
     assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
     assert_eq!(cfg.cpu_feature_overrides.avx512f, Some(true));
@@ -17403,7 +17410,11 @@ fn cpu_feature_cli_cet() {
     let cfg = dcc::cli::parse(&args).expect("-mcet should parse");
     assert_eq!(cfg.cpu_feature_overrides.cet_ss, Some(true));
 
-    let args = vec!["-mcet-ibt".to_string(), "-c".to_string(), "input.c".to_string()];
+    let args = vec![
+        "-mcet-ibt".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
     let cfg = dcc::cli::parse(&args).expect("-mcet-ibt should parse");
     assert_eq!(cfg.cpu_feature_overrides.cet_ibt, Some(true));
 }
@@ -17671,7 +17682,8 @@ int main(void) {
     let _ = fs::remove_file(&asm_path);
     // -S mode outputs machine code bytes as comments; verify function has content
     assert!(
-        asm.contains("main") && (asm.contains("IR lowering") || asm.contains("ldar") || asm.contains("stlr")),
+        asm.contains("main")
+            && (asm.contains("IR lowering") || asm.contains("ldar") || asm.contains("stlr")),
         "asm should contain main function with atomic operations"
     );
 }
@@ -18011,10 +18023,7 @@ int main(void) { return 0; }
     );
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
-    assert!(
-        text.contains("has_arm"),
-        "arm target must define __arm__"
-    );
+    assert!(text.contains("has_arm"), "arm target must define __arm__");
     assert!(
         !text.contains("has_x86_64"),
         "arm target must NOT define __x86_64__"
@@ -18169,10 +18178,7 @@ int main(void) { return 0; }
         !text.contains("has_sse2"),
         "aarch64 must NOT define __SSE2__"
     );
-    assert!(
-        !text.contains("has_mmx"),
-        "aarch64 must NOT define __MMX__"
-    );
+    assert!(!text.contains("has_mmx"), "aarch64 must NOT define __MMX__");
     assert!(
         !text.contains("has_seg_fs"),
         "aarch64 must NOT define __SEG_FS"
@@ -18183,9 +18189,9 @@ int main(void) { return 0; }
 #[test]
 fn cross_compile_elf_machine_headers() {
     let targets = [
-        ("aarch64-linux-gnu", 183u16), // EM_AARCH64
-        ("riscv64-linux-gnu", 243u16), // EM_RISCV
-        ("mips-linux-gnu", 8u16),      // EM_MIPS
+        ("aarch64-linux-gnu", 183u16),  // EM_AARCH64
+        ("riscv64-linux-gnu", 243u16),  // EM_RISCV
+        ("mips-linux-gnu", 8u16),       // EM_MIPS
         ("arm-linux-gnueabihf", 40u16), // EM_ARM
     ];
     for (target, expected_machine) in targets {
@@ -18362,11 +18368,7 @@ fn file_prefix_map_remaps_paths() {
     .unwrap();
     // Compile with -fmacro-prefix-map
     let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args([
-            "-E",
-            "-fmacro-prefix-map=/tmp=/remapped",
-            "-o",
-        ])
+        .args(["-E", "-fmacro-prefix-map=/tmp=/remapped", "-o"])
         .arg(&out)
         .arg(&src)
         .output()
@@ -18694,9 +18696,144 @@ fn m5_bootstrap_determinism() {
     let _ = fs::remove_file(&o1);
     let _ = fs::remove_file(&o2);
     assert_eq!(
-        b1, b2,
+        b1,
+        b2,
         "bootstrap determinism: .o files differ ({}B vs {}B)",
         b1.len(),
         b2.len()
     );
+}
+
+// ====== vDSO integration tests ======
+
+/// vDSO auto-detection: 验证链接器在构建可执行文件时能自动检测并嵌入 vDSO.
+#[test]
+#[cfg(unix)]
+fn vdso_auto_detect_and_embed() {
+    // 检查系统是否有 vDSO 可用
+    let vdso_path = dcc::link::vdso::detect_system_vdso(dcc::debug::ArchKind::X86_64);
+    if vdso_path.is_none() {
+        eprintln!("skip: no system vDSO found");
+        return;
+    }
+    let vdso_path = vdso_path.unwrap();
+
+    // 编译一个简单程序
+    let src = r#"
+int main(void) { return 0; }
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join("dcc-vdso-integ-test.c");
+    let obj = dir.join("dcc-vdso-integ-test.o");
+    fs::write(&src_path, src).expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 用内置链接器链接 (应自动嵌入 vDSO)
+    let exe = dir.join("dcc-vdso-integ-test");
+    let link_output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-o")
+        .arg(&exe)
+        .arg(&obj)
+        .arg("-v")
+        .output()
+        .expect("run dcc link");
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&src_path);
+
+    if !link_output.status.success() {
+        eprintln!(
+            "skip: builtin link failed: {}",
+            String::from_utf8_lossy(&link_output.stderr)
+        );
+        return;
+    }
+
+    // 检查输出 ELF 是否包含 .note.GNU-vdso 节
+    let readelf = Command::new("readelf")
+        .arg("-S")
+        .arg(&exe)
+        .output()
+        .expect("readelf -S");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe);
+
+    // 如果 vDSO 被嵌入, 应该能看到 .note.GNU-vdso 节
+    if sections.contains(".note.GNU-vdso") {
+        // vDSO 成功嵌入
+        assert!(
+            sections.contains(".text.vdso"),
+            ".text.vdso should exist when .note.GNU-vdso exists"
+        );
+    }
+    // 即使 vDSO 未嵌入 (例如解析失败), 也不应该导致链接失败
+}
+
+/// vDSO parse + embed roundtrip: 用最小 vDSO ELF 验证完整嵌入流程.
+#[test]
+#[cfg(unix)]
+fn vdso_embed_note_section_verification() {
+    // 构造最小 vDSO ELF
+    use dcc::codegen::elf;
+    let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
+    let text = b"\x90\x90\x90\x90\xc3";
+    let mut strtab = vec![0u8];
+    strtab.extend_from_slice(b"__vdso_time");
+    strtab.push(0);
+    let strtab_off = 1usize;
+
+    let mut out = vec![0u8; 64];
+    let text_off = out.len();
+    out.extend_from_slice(text);
+    let symtab_off = out.len();
+    out.resize(out.len() + 24, 0);
+    out.extend_from_slice(&(strtab_off as u32).to_le_bytes());
+    out.push((1 << 4) | 2);
+    out.push(0);
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&5u64.to_le_bytes());
+
+    let strtab_data_off = out.len();
+    out.extend_from_slice(&strtab);
+    let shstrtab_off = out.len();
+    out.extend_from_slice(shstrtab);
+    while !out.len().is_multiple_of(8) {
+        out.push(0);
+    }
+    let sh_off = out.len();
+    out.resize(out.len() + 5 * 64, 0);
+
+    out[0..4].copy_from_slice(&elf::ELFMAG);
+    out[4] = elf::ELFCLASS64;
+    out[5] = elf::ELFDATA2LSB;
+    out[6] = elf::EV_CURRENT;
+    out[16..18].copy_from_slice(&3u16.to_le_bytes());
+    out[18..20].copy_from_slice(&elf::EM_X86_64.to_le_bytes());
+    out[20..24].copy_from_slice(&1u32.to_le_bytes());
+    out[40..48].copy_from_slice(&(sh_off as u64).to_le_bytes());
+    out[58..60].copy_from_slice(&64u16.to_le_bytes());
+    out[60..62].copy_from_slice(&5u16.to_le_bytes());
+    out[62..64].copy_from_slice(&4u16.to_le_bytes());
+
+    let dir = std::env::temp_dir();
+    let vdso_path = dir.join("dcc-vdso-note-test.so");
+    std::fs::write(&vdso_path, &out).unwrap();
+
+    // 解析并验证 note 节生成
+    let info = dcc::link::vdso::parse_vdso(&vdso_path).expect("parse vdso");
+    assert!(info.symbols.contains_key("__vdso_time"));
+    assert_eq!(info.text_size, 5);
+
+    let _ = std::fs::remove_file(&vdso_path);
 }

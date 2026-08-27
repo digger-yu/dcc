@@ -294,18 +294,19 @@ pub fn link_from_bundle(
     collect_link_directives(bundle, &mut cfg_owned);
     // 0.5 预扫描链接脚本，提取脚本定义的符号名加入允许未定义列表
     // 同时从 VERSION 块导入版本定义到 VersionTable
-    let linker_script_symbols: Vec<String> = if let Some(ref script_path) = cfg_owned.linker_script {
+    let linker_script_symbols: Vec<String> = if let Some(ref script_path) = cfg_owned.linker_script
+    {
         match std::fs::read_to_string(script_path) {
             Ok(text) => match linker_script::LinkerScript::parse(&text) {
                 Ok(script) => {
                     // 从 VERSION 块导入版本定义到 VersionTable
                     for (ver_id, globals, locals) in script.extract_version_info() {
-                        cfg_owned.version_table.add_version_defs(
-                            globals, ver_id, false,
-                        );
-                        cfg_owned.version_table.add_version_defs(
-                            locals, ver_id, true,
-                        );
+                        cfg_owned
+                            .version_table
+                            .add_version_defs(globals, ver_id, false);
+                        cfg_owned
+                            .version_table
+                            .add_version_defs(locals, ver_id, true);
                     }
                     script.extract_defined_symbols()
                 }
@@ -835,7 +836,9 @@ fn embed_vdso(
     }
 
     let vdso_text_section_idx = text_idx.map(|i| i + 1).unwrap_or(new_idx as usize);
-    let vdso_text_vaddr_base = layout.sections[vdso_text_section_idx].vaddr;
+    // vaddr 此时尚未分配 (recompute_section_vaddrs 在步骤 6 调用),
+    // 先用 0 占位; 符号 vaddr 在步骤 7 重算.
+    let vdso_text_vaddr_base = 0u64;
 
     // 4. 添加 vDSO 符号到输出符号表
     let mut vdso_syms: Vec<OutputSymbol> = Vec::new();

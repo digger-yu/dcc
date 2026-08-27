@@ -384,7 +384,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |
-| vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
+| vDSO 集成 | `--vdso=<path>` 或自动检测系统 vDSO ELF（搜索 /sys/devices/system/cpu/vdso、/proc/self/maps、sysroot 路径），解析并嵌入 `.text.vdso` + `.note.GNU-vdso` 元信息节 + FUNC 符号表；`detect_system_vdso()` 支持多架构 (x86_64/aarch64)；无 vDSO 环境静默跳过不影响链接 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 (x86_64/aarch64/riscv64/arm/mips/mips64) |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
 | x86-64 重定位（36 种） | `NONE` / `64` / `COPY` / `PC32` / `PLT32` / `GLOB_DAT` / `JUMP_SLOT` / `RELATIVE` / `GOTPCREL` / `32` / `32S` / `16` / `PC16` / `8` / `PC8` / `PC64` / `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOT64` / `GOTOFF64` / `GOTPC32` / `GOTPC64` / `GOTPCREL64` / `GOTPLT64` / `PLTOFF64` / `SIZE32` / `SIZE64` / `GOTPC32_TLSDESC` / `IRELATIVE`；覆盖内核全部关键重定位（函数调用 PC32/PLT32、数据访问 64/32/32S、GOT GOTPCREL、TLS LE TPOFF32/64、TLS IE GOTTPOFF、TLS GD/LD TLSGD/TLSLD/DTPOFF/DTPMOD、per-cpu 变量、COPY 数据复制）；19 个单元测试验证各类型计算公式正确性 |

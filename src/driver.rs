@@ -84,8 +84,7 @@ fn apply_sysroot(mut cfg: Config) -> Config {
     // Auto-discover sysroot for cross-compilation when not explicitly set
     if cfg.sysroot.is_none() {
         let host = crate::cli::TargetTriple::host();
-        let is_cross = cfg.target.arch != host.arch
-            || cfg.target.os != host.os;
+        let is_cross = cfg.target.arch != host.arch || cfg.target.os != host.os;
         if is_cross {
             let triple_str = cfg.target.as_str();
             let candidates = [
@@ -96,10 +95,7 @@ fn apply_sysroot(mut cfg: Config) -> Config {
                 let p = std::path::Path::new(candidate);
                 if p.is_dir() {
                     if cfg.verbose {
-                        eprintln!(
-                            "dcc: auto sysroot = {}",
-                            p.display()
-                        );
+                        eprintln!("dcc: auto sysroot = {}", p.display());
                     }
                     cfg.sysroot = Some(p.to_path_buf());
                     break;
@@ -270,13 +266,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.verbose {
         eprintln!("dcc: input  = {}", input.display());
         let host = crate::cli::TargetTriple::host();
-        let is_cross = cfg.target.arch != host.arch
-            || cfg.target.os != host.os;
+        let is_cross = cfg.target.arch != host.arch || cfg.target.os != host.os;
         if is_cross {
-            eprintln!(
-                "dcc: target = {} (cross)",
-                cfg.target.as_str()
-            );
+            eprintln!("dcc: target = {} (cross)", cfg.target.as_str());
         } else {
             eprintln!("dcc: target = {}", cfg.target.as_str());
         }
@@ -480,11 +472,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                     vec![Diagnostic::err(
                         "E0101",
                         format!("cannot write {}: {}", path.display(), e),
-                        crate::diagnostics::Span::point(
-                            &path.display().to_string(),
-                            0,
-                            0,
-                        ),
+                        crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
                     )]
                 })?)
             }
@@ -494,10 +482,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             .file_stem()
             .map(|s| format!("{}.o", s.to_string_lossy()))
             .unwrap_or_else(|| "unknown".to_string());
-        let target = cfg
-            .dep_target
-            .as_deref()
-            .unwrap_or(&default_target);
+        let target = cfg.dep_target.as_deref().unwrap_or(&default_target);
         let target_owned;
         let target_ref = if cfg.dep_quote_target {
             target_owned = quote_make_target(target);
@@ -1047,21 +1032,16 @@ fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     let degree = if force_single {
         1
     } else {
-        let max_workers = cfg
-            .jobs
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|p| p.get())
-                    .unwrap_or(4)
-            });
+        let max_workers = cfg.jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+        });
         max_workers.min(n)
     };
 
     if cfg.verbose {
-        eprintln!(
-            "dcc: compiling {} files with {} worker(s)",
-            n, degree
-        );
+        eprintln!("dcc: compiling {} files with {} worker(s)", n, degree);
     }
 
     // Sequential fallback for -j1 or single effective worker
@@ -1101,37 +1081,32 @@ fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     let slots = std::sync::Mutex::new(vec![None; n]);
     std::thread::scope(|scope| {
         for _ in 0..degree {
-            scope.spawn(|| {
-                loop {
-                    let idx =
-                        next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if idx >= n {
-                        break;
-                    }
-                    let input = &cfg.inputs[idx];
-                    let mut c = cfg.clone();
-                    c.inputs = vec![input.clone()];
-
-                    let stem = input
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    if cfg.emit_asm {
-                        c.output = PathBuf::from(format!("{}.s", stem));
-                    } else if cfg.relocatable {
-                        c.output = PathBuf::from(format!("{}.o", stem));
-                    }
-                    if cfg.gen_dep && !cfg.dep_no_compile {
-                        c.dep_file =
-                            Some(PathBuf::from(format!("{}.d", stem)));
-                        c.dep_target =
-                            Some(c.output.display().to_string());
-                    }
-
-                    let result = run(c);
-                    slots.lock().unwrap()[idx] = Some(result);
+            scope.spawn(|| loop {
+                let idx = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if idx >= n {
+                    break;
                 }
+                let input = &cfg.inputs[idx];
+                let mut c = cfg.clone();
+                c.inputs = vec![input.clone()];
+
+                let stem = input
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if cfg.emit_asm {
+                    c.output = PathBuf::from(format!("{}.s", stem));
+                } else if cfg.relocatable {
+                    c.output = PathBuf::from(format!("{}.o", stem));
+                }
+                if cfg.gen_dep && !cfg.dep_no_compile {
+                    c.dep_file = Some(PathBuf::from(format!("{}.d", stem)));
+                    c.dep_target = Some(c.output.display().to_string());
+                }
+
+                let result = run(c);
+                slots.lock().unwrap()[idx] = Some(result);
             });
         }
     });
@@ -1851,11 +1826,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         let tmp_objs: Vec<PathBuf> = source_tasks
             .iter()
             .map(|(i, _)| {
-                std::env::temp_dir().join(format!(
-                    "dcc-builtlink-{}-{}.o",
-                    std::process::id(),
-                    i
-                ))
+                std::env::temp_dir().join(format!("dcc-builtlink-{}-{}.o", std::process::id(), i))
             })
             .collect();
         for tmp_o in &tmp_objs {
@@ -1878,18 +1849,15 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             );
         }
         let next_job = std::sync::atomic::AtomicUsize::new(0);
-        let results = std::sync::Mutex::new(vec![
-            None; n_sources
-        ]);
+        let results = std::sync::Mutex::new(vec![None; n_sources]);
         std::thread::scope(|scope| {
             for _ in 0..degree {
                 scope.spawn(|| loop {
-                    let j = next_job
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let j = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if j >= n_sources {
                         break;
                     }
-                    let (_, inp) = source_tasks[j];
+                    let (_, _inp) = source_tasks[j];
                     let mut c = cfg.clone();
                     c.output = tmp_objs[j].clone();
                     c.relocatable = true;
@@ -1908,9 +1876,8 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         }
         // Merge .o inputs and temp .o paths in original order
         let mut src_idx = 0;
-        for (i, inp) in cfg.inputs.iter().enumerate() {
-            let is_obj =
-                inp.extension().map(|e| e == "o").unwrap_or(false);
+        for inp in cfg.inputs.iter() {
+            let is_obj = inp.extension().map(|e| e == "o").unwrap_or(false);
             if is_obj {
                 inputs.push(inp.clone());
             } else {
@@ -1921,8 +1888,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     } else {
         // Sequential fallback: single source or -j1
         for (i, inp) in cfg.inputs.iter().enumerate() {
-            let is_obj =
-                inp.extension().map(|e| e == "o").unwrap_or(false);
+            let is_obj = inp.extension().map(|e| e == "o").unwrap_or(false);
             if is_obj {
                 inputs.push(inp.clone());
             } else {
@@ -2009,7 +1975,14 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             link::OutputKind::PIE | link::OutputKind::Shared
         )
         .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
-        vdso: cfg.vdso.clone(),
+        vdso: cfg.vdso.clone().or_else(|| {
+            // 自动检测系统 vDSO (仅 Executable/PIE 需要)
+            if matches!(output_kind, link::OutputKind::Executable | link::OutputKind::PIE) {
+                link::vdso::detect_system_vdso(arch_from_target(&cfg.target))
+            } else {
+                None
+            }
+        }),
         dso_cache: link::dso_cache::DsoCache::new(),
         linker_script: cfg.linker_script.clone(),
         output_format: if cfg.target.os == crate::cli::Os::Windows {
@@ -2034,13 +2007,16 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         // LTO path: read .dcc.lto sections from input .o files,
         // deserialize bitcode, run cross-TU optimization, then link
         if cfg.verbose {
-            eprintln!("dcc: LTO enabled, extracting bitcode from {} inputs", inputs.len());
+            eprintln!(
+                "dcc: LTO enabled, extracting bitcode from {} inputs",
+                inputs.len()
+            );
         }
         let object_bytes: Vec<Vec<u8>> = inputs
             .iter()
             .filter_map(|p| std::fs::read(p).ok())
             .collect();
-        
+
         let mut bc_modules: Vec<link::lto_bitcode::BitcodeModule> = object_bytes
             .iter()
             .filter_map(|obj| {
@@ -2053,11 +2029,11 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
                 .ok()
             })
             .collect();
-        
+
         if cfg.verbose {
             eprintln!("dcc: extracted {} bitcode modules", bc_modules.len());
         }
-        
+
         if !bc_modules.is_empty() {
             // Run cross-TU optimization passes
             link::lto_bitcode::run_cross_tu_lto(&mut bc_modules);
@@ -2065,7 +2041,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
                 eprintln!("dcc: cross-TU LTO optimization complete");
             }
         }
-        
+
         // Link with optimized bitcode (currently just calls link_multi_tu)
         // Future: re-codegen inlined functions before linking
         link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
