@@ -1050,21 +1050,56 @@ impl Aarch64Codegen {
             }
             Stmt::AsmGoto {
                 asm_str,
-                outputs: _,
+                outputs,
                 output_names,
                 output_constraints,
-                inputs: _,
+                inputs,
                 input_names,
                 input_constraints,
+                clobbers,
                 goto_labels,
                 span,
                 ..
             } => {
-                // 构建 goto 标签映射 (用于增强版模板替换)
+                // Build goto label mapping for template substitution
                 let label_pairs: Vec<(String, String)> = goto_labels
                     .iter()
                     .map(|l| (l.name.clone(), l.name.clone()))
                     .collect();
+                // Load input values to allocated registers
+                let pool = asm_constraints::aarch64_reg_pool();
+                let resolved_operands = resolve_asm_operands(
+                    output_constraints,
+                    input_constraints,
+                    output_names,
+                    input_names,
+                    &pool,
+                );
+                // Load inout input values
+                for (i, op) in resolved_operands.iter().enumerate() {
+                    if op.is_input && op.is_output {
+                        if let Some(ref alloc) = op.reg {
+                            if i < outputs.len() {
+                                if let Expr::Ident { name, .. } = &outputs[i] {
+                                    self.asm_load_var_to_reg(&name.name, alloc.idx);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Load pure input values
+                for (j, op) in resolved_operands.iter().enumerate() {
+                    if op.is_input && !op.is_output {
+                        if let Some(ref alloc) = op.reg {
+                            let input_idx = j - output_constraints.len();
+                            if input_idx < inputs.len() {
+                                if let Expr::Ident { name, .. } = &inputs[input_idx] {
+                                    self.asm_load_var_to_reg(&name.name, alloc.idx);
+                                }
+                            }
+                        }
+                    }
+                }
                 let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
                     output_constraints,
@@ -1074,8 +1109,6 @@ impl Aarch64Codegen {
                     &label_pairs,
                 );
                 if self.asm_text_mode {
-                    // -S 模式: 收集原始 asm 文本用于输出
-                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                     let func_name = self.source_name.clone();
                     let entry = self
                         .raw_func_asm_lines
@@ -1097,8 +1130,21 @@ impl Aarch64Codegen {
                         self.raw_func_asm_lines.push((func_name, lines));
                     }
                 } else {
-                    // -c 模式: mini-assembler 编码机器码
                     self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
+                // Writeback output registers to C variables
+                for (i, op) in resolved_operands.iter().enumerate() {
+                    if op.is_output && i < outputs.len() {
+                        if let Some(ref alloc) = op.reg {
+                            if let Expr::Ident { name, .. } = &outputs[i] {
+                                self.asm_store_reg_to_var(&name.name, alloc.idx);
+                            }
+                        }
+                    }
+                }
+                // Memory clobber barrier
+                if clobbers.iter().any(|c| c == "memory") {
+                    self.emit_dmb_ish();
                 }
             }
             Stmt::Switch { expr, cases, .. } => {

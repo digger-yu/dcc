@@ -875,12 +875,13 @@ impl Riscv64Codegen {
             }
             Stmt::AsmGoto {
                 asm_str,
-                outputs: _,
+                outputs,
                 output_names,
                 output_constraints,
-                inputs: _,
+                inputs,
                 input_names,
                 input_constraints,
+                clobbers,
                 goto_labels,
                 span,
                 ..
@@ -889,6 +890,38 @@ impl Riscv64Codegen {
                     .iter()
                     .map(|l| (l.name.clone(), l.name.clone()))
                     .collect();
+                // Load input values to allocated registers
+                let pool = asm_constraints::riscv64_reg_pool();
+                let resolved_operands = resolve_asm_operands(
+                    output_constraints,
+                    input_constraints,
+                    output_names,
+                    input_names,
+                    &pool,
+                );
+                for (i, op) in resolved_operands.iter().enumerate() {
+                    if op.is_input && op.is_output {
+                        if let Some(ref alloc) = op.reg {
+                            if i < outputs.len() {
+                                if let Expr::Ident { name, .. } = &outputs[i] {
+                                    self.asm_load_var_to_reg(&name.name, alloc.idx);
+                                }
+                            }
+                        }
+                    }
+                }
+                for (j, op) in resolved_operands.iter().enumerate() {
+                    if op.is_input && !op.is_output {
+                        if let Some(ref alloc) = op.reg {
+                            let input_idx = j - output_constraints.len();
+                            if input_idx < inputs.len() {
+                                if let Expr::Ident { name, .. } = &inputs[input_idx] {
+                                    self.asm_load_var_to_reg(&name.name, alloc.idx);
+                                }
+                            }
+                        }
+                    }
+                }
                 let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
                     output_constraints,
@@ -898,7 +931,6 @@ impl Riscv64Codegen {
                     &label_pairs,
                 );
                 if self.asm_text_mode {
-                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                     let lines: Vec<String> = resolved
                         .split('\n')
                         .map(|l| l.trim().to_string())
@@ -908,6 +940,20 @@ impl Riscv64Codegen {
                         .push((self.source_name.clone(), lines));
                 } else {
                     self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
+                // Writeback output registers
+                for (i, op) in resolved_operands.iter().enumerate() {
+                    if op.is_output && i < outputs.len() {
+                        if let Some(ref alloc) = op.reg {
+                            if let Expr::Ident { name, .. } = &outputs[i] {
+                                self.asm_store_reg_to_var(&name.name, alloc.idx);
+                            }
+                        }
+                    }
+                }
+                // Memory clobber barrier
+                if clobbers.iter().any(|c| c == "memory") {
+                    self.emit_fence(); // fence iorw, iorw
                 }
             }
             Stmt::Switch { expr, cases, .. } => {
