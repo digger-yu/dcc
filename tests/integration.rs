@@ -18623,3 +18623,80 @@ fn macro_backtrace_limit_configurable() {
         default_stderr
     );
 }
+
+/// M5: Bootstrap selftest — compile and run the bootstrap verification
+/// program that exercises 14 test groups (structs, function pointers,
+/// recursion, linked lists, bit ops, enums/unions, strings, long long,
+/// inline asm, variadic macros, _Static_assert, statement expressions,
+/// goto, switch range, static arrays).
+#[test]
+fn m5_bootstrap_selftest() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/bootstrap_selftest.c");
+    if !fixture.exists() {
+        return; // fixture not present, skip
+    }
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-bootstrap-selftest-{}", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-std=gnu23", "-o"])
+        .arg(&exe)
+        .arg(&fixture)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "bootstrap selftest compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
+    }
+    let run = Command::new(&exe).output().expect("run bootstrap selftest");
+    let _ = fs::remove_file(&exe);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "bootstrap selftest failed: {stdout}");
+    assert!(
+        stdout.contains("ALL 14 TEST GROUPS PASSED"),
+        "unexpected output: {stdout}"
+    );
+}
+
+/// M5: Bootstrap determinism — compile the same source twice to .o and
+/// verify byte-level identical output (deterministic codegen).
+#[test]
+fn m5_bootstrap_determinism() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/bootstrap_selftest.c");
+    if !fixture.exists() {
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let o1 = dir.join(format!("dcc-bootstrap-det1-{}.o", std::process::id()));
+    let o2 = dir.join(format!("dcc-bootstrap-det2-{}.o", std::process::id()));
+    for (src, out) in [(&fixture, &o1), (&fixture, &o2)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-O0", "-std=gnu23", "-o"])
+            .arg(out)
+            .arg(src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "determinism compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let b1 = fs::read(&o1).expect("read o1");
+    let b2 = fs::read(&o2).expect("read o2");
+    let _ = fs::remove_file(&o1);
+    let _ = fs::remove_file(&o2);
+    assert_eq!(
+        b1, b2,
+        "bootstrap determinism: .o files differ ({}B vs {}B)",
+        b1.len(),
+        b2.len()
+    );
+}
