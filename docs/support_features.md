@@ -514,3 +514,4 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 响应文件 `@file` | GCC 兼容响应文件支持: 命令行中 `@file` 展开为文件内容; 支持空白/换行分隔参数; 双引号/单引号包裹含空白参数; 双引号内 `\\`/`\"` 转义; `#` 注释行; 递归展开 (上限 64 层); `@-` 从 stdin 读取 |
 | 管道输入/输出 `-` | GCC 兼容管道支持: `-` 作为输入从 stdin 读取; `-o -` 输出到 stdout; 支持 `-E -`/`-c -o -`/`-S -o -` 全模式; `-` 输入默认输出 `a.o`/`a.s` (与 GCC 一致) |
 | Bootstrap 回归对比 | `src/bootstrap.rs`：字节级 / 语义级三层对比 |
+| `-ffile-prefix-map` / `-fmacro-prefix-map` | `-ffile-prefix-map=OLD=NEW` 重映射 DWARF 调试信息中的源文件路径；`-fmacro-prefix-map=OLD=NEW` 重映射 `__FILE__` 宏展开的路径前缀；支持多个 map 叠加，首次匹配生效 |

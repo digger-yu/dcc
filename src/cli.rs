@@ -175,6 +175,10 @@ pub struct Config {
     pub cpu_feature_overrides: crate::cpuid::CpuFeatureOverrides,
     /// CLI 解析期间收集的警告 (未知/忽略的标志等)
     pub cli_warnings: Vec<String>,
+    /// -ffile-prefix-map=OLD=NEW: DWARF 调试信息路径重映射
+    pub file_prefix_maps: Vec<(String, String)>,
+    /// -fmacro-prefix-map=OLD=NEW: __FILE__ 宏展开路径重映射
+    pub macro_prefix_maps: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -667,6 +671,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut incremental = false;
     let mut cpu_feature_overrides = crate::cpuid::CpuFeatureOverrides::default();
     let mut cli_warnings: Vec<String> = Vec::new();
+    let mut file_prefix_maps: Vec<(String, String)> = Vec::new();
+    let mut macro_prefix_maps: Vec<(String, String)> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -1481,6 +1487,22 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fno-stack-protector" => {
                 stack_protector = false;
             }
+            a if a.starts_with("-ffile-prefix-map=") => {
+                let mapping = &a["-ffile-prefix-map=".len()..];
+                if let Some(eq_pos) = mapping.find('=') {
+                    let old = mapping[..eq_pos].to_string();
+                    let new = mapping[eq_pos + 1..].to_string();
+                    file_prefix_maps.push((old, new));
+                }
+            }
+            a if a.starts_with("-fmacro-prefix-map=") => {
+                let mapping = &a["-fmacro-prefix-map=".len()..];
+                if let Some(eq_pos) = mapping.find('=') {
+                    let old = mapping[..eq_pos].to_string();
+                    let new = mapping[eq_pos + 1..].to_string();
+                    macro_prefix_maps.push((old, new));
+                }
+            }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-fno-pic"
             | "-fno-delete-null-pointer-checks"
@@ -2032,6 +2054,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             incremental,
             cpu_feature_overrides,
             cli_warnings,
+            file_prefix_maps: file_prefix_maps.clone(),
+            macro_prefix_maps: macro_prefix_maps.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -2134,6 +2158,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             incremental,
             cpu_feature_overrides,
             cli_warnings,
+            file_prefix_maps: file_prefix_maps.clone(),
+            macro_prefix_maps: macro_prefix_maps.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

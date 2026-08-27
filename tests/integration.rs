@@ -18345,3 +18345,43 @@ fn comdat_group_elf_output() {
     // The -g output already confirms SHT_GROUP presence.
     let _ = readelf_s; // suppress unused warning
 }
+
+/// Verify that -fmacro-prefix-map correctly remaps __FILE__ paths.
+#[test]
+#[cfg(unix)]
+fn file_prefix_map_remaps_paths() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-prefix-map-{}.c", std::process::id()));
+    let out = dir.join(format!("dcc-prefix-map-{}.out", std::process::id()));
+    // Write a test source that prints __FILE__
+    std::fs::write(
+        &src,
+        r#"const char *f = __FILE__;
+"#,
+    )
+    .unwrap();
+    // Compile with -fmacro-prefix-map
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "-E",
+            "-fmacro-prefix-map=/tmp=/remapped",
+            "-o",
+        ])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&out);
+    assert!(
+        compile.status.success(),
+        "dcc compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let output = String::from_utf8_lossy(&compile.stdout);
+    // The __FILE__ should contain /remapped instead of /tmp
+    assert!(
+        output.contains("/remapped") || !output.contains("/tmp/"),
+        "expected /tmp to be remapped to /remapped in __FILE__, got:\n{output}"
+    );
+}

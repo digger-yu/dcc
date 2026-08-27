@@ -99,6 +99,8 @@ pub struct Preprocessor {
     pub fp_contract: bool,
     /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true, OFF/DEFAULT 为 false.
     pub cx_limited_range: bool,
+    /// -fmacro-prefix-map: __FILE__ 路径重映射表
+    macro_prefix_maps: Vec<(String, String)>,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
     pending_pragmas: RefCell<Vec<(String, u32)>>,
     /// 本轮 expand_macros 实际展开过的宏名 (跨嵌套调用累积),
@@ -462,6 +464,7 @@ pub fn preprocess(
     kernel_code_model: bool,
     short_wchar: bool,
     target: &TargetTriple,
+    macro_prefix_maps: &[(String, String)],
 ) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
@@ -509,6 +512,7 @@ pub fn preprocess(
         fenv_access: false,
         fp_contract: false,
         cx_limited_range: false,
+        macro_prefix_maps: macro_prefix_maps.to_vec(),
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
         expanded_macros: RefCell::new(HashSet::new()),
@@ -3574,7 +3578,15 @@ impl Preprocessor {
 
                 // 特殊内建宏
                 if ident == "__FILE__" {
-                    out.push_str(&format!("\"{}\"", self.file));
+                    let mut file_str = self.file.clone();
+                    // Apply -fmacro-prefix-map remappings
+                    for (old, new) in &self.macro_prefix_maps {
+                        if file_str.starts_with(old.as_str()) {
+                            file_str = format!("{}{}", new, &file_str[old.len()..]);
+                            break;
+                        }
+                    }
+                    out.push_str(&format!("\"{}\"", file_str));
                     continue;
                 }
                 if ident == "__LINE__" {
@@ -6013,6 +6025,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -6041,6 +6054,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6072,6 +6086,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6104,6 +6119,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6128,6 +6144,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6151,6 +6168,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let diags = out.diags;
 
@@ -6179,6 +6197,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6201,6 +6220,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6226,6 +6246,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6258,6 +6279,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6298,6 +6320,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6322,6 +6345,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6348,6 +6372,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6382,6 +6407,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6411,6 +6437,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6441,6 +6468,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6471,6 +6499,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6498,6 +6527,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6530,6 +6560,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6561,6 +6592,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6592,6 +6624,7 @@ mod tests {
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6624,6 +6657,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6655,6 +6689,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6681,6 +6716,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -6707,6 +6743,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_off.diags.is_empty(),
@@ -6727,6 +6764,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_on.diags.is_empty(),
@@ -6747,6 +6785,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_def.diags.is_empty(),
@@ -6767,6 +6806,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_lower.diags.is_empty(),
@@ -6808,6 +6848,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 至少一个 W0001 警告
         assert!(
@@ -6844,6 +6885,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             on.diags.is_empty(),
@@ -6868,6 +6910,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             default.diags.is_empty(),
@@ -6922,6 +6965,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -6937,6 +6981,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
@@ -6968,6 +7013,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -6985,6 +7031,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -7002,6 +7049,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert_eq!(out.charset, "UTF-8");
     }
@@ -7140,6 +7188,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_create.diags.is_empty(),
@@ -7170,6 +7219,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out_with_pch.diags.is_empty(),
@@ -7202,6 +7252,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
         assert!(
@@ -7255,6 +7306,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(pch_path.exists());
 
@@ -7277,6 +7329,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 应有 warning (W0400) 但不致命
         let has_warn = out.diags.iter().any(|d| d.code == "W0400");
@@ -7307,6 +7360,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -7348,6 +7402,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -7388,6 +7443,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0402"),
@@ -7429,6 +7485,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0203"),
@@ -7465,6 +7522,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             !pch_path.exists(),
@@ -7501,6 +7559,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let err = out
             .diags
@@ -7550,6 +7609,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let err = out
             .diags
@@ -7585,6 +7645,7 @@ n\
                 false,
                 false,
                 &crate::cli::TargetTriple::host(),
+                &[],
             );
             assert!(
                 out.diags.iter().any(|d| d.code == "E0203"),
@@ -7625,6 +7686,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
@@ -7642,6 +7704,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out2.text.contains("(52 + 10)"),
@@ -7676,6 +7739,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7707,6 +7771,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7735,6 +7800,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7766,6 +7832,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7797,6 +7864,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0200"),
@@ -7832,6 +7900,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7862,6 +7931,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7890,6 +7960,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7917,6 +7988,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -7950,6 +8022,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7984,6 +8057,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8019,6 +8093,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8053,6 +8128,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8091,6 +8167,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8119,6 +8196,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8156,6 +8234,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8184,6 +8263,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8211,6 +8291,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8245,6 +8326,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8273,6 +8355,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8300,6 +8383,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8327,6 +8411,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8357,6 +8442,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -8387,6 +8473,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags
@@ -8417,6 +8504,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
     }
@@ -8437,6 +8525,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.diags
@@ -8478,6 +8567,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -8515,6 +8605,7 @@ n\
             false,
             false,
             &x86_target(),
+            &[],
         );
         let has_w0201 = out
             .diags
@@ -8664,6 +8755,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 不应有任何 #error 触发的诊断
         let errors: Vec<_> = out
@@ -8715,6 +8807,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let diags = &out.diags;
         let errors: Vec<_> = diags
@@ -8753,6 +8846,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 只有第一个 #warning 应该产生 W0200,
         // system_header 后的 #warning 应被抑制
@@ -8807,6 +8901,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_file(hdr);
         let _ = fs::remove_file(&src_path);
@@ -8857,6 +8952,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&sys_dir);
@@ -8904,6 +9000,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&user_dir);
@@ -8939,6 +9036,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let w0200_count = out
             .diags
@@ -8991,6 +9089,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_file(&inner_hdr);
         let _ = fs::remove_file(&mid_hdr);
@@ -9038,6 +9137,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 检查 visibility_history 记录了变化
         assert!(
@@ -9092,6 +9192,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -9134,6 +9235,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -9189,6 +9291,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -9243,6 +9346,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -9289,6 +9393,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let output = out.text;
         let diags = out.diags;
@@ -9329,6 +9434,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let e0210_count = out
             .diags
@@ -9361,6 +9467,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let e0210_count = out
             .diags
@@ -9392,6 +9499,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let e0210_count = out
             .diags
@@ -9422,6 +9530,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let e0210_count = out
             .diags
@@ -9454,6 +9563,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let w0200_count = out
             .diags
@@ -9488,6 +9598,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let w0200_count = out
             .diags
@@ -9519,6 +9630,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         // 应该被升级为错误 (Severity::Error)
         let promoted = out
@@ -9554,6 +9666,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let w0200_count = out
             .diags
@@ -9584,6 +9697,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         let e0210_count = out
             .diags
@@ -9614,6 +9728,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(out.fenv_access, "fenv_access should be ON via _Pragma");
         assert!(
@@ -9640,6 +9755,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.weak_symbols.contains("my_weak_sym"),
@@ -9666,6 +9782,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.text.contains("f(0)"),
@@ -9691,6 +9808,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.text.contains("f(0 , 1, 2)") || out.text.contains("f(0, 1, 2)"),
@@ -9716,6 +9834,7 @@ int ok = 1;\n";
             false,
             false,
             &x86_target(),
+            &[],
         );
         assert!(
             out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),

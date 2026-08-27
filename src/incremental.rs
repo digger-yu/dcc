@@ -392,6 +392,8 @@ mod tests {
             cli_warnings: vec![],
             incremental: true,
             cpu_feature_overrides: crate::cpuid::CpuFeatureOverrides::default(),
+            file_prefix_maps: vec![],
+            macro_prefix_maps: vec![],
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         };

@@ -63,6 +63,7 @@ pub fn compile_cpp(
         false,                                  /* kernel_code_model */
         false,                                  /* short_wchar */
         &crate::cli::TargetTriple::host(),      /* target */
+        &[],                                    /* macro_prefix_maps */
     );
     if !pp_out.diags.is_empty() {
         let mut out = Vec::new();
