@@ -2311,3 +2311,53 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Offload device codegen pipeline integration
+// ---------------------------------------------------------------------------
+
+/// Device codegen is called during compilation: verbose output should
+/// report generated device code for CUDA targets.
+#[test]
+fn offload_device_codegen_pipeline_verbose_output() {
+    let src = offload_fixture("offload_cuda.c");
+    let (out, obj) =
+        compile_to_object("dcg-pipe", &src, &["-fcuda", "--offload-arch=sm_80", "-v"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "device codegen 流水线编译应成功: {stderr}"
+    );
+    // verbose 模式应输出设备代码生成信息
+    assert!(
+        stderr.contains("offload device codegen"),
+        "verbose 输出应包含设备代码生成信息: {stderr}"
+    );
+    let _ = std::fs::remove_file(obj);
+}
+
+/// Device codegen: unsupported triple produces error.
+#[test]
+fn offload_device_codegen_unsupported_triple_error() {
+    use dcc::profile::device_codegen::generate_device_code;
+    use dcc::profile::offload::{OffloadEntry, OffloadKind, OffloadSection};
+
+    let mut section = OffloadSection::new();
+    section.add_entry(OffloadEntry {
+        kind: OffloadKind::Cuda,
+        func: "test_kern".into(),
+        file: "test.cu".into(),
+        line: 1,
+        col: 1,
+        device_triple: "riscv32-unknown-elf".into(),
+        arch: None,
+    });
+
+    let result = generate_device_code(&section);
+    assert!(!result.errors.is_empty(), "未知 triple 应产生错误");
+    assert!(
+        result.errors[0].contains("riscv32-unknown-elf"),
+        "错误应包含非法 triple: {}",
+        result.errors[0]
+    );
+}

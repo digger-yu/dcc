@@ -577,7 +577,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // Offloading: 收集 OpenMP target/simd + CUDA/HIP 限定符函数为
     // offload entries, 构造 `.dcc.offload` 节内容。校验错误/警告均带
     // 精确源位置 (经 line_map 映射回源文件)。
-    let (offload_section, mut offload_diags) = collect_offload_section(
+    let (mut offload_section, mut offload_diags) = collect_offload_section(
         &prog,
         &cfg.profile.offload,
         &pp_out.openmp_pragmas,
@@ -597,6 +597,32 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     for d in &offload_diags {
         if matches!(d.sev, Severity::Warning) {
             d.print_with(&dcfg);
+        }
+    }
+
+    // Offloading: 设备代码生成 (PTX / AMDGCN)
+    // 将 offload entry 编译为设备侧 kernel 汇编, 错误作为硬诊断
+    // 加入 offload_diags (与 entry 收集阶段的错误统一处理)。
+    if let Some(ref section) = offload_section {
+        let dcg_result = profile::device_codegen::generate_device_code(section);
+        for err in &dcg_result.errors {
+            offload_diags.push(Diagnostic::err(
+                "E0320",
+                err.clone(),
+                crate::diagnostics::Span::point("", 0, 0),
+            ));
+        }
+        if cfg.verbose {
+            for (triple, code) in &dcg_result.device_code {
+                eprintln!(
+                    "dcc: offload device codegen: {} -> {} bytes",
+                    triple,
+                    code.len()
+                );
+            }
+            for d in &dcg_result.diagnostics {
+                eprintln!("dcc: offload device codegen: {}", d);
+            }
         }
     }
 

@@ -2,7 +2,8 @@
 //
 // Offloading: 把一段代码 (通常是 `#pragma omp target` / `__global__`)
 // 编译成 host + device 两种 object, 运行时由 host 调度到 device.
-// dcc 没有完整 device codegen 后端, 但接口、校验与元数据必须完整:
+// dcc 设备 codegen 后端 (PTX / AMDGCN) 在 device_codegen.rs 实现,
+// 本模块负责接口、校验与元数据:
 //   * TargetTriples: 一组 (kind, triple) 描述 host 和 devices
 //   * OffloadSection: 序列化到 .dcc.offload 节 (ELF) 的二进制元数据,
 //     供 runtime loader 找到对应 .o / 加载到 device; to_json() 保留

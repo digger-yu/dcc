@@ -11,7 +11,8 @@
 // 当前实现分层:
 //   * 端到端: gcov / pgo / autofdo / lbr / memprof / perf_event
 //     (CLI 接受、模块结构、数据结构、解析器、权重下发 codegen)
-//   * 骨架:   offload (CLI 接受 + 元数据 + device codegen stub)
+//   * 端到端: offload (CLI + 元数据 + device codegen PTX/AMDGCN +
+//     runtime loader + driver link)
 //
 // 设计: 与 `src/sanitizer.rs` 类似, AST 改写 + codegen 钩子。
 // GCOV/PGO 在函数 prologue 注入 `inc <counter>` (默认 edge-counter 形式),
