@@ -457,6 +457,10 @@ fn normalize_stderr(raw: &str, file_path: &Path) -> String {
         .map(|l| l.trim_end_matches('\r'))
         .collect::<Vec<_>>()
         .join("\n");
+    // Normalize locale-dependent assembler messages (Chinese -> English)
+    let normalized = normalized
+        .replace("错误：", "Error:")
+        .replace("错误:", "Error:");
     format!("{}\n", normalized.trim_end())
 }
 
