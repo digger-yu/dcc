@@ -18385,3 +18385,54 @@ fn file_prefix_map_remaps_paths() {
         "expected /tmp to be remapped to /remapped in __FILE__, got:\n{output}"
     );
 }
+
+/// Verify that all common -fno-* flags used by kernel Makefiles are accepted
+/// without errors.
+#[test]
+#[cfg(unix)]
+fn fno_flags_accepted() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-fno-{}.c", std::process::id()));
+    std::fs::write(&src, "int x;\n").unwrap();
+    let fno_flags = [
+        "-fno-omit-frame-pointer",
+        "-fno-reorder-blocks",
+        "-fno-reorder-blocks-and-partition",
+        "-fno-stack-clash-protection",
+        "-fno-ssa-backprop",
+        "-fno-var-tracking",
+        "-fno-var-tracking-assignments",
+        "-fno-sched-interblock",
+        "-fno-sched-spec",
+        "-fno-schedule-insns",
+        "-fno-schedule-insns2",
+        "-fno-store-merging",
+        "-fno-thread-jumps",
+        "-fno-tree-loop-vectorize",
+        "-fno-tree-slp-vectorize",
+        "-fno-unroll-loops",
+        "-fno-peel-loops",
+        "-fno-gcse",
+        "-fno-crossjumping",
+        "-fno-aggressive-loop-optimizations",
+        "-fno-ipa-cp",
+        "-fno-ipa-icf",
+        "-fno-lto",
+        "-fno-eliminate-unused-debug-types",
+        "-fno-eliminate-unused-debug-symbols",
+        "-fno-builtin-wcslen",
+    ];
+    for flag in &fno_flags {
+        let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-fsyntax-only", flag])
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            compile.status.success(),
+            "flag {flag} was rejected: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+    let _ = fs::remove_file(&src);
+}
