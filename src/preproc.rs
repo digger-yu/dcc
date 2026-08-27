@@ -1979,23 +1979,20 @@ impl Preprocessor {
 
     /// 将物理行合并为逻辑行 (行尾 \ 与下一行拼接, \ 替换为空格),
     /// 同时记录每个逻辑行覆盖的物理行号范围。
-    fn logical_lines(text: &str, asm_mode: bool) -> Vec<LogicalLine> {
+    fn logical_lines(text: &str, _asm_mode: bool) -> Vec<LogicalLine> {
         let mut out = Vec::new();
         let mut phys = 1u32;
         let mut continued: Option<(String, u32)> = None; // (累积文本, 起始物理行)
-        // In asm_mode, join continuation lines with newlines (not spaces) so that
-        // GAS .macro bodies preserve statement boundaries.
-        let joiner = if asm_mode { "\n" } else { " " };
         for line in text.split('\n') {
             let line = line.strip_suffix('\r').unwrap_or(line);
             if let Some(prefix) = line.strip_suffix('\\') {
                 match &mut continued {
                     Some((acc, _)) => {
                         acc.push_str(prefix);
-                        acc.push_str(joiner);
+                        acc.push(' ');
                     }
                     None => {
-                        continued = Some((format!("{}{}", prefix, joiner), phys));
+                        continued = Some((format!("{} ", prefix), phys));
                     }
                 }
             } else if let Some((mut acc, start)) = continued.take() {
