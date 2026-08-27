@@ -18960,6 +18960,8 @@ impl Codegen {
         // 剥离操作数中的内联段前缀 (%gs:/%fs:/%ds: 等)
         // 内核 per-cpu 模式: "add %%gs:%1, %0" → 替换后 "add %gs:gs_val(%rip), %rax"
         // 剥离段前缀字节并在指令前发射, 操作数按无前缀形式解析
+        // 注意: 如果段前缀后只有位移量 (如 %fs:0), 需要转换为 %fs:0(%rip) 形式
+        // 以便正确解析为内存操作数
         let mut inline_seg_prefix: Option<u8> = None;
         let operands_str = {
             let seg_patterns = [
@@ -18970,7 +18972,16 @@ impl Codegen {
             for &(pat, code) in &seg_patterns {
                 if os.contains(pat) {
                     inline_seg_prefix = Some(code);
-                    os = os.replacen(pat, "", 1);
+                    // 检查段前缀后是否是纯位移量 (没有括号)
+                    // 如果是, 转换为 disp(%rip) 形式以便正确解析为内存操作数
+                    let after_pat = os.replacen(pat, "", 1);
+                    let first_operand = after_pat.split(',').next().unwrap_or("").trim();
+                    if !first_operand.is_empty() && !first_operand.contains('(') && !first_operand.starts_with('%') && !first_operand.starts_with('$') {
+                        // 纯位移量: 转换为 disp(%rip) 形式
+                        os = after_pat.replacen(first_operand, &format!("{}(%rip)", first_operand), 1);
+                    } else {
+                        os = after_pat;
+                    }
                     break;
                 }
             }
