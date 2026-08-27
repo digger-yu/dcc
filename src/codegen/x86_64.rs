@@ -19782,7 +19782,7 @@ impl Codegen {
                     }
                 }
             }
-            "ljmpl" if ops.len() == 2 => {
+            "ljmpl" | "ljmp" if ops.len() == 2 => {
                 match (&ops[0], &ops[1]) {
                     (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
                         self.emit(&[0xEA]);
@@ -19802,11 +19802,11 @@ impl Codegen {
                     }
                 }
             }
-            // ljmpw/ljmpl 间接形式: FF /5 (mem)
+            // ljmpw/ljmpl/ljmp 间接形式: FF /5 (mem)
             "ljmpw" if ops.len() == 1 => {
                 self.emit_asm_far_indirect(&ops[0], false, 16);
             }
-            "ljmpl" if ops.len() == 1 => {
+            "ljmpl" | "ljmp" if ops.len() == 1 => {
                 self.emit_asm_far_indirect(&ops[0], false, 32);
             }
             "lcallw" if ops.len() == 2 => {
@@ -19829,7 +19829,7 @@ impl Codegen {
                     }
                 }
             }
-            "lcalll" if ops.len() == 2 => {
+            "lcalll" | "lcall" if ops.len() == 2 => {
                 match (&ops[0], &ops[1]) {
                     (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
                         self.emit(&[0x9A]);
@@ -19849,11 +19849,11 @@ impl Codegen {
                     }
                 }
             }
-            // lcallw/lcalll 间接形式: FF /3 (mem)
+            // lcallw/lcalll/lcall 间接形式: FF /3 (mem)
             "lcallw" if ops.len() == 1 => {
                 self.emit_asm_far_indirect(&ops[0], true, 16);
             }
-            "lcalll" if ops.len() == 1 => {
+            "lcalll" | "lcall" if ops.len() == 1 => {
                 self.emit_asm_far_indirect(&ops[0], true, 32);
             }
 
