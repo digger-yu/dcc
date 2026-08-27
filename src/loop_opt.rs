@@ -6,6 +6,9 @@ use crate::diagnostics::Span;
 use crate::ir::Module;
 
 /// `-O2+` LICM；`-O3` 额外展开与向量循环向量化。
+///
+/// Profile-guided: hot 函数 (FuncDecl.is_hot, 由 PGO 设置) 在 O3
+/// 享受更激进的展开上限 (max_trip 4 -> 16)。
 pub fn run(module: &mut Module, level: u8) {
     if level < 2 {
         return;
@@ -16,7 +19,9 @@ pub fn run(module: &mut Module, level: u8) {
             if let Some(body) = &mut f.body {
                 licm_block(body);
                 if level >= 3 {
-                    unroll_block(body);
+                    // Profile-guided: hot 函数享受更激进的展开上限
+                    let max_trip: usize = if f.is_hot { 16 } else { 4 };
+                    unroll_block(body, max_trip);
                     vectorize_block(body);
                 }
             }
@@ -148,7 +153,7 @@ fn expr_mentions(e: &Expr, name: Option<&str>) -> bool {
 
 // ===== 循环展开 =====
 
-fn unroll_block(block: &mut Block) {
+fn unroll_block(block: &mut Block, max_trip: usize) {
     let mut out = Vec::new();
     for item in block.items.drain(..) {
         match item {
@@ -164,11 +169,12 @@ fn unroll_block(block: &mut Block) {
                     cond.as_ref(),
                     step.as_ref(),
                     body.as_ref(),
+                    max_trip,
                 ) {
                     out.extend(unrolled);
                     continue;
                 }
-                unroll_in_stmt(body.as_mut());
+                unroll_in_stmt(body.as_mut(), max_trip);
                 out.push(BlockItem::Stmt(Stmt::For {
                     init,
                     cond,
@@ -178,7 +184,7 @@ fn unroll_block(block: &mut Block) {
                 }));
             }
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
-                unroll_block(&mut b);
+                unroll_block(&mut b, max_trip);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
             }
             other => out.push(other),
@@ -187,9 +193,9 @@ fn unroll_block(block: &mut Block) {
     block.items = out;
 }
 
-fn unroll_in_stmt(body: &mut Stmt) {
+fn unroll_in_stmt(body: &mut Stmt, max_trip: usize) {
     if let Stmt::Block { b, .. } = body {
-        unroll_block(b);
+        unroll_block(b, max_trip);
     }
 }
 
@@ -198,10 +204,11 @@ fn try_unroll_for_stmt(
     cond: Option<&Expr>,
     step: Option<&Expr>,
     body: &Stmt,
+    max_trip: usize,
 ) -> Option<Vec<BlockItem>> {
-    let (ivar, trip) = parse_counted_for(init, cond, step)?;
+    let (ivar, trip) = parse_counted_for(init, cond, step, max_trip)?;
     let body_items = loop_body_items(body)?;
-    if trip == 0 || trip > 4 || body_has_control_items(&body_items) {
+    if trip == 0 || trip > max_trip || body_has_control_items(&body_items) {
         return None;
     }
     let mut items = Vec::new();
@@ -303,9 +310,10 @@ fn parse_counted_for(
     init: Option<&Stmt>,
     cond: Option<&Expr>,
     step: Option<&Expr>,
+    max_trip: usize,
 ) -> Option<(String, usize)> {
     let ivar = init_stmt_var(init?)?;
-    let limit = parse_lt_limit(cond?, &ivar)?;
+    let limit = parse_lt_limit(cond?, &ivar, max_trip)?;
     if !is_inc_step(step?, &ivar) {
         return None;
     }
@@ -339,7 +347,7 @@ fn init_stmt_var(init: &Stmt) -> Option<String> {
     }
 }
 
-fn parse_lt_limit(cond: &Expr, ivar: &str) -> Option<usize> {
+fn parse_lt_limit(cond: &Expr, ivar: &str, max_trip: usize) -> Option<usize> {
     match cond {
         Expr::Binop {
             op: BinOp::Lt,
@@ -350,7 +358,7 @@ fn parse_lt_limit(cond: &Expr, ivar: &str) -> Option<usize> {
             if let Expr::Ident { name, .. } = l.as_ref() {
                 if name.name == ivar {
                     if let Ok(v) = const_eval::eval(r) {
-                        if (0..=4).contains(&v) {
+                        if v >= 0 && (v as usize) <= max_trip {
                             return Some(v as usize);
                         }
                     }
@@ -468,7 +476,7 @@ fn try_vectorize_for(
     _body: &Block,
     stmt: &Stmt,
 ) -> Option<BlockItem> {
-    let (ivar, n) = parse_counted_for(init, cond, step)?;
+    let (ivar, n) = parse_counted_for(init, cond, step, 4)?;
     let (dst, src_l, src_r, op) = parse_vector_elem_assign(stmt, &ivar)?;
     let (elem_ty, count) = match dst.1 {
         Type::Vector(ref e, c) if c == n => (e.as_ref().clone(), c),
@@ -569,5 +577,139 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::For { span, .. }
         | Stmt::Block { span, .. } => span.clone(),
         _ => Span::point("loop", 1, 1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Ident, Type};
+    use crate::diagnostics::Span;
+
+    fn int_ty() -> Type {
+        Type::Int
+    }
+
+    /// Hot function: trip count 10 should be unrolled (max=16).
+    /// Cold function: trip count 10 should NOT be unrolled (max=4).
+    #[test]
+    fn hot_func_max_trip_16_accepts_trip_10() {
+        let sp = Span::point("t.c", 1, 1);
+        let init = Stmt::Expr {
+            e: Expr::Assign {
+                op: BinOp::Add, // plain assign uses any BinOp
+                l: Box::new(Expr::Ident {
+                    name: Ident { name: "i".into(), span: sp.clone() },
+                    span: sp.clone(),
+                    ty: int_ty(),
+                }),
+                r: Box::new(Expr::Int {
+                    v: 0, span: sp.clone(), ty: int_ty(),
+                }),
+                span: sp.clone(),
+                ty: int_ty(),
+            },
+            span: sp.clone(),
+        };
+        let cond = Expr::Binop {
+            op: BinOp::Lt,
+            l: Box::new(Expr::Ident {
+                name: Ident { name: "i".into(), span: sp.clone() },
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            r: Box::new(Expr::Int {
+                v: 10, span: sp.clone(), ty: int_ty(),
+            }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+        let step = Expr::PostInc {
+            e: Box::new(Expr::Ident {
+                name: Ident { name: "i".into(), span: sp.clone() },
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+
+        // max_trip=4 should reject trip=10
+        let r_cold = parse_counted_for(
+            Some(&init), Some(&cond), Some(&step), 4,
+        );
+        assert!(
+            r_cold.is_none(),
+            "cold func max_trip=4 should reject trip=10"
+        );
+
+        // max_trip=16 should accept trip=10
+        let r_hot = parse_counted_for(
+            Some(&init), Some(&cond), Some(&step), 16,
+        );
+        assert!(
+            r_hot.is_some(),
+            "hot func max_trip=16 should accept trip=10"
+        );
+        let (ivar, trip) = r_hot.unwrap();
+        assert_eq!(ivar, "i");
+        assert_eq!(trip, 10);
+    }
+
+    /// Trip count within default limit (<=4) should always be accepted.
+    #[test]
+    fn small_trip_always_accepted() {
+        let sp = Span::point("t.c", 1, 1);
+        let init = Stmt::Expr {
+            e: Expr::Assign {
+                op: BinOp::Add,
+                l: Box::new(Expr::Ident {
+                    name: Ident { name: "j".into(), span: sp.clone() },
+                    span: sp.clone(),
+                    ty: int_ty(),
+                }),
+                r: Box::new(Expr::Int {
+                    v: 0, span: sp.clone(), ty: int_ty(),
+                }),
+                span: sp.clone(),
+                ty: int_ty(),
+            },
+            span: sp.clone(),
+        };
+        let cond = Expr::Binop {
+            op: BinOp::Lt,
+            l: Box::new(Expr::Ident {
+                name: Ident { name: "j".into(), span: sp.clone() },
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            r: Box::new(Expr::Int {
+                v: 3, span: sp.clone(), ty: int_ty(),
+            }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+        let step = Expr::PostInc {
+            e: Box::new(Expr::Ident {
+                name: Ident { name: "j".into(), span: sp.clone() },
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+
+        // Both cold and hot should accept trip=3
+        let r_cold = parse_counted_for(
+            Some(&init), Some(&cond), Some(&step), 4,
+        );
+        assert!(r_cold.is_some());
+        assert_eq!(r_cold.unwrap().1, 3);
+
+        let r_hot = parse_counted_for(
+            Some(&init), Some(&cond), Some(&step), 16,
+        );
+        assert!(r_hot.is_some());
+        assert_eq!(r_hot.unwrap().1, 3);
     }
 }
