@@ -1984,6 +1984,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             }
         }),
         dso_cache: link::dso_cache::DsoCache::new(),
+        lib_search_paths: cfg.lib_search_paths.clone(),
         linker_script: cfg.linker_script.clone(),
         output_format: if cfg.target.os == crate::cli::Os::Windows {
             link::OutputFormat::Pe

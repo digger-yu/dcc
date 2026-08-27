@@ -127,6 +127,8 @@ pub struct LinkConfig {
     pub vdso: Option<PathBuf>,
     /// DSO 解析缓存 (跨 link invocation 复用, 按 path/mtime/size 去重)
     pub dso_cache: dso_cache::DsoCache,
+    /// 库搜索路径 (-L flags)
+    pub lib_search_paths: Vec<PathBuf>,
     /// 链接器脚本路径 (-T script.lds)
     pub linker_script: Option<PathBuf>,
     /// 输出文件格式 (ELF / PE)
@@ -188,6 +190,7 @@ impl Default for LinkConfig {
             dynamic_linker: None,
             vdso: None,
             dso_cache: dso_cache::DsoCache::new(),
+            lib_search_paths: vec![],
             linker_script: None,
             output_format: OutputFormat::Elf,
         }
@@ -324,6 +327,39 @@ pub fn link_from_bundle(
     } else {
         Vec::new()
     };
+    // 0.8 DSO 缓存: 解析 -lxxx 库并提取动态符号加入允许未定义列表
+    let mut dso_symbols: Vec<String> = Vec::new();
+    for lib_name in &cfg_owned.libs {
+        match dso_cache::resolve_and_load(
+            &mut cfg_owned.dso_cache,
+            lib_name,
+            &cfg_owned.lib_search_paths,
+            None,
+        ) {
+            Ok(info) => {
+                if cfg_owned.verbose {
+                    eprintln!(
+                        "dcc-link: DSO -l{} -> {} ({} dyn symbols)",
+                        lib_name,
+                        info.path.display(),
+                        info.dyn_symbols.len()
+                    );
+                }
+                for sym_name in info.dyn_symbols.keys() {
+                    dso_symbols.push(sym_name.clone());
+                }
+            }
+            Err(e) => {
+                if cfg_owned.verbose {
+                    eprintln!(
+                        "dcc-link: warning: cannot resolve -l{}: {}",
+                        lib_name, e
+                    );
+                }
+            }
+        }
+    }
+    cfg_owned.allowed_undef.extend(dso_symbols);
     let cfg = &cfg_owned;
     // 0.9 COMDAT 组去重 (在符号解析之前, 丢弃重复 COMDAT 组的节)
     let comdat_discarded = resolve::resolve_comdat_groups(bundle);

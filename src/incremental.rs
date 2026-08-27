@@ -299,10 +299,9 @@ pub fn should_use_incremental(cfg: &Config, input: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn make_test_config(source_path: &Path, output_path: &Path) -> Config {
-        let mut cfg = Config {
+        let cfg = Config {
             inputs: vec![source_path.to_path_buf()],
             output: output_path.to_path_buf(),
             output_explicit: true,
@@ -363,6 +362,7 @@ mod tests {
             no_undefined_version: false,
             link_opts: crate::link::link_opts::LinkOpts::default(),
             link_libs: vec![],
+            lib_search_paths: vec![],
             gc_sections_root: vec![],
             no_semantic_interposition: false,
             semantic_interposition: false,
@@ -394,6 +394,7 @@ mod tests {
             cpu_feature_overrides: crate::cpuid::CpuFeatureOverrides::default(),
             file_prefix_maps: vec![],
             macro_prefix_maps: vec![],
+            macro_backtrace_limit: 128,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         };

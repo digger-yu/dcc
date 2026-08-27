@@ -30,16 +30,11 @@ pub enum FtraceMode {
 }
 
 /// Stack protector guard register
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StackGuardReg {
+    #[default]
     Fs, // default: %fs:0x28
     Gs, // per-CPU: %gs:0x28
-}
-
-impl Default for StackGuardReg {
-    fn default() -> Self {
-        StackGuardReg::Fs
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,12 +72,12 @@ pub struct Config {
     pub sse: bool,
     pub kernel_code_model: bool,
     pub auto_var_init_zero: bool, // -ftrivial-auto-var-init=zero
-    pub stack_protector: bool, // -fstack-protector / -fstack-protector-all
-    pub unwind_tables: bool,   // -fno-asynchronous-unwind-tables / -fno-unwind-tables
+    pub stack_protector: bool,    // -fstack-protector / -fstack-protector-all
+    pub unwind_tables: bool,      // -fno-asynchronous-unwind-tables / -fno-unwind-tables
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
-    pub debug_level: u8, // 0=off (g0), 1=g1, 2=g2, 3=g3
+    pub debug_level: u8,   // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub dwarf_version: u8, // DWARF version: 4 or 5 (default 4)
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
@@ -111,6 +106,8 @@ pub struct Config {
     pub link_opts: crate::link::link_opts::LinkOpts,
     /// 链接库名 (-lxxx)
     pub link_libs: Vec<String>,
+    /// 库搜索路径 (-L)
+    pub lib_search_paths: Vec<PathBuf>,
     /// gc-sections 显式根符号 (-u)
     pub gc_sections_root: Vec<String>,
     /// -fno-semantic-interposition
@@ -521,10 +518,7 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
 }
 
 /// 递归展开参数列表中的 `@file` 引用。
-fn expand_response_files_impl(
-    args: &[String],
-    depth: u32,
-) -> Result<Vec<String>, CliError> {
+fn expand_response_files_impl(args: &[String], depth: u32) -> Result<Vec<String>, CliError> {
     if depth > MAX_RESPONSE_DEPTH {
         return Err(CliError::new(&format!(
             "response file recursion limit ({}) exceeded",
@@ -545,16 +539,11 @@ fn expand_response_files_impl(
                 let mut buf = String::new();
                 std::io::stdin()
                     .read_to_string(&mut buf)
-                    .map_err(|e| {
-                        CliError::new(&format!("cannot read stdin for @-: {}", e))
-                    })?;
+                    .map_err(|e| CliError::new(&format!("cannot read stdin for @-: {}", e)))?;
                 buf
             } else {
                 std::fs::read_to_string(path).map_err(|e| {
-                    CliError::new(&format!(
-                        "cannot read response file '{}': {}",
-                        path, e
-                    ))
+                    CliError::new(&format!("cannot read response file '{}': {}", path, e))
                 })?
             };
             let tokens = tokenize_response_content(&content);
@@ -648,6 +637,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut lto_partitions: Option<u32> = None;
     let mut gc_sections_root: Vec<String> = Vec::new();
     let mut link_libs: Vec<String> = Vec::new();
+        let mut lib_search_paths: Vec<PathBuf> = Vec::new();
     let mut trapv = false;
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
@@ -712,17 +702,27 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 jobs = Some(s[2..].parse().unwrap());
             }
             "-j" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::new("missing arg after -j"))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::new("missing arg after -j"))?;
                 jobs = Some(v.parse().map_err(|_| CliError::new("invalid -j value"))?);
                 i += 1;
             }
             s if s.starts_with("--jobs=") => {
                 let v = &s[7..];
-                jobs = Some(v.parse().map_err(|_| CliError::new("invalid --jobs value"))?);
+                jobs = Some(
+                    v.parse()
+                        .map_err(|_| CliError::new("invalid --jobs value"))?,
+                );
             }
             "--jobs" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::new("missing arg after --jobs"))?;
-                jobs = Some(v.parse().map_err(|_| CliError::new("invalid --jobs value"))?);
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::new("missing arg after --jobs"))?;
+                jobs = Some(
+                    v.parse()
+                        .map_err(|_| CliError::new("invalid --jobs value"))?,
+                );
                 i += 1;
             }
             "-r" => {
@@ -916,16 +916,25 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 link_libs.push(a[2..].to_string());
             }
             // -L, -l, -T 等链接器选项
-            "-L" | "-l" => {
+            "-L" => {
                 i += 1;
-            } // 跳过参数
+                if let Some(p) = args.get(i) {
+                    lib_search_paths.push(PathBuf::from(p));
+                }
+            }
+            "-l" => {
+                i += 1;
+            } // skip -l arg (already handled above)
             "-T" => {
                 i += 1;
                 if let Some(path) = args.get(i) {
                     linker_script = Some(PathBuf::from(path));
                 }
             }
-            a if a.starts_with("-L") || a.starts_with("-l") => {} // 内联形式
+            a if a.starts_with("-L") => {
+                lib_search_paths.push(PathBuf::from(&a[2..]));
+            }
+            a if a.starts_with("-l") => {} // inline -l form (already handled)
             a if a.starts_with("-T") => {
                 linker_script = Some(PathBuf::from(&a[2..]));
             }
@@ -977,17 +986,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                         }
                         "-MT" => {
                             j += 1;
-                            let value = opts.get(j).ok_or_else(|| {
-                                CliError::new("missing arg after -Wp,-MT")
-                            })?;
+                            let value = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-MT"))?;
                             dep_target = Some((*value).to_string());
                             dep_quote_target = false;
                         }
                         "-MQ" => {
                             j += 1;
-                            let value = opts.get(j).ok_or_else(|| {
-                                CliError::new("missing arg after -Wp,-MQ")
-                            })?;
+                            let value = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-MQ"))?;
                             dep_target = Some((*value).to_string());
                             dep_quote_target = true;
                         }
@@ -1067,8 +1076,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-g1" => debug_level = 1,
             "-g2" => debug_level = 2,
             "-g3" => debug_level = 3,
-            "-gdwarf-4" => { debug_level = 2; dwarf_version = 4; }
-            "-gdwarf-5" => { debug_level = 2; dwarf_version = 5; }
+            "-gdwarf-4" => {
+                debug_level = 2;
+                dwarf_version = 4;
+            }
+            "-gdwarf-5" => {
+                debug_level = 2;
+                dwarf_version = 5;
+            }
             "-flto" => lto_enabled = true,
             a if a.starts_with("-flto=") => lto_enabled = true,
             "-ffunction-sections" => function_sections = true,
@@ -1355,8 +1370,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 .map_err(|e| CliError::new(&e))?;
             }
             a if a.starts_with("--target=") => {
-                target = TargetTriple::parse(&a["--target=".len()..])
-                    .map_err(|e| CliError::new(&e))?;
+                target =
+                    TargetTriple::parse(&a["--target=".len()..]).map_err(|e| CliError::new(&e))?;
             }
             "-std=c89" => std = StdMode::C89,
             "-std=c90" => std = StdMode::C89, // c90 = c89 别名
@@ -1872,8 +1887,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         let is_source = |p: &PathBuf| -> bool {
             matches!(
                 p.extension().and_then(|e| e.to_str()),
-                Some("c") | Some("C") | Some("S") | Some("s")
-                    | Some("cpp") | Some("cc") | Some("cxx") | Some("CPP") | Some("CXX")
+                Some("c")
+                    | Some("C")
+                    | Some("S")
+                    | Some("s")
+                    | Some("cpp")
+                    | Some("cc")
+                    | Some("cxx")
+                    | Some("CPP")
+                    | Some("CXX")
             )
         };
         let all_sources = inputs.iter().all(is_source);
@@ -1884,9 +1906,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // Multi-file -c/-S/-E/-fsyntax-only: allowed, each file
             // compiled independently. -o is forbidden with multiple inputs.
             if output_explicit {
-                return Err(CliError::new(
-                    "cannot specify -o with multiple input files",
-                ));
+                return Err(CliError::new("cannot specify -o with multiple input files"));
             }
         } else if all_sources {
             return Err(CliError::new(
@@ -1934,7 +1954,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             let stem = if first.as_os_str() == "-" {
                 "a".to_string()
             } else {
-                first.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                first
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
             };
             if emit_asm {
                 output = PathBuf::from(format!("{}.s", stem));
@@ -1949,7 +1973,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 let stem = if first.as_os_str() == "-" {
                     "a".to_string()
                 } else {
-                    first.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                    first
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
                 };
                 Some(PathBuf::from(format!("{}.d", stem)))
             } else {
@@ -2060,6 +2088,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             no_undefined_version,
             link_opts: all_link_opts,
             link_libs: link_libs.clone(),
+                        lib_search_paths: lib_search_paths.clone(),
             gc_sections_root: gc_sections_root.clone(),
             no_semantic_interposition,
             semantic_interposition,
@@ -2165,6 +2194,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             no_undefined_version: false,
             link_opts: crate::link::link_opts::LinkOpts::from_env(),
             link_libs: Vec::new(),
+                        lib_search_paths: Vec::new(),
             gc_sections_root: Vec::new(),
             no_semantic_interposition: false,
             semantic_interposition: false,
@@ -2801,8 +2831,7 @@ mod tests {
     #[test]
     fn tokenize_response_content_comments() {
         use super::tokenize_response_content;
-        let tokens =
-            tokenize_response_content("-O2\n# this is a comment\n-c\n");
+        let tokens = tokenize_response_content("-O2\n# this is a comment\n-c\n");
         assert_eq!(tokens, vec!["-O2", "-c"]);
     }
 
@@ -2819,10 +2848,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let rsp = dir.join("dcc-rsp-basic.txt");
         std::fs::write(&rsp, "-O2\n-c\n").unwrap();
-        let args = vec![
-            "@".to_string() + rsp.to_str().unwrap(),
-            "foo.c".to_string(),
-        ];
+        let args = vec!["@".to_string() + rsp.to_str().unwrap(), "foo.c".to_string()];
         let expanded = expand_response_files(&args).unwrap();
         assert_eq!(expanded, vec!["-O2", "-c", "foo.c"]);
         let _ = std::fs::remove_file(&rsp);
@@ -2868,11 +2894,7 @@ mod tests {
         let src = dir.join(format!("dcc-rsp-integ-{}.c", std::process::id()));
         let rsp = dir.join(format!("dcc-rsp-integ-{}.rsp", std::process::id()));
         std::fs::write(&src, "int main(void) { return 0; }\n").unwrap();
-        std::fs::write(
-            &rsp,
-            format!("-fsyntax-only\n{}\n", src.display()),
-        )
-        .unwrap();
+        std::fs::write(&rsp, format!("-fsyntax-only\n{}\n", src.display())).unwrap();
         let args = vec!["@".to_string() + rsp.to_str().unwrap()];
         let cfg = parse(&args).expect("response file should parse");
         assert!(cfg.syntax_only);
