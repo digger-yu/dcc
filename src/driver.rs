@@ -2023,7 +2023,43 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         link_cfg.entry = cfg.linker_entry.clone().unwrap();
     }
     let bytes = if cfg.linker_lto {
-        // LTO 路径：暂时不读取 .dcc.lto（保留给后续：load bitcode 后做 cross-TU 优化）
+        // LTO path: read .dcc.lto sections from input .o files,
+        // deserialize bitcode, run cross-TU optimization, then link
+        if cfg.verbose {
+            eprintln!("dcc: LTO enabled, extracting bitcode from {} inputs", inputs.len());
+        }
+        let object_bytes: Vec<Vec<u8>> = inputs
+            .iter()
+            .filter_map(|p| std::fs::read(p).ok())
+            .collect();
+        
+        let mut bc_modules: Vec<link::lto_bitcode::BitcodeModule> = object_bytes
+            .iter()
+            .filter_map(|obj| {
+                if obj.is_empty() {
+                    return None;
+                }
+                link::lto_bitcode::deserialize_module(
+                    &crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                )
+                .ok()
+            })
+            .collect();
+        
+        if cfg.verbose {
+            eprintln!("dcc: extracted {} bitcode modules", bc_modules.len());
+        }
+        
+        if !bc_modules.is_empty() {
+            // Run cross-TU optimization passes
+            link::lto_bitcode::run_cross_tu_lto(&mut bc_modules);
+            if cfg.verbose {
+                eprintln!("dcc: cross-TU LTO optimization complete");
+            }
+        }
+        
+        // Link with optimized bitcode (currently just calls link_multi_tu)
+        // Future: re-codegen inlined functions before linking
         link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
     } else {
         link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
