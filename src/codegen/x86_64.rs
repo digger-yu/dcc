@@ -20740,7 +20740,17 @@ impl Codegen {
                     (&ops[0], &ops[1], &ops[2])
                 {
                     if *ss == 128 {
-                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x19, 0);
+                        match dst {
+                            // vextractpd to XMM register: VEX.NDS.128.66.0F3A.WIG 19 /r
+                            AsmOperand::Reg(d, ds) if *ds == 128 => {
+                                self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                                self.emit(&[0x19, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            // vextractpd to GPR or memory: same as vpextr path
+                            _ => {
+                                self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x19, 0);
+                            }
+                        }
                     } else {
                         self.asm_warn("vextractpd src must be xmm");
                     }
