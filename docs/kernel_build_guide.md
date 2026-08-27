@@ -17,6 +17,7 @@
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc 三 TU（modpost/file2alias/sumversion） |
 | 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ✅ **vmlinux + QEMU boot 验证通过**（16MB ELF，串口启动日志正常） |
+| **initramfs 启动到 init** | ✅ **已验证**（内核成功执行 "Run /init as init process"） |
 
 ### 本地一键验证
 
@@ -117,6 +118,44 @@ qemu-system-x86_64 \
 预期输出包含 `Linux version 7.1.0` 等启动日志。
 无 initramfs 时最终会因无法挂载根文件系统而 panic，这是预期行为，
 `qemu_boot_matrix.sh` 会将此情况视为 boot smoke 通过。
+
+**initramfs 启动验证**：`scripts/build_initramfs.sh` 构建最小 initramfs（busybox + /init 脚本），
+内核成功启动后会尝试执行 init 进程：
+
+```bash
+# 构建 initramfs
+bash scripts/build_initramfs.sh
+
+# 启动带 initrd 的内核
+qemu-system-x86_64 \
+    -kernel arch/x86/boot/bzImage \
+    -initrd initramfs/initramfs.cpio.gz \
+    -m 512M -no-reboot -display none -serial stdio \
+    -append "console=ttyS0 earlyprintk=serial,ttyS0,115200"
+```
+
+预期输出包含：
+```
+Run /init as init process
+=== DCC kernel: init reached successfully ===
+=== Boot to init complete ===
+```
+
+内核配置必须额外启用：
+```bash
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+```
+
+**混合编译模式**：`scripts/kernel-cc.sh` 包装脚本实现 C 文件用 dcc、汇编文件用 gcc：
+
+```bash
+make CC=/path/to/kernel-cc.sh bzImage
+```
+
+这解决了复杂 GAS 宏（如 `ALT_INSTR`、`FILL_RETURN_BUFFER`）在 dcc 预处理后的兼容性问题。
 
 ### asm-offsets 验收（prepare0 步骤 4–5）
 
@@ -390,6 +429,7 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验
 | codegen 不完整 | 部分 x86_64 指令尚未实现 | 持续改进中 |
 | vmlinux 生成 | 完整内核链接 | ✅ **已完成**（2026-08-25，16MB ELF，零 objtool 错误） |
 | QEMU 启动 | bzImage 串口启动日志 | ✅ **已验证**（2026-08-27，需启用 CONFIG_SERIAL_8250_CONSOLE） |
+| **initramfs 启动到 init** | 内核执行 "Run /init as init process" | ✅ **已验证**（2026-08-27，busybox init 脚本成功执行） |
 
 ## 6. 调试技巧
 
