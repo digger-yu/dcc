@@ -2361,3 +2361,42 @@ fn offload_device_codegen_unsupported_triple_error() {
         result.errors[0]
     );
 }
+
+/// -fprofile-values standalone: compilation produces .o and .pgort.c
+/// without requiring -fprofile-generate.
+#[test]
+fn profile_values_standalone_compilation() {
+    let dir = std::env::temp_dir()
+        .join(format!("dcc-pv-standalone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("pv.c");
+    std::fs::write(
+        &src,
+        "int add(int a, int b) { return a + b; }\n\
+         int main(void) { return add(1, 2); }\n",
+    )
+    .unwrap();
+
+    let out = dcc()
+        .current_dir(&dir)
+        .args(["-std=gnu23", "-fprofile-values", "-c"])
+        .arg(src.file_name().unwrap())
+        .args(["-o", "pv.o"])
+        .output()
+        .expect("运行 dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "-fprofile-values 单独使用应编译成功: {stderr}"
+    );
+    assert!(dir.join("pv.o").exists(), "应产出 .o");
+    // -fprofile-values 应自动生成 .pgort.c runtime
+    assert!(
+        dir.join("pv.pgort.c").exists(),
+        "-fprofile-values 应自动生成 .pgort.c"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
