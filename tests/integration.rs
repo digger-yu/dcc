@@ -3289,6 +3289,28 @@ fn percpu_decl_compiles() {
     );
 }
 
+/// Per-CPU 变量完整支持: __percpu 限定符, __seg_gs/__seg_fs 指针,
+/// DEFINE_PER_CPU/DECLARE_PER_CPU 宏, 以及 %%gs: 段前缀内联汇编.
+/// 测试验证:
+/// 1. __percpu 类型限定符解析
+/// 2. __seg_gs/__seg_fs 指针类型存储
+/// 3. per-cpu 变量声明和访问
+/// 4. 内联汇编中段前缀编码
+#[test]
+#[cfg(unix)]
+fn percpu_access_runtime() {
+    let src = include_str!("fixtures/c/percpu_access.c");
+    let (out, exe) = run_compile_and_run("percpu-access", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "percpu access compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "percpu access runtime check failed");
+}
+
 /// __attribute__((section("a" "b"))) 相邻字符串拼接
 #[test]
 fn section_concat_attribute_compiles() {
