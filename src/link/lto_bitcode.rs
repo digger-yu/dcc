@@ -621,8 +621,8 @@ impl LtoConfig {
 }
 
 /// 跨 TU LTO 优化入口 (默认配置)
-pub fn run_cross_tu_lto(modules: &mut [BitcodeModule]) {
-    run_cross_tu_lto_with_config(modules, &LtoConfig::default_opt());
+pub fn run_cross_tu_lto(modules: &mut [BitcodeModule]) -> Vec<String> {
+    run_cross_tu_lto_with_config(modules, &LtoConfig::default_opt())
 }
 
 /// 跨 TU LTO：在多个 BitcodeModule 上做：
@@ -633,7 +633,7 @@ pub fn run_cross_tu_lto(modules: &mut [BitcodeModule]) {
 ///   5. no_semantic_interposition: 外部全局/函数标记为 direct access
 ///
 /// 简化实现：多个优化 pass 在一个函数内顺序执行。
-pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConfig) {
+pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConfig) -> Vec<String> {
     // ----- Pass 0: 全局符号汇总 -----
     let mut global_const_values: HashMap<String, Option<ExprLiteral>> = HashMap::new();
     let mut all_globals: HashSet<String> = HashSet::new();
@@ -716,7 +716,9 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
     }
 
     // ----- Pass 5: 删除未引用的 static / .L 函数 -----
+    let mut dead_functions: Vec<String> = Vec::new();
     for m in modules.iter_mut() {
+        let before: HashSet<String> = m.functions.iter().map(|f| f.name.clone()).collect();
         m.functions.retain(|f| {
             // 公开名（不是 .L 开头）总是保留
             if !f.name.starts_with('.') && !f.name.starts_with("__dcc_local_") {
@@ -725,6 +727,10 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
             // 否则看是否被引用
             referenced.contains(&f.name)
         });
+        let after: HashSet<String> = m.functions.iter().map(|f| f.name.clone()).collect();
+        for name in before.difference(&after) {
+            dead_functions.push(name.clone());
+        }
     }
 
     // ----- Pass 6: 删除未引用的全局 (DAE) -----
@@ -762,6 +768,7 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
             }
         }
     }
+    dead_functions
 }
 
 /// 内联候选判定：

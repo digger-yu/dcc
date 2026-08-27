@@ -706,9 +706,12 @@ pub fn link_with_lto(
         })
         .collect();
     // 2. 跨 TU 优化
-    run_cross_tu_lto(&mut modules);
+    let _dead_fns = run_cross_tu_lto(&mut modules);
     // 3. 链接（简化：LTO 暂只做 DCE，后续可加 inlining 后 codegen）
     let bytes = link_multi_tu(inputs, output, cfg)?;
+    // 4. TODO: 剥离被 LTO DCE 删除的函数符号
+    // 目前 LTO DCE 只在 IR 层面删除，实际链接仍使用原始目标文件
+    // 完整实现需要重新从优化后的 bitcode 生成目标文件
     Ok(bytes)
 }
 
@@ -1059,6 +1062,7 @@ fn embed_vdso(
 
 /// -r + LTO 模式: 从输入对象中提取 .dcc.lto 节, 运行跨 TU 优化,
 /// 将合并后的位码作为 .dcc.lto 节嵌入输出 (替代 host objcopy).
+/// 同时剥离被 LTO DCE 判定为 dead 的 LOCAL 符号.
 fn inject_lto_section_from_bundle(
     layout: &mut layout::Layout,
     bundle: &InputBundle,
@@ -1066,6 +1070,19 @@ fn inject_lto_section_from_bundle(
 ) {
     use crate::codegen::elf::SHT_PROGBITS;
     use crate::link::layout::{OutputSection, OutputSectionKind};
+
+    // 0. 收集输入 ELF 中的 LOCAL 函数名 (static 函数)
+    let mut local_fn_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for obj in &bundle.objects {
+        for sym in &obj.symbols {
+            if sym.bind == crate::codegen::elf::STB_LOCAL
+                && sym.ty == crate::codegen::elf::STT_FUNC
+            {
+                local_fn_names.insert(sym.name.clone());
+            }
+        }
+    }
 
     // 1. 从 bundle 提取所有 .dcc.lto 节并反序列化
     let mut bc_modules: Vec<lto_bitcode::BitcodeModule> = Vec::new();
@@ -1086,12 +1103,40 @@ fn inject_lto_section_from_bundle(
     }
 
     // 2. 运行跨 TU LTO 优化
-    lto_bitcode::run_cross_tu_lto(&mut bc_modules);
+    let mut dead_fns = lto_bitcode::run_cross_tu_lto(&mut bc_modules);
 
-    if verbose {
+    // 2b. 额外剥离不被引用的 LOCAL (static) 函数.
+    //     DCE pass 只移除 .L / __dcc_local_ 前缀的函数,
+    //     这里补充移除 static 且不被引用的函数.
+    //     先收集所有模块中被引用的函数名 (避免借用冲突).
+    let mut all_referenced: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for m in bc_modules.iter() {
+        for f in &m.functions {
+            for stmt in &f.body {
+                collectfn_refs_in_stmt(stmt, &mut all_referenced);
+            }
+        }
+    }
+    let mut extra_dead: Vec<String> = Vec::new();
+    for m in bc_modules.iter_mut() {
+        m.functions.retain(|f| {
+            // LOCAL 函数且不被引用 → 移除
+            if local_fn_names.contains(&f.name)
+                && !all_referenced.contains(&f.name)
+            {
+                extra_dead.push(f.name.clone());
+                return false;
+            }
+            true
+        });
+    }
+    dead_fns.extend(extra_dead);
+
+    if verbose && !dead_fns.is_empty() {
         eprintln!(
-            "dcc-link: -r LTO: merged {} bitcode module(s)",
-            bc_modules.len()
+            "dcc-link: -r LTO: {} dead function(s) stripped",
+            dead_fns.len()
         );
     }
 
@@ -1123,11 +1168,56 @@ fn inject_lto_section_from_bundle(
     };
     layout.sections.push(lto_section);
 
+    // 5. 从 layout 符号表中剥离 dead 函数符号, 并移除对应节
+    if !dead_fns.is_empty() {
+        let dead_set: std::collections::HashSet<&str> =
+            dead_fns.iter().map(|s| s.as_str()).collect();
+        // 5a. 剥离 dead 函数符号
+        layout.symbols.retain(|sym| !dead_set.contains(sym.name.as_str()));
+        // 5b. 移除 dead 函数对应的 .text.{fn} 节
+        let dead_section_names: std::collections::HashSet<String> =
+            dead_set.iter().map(|name| format!(".text.{}", name)).collect();
+        // 5c. 剥离 dead 节的 SECTION 符号
+        layout.symbols.retain(|sym| {
+            !(sym.ty == crate::codegen::elf::STT_SECTION
+                && dead_section_names.contains(sym.name.as_str()))
+        });
+        layout.sections.retain(|sec| {
+            !dead_section_names.contains(sec.name.as_str())
+        });
+    }
+
     if verbose {
         eprintln!(
             "dcc-link: -r LTO: embedded .dcc.lto section ({} bytes)",
             merged_payload.len()
         );
+    }
+}
+
+/// 收集 TypedStmt 中所有 ExprKind::Local 引用的函数名.
+fn collectfn_refs_in_stmt(
+    stmt: &crate::ir::TypedStmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for expr in &stmt.expressions {
+        collectfn_refs_in_expr(expr, out);
+    }
+    for nested in &stmt.nested {
+        collectfn_refs_in_stmt(nested, out);
+    }
+}
+
+/// 收集 TypedExpr 中所有 ExprKind::Local 引用的函数名.
+fn collectfn_refs_in_expr(
+    expr: &crate::ir::TypedExpr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    if let crate::ir::ExprKind::Local(ref n) = expr.kind {
+        out.insert(n.clone());
+    }
+    for child in &expr.children {
+        collectfn_refs_in_expr(child, out);
     }
 }
 

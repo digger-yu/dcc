@@ -1421,14 +1421,14 @@ impl Expr {
             | Expr::PreInc { ty, .. }
             | Expr::PreDec { ty, .. }
             | Expr::Comma { ty, .. }
-            | Expr::LabelAddr { ty, .. } => ty.clone(),
+            | Expr::LabelAddr { ty, .. }
+            | Expr::CompoundLit { ty, .. } => ty.clone(),
             Expr::AsmExpr { ty, .. } => ty.clone(),
             Expr::VaArg { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. }
             | Expr::SizeofExpr { .. }
-            | Expr::CompoundLit { .. }
             | Expr::AlignofTy { .. }
             | Expr::AlignofExpr { .. }
             | Expr::Offsetof { .. } => Type::Int,

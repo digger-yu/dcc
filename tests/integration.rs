@@ -18883,13 +18883,15 @@ fn vdso_embed_note_section_verification() {
     let _text_off = out.len();
     out.extend_from_slice(text);
     let _symtab_off = out.len();
+    // NULL symbol entry (24 bytes of zeros)
     out.resize(out.len() + 24, 0);
+    // Actual symbol entry for __vdso_time
     out.extend_from_slice(&(strtab_off as u32).to_le_bytes());
-    out.push((1 << 4) | 2);
+    out.push((1 << 4) | 2); // STB_GLOBAL | STT_FUNC
     out.push(0);
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
-    out.extend_from_slice(&5u64.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // st_shndx = 1 (.text)
+    out.extend_from_slice(&0u64.to_le_bytes()); // st_value
+    out.extend_from_slice(&5u64.to_le_bytes()); // st_size
 
     let _strtab_data_off = out.len();
     out.extend_from_slice(&strtab);
@@ -18900,6 +18902,94 @@ fn vdso_embed_note_section_verification() {
     }
     let sh_off = out.len();
     out.resize(out.len() + 5 * 64, 0);
+
+    // Write section headers
+    let write_sh = |buf: &mut Vec<u8>,
+                    idx: usize,
+                    name_off: u32,
+                    sh_type: u32,
+                    flags: u64,
+                    addr: u64,
+                    offset: u64,
+                    size: u64,
+                    link: u32,
+                    info: u32,
+                    addralign: u64,
+                    entsize: u64| {
+        let base = sh_off + idx * 64;
+        buf[base..base + 4].copy_from_slice(&name_off.to_le_bytes());
+        buf[base + 4..base + 8].copy_from_slice(&sh_type.to_le_bytes());
+        buf[base + 8..base + 16].copy_from_slice(&flags.to_le_bytes());
+        buf[base + 16..base + 24].copy_from_slice(&addr.to_le_bytes());
+        buf[base + 24..base + 32].copy_from_slice(&offset.to_le_bytes());
+        buf[base + 32..base + 40].copy_from_slice(&size.to_le_bytes());
+        buf[base + 40..base + 44].copy_from_slice(&link.to_le_bytes());
+        buf[base + 44..base + 48].copy_from_slice(&info.to_le_bytes());
+        buf[base + 48..base + 56].copy_from_slice(&addralign.to_le_bytes());
+        buf[base + 56..base + 64].copy_from_slice(&entsize.to_le_bytes());
+    };
+    // Section 0: NULL
+    write_sh(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // Section 1: .text
+    write_sh(
+        &mut out,
+        1,
+        1, // shstrtab offset for ".text"
+        elf::SHT_PROGBITS,
+        0x6, // SHF_ALLOC | SHF_EXECINSTR
+        0,
+        _text_off as u64,
+        text.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+    // Section 2: .symtab
+    write_sh(
+        &mut out,
+        2,
+        7, // shstrtab offset for ".symtab"
+        elf::SHT_SYMTAB,
+        0,
+        0,
+        _symtab_off as u64,
+        48, // 2 symbol entries (NULL + __vdso_time)
+        3,  // link to .strtab (section 3)
+        1,  // info: first non-local symbol index
+        8,
+        24,
+    );
+    // Section 3: .strtab
+    write_sh(
+        &mut out,
+        3,
+        15, // shstrtab offset for ".strtab"
+        elf::SHT_STRTAB,
+        0,
+        0,
+        _strtab_data_off as u64,
+        strtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+    // Section 4: .shstrtab
+    write_sh(
+        &mut out,
+        4,
+        23, // shstrtab offset for ".shstrtab"
+        elf::SHT_STRTAB,
+        0,
+        0,
+        _shstrtab_off as u64,
+        shstrtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
 
     out[0..4].copy_from_slice(&elf::ELFMAG);
     out[4] = elf::ELFCLASS64;

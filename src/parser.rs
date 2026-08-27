@@ -2519,16 +2519,15 @@ impl<'a> Parser<'a> {
         let cond_text = format!("{}", const_eval::ExprDebug(&condition));
         match const_eval::eval(&condition) {
             Ok(0) => {
-                // 内核大量使用 static_assert + sizeof 比较, dcc 的 struct layout
-                // 尚未完全精确; 降级为 warning 以允许构建继续.
+                // C11: _Static_assert 条件为假是硬错误
                 if !cond_text.is_empty() && cond_text != "<expr>" {
-                    self.diags.push(Diagnostic::warn(
-                        "W0010",
+                    self.diags.push(Diagnostic::err(
+                        "E0010",
                         format!("{} (evaluates to: {})", message, cond_text),
                         span,
                     ));
                 } else {
-                    self.diags.push(Diagnostic::warn("W0010", message, span));
+                    self.diags.push(Diagnostic::err("E0010", message, span));
                 }
             }
             Ok(_) => {}
@@ -6426,6 +6425,12 @@ impl<'a> Parser<'a> {
                     then_ty
                 } else if matches!(else_ty, Type::Ptr(_)) {
                     else_ty
+                } else if matches!(then_ty, Type::Vector(_, _))
+                    || matches!(else_ty, Type::Vector(_, _))
+                {
+                    // Vector ternary: if either branch is a vector,
+                    // use the then-branch type.
+                    then_ty
                 } else if then_ty == else_ty {
                     then_ty
                 } else {
