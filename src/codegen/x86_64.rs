@@ -15179,6 +15179,16 @@ impl Codegen {
         }
     }
 
+    /// 尝试从 AST 表达式中提取原子内存序常量值.
+    /// __ATOMIC_RELAXED=0, __ATOMIC_CONSUME=1, __ATOMIC_ACQUIRE=2,
+    /// __ATOMIC_RELEASE=3, __ATOMIC_ACQ_REL=4, __ATOMIC_SEQ_CST=5.
+    fn eval_mem_order(&self, arg: &Expr) -> i32 {
+        match arg {
+            Expr::Int { v, .. } => *v as i32,
+            _ => 5, // default SEQ_CST for safety
+        }
+    }
+
     /// 原子内置函数 codegen: 返回 true 表示已处理
     fn gen_atomic_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
@@ -15192,6 +15202,9 @@ impl Codegen {
                 self.gen_expr(&args[1], 6); // rsi = val
                                             // lock xadd [rdi], rsi (按 sz 选操作数尺寸)
                 self.emit_atomic_xadd(sz);
+                // lock prefix is full barrier; SEQ_CST needs explicit mfence
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 6 {
                     self.mov(dst, 6);
                 }
@@ -15207,6 +15220,8 @@ impl Codegen {
                                             // neg rsi (按 sz 选操作数尺寸)
                 self.emit_neg(sz);
                 self.emit_atomic_xadd(sz);
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 6 {
                     self.mov(dst, 6);
                 }
@@ -15222,6 +15237,8 @@ impl Codegen {
                 self.emit_cas_loop(sz, |cg, s| {
                     cg.emit_and_rdx_rsi(s);
                 });
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 1 {
                     self.mov(dst, 1);
                 }
@@ -15237,6 +15254,8 @@ impl Codegen {
                 self.emit_cas_loop(sz, |cg, s| {
                     cg.emit_or_rdx_rsi(s);
                 });
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 1 {
                     self.mov(dst, 1);
                 }
@@ -15252,6 +15271,8 @@ impl Codegen {
                 self.emit_cas_loop(sz, |cg, s| {
                     cg.emit_xor_rdx_rsi(s);
                 });
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 1 {
                     self.mov(dst, 1);
                 }
@@ -15262,6 +15283,13 @@ impl Codegen {
                 if args.len() < 3 {
                     return false;
                 }
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
+                } else {
+                    5
+                };
+                // SEQ_CST pre-barrier
+                if sord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 0); // rax = expected (cmpxchg 用 rax)
                                             // 保存 expected 到帧临时槽, 因为还需要写入
@@ -15301,6 +15329,70 @@ impl Codegen {
                 self.emit(&[0x48, 0x89, 0x06]); // mov [rsi], rax
                 self.label(&l_skip);
                 self.emit(&[0x48, 0x0F, 0xB6, 0xC2]); // movzx rax, dl
+                // SEQ_CST post-barrier
+                if sord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            "__atomic_compare_exchange" => {
+                // Non-_n variant: desired is also a pointer (must dereference)
+                // args: (ptr, expected_ptr, desired_ptr, weak, succ_order, fail_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
+                } else {
+                    5
+                };
+                if sord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                // First: compute desired value into rsi
+                // (must be done BEFORE expected, since cmpxchg needs rax = expected)
+                if !self.gen_lvalue_addr(&args[2], 0) {
+                    self.gen_expr(&args[2], 0);
+                }
+                // rax = address of desired variable
+                self.emit(&[0x48, 0x8B, 0x30]); // mov rsi, [rax] (rsi = desired value)
+                // Then: compute expected value into rax (last, for cmpxchg)
+                self.gen_expr(&args[1], 0); // rax = expected_ptr
+                let slot = -8 - (self.expr_depth as i32 * 8);
+                // Save expected_ptr to stack slot
+                {
+                    let rex = 0x49u8;
+                    self.emit(&[rex, 0x89]);
+                    if slot.abs() < 128 {
+                        self.emit(&[0x45, slot as i8 as u8]);
+                    } else {
+                        self.emit(&[0x85]);
+                        self.emit(&slot.to_le_bytes());
+                    }
+                }
+                // Dereference expected: rax = *expected_ptr
+                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                // Now: rax = expected value, rsi = desired value, rdi = ptr
+                let sz = self.atomic_elem_size(args, 0);
+                self.emit_lock_cmpxchg_rdi_rsi(sz);
+                self.emit(&[0x0F, 0x94, 0xC2]); // sete dl
+                let l_skip = self.fresh_label();
+                self.jmp_rel32(&l_skip, JumpKind::Je);
+                // Failure: write current rax to *expected_ptr
+                {
+                    let rex = 0x49u8;
+                    self.emit(&[rex, 0x8B]);
+                    if slot.abs() < 128 {
+                        self.emit(&[0x75, slot as i8 as u8]);
+                    } else {
+                        self.emit(&[0xB5]);
+                        self.emit(&slot.to_le_bytes());
+                    }
+                }
+                self.emit(&[0x48, 0x89, 0x06]); // mov [rsi], rax
+                self.label(&l_skip);
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC2]); // movzx rax, dl
+                if sord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -15311,10 +15403,21 @@ impl Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[2]);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
-                self.emit_mov_to_mem(sz); // mov [rdi], rsi (按 sz 选尺寸)
-                self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+                match ord {
+                    0 => { // RELAXED: plain store
+                        self.emit_mov_to_mem(sz);
+                    }
+                    3 | 4 => { // RELEASE: compiler barrier + store
+                        self.emit_mov_to_mem(sz);
+                    }
+                    _ => { // SEQ_CST/ACQUIRE: mfence + store
+                        self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+                        self.emit_mov_to_mem(sz);
+                    }
+                }
                 true
             }
             "__atomic_load_n" => {
@@ -15322,8 +15425,19 @@ impl Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = if args.len() > 1 {
+                    self.eval_mem_order(&args[1])
+                } else {
+                    5
+                };
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.emit_mov_from_mem(sz, dst); // mov reg, [rdi] (按 sz 选尺寸)
+                self.emit_mov_from_mem(sz, dst); // mov reg, [rdi]
+                match ord {
+                    0 | 3 => {} // RELAXED/RELEASE: no barrier needed
+                    2 | _ => { // ACQUIRE/SEQ_CST: mfence after load
+                        self.emit(&[0x0F, 0xAE, 0xF0]);
+                    }
+                }
                 true
             }
             "__atomic_exchange_n" => {
@@ -15335,6 +15449,8 @@ impl Codegen {
                 self.gen_expr(&args[1], 6); // rsi = val
                                             // lock xchg [rdi], rsi: 按 sz 选尺寸
                 self.emit_lock_xchg_rdi_rsi(sz);
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 if dst != 6 {
                     self.mov(dst, 6);
                 }

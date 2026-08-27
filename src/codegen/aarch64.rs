@@ -3859,6 +3859,14 @@ impl Aarch64Codegen {
         }
     }
 
+    /// 尝试从 IR 表达式中提取原子内存序常量值.
+    fn eval_mem_order(&self, arg: &TypedExpr) -> i32 {
+        match &arg.literal {
+            Some(ExprLiteral::Int(v)) => *v as i32,
+            _ => 5, // default SEQ_CST for safety
+        }
+    }
+
     /// 原子内建函数 codegen: 返回 true 表示已处理
     /// 参数约定: args[0]=ptr, args[1]=val (对于 store/exchange/cmpxchg 有不同)
     /// 结果返回在 x0
@@ -3869,11 +3877,20 @@ impl Aarch64Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[1]);
                 // x0 = ptr
                 self.gen_expr(&args[0]);
                 self.mov_x_reg(1, 0); // x1 = ptr (保存)
-                // ldar x0, [x1] (Load-Acquire)
-                self.emit_ldar(sz, 0, 1);
+                match ord {
+                    0 | 3 => {
+                        // RELAXED/RELEASE: plain LDR
+                        self.emit_ldr_x(0, 1, 0, sz);
+                    }
+                    _ => {
+                        // SEQ_CST/ACQUIRE/ACQ_REL: LDAR
+                        self.emit_ldar(sz, 0, 1);
+                    }
+                }
                 true
             }
             "__atomic_store_n" => {
@@ -3881,13 +3898,22 @@ impl Aarch64Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[2]);
                 // x0 = ptr
                 self.gen_expr(&args[0]);
                 self.mov_x_reg(1, 0); // x1 = ptr
                 // x0 = val
                 self.gen_expr(&args[1]);
-                // stlr x0, [x1] (Store-Release)
-                self.emit_stlr(sz, 0, 1);
+                match ord {
+                    0 => {
+                        // RELAXED: plain STR
+                        self.emit_str_x(0, 1, 0, sz);
+                    }
+                    _ => {
+                        // SEQ_CST/ACQUIRE/RELEASE/ACQ_REL: STLR
+                        self.emit_stlr(sz, 0, 1);
+                    }
+                }
                 true
             }
             "__atomic_exchange_n" => {
@@ -4067,6 +4093,45 @@ impl Aarch64Codegen {
                 // 重新加载当前值并写入 expected
                 self.emit_ldxr(sz, 0, 2); // 读取当前值 (非 atomic, 仅清除 monitor)
                 self.emit_clrex(); // 清除 exclusive monitor
+                self.emit_str_x(0, 4, 0, sz); // *expected_ptr = current
+                self.mov_w0_imm(0);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_compare_exchange" => {
+                // Non-_n variant: desired is also a pointer (must dereference)
+                // args: (ptr, expected_ptr, desired_ptr, weak, succ_order, fail_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // x0 = ptr
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                // x0 = expected_ptr
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(4, 0); // x4 = expected_ptr
+                // load *expected_ptr into x1
+                self.emit_ldr_x(1, 4, 0, sz); // x1 = *expected_ptr
+                // x0 = desired_ptr -> dereference to get desired value
+                self.gen_expr(&args[2]);
+                self.mov_x_reg(6, 0); // x6 = desired_ptr
+                self.emit_ldr_x(3, 6, 0, sz); // x3 = *desired_ptr
+                // CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);
+                self.emit_cmp_x_reg(0, 1);
+                self.emit_bcond(&l_fail, 1); // NE
+                self.emit_stlxr(sz, 5, 3, 2);
+                self.emit_cbnz(5, &l_retry);
+                self.mov_w0_imm(1);
+                self.b(&l_done);
+                self.label(&l_fail);
+                self.emit_ldxr(sz, 0, 2);
+                self.emit_clrex();
                 self.emit_str_x(0, 4, 0, sz); // *expected_ptr = current
                 self.mov_w0_imm(0);
                 self.label(&l_done);

@@ -1801,6 +1801,14 @@ impl Riscv64Codegen {
         }
     }
 
+    /// 尝试从 IR 表达式中提取原子内存序常量值.
+    fn eval_mem_order(&self, arg: &TypedExpr) -> i32 {
+        match &arg.literal {
+            Some(ExprLiteral::Int(v)) => *v as i32,
+            _ => 5, // default SEQ_CST for safety
+        }
+    }
+
     /// 原子内建函数 codegen: 返回 true 表示已处理
     /// 参数约定: args[0]=ptr (a0), args[1]=val (a0)
     /// 结果返回在 a0
@@ -1811,11 +1819,19 @@ impl Riscv64Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[1]);
                 // a0 = ptr
                 self.gen_expr(&args[0]);
                 self.mv_a_reg(11); // a1 = ptr (save)
-                // fence rw, rw (memory ordering)
-                self.emit_fence();
+                match ord {
+                    0 => {} // RELAXED: no fence
+                    2 => { // ACQUIRE: fence r, rw
+                        self.emit_fence();
+                    }
+                    _ => { // SEQ_CST/RELEASE: fence rw, rw
+                        self.emit_fence();
+                    }
+                }
                 // load from [a1] to a0
                 self.emit_load_sz(10, 11, 0, sz);
                 true
@@ -1825,15 +1841,20 @@ impl Riscv64Codegen {
                     return false;
                 }
                 let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[2]);
                 // a0 = ptr
                 self.gen_expr(&args[0]);
                 self.mv_a_reg(11); // a1 = ptr
                 // a0 = val
                 self.gen_expr(&args[1]);
+                match ord {
+                    0 => {} // RELAXED: no fence
+                    _ => { // SEQ_CST/ACQUIRE/RELEASE: fence before store
+                        self.emit_fence();
+                    }
+                }
                 // store a0 to [a1]
                 self.emit_store_sz(10, 11, 0, sz);
-                // fence rw, rw
-                self.emit_fence();
                 true
             }
             "__atomic_exchange_n" => {
@@ -1860,8 +1881,9 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
-                // fence rw, rw for SEQ_CST before AMO
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
                 // amoadd [a1], a2 -> a0 (old value)
                 self.emit_amoadd(sz, 10, 12, 11);
                 true
@@ -1877,8 +1899,9 @@ impl Riscv64Codegen {
                 // negate a0 (a0 = -val)
                 self.emit_neg(10, 10);
                 self.mv_a_reg(12);
-                // fence rw, rw for SEQ_CST before AMO
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
                 // amoadd [a1], a2 -> a0 (old value, adding negative)
                 self.emit_amoadd(sz, 10, 12, 11);
                 true
@@ -1892,8 +1915,9 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
-                // fence rw, rw for SEQ_CST before AMO
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
                 // amoand [a1], a2 -> a0
                 self.emit_amoand(sz, 10, 12, 11);
                 true
@@ -1907,8 +1931,9 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
-                // fence rw, rw for SEQ_CST before AMO
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
                 // amoor [a1], a2 -> a0
                 self.emit_amoor(sz, 10, 12, 11);
                 true
@@ -1922,8 +1947,9 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
-                // fence rw, rw for SEQ_CST before AMO
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
                 // amoxor [a1], a2 -> a0
                 self.emit_amoxor(sz, 10, 12, 11);
                 true
@@ -1945,8 +1971,13 @@ impl Riscv64Codegen {
                 // a0 = desired
                 self.gen_expr(&args[2]);
                 self.mv_a_reg(14); // a4 = desired
-                // fence rw, rw for SEQ_CST before LR/SC
-                self.emit_fence();
+                // fence rw, rw only for SEQ_CST before LR/SC
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
+                } else {
+                    5
+                };
+                if sord == 5 { self.emit_fence(); }
                 // LR/SC CAS loop
                 let l_retry = self.fresh_label("atomic_cas");
                 let l_fail = self.fresh_label("atomic_cas_fail");
@@ -1964,6 +1995,49 @@ impl Riscv64Codegen {
                 self.li_a0(1);
                 self.j(&l_done);
                 // failure: store current to *expected, a0 = 0
+                self.label(&l_fail);
+                self.emit_store_sz(10, 13, 0, sz); // *expected = current
+                self.li_a0(0);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_compare_exchange" => {
+                // Non-_n variant: desired is also a pointer (must dereference)
+                // args: (ptr, expected_ptr, desired_ptr, weak, succ_order, fail_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = expected_ptr
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(13); // a3 = expected_ptr
+                // load *expected_ptr to a2
+                self.emit_load_sz(12, 13, 0, sz); // a2 = *expected
+                // a0 = desired_ptr -> dereference to get desired
+                self.gen_expr(&args[2]);
+                self.mv_a_reg(15); // a5 = desired_ptr (reuse for temp)
+                self.emit_load_sz(14, 15, 0, sz); // a4 = *desired_ptr
+                // fence only for SEQ_CST
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
+                } else {
+                    5
+                };
+                if sord == 5 { self.emit_fence(); }
+                // LR/SC CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &l_fail);
+                self.emit_sc(sz, 15, 14, 11);
+                self.emit_bnez(15, &l_retry);
+                self.li_a0(1);
+                self.j(&l_done);
                 self.label(&l_fail);
                 self.emit_store_sz(10, 13, 0, sz); // *expected = current
                 self.li_a0(0);
