@@ -84,6 +84,8 @@ pub struct Aarch64Codegen {
     /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
     mcount_loc_entries: Vec<(u64, String)>,
     _target: Target,
+    /// break/continue 标签栈: (break_label, continue_label)
+    break_continue_stack: Vec<(String, String)>,
 }
 
 /// AAPCS64 同构浮点聚合 (HFA) 描述
@@ -146,6 +148,7 @@ impl Aarch64Codegen {
             diagnostics: Vec::new(),
             mcount_loc_entries: Vec::new(),
             _target: target,
+            break_continue_stack: Vec::new(),
         }
     }
 
@@ -997,6 +1000,7 @@ impl Aarch64Codegen {
                 let lbl_loop = self.fresh_label("Lwhile");
                 let lbl_exit = self.fresh_label("Lwend");
                 self.label(&lbl_loop);
+                self.break_continue_stack.push((lbl_exit.clone(), lbl_loop.clone()));
                 if let Some(cond) = ir.expressions.first() {
                     self.gen_expr(cond);
                     self.cbz_w0(&lbl_exit);
@@ -1004,6 +1008,7 @@ impl Aarch64Codegen {
                 self.gen_stmt(body, &ir.nested[0]);
                 self.b(&lbl_loop);
                 self.label(&lbl_exit);
+                self.break_continue_stack.pop();
             }
             Stmt::For {
                 init,
@@ -1017,8 +1022,10 @@ impl Aarch64Codegen {
                     self.gen_stmt(s, &ir.nested[0]);
                 }
                 let lbl_loop = self.fresh_label("Lfor");
+                let lbl_cont = self.fresh_label("Lfor_cont");
                 let lbl_exit = self.fresh_label("Lfend");
                 self.label(&lbl_loop);
+                self.break_continue_stack.push((lbl_exit.clone(), lbl_cont.clone()));
                 if cond.is_some() {
                     if let Some(ir_cond) = ir.expressions.first() {
                         self.gen_expr(ir_cond);
@@ -1026,6 +1033,7 @@ impl Aarch64Codegen {
                     }
                 }
                 self.gen_stmt(body, &ir.nested[body_idx]);
+                self.label(&lbl_cont);
                 if step.is_some() {
                     if let Some(step_ir) = ir.expressions.get(1) {
                         let _ = self.gen_expr(step_ir);
@@ -1033,6 +1041,7 @@ impl Aarch64Codegen {
                 }
                 self.b(&lbl_loop);
                 self.label(&lbl_exit);
+                self.break_continue_stack.pop();
             }
             Stmt::Block { b, .. } => {
                 for (item, nested_ir) in b.items.iter().zip(ir.nested.iter()) {
@@ -1090,6 +1099,102 @@ impl Aarch64Codegen {
                 } else {
                     // -c 模式: mini-assembler 编码机器码
                     self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
+            }
+            Stmt::Switch { expr, cases, .. } => {
+                // switch: 计算表达式值存入栈临时槽, 逐一比较 case 值
+                let l_end = self.fresh_label("Lsw_end");
+                let l_default = self.fresh_label("Lsw_def");
+                // 分配栈临时保存 switch 值
+                let sw_tmp = self.alloc_local("<sw_val>", 4);
+                // 计算 switch 表达式
+                if let Some(sw_ir) = ir.expressions.first() {
+                    self.gen_expr(sw_ir);
+                } else {
+                    self.gen_expr_from_ast(expr);
+                }
+                // w0 -> 栈临时
+                self.store_w0(sw_tmp);
+                self.break_continue_stack.push((l_end.clone(), String::new()));
+                let mut has_default = false;
+                let mut case_labels: Vec<(String, &crate::ast::Case)> = Vec::new();
+                for case in cases {
+                    if let Some(ref val_expr) = &case.val {
+                        let l_case = self.fresh_label("Lsw_case");
+                        // 重新加载 switch 值到 w14
+                        self.load_w0(sw_tmp);
+                        self.mov_w14_w0(); // w14 = switch value
+                        if let Some(ref hi) = case.range_end {
+                            // GNU case low ... high: 范围匹配
+                            self.gen_expr_from_ast(val_expr); // w0 = low
+                            self.mov_w1_w0(); // w1 = low
+                            self.gen_expr_from_ast(hi); // w0 = high
+                            self.mov_w2_w0(); // w2 = high
+                            // cmp w14, w1 (switch vs low)
+                            self.emit_cmp_w_reg(14, 1);
+                            let l_skip_lo = self.fresh_label("Lsw_skip_lo");
+                            self.emit_bcond(&l_skip_lo, 0xd); // GE: switch >= low
+                            // switch < low => skip
+                            self.b(&l_skip_lo);
+                            self.label(&l_skip_lo);
+                            // cmp w14, w2 (switch vs high)
+                            self.emit_cmp_w_reg(14, 2);
+                            let l_skip = self.fresh_label("Lsw_skip");
+                            self.emit_bcond(&l_skip, 0xc); // GT: switch > high
+                            self.b(&l_case);
+                            self.label(&l_skip);
+                        } else {
+                            // case N: 精确匹配
+                            self.gen_expr_from_ast(val_expr); // w0 = case value
+                            self.mov_w1_w0(); // w1 = case value
+                            // cmp w14, w1
+                            self.emit_cmp_w_reg(14, 1);
+                            // b.eq l_case
+                            self.emit_bcond(&l_case, 0x0); // EQ
+                        }
+                        case_labels.push((l_case, case));
+                    } else {
+                        has_default = true;
+                    }
+                }
+                // 无匹配: 跳 default 或 end
+                if has_default {
+                    self.b(&l_default);
+                } else {
+                    self.b(&l_end);
+                }
+                // case 体
+                for (l_case, case) in &case_labels {
+                    self.label(l_case);
+                    for (item, nested_ir) in case.body.items.iter().zip(ir.nested.iter()) {
+                        self.gen_block_item(item, nested_ir);
+                    }
+                }
+                // default 体
+                if has_default {
+                    self.label(&l_default);
+                    for case in cases {
+                        if case.val.is_none() {
+                            for (item, nested_ir) in case.body.items.iter().zip(ir.nested.iter()) {
+                                self.gen_block_item(item, nested_ir);
+                            }
+                        }
+                    }
+                }
+                // break 出口
+                self.label(&l_end);
+                self.break_continue_stack.pop();
+            }
+            Stmt::Break { .. } => {
+                if let Some((l_break, _)) = self.break_continue_stack.last().cloned() {
+                    self.b(&l_break);
+                }
+            }
+            Stmt::Continue { .. } => {
+                if let Some((_, l_cont)) = self.break_continue_stack.last().cloned() {
+                    if !l_cont.is_empty() {
+                        self.b(&l_cont);
+                    }
                 }
             }
             _ => {}
@@ -2325,6 +2430,20 @@ impl Aarch64Codegen {
 
     fn mov_w1_w0(&mut self) {
         self.emit(&[0xe1, 0x03, 0x80, 0x2a]);
+    }
+
+    /// MOV W2, W0 — ORR W2, WZR, W0
+    fn mov_w2_w0(&mut self) {
+        self.emit(&[0xe2, 0x03, 0x80, 0x2a]);
+    }
+
+    /// CMP Wn, Wm (alias of SUBS WZR, Wn, Wm) — 32-bit register compare
+    fn emit_cmp_w_reg(&mut self, rn: u8, rm: u8) {
+        // SUBS WZR, Wn, Wm => 0x6B000000 | Rm<<16 | Rn<<5 | 31
+        let subs = 0x6b00001fu32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5);
+        self.emit(&subs.to_le_bytes());
     }
 
     fn mov_w_reg_w0(&mut self, reg: u8) {

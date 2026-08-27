@@ -6228,9 +6228,13 @@ impl Codegen {
                         self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
                         if let Some(ref hi) = case.range_end {
                             // GNU case low ... high: 范围匹配
+                            // 保存 low 到临时栈槽, 防止 gen_expr(hi) 求值时
+                            // 将 rdx 用作临时寄存器导致 low 值被覆盖.
                             let l_next = self.fresh_label();
                             self.gen_expr(val, 2); // rdx = low
-                            self.gen_expr(hi, 8); // r8 = high (槽位 3 是 rbx, 与 cmp r8 不匹配)
+                            self.emit(&[0x48, 0x89, 0x54, 0x24, 0xF8]); // mov [rsp-8], rdx
+                            self.gen_expr(hi, 8); // r8 = high
+                            self.emit(&[0x48, 0x8B, 0x54, 0x24, 0xF8]); // mov rdx, [rsp-8]
                             self.emit(&[0x48, 0x39, 0xD1]); // cmp rcx, rdx
                             self.jmp_rel32(&l_next, JumpKind::Jl);
                             self.emit(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
