@@ -9,14 +9,14 @@
 | **M2** | struct/union/enum + 指针 | ✅ 完成 | examples/struct_test.c |
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (~1.5x, 100K vs 99K 行) |
-| **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
+| **M5** | **自举 (dcc 编 dcc)** | ✅ 完成 | `scripts/bootstrap.sh` 4 阶段流程: dcc0 构建 → 编译自举测试 (14 组) → 运行验证 → 确定性对比 (byte + semantic)；`tests/fixtures/c/bootstrap_selftest.c` 覆盖 struct/func_ptr/recursion/linked_list/bitops/enum+union/string/long_long/inline_asm/variadic_macro/_Static_assert/stmt_expr/goto/switch_range/static_array；`src/bootstrap.rs` 三层对比基础设施；`make bootstrap` 一键验证 |
 | **M6** | Linux 内核 benchmark | ✅ 完成 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M6b** | GCC libiberty（短期） | ✅ 完成 | 本地 125/129 OK；见 `docs/gcc_build_guide.md` |
 | **M6c** | 内核全树验收脚本 | ✅ 完成 | Rust fixdep；modpost_link / prepare0_full / kernel_phase_b_check |
 | **M7** | ARM64 + RISC-V | ✅ 完成 | aarch64/riscv64 typed IR + 控制流/调用/rodata |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ✅ 完成 | GitHub-style 行+指针+hint；码表见 [diagnostics.md](./diagnostics.md)；snapshot 回归 `tests/errors.rs` |
-| **M10** | 跨平台交叉编译 | ⏳ | riscv64-linux-gnu-dcc 命名 |
+| **M10** | 跨平台交叉编译 | ✅ 完成 | `--target=<triple>` 6 架构 (x86_64/aarch64/riscv64/mips64/mips/arm); 三元组解析+vendor 省略+别名 (armv7); 架构感知预定义宏+数据模型+字节序; sysroot 自动搜索; DWARF 重定位架构感知; 15+ 集成测试 (hello/控制流/浮点/TLS/预定义宏/ELF machine header); 详见 `docs/cross_compile.md` |
 | **M11.3** | 链接器补洞 | ✅ 完成 | LTO 跨函数内联/常量传播/全局优化；`.gnu.hash` TIE 压缩；`.eh_frame_hdr` 搜索表；IFUNC；`--exclude-libs`/`--build-id=sha1`/`--no-undefined-version`；AArch64+RISC-V 重定位（22+15 种）；GOT64；TLS 重定位 |
 | **M12-link** | **GNU ld 兼容链接特性补齐** | ✅ 完成 | `-z relro/now/lazy/execstack/noexecstack/pack-relative-relocs/max-page-size=N`、RPATH/RUNPATH、`-fuse-ld=`、`-fno-semantic-interposition`、SHF_GNU_RETAIN、`.symver` 完整版本表、IFUNC `target_clones` 多版本、`__dso_handle`/`.fini_array` 调度、gc_sections_root 自动选根、`-r` 自研路径、`--gdb-index`/`--compress-debug-sections` 占位 |
 | **M12** | **x86_64 mini-asm 补全** | ✅ 完成 | 消除 nop 警告：段寄存器 (cs/ds/es/fs/gs/ss) 读写、push/pop 段、imm64 内存目标、pushq imm64、%al/%ax imm test、shift $cl on any reg、cmpxchg/xadd/bswap/popcnt/movnt/prefetch 内存源+SymDisp、setcc AH/BH/CH/DH、movzx/movsx 全 8/16/32→32/64、wbinvd/invd/cpuid/rdtsc/rdtscp/rdpmc、syscall/sysret/sysenter/sysexit/swapgs/stac/clac/endbr64/pause、vmx vmlaunch/vmresume/vmread/vmwrite、fxsave/fxrstor/ldmxcsr/stmxcsr、ud2/hlt/cli/sti/cld/std、pushq/popq 扩展、vmovq/段前缀 mem 寻址；新增 `tests/fixtures/c/asm_paravirt.c` |

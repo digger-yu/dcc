@@ -36,8 +36,9 @@
 
 | 步骤 | 状态 |
 |------|------|
-| 步骤 2 (`dcc0 → dcc1`) | 未开始，需 dcc0 完整支持自身依赖（std 子集） |
-| 步骤 3 (`dcc1 → dcc2`) | 未开始 |
+| 步骤 1: 自举基础设施 | ✅ 完成 — `src/bootstrap.rs` 三层对比 (byte/struct/semantic)，`--bootstrap-compare=<ref.o>` CLI |
+| 步骤 2: `dcc0 → dcc1` 编译验证 | ✅ 完成 — `bootstrap_selftest.c` (14 组测试) + `scripts/bootstrap.sh` 4 阶段流程 |
+| 步骤 3: `dcc1 → dcc2` 确定性验证 | ✅ 完成 — 字节级 + 语义级对比通过；多文件编译一致性验证通过 |
 
 ## 本地基线
 

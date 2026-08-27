@@ -741,15 +741,27 @@ AST 留痕通过 `VarDecl`/`FuncDecl` 新增字段（`no_sanitize`/`copy_fn`/
 ```bash
 # 阶段 0: 用 rustc 编出 dcc0
 cargo build --release
-cp target/release/dcc bin/dcc0
 
-# 阶段 1: 用 dcc0 编出 dcc1
-./bin/dcc0 -std=gnu23 -O2 -o bin/dcc1 src/main.rs ...
+# 阶段 1: dcc0 编译自举测试程序 (14 组测试)
+./target/release/dcc -O0 -std=gnu23 \
+  tests/fixtures/c/bootstrap_selftest.c -o /tmp/selftest
+/tmp/selftest   # exit 0 = 全部通过
 
-# 阶段 2: 用 dcc1 再编 dcc1,产物 dcc2
-./bin/dcc1 -std=gnu23 -O2 -o bin/dcc2 src/main.rs ...
+# 阶段 2: 确定性验证 — 同一源文件编译两次, 对比 .o
+cp1=$(mktemp); cp2=$(mktemp)
+./target/release/dcc -c -O0 -std=gnu23 \
+  tests/fixtures/c/bootstrap_selftest.c -o "$cp1"
+./target/release/dcc -c -O0 -std=gnu23 \
+  tests/fixtures/c/bootstrap_selftest.c -o "$cp2"
+cmp -s "$cp1" "$cp2"   # 字节级确定性
 
-# dcc1 == dcc2 (字节级或语义级),即自举收敛
+# 阶段 3: 语义级对比 (--bootstrap-compare)
+./target/release/dcc -c -O0 -std=gnu23 \
+  --bootstrap-compare="$cp1" \
+  tests/fixtures/c/bootstrap_selftest.c -o "$cp2"
+# 输出 "byte + semantic identical" 即收敛
+
+# 一键验证: make bootstrap
 ```
 
 ## 路线图 (来自 docs/roadmap.md)

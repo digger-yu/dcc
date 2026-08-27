@@ -29,7 +29,7 @@
 | 后端 | x86_64 / aarch64 / riscv64 / mips / mips64 / arm 全部完整（`has_backend() == true`） |
 | 链接器 | 自有 `src/link/` 内置链接器；旧路径走 host `ld -r`（`link/legacy.rs`） |
 | LTO | 自有 `.dcc.lto` 段 + DBC 位码（`src/link/lto_bitcode.rs`） |
-| 当前阶段 | **alpha**（M0–M25 已完成；M5 自举未开始；内核全树未首跑） |
+| 当前阶段 | **alpha**（M0–M25 已完成；M5 自举已完成；内核全树未首跑） |
 
 ## 2. 调用约定
 
@@ -328,7 +328,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | 链接 | 运行时 dynamic loader (`ld.so`) | IPA-SRA / PGO 集成已实装；`ld.so` 为设计决策 |
 | C++ | 完整 concept SFINAE 联动；模板基类 / 友元；`export template` | 模板单态化 / BMF modules / 协程真状态机均已实装；模板基类/友元/export template 仍不支持 |
 | 平台 | Windows MSVC（codegen SysV-like）；Darwin / Mach-O；wasm32；AVR / MSP430 / Xtensa；PowerPC；LoongArch64 | 🔴 |
-| 自举 | `dcc0 → dcc1` 起步；`dcc1 → dcc2` 验证 | 字节/语义对比基础设施 `--bootstrap-compare=` 已实装（M25） |
+| 自举 | ✅ `dcc0 → dcc1 → dcc2` 验证通过 | 14 组测试 + 字节/语义确定性对比 + `make bootstrap` |
 
 ## 9. 路线图
 
@@ -336,7 +336,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 
 **近期（未完成里程碑）**
 
-- **M5 自举**：`dcc0 → dcc1` 起步；需先补 std 子集。
+- **M5 自举**：✅ 已完成 — `scripts/bootstrap.sh` + `bootstrap_selftest.c` (14 组测试) + 确定性验证。
 - **M6 Linux 内核全树首跑**：`make CC=dcc` 推进至 vmlinux + bzImage + QEMU 启动（`scripts/kernel_full_check.sh` 脚本就绪，`BUILD_BZIMAGE=1` 时非 SKIP）。
 - **M10 跨平台二进制**：`x86_64-dcc` / `aarch64-dcc` / `riscv64-dcc` 命名分发。
 
