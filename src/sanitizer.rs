@@ -41,6 +41,7 @@ use crate::ast::{
 };
 use crate::cli::{Arch, CliError};
 use crate::diagnostics::Span;
+use std::collections::{HashMap, HashSet};
 
 /// 启用的 sanitizer 标志 (与 GCC `-fsanitize=*` 子集对应)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -285,6 +286,12 @@ struct InstrumentCtx {
     next_guard_id: u32,
     /// 目标架构 (影响 KASAN shadow 偏移)。
     arch: Arch,
+    /// KCOV 合并: always_inline 函数名集合。
+    inlined_funcs: HashSet<String>,
+    /// KCOV 合并: 函数名 -> 调用者函数名。
+    inline_callers: HashMap<String, String>,
+    /// KCOV 合并: 已分配 guard 的函数 -> (数组名, base_id)。
+    func_guard_map: HashMap<String, (String, u32)>,
 }
 
 impl InstrumentCtx {
@@ -294,6 +301,9 @@ impl InstrumentCtx {
             guard_counter: 0,
             next_guard_id: 0,
             arch,
+            inlined_funcs: HashSet::new(),
+            inline_callers: HashMap::new(),
+            func_guard_map: HashMap::new(),
         }
     }
 
@@ -313,6 +323,7 @@ impl InstrumentCtx {
 }
 
 /// 顶层入口:在 driver parse 之后、IR lower 之前调用。
+/// `arch` 用于 KASAN-kernel shadow 偏移选择与 HWASAN 内联 tag 检查。
 pub fn instrument_program(prog: &mut Program, flags: SanitizerFlags, arch: Arch) {
     if !flags.any() {
         return;
@@ -321,10 +332,185 @@ pub fn instrument_program(prog: &mut Program, flags: SanitizerFlags, arch: Arch)
         tu_init_pending: flags.needs_tu_init(),
         ..InstrumentCtx::new(arch)
     };
+    // KCOV 跨函数 inline 合并: 预扫描识别 always_inline 函数
+    // 及其调用者, 以便在插桩时为内联函数复用调用者的 guard 数组。
+    if flags.needs_edge_coverage() {
+        build_inline_map(prog, &mut ctx);
+    }
+    // 两遍处理: 第一遍处理非内联函数, 第二遍处理内联函数。
+    // 这样内联函数可以找到调用者已分配的 guard 数组。
     for decl in prog.decls.iter_mut() {
         if let Decl::Func(f) = decl {
-            instrument_func(f, flags, &mut ctx);
+            if !ctx.inlined_funcs.contains(f.name.name.as_str()) {
+                instrument_func(f, flags, &mut ctx);
+            }
         }
+    }
+    for decl in prog.decls.iter_mut() {
+        if let Decl::Func(f) = decl {
+            if ctx.inlined_funcs.contains(f.name.name.as_str()) {
+                instrument_func(f, flags, &mut ctx);
+            }
+        }
+    }
+}
+
+/// 预扫描: 收集 always_inline / flatten 函数名及其调用者映射。
+/// 当函数 B 标记为 always_inline 且仅被 A 调用时,
+/// B 的 guard 数组可合并到 A 的数组中 (KCOV 跨函数 inline 合并)。
+fn build_inline_map(prog: &Program, ctx: &mut InstrumentCtx) {
+    let mut inline_set: HashSet<String> = HashSet::new();
+    for decl in &prog.decls {
+        if let Decl::Func(f) = decl {
+            if (f.is_always_inline || f.is_flatten) && f.body.is_some() {
+                inline_set.insert(f.name.name.clone());
+            }
+        }
+    }
+    if inline_set.is_empty() {
+        return;
+    }
+    let mut caller_count: HashMap<String, Vec<String>> = HashMap::new();
+    for decl in &prog.decls {
+        if let Decl::Func(f) = decl {
+            if f.body.is_none() {
+                continue;
+            }
+            let mut callees: HashSet<String> = HashSet::new();
+            collect_func_calls(f, &mut callees);
+            for callee in &callees {
+                if inline_set.contains(callee) {
+                    caller_count
+                        .entry(callee.clone())
+                        .or_default()
+                        .push(f.name.name.clone());
+                }
+            }
+        }
+    }
+    // 仅当 inline 函数只有一个调用者时才合并
+    for (func, callers) in &caller_count {
+        if callers.len() == 1 {
+            ctx.inlined_funcs.insert(func.clone());
+            ctx.inline_callers
+                .insert(func.clone(), callers[0].clone());
+        }
+    }
+}
+
+/// 收集函数体中的所有直接调用目标名。
+fn collect_func_calls(func: &FuncDecl, callees: &mut HashSet<String>) {
+    if let Some(body) = &func.body {
+        collect_calls_in_block(body, callees);
+    }
+}
+
+fn collect_calls_in_block(block: &Block, callees: &mut HashSet<String>) {
+    for item in &block.items {
+        match item {
+            BlockItem::Stmt(s) => collect_calls_in_stmt(s, callees),
+            BlockItem::Decl(Decl::Func(f)) => {
+                if let Some(body) = &f.body {
+                    collect_calls_in_block(body, callees);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_calls_in_stmt(stmt: &Stmt, callees: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+            collect_calls_in_expr(e, callees);
+        }
+        Stmt::If { cond, then_, else_, .. } => {
+            collect_calls_in_expr(cond, callees);
+            collect_calls_in_stmt(then_, callees);
+            if let Some(e) = else_ {
+                collect_calls_in_stmt(e, callees);
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+            collect_calls_in_expr(cond, callees);
+            collect_calls_in_stmt(body, callees);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(i) = init {
+                collect_calls_in_stmt(i, callees);
+            }
+            if let Some(c) = cond {
+                collect_calls_in_expr(c, callees);
+            }
+            if let Some(s) = step {
+                collect_calls_in_expr(s, callees);
+            }
+            collect_calls_in_stmt(body, callees);
+        }
+        Stmt::Block { b, .. } => collect_calls_in_block(b, callees),
+        Stmt::Switch { expr, cases, .. } => {
+            collect_calls_in_expr(expr, callees);
+            for c in cases {
+                collect_calls_in_block(&c.body, callees);
+            }
+        }
+        Stmt::Label { stmt, .. } => collect_calls_in_stmt(stmt, callees),
+        _ => {}
+    }
+}
+
+fn collect_calls_in_expr(expr: &Expr, callees: &mut HashSet<String>) {
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                callees.insert(name.name.clone());
+            }
+            for a in args {
+                collect_calls_in_expr(a, callees);
+            }
+        }
+        Expr::Binop { l, r, .. } => {
+            collect_calls_in_expr(l, callees);
+            collect_calls_in_expr(r, callees);
+        }
+        Expr::Unary { e, .. } | Expr::AddrOf { e, .. } | Expr::Deref { e, .. }
+        | Expr::Cast { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+            collect_calls_in_expr(e, callees);
+        }
+        Expr::Cond { cond, then_, else_, .. } => {
+            collect_calls_in_expr(cond, callees);
+            collect_calls_in_expr(then_, callees);
+            collect_calls_in_expr(else_, callees);
+        }
+        Expr::Comma { l, r, .. } => {
+            collect_calls_in_expr(l, callees);
+            collect_calls_in_expr(r, callees);
+        }
+        Expr::Index { arr, idx, .. } => {
+            collect_calls_in_expr(arr, callees);
+            collect_calls_in_expr(idx, callees);
+        }
+        Expr::Member { expr, .. } => collect_calls_in_expr(expr, callees),
+        Expr::Assign { l, r, .. } => {
+            collect_calls_in_expr(l, callees);
+            collect_calls_in_expr(r, callees);
+        }
+        Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
+        | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+            collect_calls_in_expr(e, callees);
+        }
+        Expr::StmtExpr { block, .. } => collect_calls_in_block(block, callees),
+        Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
+            for init in inits {
+                match init {
+                    InitItem::Expr(e) => collect_calls_in_expr(e, callees),
+                    InitItem::Designated { value, .. } => {
+                        collect_calls_in_expr(value, callees)
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -375,19 +561,45 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
     }
 
     // KCOV/Fuzzer 边覆盖:声明每函数 guard 计数器 + TU 全局索引数组
-    let guard_var = if func_flags.needs_edge_coverage() {
-        let name = ctx.alloc_guard_var();
-        prologue.push(guard_array_decl(&name, &span));
-        Some(name)
+    // KCOV 合并: 内联函数复用调用者的 guard 数组, 不单独分配。
+    let func_name = func.name.name.clone();
+    let is_inlined = ctx.inlined_funcs.contains(func_name.as_str());
+    let (guard_var, func_guard_base) = if func_flags.needs_edge_coverage() {
+        if is_inlined {
+            // 内联函数: 复用调用者的 guard 数组
+            if let Some(caller) = ctx.inline_callers.get(&func_name).cloned() {
+                if let Some((arr, _base)) = ctx.func_guard_map.get(&caller).cloned() {
+                    let inline_base = ctx.next_guard();
+                    ctx.func_guard_map
+                        .insert(func_name, (arr.clone(), inline_base));
+                    (Some(arr), inline_base)
+                } else {
+                    // 调用者未找到 guard, 降级为独立分配
+                    let name = ctx.alloc_guard_var();
+                    prologue.push(guard_array_decl(&name, &span));
+                    let g = ctx.next_guard();
+                    prologue.push(guard_init(&g, &span));
+                    ctx.func_guard_map.insert(func_name, (name.clone(), g));
+                    (Some(name), g)
+                }
+            } else {
+                let name = ctx.alloc_guard_var();
+                prologue.push(guard_array_decl(&name, &span));
+                let g = ctx.next_guard();
+                prologue.push(guard_init(&g, &span));
+                ctx.func_guard_map.insert(func_name, (name.clone(), g));
+                (Some(name), g)
+            }
+        } else {
+            let name = ctx.alloc_guard_var();
+            prologue.push(guard_array_decl(&name, &span));
+            let g = ctx.next_guard();
+            prologue.push(guard_init(&g, &span));
+            ctx.func_guard_map.insert(func_name, (name.clone(), g));
+            (Some(name), g)
+        }
     } else {
-        None
-    };
-    let func_guard_base = if func_flags.needs_edge_coverage() {
-        let g = ctx.next_guard();
-        prologue.push(guard_init(&g, &span));
-        g
-    } else {
-        0
+        (None, 0)
     };
 
     // 函数入口回调 (KCOV trace_pc + KCSAN func_entry)
@@ -5075,6 +5287,82 @@ mod tests {
             names.iter().any(|n| n.starts_with("__hwasan_tag_mismatch")),
             "kernel-hwaddress store should call __hwasan_tag_mismatch*, got: {:?}",
             names
+        );
+    }
+
+    // ── KCOV cross-function inline merging ─────────────────────────────
+
+    #[test]
+    fn kcov_inline_merge_reuses_caller_guard_array() {
+        // When an always_inline function is called by exactly one caller,
+        // it should reuse the caller's guard array name.
+        let mut helper = empty_func("helper");
+        helper.is_always_inline = true;
+        let mut main_fn = empty_func("main");
+        // Replace main's body with a call to helper + return
+        main_fn.body = Some(Block {
+            items: vec![
+                BlockItem::Stmt(Stmt::Expr {
+                    e: Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "helper".into(),
+                                span: Span::point("t.c", 6, 1),
+                            },
+                            span: Span::point("t.c", 6, 1),
+                            ty: Type::Func(Box::new(Type::Int.into()), vec![]),
+                        }),
+                        args: vec![],
+                        span: Span::point("t.c", 6, 1),
+                        ty: Type::Int,
+                    },
+                    span: Span::point("t.c", 6, 1),
+                }),
+                BlockItem::Stmt(Stmt::Return {
+                    val: None,
+                    span: Span::point("t.c", 7, 1),
+                }),
+            ],
+            span: Span::point("t.c", 5, 1),
+        });
+        let mut prog = Program {
+            decls: vec![Decl::Func(helper), Decl::Func(main_fn)],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kcov: true,
+                ..Default::default()
+            },
+            Arch::X86_64,
+        );
+        // main should have its own guard array declaration
+        let mut main_guard_var: Option<String> = None;
+        let mut helper_has_guard_decl = false;
+        for decl in &prog.decls {
+            let Decl::Func(f) = decl else { continue };
+            let body = f.body.as_ref().unwrap();
+            for item in &body.items {
+                if let BlockItem::Decl(Decl::Var(v)) = item {
+                    if v.name.name.starts_with("__dcc_cov_guards_") {
+                        if f.name.name == "main" {
+                            main_guard_var = Some(v.name.name.clone());
+                        } else if f.name.name == "helper" {
+                            helper_has_guard_decl = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(main_guard_var.is_some(), "main should have guard array");
+        // helper (always_inline, single caller) should NOT declare its own
+        // guard array; it reuses main's array
+        assert!(
+            !helper_has_guard_decl,
+            "inlined helper should not declare its own guard array"
         );
     }
 }
