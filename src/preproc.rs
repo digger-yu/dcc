@@ -1050,6 +1050,100 @@ pub fn preprocess(
             variadic: false,
         },
     );
+    // percpu 访问宏: Linux 内核 x86_64 per-cpu 区域通过 %gs 段寄存器访问.
+    // __percpu 类型限定符: 标记变量位于 per-cpu 区域
+    pp.macros.insert(
+        "__percpu".to_string(),
+        MacroDef {
+            params: None,
+            body: "__attribute__((section(\".data..percpu\"))) __seg_gs".to_string(),
+            variadic: false,
+        },
+    );
+    // __get_cpu_var(var): 访问当前 CPU 的 per-cpu 变量
+    // 展开为通过 %gs 段前缀的直接引用
+    pp.macros.insert(
+        "__get_cpu_var".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string()]),
+            body: "(*({ __typeof__(&(var)) __percpu_ptr = (__typeof__(&(var)))&(var); __percpu_ptr; }))".to_string(),
+            variadic: false,
+        },
+    );
+    // per_cpu(var, cpu): 访问指定 CPU 的 per-cpu 变量
+    // 简化版本: 仅支持当前 CPU (cpu = 0 或忽略 cpu 参数)
+    pp.macros.insert(
+        "per_cpu".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string(), "cpu".to_string()]),
+            body: "(*({ __typeof__(&(var)) __percpu_ptr = (__typeof__(&(var)))&(var); __percpu_ptr; }))".to_string(),
+            variadic: false,
+        },
+    );
+    // __this_cpu_read(var): 读取当前 CPU 的 per-cpu 变量
+    // 使用内联汇编确保正确的段前缀访问
+    pp.macros.insert(
+        "__this_cpu_read".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string()]),
+            body: "({ __typeof__(var) __val; asm volatile(\"mov %%gs:%1, %0\" : \"=r\"(__val) : \"m\"(var)); __val; })".to_string(),
+            variadic: false,
+        },
+    );
+    // __this_cpu_write(var, val): 写入当前 CPU 的 per-cpu 变量
+    pp.macros.insert(
+        "__this_cpu_write".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string(), "val".to_string()]),
+            body: "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            variadic: false,
+        },
+    );
+    // this_cpu_read(var): 带屏障的读取
+    pp.macros.insert(
+        "this_cpu_read".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string()]),
+            body: "({ __typeof__(var) __val; asm volatile(\"mov %%gs:%1, %0\" : \"=r\"(__val) : \"m\"(var)); __val; })".to_string(),
+            variadic: false,
+        },
+    );
+    // this_cpu_write(var, val): 带屏障的写入
+    pp.macros.insert(
+        "this_cpu_write".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string(), "val".to_string()]),
+            body: "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            variadic: false,
+        },
+    );
+    // __this_cpu_add(var, val): 原子加操作
+    pp.macros.insert(
+        "__this_cpu_add".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string(), "val".to_string()]),
+            body: "({ asm volatile(\"add %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            variadic: false,
+        },
+    );
+    // __this_cpu_inc(var): 原子自增
+    pp.macros.insert(
+        "__this_cpu_inc".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string()]),
+            body: "({ asm volatile(\"incl %%gs:%0\" : : \"m\"(var) : \"memory\"); })".to_string(),
+            variadic: false,
+        },
+    );
+    // __this_cpu_dec(var): 原子自减
+    pp.macros.insert(
+        "__this_cpu_dec".to_string(),
+        MacroDef {
+            params: Some(vec!["var".to_string()]),
+            body: "({ asm volatile(\"decl %%gs:%0\" : : \"m\"(var) : \"memory\"); })".to_string(),
+            variadic: false,
+        },
+    );
     // 用户 -D 定义
     for (name, val) in defines {
         let v = val.as_deref().unwrap_or("1");
