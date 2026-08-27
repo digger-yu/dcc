@@ -430,6 +430,11 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验
 | vmlinux 生成 | 完整内核链接 | ✅ **已完成**（2026-08-25，16MB ELF，零 objtool 错误） |
 | QEMU 启动 | bzImage 串口启动日志 | ✅ **已验证**（2026-08-27，需启用 CONFIG_SERIAL_8250_CONSOLE） |
 | **initramfs 启动到 init** | 内核执行 "Run /init as init process" | ✅ **已验证**（2026-08-27，busybox init 脚本成功执行） |
+| DEFINE() .ascii 输出 | -S 模式下发射 `.ascii "->..."` 行 | ✅ **已完成**（2026-08-28，与 GCC 输出一致） |
+| .S 文件预处理 | 续接行处理与 GCC 行为一致 | ✅ **已验证**（entry_64.S 预处理后可通过 GAS 汇编） |
+| const_eval offsetof | 复杂内核结构体偏移量求值 | ⚠️ 部分结构体返回 0，需用 gcc 编译 asm-offsets.c |
+| .S 文件全链路编译 | dcc 预处理 + gcc fallback | ✅ **已完成**（2026-08-28，kernel-cc.sh 用 dcc 编译 .S，失败自动回退 gcc；51 个 .S 文件全部处理，QEMU 启动验证通过） |
+| 字符字面量跨行扫描 | 注释中 `'` 吞掉后续行宏展开 | ✅ **已修复**（2026-08-28，三处扫描循环增加 `\n` 终止条件） |
 
 ## 6. 调试技巧
 
