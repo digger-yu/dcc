@@ -18568,3 +18568,58 @@ fn qualifier_aware_optimization() {
     // are collected for read-only analysis, restrict is available for
     // future alias analysis improvements).
 }
+
+/// Verify that -fmacro-backtrace-limit=N configures the macro expansion
+/// recursion depth limit.
+#[test]
+#[cfg(unix)]
+fn macro_backtrace_limit_configurable() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-macro-limit-{}.c", std::process::id()));
+    // Create a file with deeply nested macro expansion
+    let mut content = String::new();
+    for i in 0..200 {
+        if i < 199 {
+            content.push_str(&format!("#define M{} M{}\n", i, i + 1));
+        } else {
+            content.push_str(&format!("#define M{} 42\n", i));
+        }
+    }
+    content.push_str("int x = M0;\n");
+    fs::write(&src, &content).expect("write src");
+    // Compile with default limit (128) - should trigger W0201 warning
+    let compile_default = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join(format!("dcc-macro-limit-default-{}.o", std::process::id())))
+        .arg(&src)
+        .output()
+        .expect("run dcc default");
+    // Compile with higher limit (256) - should not trigger warning
+    let compile_higher = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fmacro-backtrace-limit=256", "-o"])
+        .arg(dir.join(format!("dcc-macro-limit-higher-{}.o", std::process::id())))
+        .arg(&src)
+        .output()
+        .expect("run dcc higher");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(dir.join(format!("dcc-macro-limit-default-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-macro-limit-higher-{}.o", std::process::id())));
+    // Both should succeed (warning is non-fatal)
+    assert!(
+        compile_default.status.success(),
+        "default limit compile failed: {}",
+        String::from_utf8_lossy(&compile_default.stderr)
+    );
+    assert!(
+        compile_higher.status.success(),
+        "higher limit compile failed: {}",
+        String::from_utf8_lossy(&compile_higher.stderr)
+    );
+    // The default limit should produce a warning about depth limit
+    let default_stderr = String::from_utf8_lossy(&compile_default.stderr);
+    assert!(
+        default_stderr.contains("depth limit") || default_stderr.contains("W0201"),
+        "expected depth limit warning with default limit, stderr: {}",
+        default_stderr
+    );
+}

@@ -101,6 +101,8 @@ pub struct Preprocessor {
     pub cx_limited_range: bool,
     /// -fmacro-prefix-map: __FILE__ 路径重映射表
     macro_prefix_maps: Vec<(String, String)>,
+    /// 宏展开递归深度上限 (-fmacro-backtrace-limit=N, 默认 128)
+    macro_depth_limit: usize,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
     pending_pragmas: RefCell<Vec<(String, u32)>>,
     /// 本轮 expand_macros 实际展开过的宏名 (跨嵌套调用累积),
@@ -465,6 +467,7 @@ pub fn preprocess(
     short_wchar: bool,
     target: &TargetTriple,
     macro_prefix_maps: &[(String, String)],
+    macro_depth_limit: usize,
 ) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
@@ -513,6 +516,7 @@ pub fn preprocess(
         fp_contract: false,
         cx_limited_range: false,
         macro_prefix_maps: macro_prefix_maps.to_vec(),
+        macro_depth_limit,
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
         expanded_macros: RefCell::new(HashSet::new()),
@@ -3480,14 +3484,14 @@ impl Preprocessor {
         map: LineMap,
     ) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
-        // 128 层在 debug 模式下约消耗 ~1MB 栈空间, 安全落在默认 2MB
-        // 线程栈内; GCC 使用 200, 但 GCC 的栈帧在 release 模式下更小。
+        // 深度上限由 -fmacro-backtrace-limit=N 配置 (默认 128)
+        let limit = self.macro_depth_limit;
         let depth = EXPAND_DEPTH.with(|d| {
             let v = d.get();
             d.set(v + 1);
             v
         });
-        if depth > 128 {
+        if depth as usize > limit {
             EXPAND_DEPTH.with(|d| d.set(depth));
             // 每 TU 仅发一条 W0201 警告, 避免递归链中重复刷屏
             if !*self.depth_limit_warned.borrow() {
@@ -3497,9 +3501,9 @@ impl Preprocessor {
                 self.push_warning(self.warn_at(
                     "W0201",
                     format!(
-                        "macro expansion depth limit (128) reached; \
+                        "macro expansion depth limit ({}) reached; \
                          expansion of '{}' left unexpanded",
-                        hdr
+                        limit, hdr
                     ),
                     line,
                 ));

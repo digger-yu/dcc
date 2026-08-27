@@ -179,6 +179,8 @@ pub struct Config {
     pub file_prefix_maps: Vec<(String, String)>,
     /// -fmacro-prefix-map=OLD=NEW: __FILE__ 宏展开路径重映射
     pub macro_prefix_maps: Vec<(String, String)>,
+    /// -fmacro-backtrace-limit=N: 宏展开递归深度上限 (默认 128)
+    pub macro_backtrace_limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -673,6 +675,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut cli_warnings: Vec<String> = Vec::new();
     let mut file_prefix_maps: Vec<(String, String)> = Vec::new();
     let mut macro_prefix_maps: Vec<(String, String)> = Vec::new();
+    let mut macro_backtrace_limit: usize = 128;
 
     let mut i = 0;
     while i < args.len() {
@@ -1503,6 +1506,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     macro_prefix_maps.push((old, new));
                 }
             }
+            a if a.starts_with("-fmacro-backtrace-limit=") => {
+                let val = &a["-fmacro-backtrace-limit=".len()..];
+                if let Ok(n) = val.parse::<usize>() {
+                    macro_backtrace_limit = n;
+                }
+            }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-fno-pic"
             | "-fno-delete-null-pointer-checks"
@@ -2082,6 +2091,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             cli_warnings,
             file_prefix_maps: file_prefix_maps.clone(),
             macro_prefix_maps: macro_prefix_maps.clone(),
+            macro_backtrace_limit,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -2186,6 +2196,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             cli_warnings,
             file_prefix_maps: file_prefix_maps.clone(),
             macro_prefix_maps: macro_prefix_maps.clone(),
+            macro_backtrace_limit,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

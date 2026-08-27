@@ -93,7 +93,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
 | 数字分隔符 | `1'000'000` |
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
-| 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告 |
+| 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告；`-fmacro-backtrace-limit=N` 可配置深度上限 (默认 128) |
 | 依赖文件 -M / -MM / -MD / -MMD / -MF / -MT / -MQ / -MP | GCC 兼容全集合依赖生成: `-M`/`-MM` 仅生成依赖不编译 (stdout 或 `-MF` 指定文件); `-MD`/`-MMD` 编译同时生成 `.d`; `-MF` 指定输出路径; `-MT` 字面目标名; `-MQ` 转义 `$` 等特殊字符; `-MP` 生成 phony 目标; 格式 `\` 续行 + 路径转义 + fixdep 支持 |
 | `-Wp,*` 子选项白名单 | CLI 与 `dcc-host-wrapper.sh` 仅白名单支持预处理器子选项，未知项报 unsupported |
 | x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags；`-mno-sse`/`-mcmodel=kernel`/`-ftrivial-auto-var-init=zero` 已完整实现 |

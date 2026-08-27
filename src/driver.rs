@@ -342,6 +342,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.short_wchar,
         &cfg.target,
         &cfg.macro_prefix_maps,
+        cfg.macro_backtrace_limit,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -1309,6 +1310,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 cfg.short_wchar,
                 &cfg.target,
                 &cfg.macro_prefix_maps,
+                cfg.macro_backtrace_limit,
             );
             (pp_out.text, pp_out.deps, pp_out.diags)
         };
@@ -1550,6 +1552,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             cfg.short_wchar,
             &cfg.target,
             &cfg.macro_prefix_maps,
+            cfg.macro_backtrace_limit,
         );
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
@@ -1618,6 +1621,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         cfg.short_wchar,
         &cfg.target,
         &cfg.macro_prefix_maps,
+        cfg.macro_backtrace_limit,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
