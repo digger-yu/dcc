@@ -3239,6 +3239,30 @@ fn percpu_access_runtime() {
     assert_eq!(rc, 0, "percpu access runtime check failed");
 }
 
+/// Per-CPU 变量完整支持: __seg_gs 指针类型传播, 段前缀解引用,
+/// __get_cpu_var/per_cpu 宏展开, __this_cpu_* 内建函数.
+/// 测试验证:
+/// 1. __seg_gs 指针类型在 cast 和声明中的解析
+/// 2. __seg_gs 指针解引用生成 %gs: 段前缀
+/// 3. __get_cpu_var 宏通过 __seg_gs 指针正确展开
+/// 4. per_cpu(var, cpu) 宏使用 cpu 参数
+/// 5. __builtin_dcc_this_cpu_read/write/add 内建函数
+/// 6. __this_cpu_inc/dec 内联汇编模式
+#[test]
+#[cfg(unix)]
+fn percpu_full_support_compiles() {
+    let src = include_str!("fixtures/c/percpu_full.c");
+    let (out, exe) = run_compile_and_run("percpu-full", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "percpu full compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "percpu full runtime check failed");
+}
+
 /// __attribute__((section("a" "b"))) 相邻字符串拼接
 #[test]
 fn section_concat_attribute_compiles() {

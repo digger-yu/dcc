@@ -11097,18 +11097,6 @@ impl Codegen {
         self.emit_load_mem_typed(size, ty);
     }
 
-    /// 带段前缀的存储到 [rax]: 根据值大小选择存储指令,
-    /// 段前缀字节在调用方发射.
-    fn emit_store_rax_seg(&mut self, seg_prefix: u8, size: usize) {
-        self.emit(&[seg_prefix]);
-        match size {
-            1 => self.emit(&[0x88, 0x00]),             // mov [rax], al
-            2 => self.emit(&[0x66, 0x89, 0x00]),       // mov [rax], ax
-            4 => self.emit(&[0x89, 0x00]),             // mov [rax], eax
-            _ => self.emit(&[0x48, 0x89, 0x00]),       // mov [rax], rax
-        }
-    }
-
     // 注册变量偏移 (数组按实际大小分配多个槽)
     fn register_var(&mut self, name: &str, ty: &Type) -> i32 {
         if let Some(&(off, _)) = self.var_map.get(name) {
