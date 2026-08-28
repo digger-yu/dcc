@@ -6313,7 +6313,7 @@ impl Codegen {
             } => {
                 // 记录 asm 语句的源行号, 使 mini-asm 警告能附带源位置
                 self.current_asm_src_line = span.line;
-                // 将 GCC 的 %lN / %l[name] 占位符解析为 C 标签名。
+                // 将 GCC 的 %lN / %l[name] / %c[label] 占位符解析为 C 标签名。
                 // 使用数字边界检查防止 %l1 错误匹配 %l10 等多位索引。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
@@ -6323,6 +6323,9 @@ impl Codegen {
                         Self::asm_replace_label_idx(&resolved_asm, label_base + i, &label.name);
                     resolved_asm =
                         resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                    // %c[label]: strip immediate prefix, resolve to label
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%c[{}]", label.name), &label.name);
                 }
                 // 跨函数标签地址 + asm goto 混用警告:
                 // &&label 产生的地址仅在当前函数内有效; 若作为输入操作数

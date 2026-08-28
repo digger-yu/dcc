@@ -597,7 +597,30 @@ pub fn resolve_asm_template_enhanced(
                                 .map(|(_, r)| r.clone())
                                 .unwrap_or_else(|| name.clone());
                             result.push_str(&resolved);
-                            i += 3 + end + 1;
+                            let mut new_i = i + 3 + end + 1;
+                            // Support label+offset: %l[name]+N or %l[name]-N
+                            if new_i < chars.len()
+                                && (chars[new_i] == '+' || chars[new_i] == '-')
+                            {
+                                let sign = chars[new_i] as char;
+                                new_i += 1;
+                                let off_start = new_i;
+                                // Skip decimal or hex digits (e.g. 0x10)
+                                while new_i < chars.len()
+                                    && (chars[new_i].is_ascii_digit()
+                                        || chars[new_i] == 'x'
+                                        || chars[new_i] == 'X')
+                                {
+                                    new_i += 1;
+                                }
+                                let offset: String =
+                                    chars[off_start..new_i].iter().collect();
+                                if !offset.is_empty() {
+                                    result.push(sign);
+                                    result.push_str(&offset);
+                                }
+                            }
+                            i = new_i;
                         } else {
                             result.push(chars[i]);
                             i += 1;
@@ -617,7 +640,42 @@ pub fn resolve_asm_template_enhanced(
                                 result.push_str(&format!(".Lasm_label_{}", idx));
                             }
                         }
-                        i = num_end;
+                        let mut new_i = num_end;
+                        // Support label+offset: %lN+M or %lN-M
+                        if new_i < chars.len()
+                            && (chars[new_i] == '+' || chars[new_i] == '-')
+                        {
+                            let sign = chars[new_i] as char;
+                            new_i += 1;
+                            let off_start = new_i;
+                            while new_i < chars.len() && chars[new_i].is_ascii_digit() {
+                                new_i += 1;
+                            }
+                            let offset: String =
+                                chars[off_start..new_i].iter().collect();
+                            if !offset.is_empty() {
+                                result.push(sign);
+                                result.push_str(&offset);
+                            }
+                        }
+                        i = new_i;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                // %c[label] → strip immediate prefix, resolve to label name
+                'c' if i + 2 < chars.len() && chars[i + 2] == '[' => {
+                    if let Some(end) = chars[i + 3..].iter().position(|&c| c == ']') {
+                        let name: String = chars[i + 3..i + 3 + end].iter().collect();
+                        // Check if it's a goto label
+                        let resolved = goto_labels
+                            .iter()
+                            .find(|(n, _)| n == &name)
+                            .map(|(_, r)| r.clone())
+                            .unwrap_or_else(|| name.clone());
+                        result.push_str(&resolved);
+                        i += 3 + end + 1;
                     } else {
                         result.push(chars[i]);
                         i += 1;

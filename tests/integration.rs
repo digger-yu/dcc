@@ -11303,6 +11303,21 @@ fn asm_extended_constraint_coverage() {
     assert_eq!(code, 0, "extended constraints checks failed (exit={code})");
 }
 
+/// asm goto extended label expressions: %c[label] strip immediate prefix,
+/// label+offset, multiple goto labels.
+#[test]
+#[cfg(unix)]
+fn asm_goto_label_expressions() {
+    let src = include_str!("fixtures/c/asm_goto_label_expr.c");
+    let (out, code) = run_host_link_and_run("asm-goto-label-expr", src);
+    assert!(
+        out.status.success(),
+        "asm goto label expr compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "asm goto label expr checks failed (exit={code})");
+}
+
 /// M3.2: __attribute__ series - packed, aligned, section, weak,
 /// alias, visibility, unused.
 #[test]
