@@ -3772,6 +3772,35 @@ impl<'a> CppParser<'a> {
                 break;
             }
         }
+        // enum/struct/union 后跟类型名标识符时, 消费标识符作为类型名的一部分
+        // 例如 `enum location_resolution_kind` → "enum location_resolution_kind"
+        // 而非仅 "enum" (否则后续标识符被误认为参数名/变量名)
+        if matches!(name.as_str(), "enum" | "struct" | "union") {
+            if let Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                text,
+                ..
+            })) = &self.peek
+            {
+                full_name = format!("{} {}", full_name, text);
+                self.bump();
+                // 也支持限定名: enum ns::Kind
+                while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                    self.bump();
+                    if let Some(CppTok::C(Tok {
+                        kind: TokKind::Ident,
+                        text,
+                        ..
+                    })) = &self.peek
+                    {
+                        full_name = format!("{}::{}", full_name, text);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
         let mut ty = match full_name.as_str() {
             "void" => MangleType::Void,
             "bool" => MangleType::Bool,
