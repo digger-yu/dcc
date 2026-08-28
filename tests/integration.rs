@@ -11318,6 +11318,21 @@ fn asm_goto_label_expressions() {
     assert_eq!(code, 0, "asm goto label expr checks failed (exit={code})");
 }
 
+/// SSA DCE pass can eliminate pure (non-volatile, no outputs, no
+/// memory clobber) asm statements when their results are unused.
+#[test]
+#[cfg(unix)]
+fn asm_dead_code_elimination() {
+    let src = include_str!("fixtures/c/asm_dce.c");
+    let (out, code) = run_host_link_and_run("asm-dce", src);
+    assert!(
+        out.status.success(),
+        "asm dce compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "asm dce checks failed (exit={code})");
+}
+
 /// M3.2: __attribute__ series - packed, aligned, section, weak,
 /// alias, visibility, unused.
 #[test]

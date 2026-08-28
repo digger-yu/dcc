@@ -94,21 +94,29 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
                     true
                 }
             }
-            // inline asm: volatile asm 或带输出的 asm 保留，
-            // 无输出且非 volatile 的纯 asm 可在结果未用时消除。
-            InstKind::InlineAsm { volatile, outputs, output_vars, .. } => {
+            // inline asm DCE rules (matching GCC behavior):
+            // - volatile asm: always preserved
+            // - asm with outputs: preserved if results are used
+            // - asm with memory clobber: preserved (side effect)
+            // - pure asm (no outputs, no memory clobber, non-volatile):
+            //   can be eliminated when results are unused
+            InstKind::InlineAsm { volatile, outputs, output_vars, clobbers, .. } => {
                 if *volatile {
                     true
                 } else if !output_vars.is_empty() || !outputs.is_empty() {
-                    // 带输出的 asm: 结果被使用时保留
+                    // asm with outputs: preserved if results are used
                     if let Some(d) = &i.dest {
                         used.contains(&d.name())
                     } else {
                         true
                     }
-                } else {
-                    // 无输出的非 volatile asm: 保留 (可能有不可见副作用)
+                } else if asm_has_memory_clobber(clobbers) {
+                    // asm with memory clobber has observable side effect
                     true
+                } else {
+                    // pure asm without outputs or memory clobber:
+                    // safe to eliminate when unused
+                    false
                 }
             }
             _ => true,
@@ -2605,5 +2613,121 @@ mod tests {
         assert_eq!(alias_classify("p", "q", &sets), "identity");
         assert_eq!(alias_classify("p", "r", &sets), "disjoint");
         assert_eq!(alias_classify("p", "unknown", &sets), "overlap");
+    }
+
+    /// DCE eliminates pure (non-volatile, no outputs, no memory
+    /// clobber) asm when its results are unused.
+    #[test]
+    fn dce_removes_pure_asm_without_outputs() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let mut bb = BasicBlock {
+            name: "entry".into(),
+            phis: vec![],
+            insts: vec![],
+            term: Terminator::Ret { val: None },
+            preds: vec![],
+            succs: vec![],
+        };
+        // pure asm: no volatile, no outputs, no memory clobber
+        bb.insts.push(Inst {
+            dest: None,
+            kind: InstKind::InlineAsm {
+                asm_str: "nop".into(),
+                outputs: vec![],
+                output_names: vec![],
+                output_constraints: vec![],
+                output_vars: vec![],
+                inputs: vec![],
+                input_names: vec![],
+                input_constraints: vec![],
+                clobbers: vec![],
+                volatile: false,
+                ty: Type::Void,
+            },
+            span: span.clone(),
+        });
+        f.blocks.insert("entry".into(), bb);
+        assert!(dead_inst_elim(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts.len(), 0, "pure asm should be eliminated");
+    }
+
+    /// DCE preserves volatile asm even without outputs.
+    #[test]
+    fn dce_preserves_volatile_asm() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let mut bb = BasicBlock {
+            name: "entry".into(),
+            phis: vec![],
+            insts: vec![],
+            term: Terminator::Ret { val: None },
+            preds: vec![],
+            succs: vec![],
+        };
+        bb.insts.push(Inst {
+            dest: None,
+            kind: InstKind::InlineAsm {
+                asm_str: "nop".into(),
+                outputs: vec![],
+                output_names: vec![],
+                output_constraints: vec![],
+                output_vars: vec![],
+                inputs: vec![],
+                input_names: vec![],
+                input_constraints: vec![],
+                clobbers: vec![],
+                volatile: true,
+                ty: Type::Void,
+            },
+            span: span.clone(),
+        });
+        f.blocks.insert("entry".into(), bb);
+        assert!(!dead_inst_elim(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts.len(), 1, "volatile asm must be preserved");
+    }
+
+    /// DCE preserves asm with memory clobber (observable side effect).
+    #[test]
+    fn dce_preserves_asm_with_memory_clobber() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let mut bb = BasicBlock {
+            name: "entry".into(),
+            phis: vec![],
+            insts: vec![],
+            term: Terminator::Ret { val: None },
+            preds: vec![],
+            succs: vec![],
+        };
+        bb.insts.push(Inst {
+            dest: None,
+            kind: InstKind::InlineAsm {
+                asm_str: "nop".into(),
+                outputs: vec![],
+                output_names: vec![],
+                output_constraints: vec![],
+                output_vars: vec![],
+                inputs: vec![],
+                input_names: vec![],
+                input_constraints: vec![],
+                clobbers: vec!["memory".into()],
+                volatile: false,
+                ty: Type::Void,
+            },
+            span: span.clone(),
+        });
+        f.blocks.insert("entry".into(), bb);
+        assert!(!dead_inst_elim(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(
+            bb.insts.len(), 1,
+            "asm with memory clobber must be preserved"
+        );
     }
 }

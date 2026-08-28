@@ -83,10 +83,10 @@ pub fn optimize(module: &mut Module, level: u8) {
     fold_constants(module);
     if level >= 2 {
         prune_dead_stores(module);
-        // Note: dead asm elimination is intentionally NOT performed.
-        // GCC treats all inline asm as potentially having unknown side effects,
-        // so DCE preserves asm statements even without outputs or clobbers.
-        // We follow this convention for compatibility.
+        // Dead asm elimination: the SSA DCE pass removes pure
+        // (non-volatile, no outputs, no memory clobber) asm when
+        // its results are unused, matching GCC behavior. Volatile
+        // asm and asm with side effects are always preserved.
         fold_constant_branches(module);
         eliminate_unreachable(module);
         crate::ssa_gvn::run(module, level);

@@ -1013,28 +1013,36 @@ mod tests {
 
     #[test]
     fn validate_constraint_unsupported() {
-        // Unsupported constraint letters
-        assert!(validate_constraint("Z").is_some());
-        assert!(validate_constraint("J").is_some());
-        assert!(validate_constraint("K").is_some());
-        assert!(validate_constraint("L").is_some());
-        assert!(validate_constraint("M").is_some());
-        assert!(validate_constraint("N").is_some());
-        assert!(validate_constraint("O").is_some());
-        assert!(validate_constraint("P").is_some());
+        // Empty string is unsupported
         assert!(validate_constraint("").is_some());
+        // Non-alphanumeric special characters
+        assert!(validate_constraint("#").is_some());
+        assert!(validate_constraint("*").is_some());
+        // Prefix-only without remainder is accepted (bare prefix)
+        assert!(validate_constraint("=").is_none());
+        assert!(validate_constraint("+").is_none());
     }
 
     #[test]
-    fn validate_asm_constraints_batch() {
+    fn validate_asm_constraints_batch_no_errors_for_known() {
+        // All constraints are now accepted with extended coverage
         let errors = validate_asm_constraints(
             &["=r".to_string(), "ZH".to_string()],
             &["r".to_string(), "WL".to_string()],
         );
-        // ZH and WL contain no known constraint letters
+        // ZH contains H (ARM), WL contains L (ARM) - all known
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn validate_asm_constraints_batch_rejects_special_chars() {
+        let errors = validate_asm_constraints(
+            &["=r".to_string(), "##".to_string()],
+            &["r".to_string(), "**".to_string()],
+        );
         assert_eq!(errors.len(), 2);
-        assert!(errors[0].contains("ZH"));
-        assert!(errors[1].contains("WL"));
+        assert!(errors[0].contains("##"));
+        assert!(errors[1].contains("**"));
     }
 
     // -----------------------------------------------------------------------
