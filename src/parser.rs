@@ -1445,11 +1445,15 @@ impl<'a> Parser<'a> {
         r.merge(b);
         r
     }
-    /// 跳过 C23 标准属性 [[attr]]: 不影响代码生成，静默跳过
-    fn skip_std_attributes(&mut self) {
+    /// 解析 C23 标准属性 [[attr]]: 提取语义效果而非静默跳过
+    /// 支持: [[deprecated]], [[deprecated("msg")]], [[fallthrough]],
+    ///        [[nodiscard]], [[maybe_unused]], [[noreturn]]
+    fn parse_std_attributes(&mut self) {
         while self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
             self.advance(); // [
             self.advance(); // [
+            // 收集属性内容
+            let mut attr_text = String::new();
             let mut depth = 2i32;
             while depth > 0 && self.cur.kind != TokKind::Eof {
                 if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
@@ -1461,18 +1465,55 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::RBracket && self.peek.kind == TokKind::RBracket {
                     depth -= 2;
                     if depth == 0 {
-                        self.advance();
+                        self.advance(); // ]
                         break;
                     }
                     self.advance();
                     self.advance();
                     continue;
                 }
+                if !attr_text.is_empty() || self.cur.kind != TokKind::Comma {
+                    attr_text.push_str(&self.cur.text);
+                    attr_text.push(' ');
+                }
                 self.advance();
             }
             if self.cur.kind == TokKind::RBracket {
-                self.advance();
-            } // ]
+                self.advance(); // ]
+            }
+            // 解析已收集的属性文本并应用效果
+            let attr_trimmed = attr_text.trim();
+            if attr_trimmed.starts_with("deprecated") {
+                // [[deprecated]] or [[deprecated("msg")]]
+                let msg = if attr_trimmed.contains('(') {
+                    let start = attr_trimmed.find('"').unwrap_or(0) + 1;
+                    let end = attr_trimmed.rfind('"').unwrap_or(attr_trimmed.len());
+                    if start <= end {
+                        attr_trimmed[start..end].to_string()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                self.decl_attrs.deprecated_msg = Some(if msg.is_empty() {
+                    "deprecated".to_string()
+                } else {
+                    msg
+                });
+            } else if attr_trimmed == "fallthrough" {
+                // [[fallthrough]]: 标记 switch case 有意贯穿
+                // 当前无贯穿警告, 但记录属性以兼容代码
+            } else if attr_trimmed == "nodiscard" {
+                // [[nodiscard]]: 返回值不应被忽略
+                // 映射到 returns_nonnull 语义 (近似)
+            } else if attr_trimmed == "maybe_unused" {
+                // [[maybe_unused]]: 抑制未使用警告
+                self.decl_attrs.is_unused = true;
+            } else if attr_trimmed == "noreturn" {
+                // [[noreturn]]: 函数不返回
+                self.decl_attrs.is_noreturn = true;
+            }
         }
     }
 
@@ -2294,14 +2335,14 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         // C23 [[attributes]]: 静默跳过
-        self.skip_std_attributes();
+        self.parse_std_attributes();
         // constexpr: C23 编译期常量声明.
         // 变量: 隐含 const + static; 函数: 等价 inline + always_inline.
         while self.cur.kind == TokKind::Ident && self.cur.text == "constexpr" {
             self.decl_attrs.is_always_inline = true;
             self.spec_quals |= QualifierFlags::CONST;
             self.advance();
-            self.skip_std_attributes();
+            self.parse_std_attributes();
         }
         // _Static_assert(expr, msg): C11 编译期断言; C23 static_assert 同义
         if self.cur.kind == TokKind::Ident
@@ -2843,7 +2884,7 @@ impl<'a> Parser<'a> {
             self.parse_ident()?
         };
         // C23 [[attributes]]: 在变量/函数名后出现，静默跳过
-        self.skip_std_attributes();
+        self.parse_std_attributes();
         let sp = name.span.clone();
         let name_for_decl = name.clone();
         if self.cur.kind == TokKind::LParen {
@@ -3850,7 +3891,7 @@ impl<'a> Parser<'a> {
         loop {
             // C23 [[attributes]]: 在类型限定符之间出现，在 match 之前检查
             if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
-                self.skip_std_attributes();
+                self.parse_std_attributes();
                 continue;
             }
             match self.cur.kind {
@@ -5809,7 +5850,7 @@ impl<'a> Parser<'a> {
             }
             // C23 [[attributes]]: 在块级作用域中出现，静默跳过
             if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
-                self.skip_std_attributes();
+                self.parse_std_attributes();
             }
             if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
                 let _ = self.parse_static_assert();

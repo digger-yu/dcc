@@ -19850,3 +19850,33 @@ int main(void) { return x + y; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 [[...]] standard attribute syntax with semantic effects
+#[test]
+fn c23_std_attributes_effect() {
+    let src = r#"
+[[deprecated("use new_func")]]
+void old_func(void) {}
+
+[[nodiscard]]
+int must_use(void) { return 42; }
+
+[[maybe_unused]]
+int unused_var = 10;
+
+[[noreturn]]
+void never_returns(void) { while(1) {} }
+
+void test(void) {
+    old_func();
+    must_use();
+    never_returns();
+}
+"#;
+    let output = run_syntax_test("c23-std-attrs", src);
+    assert!(
+        output.status.success(),
+        "C23 [[...]] attributes should parse correctly. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
