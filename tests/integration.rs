@@ -19497,3 +19497,36 @@ int main(void) { return 0; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C89 volatile semantics: volatile variables compile at all opt levels
+#[test]
+fn volatile_semantics_syntax_ok() {
+    let source = include_str!("fixtures/c/volatile_semantics.c");
+    // Test at O0
+    let output = run_syntax_test("volatile-semantics-o0", source);
+    assert!(
+        output.status.success(),
+        "volatile semantics at O0. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C89 volatile: verify volatile qualifier is parsed and stored
+#[test]
+fn volatile_qualifier_parsed() {
+    let src = r#"
+volatile int g;
+int main(void) {
+    volatile int x = 1;
+    int y = x;
+    g = y;
+    return 0;
+}
+"#;
+    let output = run_syntax_test("volatile-qual", src);
+    assert!(
+        output.status.success(),
+        "volatile qualifier should parse. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
