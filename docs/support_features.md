@@ -390,6 +390,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `SHF_GNU_RETAIN` 节标志 | 元数据节自动打 `0x200000` |
 | `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序；`.init_array` / `.fini_array` / `.preinit_array` 输出使用正确 ELF 节类型 (SHT_INIT_ARRAY=14 / SHT_FINI_ARRAY=15 / SHT_PREINIT_ARRAY=16) 而非 SHT_PROGBITS |
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable`；完全替代 host `ld -r` + `objcopy`，包括 LTO 模式；`inject_lto_section_from_bundle()` 从输入提取 `.dcc.lto` 节、运行跨 TU 优化、将合并位码直接嵌入输出节，无需外部工具 |
+| `-r` + `-T` 链接器脚本组合 | `link_relocatable_with_script()` 支持 `-r -T script.lds` 组合，内核模块构建流程需要此组合；内置 relocatable 路径传递 linker_script 到 LinkConfig，由布局引擎的 `build_with_linker脚本()` 处理 |
+| `--whole-archive` / `--no-whole-archive` | 强制从静态库提取所有成员（而非仅解析未定义符号的成员）；支持独立参数和 `-Wl,` 前缀形式；`ar_archive.rs` 解析 Unix ar 格式归档，提取所有 .o 成员到临时文件后加入 InputBundle；内核静态链接场景需要此功能 |
 | DSO 缓存与 -lxxx 解析 | `DsoCache` 按 (path, mtime, size) 三元组去重缓存 .so 解析结果；`resolve_library()` 支持 -L 搜索路径、sysroot 前缀和标准系统路径；`parse_dso_file()` 提取动态符号表；`resolve_and_load()` 结合搜索+缓存+解析；链接时自动将 DSO 动态符号加入允许未定义列表 |
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |
@@ -444,7 +446,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 特性 | 说明 |
 |------|------|
 | DWARF v4 | x86_64 / AArch64 / RISC-V / MIPS / MIPS64 / ARM 全部架构 |
-| `.BTF` | x86_64 / AArch64 / RISC-V（完整类型转储：int/struct/union/enum/ptr/typedef/array/func 等） |
+| `.BTF` | x86_64 / AArch64 / RISC-V（完整类型转储：int/float/struct/union/enum/ptr/typedef/array/func/var/datasec 等）；`.BTF.ext` 节包含 func_info + line_info（BPF verifier 需要） |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表；内联汇编中的 `.cfi_*` 指令完整支持（`.cfi_startproc`/`.cfi_endproc`/`.cfi_def_cfa_offset`/`.cfi_def_cfa`/`.cfi_offset`/`.cfi_restore`/`.cfi_remember_state`/`.cfi_restore_state`/`.cfi_adjust_cfa_offset`/`.cfi_def_cfa_register`/`.cfi_return_column`/`.cfi_signal_frame`/`.cfi_window_save`/`.cfi_negate_ra_state`），`-S` 文本模式保留为汇编输出，`-c` 二进制模式静默接受 |
 | `.orc_unwind_ip` / `.orc_unwind` | 由 objtool 统一生成，dcc 不输出（避免 "file already has .orc_unwind section" 冲突） |
 | DWARF line table | `-g1` 下自动去重; `DW_LNE_set_discriminator` 支持同 PC 多行条目 (asm 逐指令调试) |
