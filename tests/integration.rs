@@ -11411,6 +11411,22 @@ fn tls_model_codegen() {
     let _ = fs::remove_file(&exe);
 }
 
+/// Struct field aligned: __attribute__((aligned(N))) on struct fields
+/// correctly affects layout padding and memory access offsets.
+#[test]
+#[cfg(unix)]
+fn struct_field_aligned_codegen() {
+    let src = include_str!("fixtures/c/struct_field_aligned.c");
+    let (out, exe) = run_compile_and_run("struct-field-aligned", src);
+    assert!(
+        out.status.success(),
+        "struct field aligned compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "struct field aligned checks failed");
+    let _ = fs::remove_file(&exe);
+}
+
 /// Extended asm constraint coverage: I/J/K/L/M/N/O/P integer ranges,
 /// early-clobber, commutative, multi-letter constraints.
 #[test]
