@@ -853,25 +853,140 @@ fn convert_ref_params(s: &str) -> String {
 }
 
 /// 为已知 struct 类型添加 struct 前缀: `pair* p` → `struct pair* p`
+/// 但不在 struct 定义本身中添加 (即不在 `struct NAME {` 或 `struct NAME;` 中添加)
+/// 也不在函数名中添加 (即不在 `NAME(` 中添加)
 fn add_struct_prefix(s: &str, struct_name: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
+    let name_len = struct_name.len();
     let mut i = 0;
     while i < len {
         // 检查是否是 struct_name
         if match_word_at(bytes, i, struct_name) {
-            // 检查前面是否已经有 struct 前缀
-            let before = if result.len() >= 7 { &result[result.len()-7..] } else { &result };
-            if !before.ends_with("struct ") && !before.ends_with("struct\t") {
+            // 检查前面是否已经有 struct 前缀 (包括空白字符)
+            let mut has_struct_prefix = false;
+            let mut k = result.len();
+            // 跳过尾部空白
+            while k > 0 && (result.as_bytes()[k-1] as char).is_ascii_whitespace() {
+                k -= 1;
+            }
+            // 检查是否以 "struct" 结尾
+            if k >= 6 && &result.as_bytes()[k-6..k] == b"struct" {
+                // 检查 struct 前面是否是标识符边界
+                if k == 6 || !is_ident_char(result.as_bytes()[k-7]) {
+                    has_struct_prefix = true;
+                }
+            }
+            // 检查前面是否是 '*' (指针变量名) 或 '&' (引用变量名)
+            // 如果是, 则当前名字是变量名, 不是类型名
+            let is_var_after_ptr = k > 0 && (result.as_bytes()[k-1] == b'*' || result.as_bytes()[k-1] == b'&');
+            // 检查前面是否是标识符 (类型名), 如果是, 则当前名字是变量名
+            // 但需要排除 C/C++ 关键字 (如 const, inline, static 等)
+            let mut is_var_after_type = k > 0 && is_ident_char(result.as_bytes()[k-1])
+                && !has_struct_prefix;
+            // 如果前面是标识符, 检查是否是关键字
+            if is_var_after_type {
+                // 提取前面的标识符
+                let mut kend = k;
+                while kend > 0 && is_ident_char(result.as_bytes()[kend-1]) {
+                    kend -= 1;
+                }
+                let prev_ident = &result.as_bytes()[kend..k];
+                // 检查是否是 C/C++ 关键字 (这些关键字后面可以跟类型名)
+                let is_keyword = prev_ident == b"const" || prev_ident == b"volatile"
+                    || prev_ident == b"inline" || prev_ident == b"static"
+                    || prev_ident == b"extern" || prev_ident == b"register"
+                    || prev_ident == b"auto" || prev_ident == b"typedef"
+                    || prev_ident == b"return" || prev_ident == b"sizeof"
+                    || prev_ident == b"typeof" || prev_ident == b"__typeof"
+                    || prev_ident == b"struct" || prev_ident == b"enum"
+                    || prev_ident == b"union";
+                // 如果是关键字, 则当前名字是类型名, 不是变量名
+                if is_keyword {
+                    is_var_after_type = false;
+                }
+            }
+            // 检查前面是否是 '(' 或 ',' (函数参数位置), 如果是, 则当前名字是变量名
+            let is_func_arg = k > 0 && (result.as_bytes()[k-1] == b'(' || result.as_bytes()[k-1] == b',');
+            // 检查后面是否是 struct 定义的开始 ({ 或 ; 或 :)
+            let mut j = skip_ws(bytes, i + name_len);
+            let is_struct_def = j < len && (bytes[j] == b'{' || bytes[j] == b';' || bytes[j] == b':');
+            // 检查后面是否是函数调用 (NAME()
+            let is_func_call = j < len && bytes[j] == b'(';
+            // 检查后面是否是另一个标识符 (类型位置, 如 `pair make_pair`)
+            // 如果是, 则当前名字是类型名, 应添加 struct 前缀
+            let is_type_before_ident = j < len && is_ident_char(bytes[j])
+                && bytes[j] != b'{' && bytes[j] != b';' && bytes[j] != b':';
+            
+            // 如果后面是标识符 (类型位置), 强制添加 struct 前缀
+            if is_type_before_ident && !has_struct_prefix && !is_struct_def {
+                result.push_str("struct ");
+            } else if !has_struct_prefix && !is_struct_def && !is_func_call
+                && !is_var_after_ptr && !is_var_after_type && !is_func_arg
+            {
                 result.push_str("struct ");
             }
             result.push_str(struct_name);
-            i += struct_name.len();
+            i += name_len;
             continue;
         }
         result.push(bytes[i] as char);
         i += 1;
+    }
+    result
+}
+
+/// 收集所有 struct 名称, 然后在函数参数/返回类型/局部变量中为它们添加 struct 前缀
+fn add_struct_prefix_to_types(s: &str) -> String {
+    // 第一步: 收集所有 struct 名称
+    let mut struct_names: Vec<String> = Vec::new();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            i = skip_comment(bytes, i); continue;
+        }
+        if match_word_at(bytes, i, "struct") {
+            let mut j = skip_ws(bytes, i + 6);
+            // 跳过可能的属性宏 (如 GTY(...), __attribute__(...), 等)
+            // 属性宏格式: IDENT(...) 或 IDENT((...))
+            while j < len && is_ident_char(bytes[j]) {
+                let (ident, ident_end) = read_ident(bytes, j);
+                let k = skip_ws(bytes, ident_end);
+                // 检查后面是否是 '('
+                if k < len && bytes[k] == b'(' {
+                    // 跳过括号内容
+                    let mut depth = 1i32;
+                    let mut m = k + 1;
+                    while m < len && depth > 0 {
+                        if bytes[m] == b'(' { depth += 1; }
+                        else if bytes[m] == b')' { depth -= 1; }
+                        m += 1;
+                    }
+                    j = skip_ws(bytes, m);
+                } else {
+                    // 不是属性宏, 这是 struct 名
+                    break;
+                }
+            }
+            if j < len && is_ident_char(bytes[j]) {
+                let (name, _) = read_ident(bytes, j);
+                if !name.is_empty() && !struct_names.contains(&name) {
+                    struct_names.push(name);
+                }
+            }
+        }
+        i += 1;
+    }
+    if struct_names.is_empty() { return s.to_string(); }
+
+    // 第二步: 为所有 struct 名称添加 struct 前缀
+    let mut result = s.to_string();
+    for name in &struct_names {
+        result = add_struct_prefix(&result, name);
     }
     result
 }
@@ -1184,16 +1299,61 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
     result
 }
 
+/// 剥离 GCC 属性宏: GTY(...), __attribute__((...)), __declspec(...), 等
+/// 这些属性在 C 降级中不需要, 且会干扰解析
+fn strip_gcc_attributes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 跳过字符串和注释
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // 检测属性宏: IDENT(...) 其中 IDENT 是 GTY, __attribute__, __declspec 等
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            if ident == "GTY" || ident == "__attribute__" || ident == "__declspec"
+                || ident == "__cdecl" || ident == "__stdcall" || ident == "__fastcall"
+            {
+                let j = skip_ws(bytes, ident_end);
+                if j < len && bytes[j] == b'(' {
+                    // 跳过整个属性宏 (包括嵌套括号)
+                    let mut depth = 1i32;
+                    let mut k = j + 1;
+                    while k < len && depth > 0 {
+                        if bytes[k] == b'(' { depth += 1; }
+                        else if bytes[k] == b')' { depth -= 1; }
+                        k += 1;
+                    }
+                    // 跳过属性宏后的空白
+                    i = skip_ws(bytes, k);
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 预处理 C++ 源文本, 将复杂 C++ 构造替换为 C 兼容形式.
 /// 在 strip_cpp_keywords 的字符级处理之前调用.
 fn replace_cpp_constructs(s: &str) -> String {
     let mut result = s.to_string();
+    // 剥离 GCC 属性宏 (如 GTY(...), __attribute__((...)), 等)
+    result = strip_gcc_attributes(&result);
     // class → struct (简单替换, 仅独立的 class 关键字)
     result = replace_word(&result, "class", "struct");
     // 删除 struct 继承语法: struct X : Y { → struct X {
     result = remove_struct_inheritance(&result);
     // 清理 struct 定义体: 删除构造函数/析构函数/默认参数/内联成员函数等
     result = clean_struct_bodies(&result);
+    // 为所有 struct 类型名称添加 struct 前缀 (在函数参数/返回类型/局部变量中)
+    result = add_struct_prefix_to_types(&result);
     // 删除访问说明符 public: / private: / protected:
     for kw in &["public", "private", "protected"] {
         result = replace_access_specifier(&result, kw);
