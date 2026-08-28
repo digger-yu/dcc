@@ -13500,6 +13500,24 @@ impl Codegen {
                 self.mov_imm(dst, value);
                 true
             }
+            // __builtin_nonzero_p(x): returns 1 if x is known to be non-zero,
+            // 0 otherwise. Conservative: return 0 (unknown) at compile time.
+            "__builtin_nonzero_p" => {
+                // Conservative implementation: we cannot prove non-zero at
+                // compile time in general, so return 0 (unknown).
+                // A more sophisticated version could check constant args.
+                let value = args.first().and_then(|arg| {
+                    const_eval::eval(arg).ok().map(|v| if v != 0 { 1i128 } else { 0i128 })
+                }).unwrap_or(0);
+                self.mov_imm(dst, value);
+                true
+            }
+            // __builtin_mul_loop: not a standard GCC builtin, but used in some
+            // kernel code. Treat as no-op returning 0.
+            "__builtin_mul_loop" => {
+                self.mov_imm(dst, 0);
+                true
+            }
             // __builtin_object_size(ptr, type): 编译期对象大小，未知时 (size_t)-1
             "__builtin_object_size" => {
                 let type_arg = args

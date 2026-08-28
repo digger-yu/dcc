@@ -19186,3 +19186,51 @@ int main(void) { return get_tls(); }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ==========================================================================
+// P1-6: Missing __builtin_* support
+// ==========================================================================
+
+#[test]
+fn builtin_nonzero_p_compiles() {
+    // Verify __builtin_nonzero_p is recognized and compiles
+    let src = r#"
+int test_nonzero(int x) {
+    if (__builtin_nonzero_p(x)) {
+        return 1;
+    }
+    return 0;
+}
+int main(void) {
+    return test_nonzero(42);
+}
+"#;
+    let output = run_syntax_test("builtin-nonzero", src);
+    assert!(
+        output.status.success(),
+        "__builtin_nonzero_p should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn builtin_expect_with_probability_compiles() {
+    // Verify __builtin_expect_with_probability is recognized
+    let src = r#"
+int test_expect(int x) {
+    if (__builtin_expect_with_probability(x != 0, 1, 0.9)) {
+        return 1;
+    }
+    return 0;
+}
+int main(void) {
+    return test_expect(42);
+}
+"#;
+    let output = run_syntax_test("builtin-expect-prob", src);
+    assert!(
+        output.status.success(),
+        "__builtin_expect_with_probability should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

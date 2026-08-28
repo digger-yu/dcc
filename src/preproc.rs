@@ -5937,6 +5937,8 @@ impl Preprocessor {
                 | "__builtin_object_size"
                 | "__builtin_dynamic_object_size"
                 | "__builtin_expect_with_probability"
+                | "__builtin_nonzero_p"
+                | "__builtin_mul_loop"
                 | "__builtin_clz"
                 | "__builtin_clzl"
                 | "__builtin_clzll"
