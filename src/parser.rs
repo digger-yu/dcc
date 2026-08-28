@@ -5734,14 +5734,20 @@ impl<'a> Parser<'a> {
             if is_nested_fptr {
                 self.advance(); // (
                 self.skip_attributes(); // 跳过 __attribute__((...))
-                if self.cur.kind == TokKind::Star {
+                // 支持多级指针: (*name), (**name), (***name) 等
+                let mut ptr_depth = 0;
+                while self.cur.kind == TokKind::Star {
                     self.advance(); // *
+                    ptr_depth += 1;
+                    while matches!(
+                        self.cur.kind,
+                        TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+                    ) {
+                        self.advance();
+                    }
                 }
-                while matches!(
-                    self.cur.kind,
-                    TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
-                ) {
-                    self.advance();
+                if ptr_depth == 0 {
+                    ptr_depth = 1; // 至少一级指针
                 }
                 let nm = if self.cur.kind == TokKind::Ident {
                     let id = Ident {
@@ -5767,9 +5773,19 @@ impl<'a> Parser<'a> {
                         Box::new(ty.into()),
                         inner_params.iter().map(|p| p.ty.clone().into()).collect(),
                     );
-                    ty = Type::Ptr(Box::new(func_ty.into()));
+                    // 按指针深度包裹: (**name)(params) -> Ptr(Ptr(Func(...)))
+                    let mut wrapped: Type = func_ty;
+                    for _ in 0..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    ty = wrapped;
                 } else {
-                    ty = Type::Ptr(Box::new(ty.into()));
+                    // 无后续 (params): 只是多级指针, 不是函数指针
+                    let mut wrapped: Type = ty;
+                    for _ in 0..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    ty = wrapped;
                 }
                 ps.push(Param {
                     ty,
