@@ -447,13 +447,18 @@ const MAX_RESPONSE_DEPTH: u32 = 64;
 ///
 /// 分词规则:
 /// - 空白字符 (空格/Tab/换行) 分隔参数
-/// - 双引号 `"..."` 内的空白不分割, 支持 `\\` 和 `\"` 转义
+/// - 双引号 `"..."` 内的空白不分割, 支持 `\\`、`\"`、`\n`、`\t`、`\r` 转义
 /// - 单引号 `'...'` 内的空白不分割, 无转义
 /// - 非引号内的 `\` 转义下一个字符
+/// - 行尾反斜杠 (`\` 后紧跟 `\n`) 为行续行: 删除两个字符使逻辑行跨物理行
 /// - `#` 开头的行 (行首或前导空白后) 视为注释, 跳到行尾
 fn tokenize_response_content(content: &str) -> Vec<String> {
+    // 预处理: 行续行 — `\` + `\n` 删除, 使逻辑行跨物理行
+    // 同时处理 `\` + `\r\n` (Windows 行尾)
+    let preprocessed = preprocess_line_continuations(content);
+
     let mut args: Vec<String> = Vec::new();
-    let chars: Vec<char> = content.chars().collect();
+    let chars: Vec<char> = preprocessed.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
@@ -483,6 +488,18 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
                                 arg.push(chars[i + 1]);
                                 i += 2;
                             }
+                            'n' => {
+                                arg.push('\n');
+                                i += 2;
+                            }
+                            't' => {
+                                arg.push('\t');
+                                i += 2;
+                            }
+                            'r' => {
+                                arg.push('\r');
+                                i += 2;
+                            }
                             _ => {
                                 arg.push('\\');
                                 arg.push(chars[i + 1]);
@@ -508,9 +525,25 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
                     i += 1; // 跳过结束引号
                 }
             } else if chars[i] == '\\' && i + 1 < len {
-                // 引号外的反斜杠转义
-                arg.push(chars[i + 1]);
-                i += 2;
+                // 引号外的反斜杠转义: 识别 \n \t \r 转义序列
+                match chars[i + 1] {
+                    'n' => {
+                        arg.push('\n');
+                        i += 2;
+                    }
+                    't' => {
+                        arg.push('\t');
+                        i += 2;
+                    }
+                    'r' => {
+                        arg.push('\r');
+                        i += 2;
+                    }
+                    _ => {
+                        arg.push(chars[i + 1]);
+                        i += 2;
+                    }
+                }
             } else {
                 arg.push(chars[i]);
                 i += 1;
@@ -521,6 +554,31 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
         }
     }
     args
+}
+
+/// 预处理行续行: 删除 `\` + `\n` (Unix) 和 `\` + `\r\n` (Windows) 序列。
+/// 这使逻辑行可以跨越多行物理行。
+fn preprocess_line_continuations(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let chars: Vec<char> = content.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '\\' && i + 1 < len {
+            if chars[i + 1] == '\n' {
+                // Unix 行续行: `\` + `\n` → 删除
+                i += 2;
+                continue;
+            } else if chars[i + 1] == '\r' && i + 2 < len && chars[i + 2] == '\n' {
+                // Windows 行续行: `\` + `\r\n` → 删除
+                i += 3;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
 }
 
 /// 递归展开参数列表中的 `@file` 引用。
@@ -2887,8 +2945,17 @@ mod tests {
     #[test]
     fn tokenize_response_content_escape_in_double_quotes() {
         use super::tokenize_response_content;
-        let tokens = tokenize_response_content(r#""path\to\file""#);
+        // `\\` inside double quotes produces literal backslash
+        let tokens = tokenize_response_content(r#""path\\to\\file""#);
         assert_eq!(tokens, vec![r#"path\to\file"#]);
+    }
+
+    #[test]
+    fn tokenize_response_content_escape_t_in_double_quotes() {
+        use super::tokenize_response_content;
+        // `\t` inside double quotes produces tab character
+        let tokens = tokenize_response_content(r#""col1\tcol2""#);
+        assert_eq!(tokens, vec!["col1\tcol2"]);
     }
 
     #[test]
@@ -2971,6 +3038,72 @@ mod tests {
         assert_eq!(cfg.inputs, vec![src.clone()]);
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&rsp);
+    }
+
+    // --- Line continuation and escape sequence tests ---
+
+    #[test]
+    fn tokenize_response_line_continuation_unix() {
+        use super::tokenize_response_content;
+        // `\` + `\n` joins lines: "-O2\\\n-c" becomes "-O2-c"
+        let tokens = tokenize_response_content("-O2\\
+-c");
+        assert_eq!(tokens, vec!["-O2-c"]);
+    }
+
+    #[test]
+    fn tokenize_response_line_continuation_mid_arg() {
+        use super::tokenize_response_content;
+        // Line continuation within a single argument
+        let tokens = tokenize_response_content("-DFOO=\\
+BAR");
+        assert_eq!(tokens, vec!["-DFOO=BAR"]);
+    }
+
+    #[test]
+    fn tokenize_response_line_continuation_windows() {
+        use super::tokenize_response_content;
+        // `\` + `\r\n` (Windows line ending) joins lines
+        let input = "-O2\\\r\n-c";
+        let tokens = tokenize_response_content(input);
+        assert_eq!(tokens, vec!["-O2-c"]);
+    }
+
+    #[test]
+    fn tokenize_response_escape_n_in_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content(r#""line1\nline2""#);
+        assert_eq!(tokens, vec!["line1\nline2"]);
+    }
+
+    #[test]
+    fn tokenize_response_escape_t_in_quotes() {
+        use super::tokenize_response_content;
+        let tokens = tokenize_response_content(r#""col1\tcol2""#);
+        assert_eq!(tokens, vec!["col1\tcol2"]);
+    }
+
+    #[test]
+    fn tokenize_response_escape_outside_quotes() {
+        use super::tokenize_response_content;
+        // \n outside quotes produces a newline char embedded in the token
+        let tokens = tokenize_response_content("path\\nname");
+        assert_eq!(tokens, vec!["path\nname"]);
+    }
+
+    #[test]
+    fn preprocess_line_continuations_no_change() {
+        use super::preprocess_line_continuations;
+        let input = "-O2 -c foo.c";
+        assert_eq!(preprocess_line_continuations(input), input);
+    }
+
+    #[test]
+    fn preprocess_line_continuations_backslash_not_at_eol() {
+        use super::preprocess_line_continuations;
+        // `\` followed by space is NOT a line continuation
+        let input = "path\\ to";
+        assert_eq!(preprocess_line_continuations(input), input);
     }
 
     // --- Pipe input/output (@file) tests ---
