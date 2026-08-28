@@ -4409,6 +4409,53 @@ int main(void) { return 0; }
     let _ = std::fs::remove_file(&obj_path);
 }
 
+/// .section/.previous 支持 (VDSO 构建场景):
+/// .section 切换节后数据必须进入自定义节而非 .text,
+/// 重定位必须为 PC32 (PIC 兼容), 不能是 R_X86_64_32 绝对重定位.
+#[test]
+fn asm_section_previous_vdso_pattern() {
+    let source = include_str!("fixtures/c/asm_section_previous_vdso.c");
+    let (output, obj_path) = run_object_test("asm-section-previous-vdso", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+    let obj_data = std::fs::read(&obj_path).expect("read object file");
+    // .altinstr_replacement 必须存在且包含可执行代码
+    let alt_sec = elf64_section_data(&obj_data, ".altinstr_replacement")
+        .expect("missing .altinstr_replacement (section directive dropped)");
+    assert!(alt_sec.len() > 0, ".altinstr_replacement empty");
+    // .altinstructions 必须存在且包含数据条目
+    let alt_instr = elf64_section_data(&obj_data, ".altinstructions")
+        .expect("missing .altinstructions (previous directive dropped)");
+    assert!(alt_instr.len() >= 8, ".altinstructions too small: {}", alt_instr.len());
+    // __bug_table 必须存在
+    let bug_table = elf64_section_data(&obj_data, "__bug_table")
+        .expect("missing __bug_table");
+    assert!(bug_table.len() > 0, "__bug_table empty");
+    // __ex_table 必须存在 (嵌套 pushsection 在 section 上下文中)
+    let ex_table = elf64_section_data(&obj_data, "__ex_table")
+        .expect("missing __ex_table (nested pushsection in section context)");
+    assert!(ex_table.len() > 0, "__ex_table empty");
+    // 验证无 R_X86_64_32 绝对重定位 (PIC 不兼容)
+    let dump = Command::new("objdump")
+        .args(["-r"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump -r");
+    let relocs = String::from_utf8_lossy(&dump.stdout);
+    let has_abs32 = relocs.lines().any(|line| {
+        line.contains("R_X86_64_32") && !line.contains("R_X86_64_32S")
+    });
+    assert!(
+        !has_abs32,
+        "found R_X86_64_32 absolute relocation (PIC incompatible): {relocs}"
+    );
+    let _ = std::fs::remove_file(&obj_path);
+}
+
 #[test]
 fn function_return_thunk_avoids_naked_ret_in_c_and_asm() {
     let source = r#"

@@ -185,6 +185,10 @@ pub struct Codegen {
     pub pending_debug_info_relocs: Vec<(u64, String)>,
     // .pushsection 非文本节数据收集
     pushsection_stack: Vec<usize>,
+    /// .section/.previous 节切换栈 (独立于 pushsection_stack)
+    section_stack: Vec<usize>,
+    /// 标记当前节上下文是否由 .section 创建 (用于 .previous 正确区分 .pushsection)
+    section_active: bool,
     pending_custom_sec_rels: Vec<CustomSecRel>,
     /// 可执行 pushsection (.fixup / .altinstr_replacement) 栈: (sec_idx, self.code 起始偏移)
     pushsection_exec_stack: Vec<(usize, u64)>,
@@ -1363,6 +1367,8 @@ impl Codegen {
             comdat_groups: vec![],
             pending_debug_info_relocs: vec![],
             pushsection_stack: vec![],
+            section_stack: vec![],
+            section_active: false,
             pending_custom_sec_rels: vec![],
             pushsection_exec_stack: vec![],
             pushsection_code_ranges: vec![],
@@ -2097,12 +2103,12 @@ impl Codegen {
                 let sym = Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                 return (0, Some((sym, elf::R_X86_64_PC32, 0)), None);
             }
-            // symbol + N → PC32, addend=N (或绝对引用 + addend)
+            // symbol + N → PC32, addend=N (PIC-compatible)
             if op == '+' {
                 if let Ok(n) = right.parse::<i64>() {
                     let sym =
                         Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
-                    return (0, Some((sym, elf::R_X86_64_32, n)), None);
+                    return (0, Some((sym, elf::R_X86_64_PC32, n)), None);
                 }
             }
             // symbol - number → PC32 with negative addend
@@ -2127,11 +2133,11 @@ impl Codegen {
                 return (0, None, Some((left_sym, right_sym)));
             }
         }
-        // 纯符号引用 (无算术)
+        // 纯符号引用 (无算术) → PC32 (PIC-compatible, 避免 R_X86_64_32 绝对重定位)
         let (val, is_sym) = Self::parse_asm_expr_atom(expr, locals, line_idx, numeric_label_map);
         if is_sym {
             let sym = Self::resolve_asm_data_symbol(expr, locals, line_idx, numeric_label_map);
-            return (0, Some((sym, elf::R_X86_64_32, 0)), None);
+            return (0, Some((sym, elf::R_X86_64_PC32, 0)), None);
         }
         (val, None, None)
     }
@@ -17873,8 +17879,75 @@ impl Codegen {
                             .push((sec_idx, self.code.len() as u64));
                     }
                     self.pushsection_stack.push(sec_idx);
+                    self.section_active = false;
                     continue;
                 }
+            }
+            // .section name, "flags": 切换节 (类似 .pushsection 但用独立栈)
+            // VDSO 构建中 .section/.previous 模式常见
+            if trimmed.starts_with(".section")
+                && !trimmed.starts_with(".section.")
+            {
+                let second_token = trimmed
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("");
+                let sec_name = second_token
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !sec_name.starts_with(".text") && !sec_name.is_empty() {
+                    let (is_writable, is_exec, is_merge, is_strings, entsize) =
+                        Self::parse_pushsection_flags(trimmed);
+                    let sec_idx = self.ensure_custom_section_with_flags(
+                        sec_name, is_exec, is_writable, is_merge, is_strings, entsize,
+                    );
+                    if is_exec {
+                        self.pushsection_exec_stack
+                            .push((sec_idx, self.code.len() as u64));
+                    }
+                    self.section_stack.push(sec_idx);
+                    self.pushsection_stack.push(sec_idx);
+                    self.section_active = true;
+                    continue;
+                }
+            }
+            // .previous: 回到 .section 切换前的节
+            if trimmed.starts_with(".previous") {
+                if self.section_active {
+                    // 当前上下文由 .section 创建, 需关闭并从 section_stack 恢复
+                    if let Some(&top_sec) = self.pushsection_stack.last() {
+                        let top_is_exec = self.extra_sections[top_sec].flags & elf::SHF_EXECINSTR != 0;
+                        if top_is_exec {
+                            if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
+                                let size = self.code.len() as u64 - start;
+                                if size > 0 {
+                                    let align = self.extra_sections[sec_idx].align.max(16);
+                                    let len = self.extra_sections[sec_idx].data.len();
+                                    let aligned = (len + align as usize - 1) & !(align as usize - 1);
+                                    self.pad_custom_section_to(sec_idx, aligned);
+                                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                                    self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
+                                    self.pushsection_code_ranges.push((start, size, sec_idx, sec_off));
+                                }
+                            }
+                        }
+                        self.pushsection_stack.pop();
+                    }
+                    // 从 section_stack 恢复上一节
+                    if let Some(prev_sec) = self.section_stack.pop() {
+                        let prev_is_exec = self.extra_sections[prev_sec].flags & elf::SHF_EXECINSTR != 0;
+                        if prev_is_exec {
+                            self.pushsection_exec_stack.push((prev_sec, self.code.len() as u64));
+                        }
+                        self.pushsection_stack.push(prev_sec);
+                        self.section_active = true;
+                    } else {
+                        self.section_active = false;
+                    }
+                }
+                continue;
             }
             // .popsection: 退出 pushsection 模式
             if trimmed.starts_with(".popsection") {
@@ -17930,8 +18003,64 @@ impl Codegen {
                                 self.pushsection_exec_stack.push((nested_idx, self.code.len() as u64));
                             }
                             self.pushsection_stack.push(nested_idx);
+                            self.section_active = false;
                             continue;
                         }
+                    }
+                    // Handle nested .section inside exec pushsection
+                    if trimmed.starts_with(".section")
+                        && !trimmed.starts_with(".section.")
+                    {
+                        let second_token = trimmed.split_whitespace().nth(1).unwrap_or("");
+                        let sec_name = second_token.split(',').next().unwrap_or("").trim();
+                        if !sec_name.starts_with(".text") && !sec_name.is_empty() {
+                            let (is_w, is_e, is_m, is_s, ent) =
+                                Self::parse_pushsection_flags(trimmed);
+                            let nested_idx = self.ensure_custom_section_with_flags(
+                                sec_name, is_e, is_w, is_m, is_s, ent,
+                            );
+                            if is_e {
+                                self.pushsection_exec_stack.push((nested_idx, self.code.len() as u64));
+                            }
+                            self.section_stack.push(nested_idx);
+                            self.pushsection_stack.push(nested_idx);
+                            self.section_active = true;
+                            continue;
+                        }
+                    }
+                    // Handle nested .previous inside exec pushsection
+                    if trimmed.starts_with(".previous") {
+                        if self.section_active {
+                            if let Some(&top_sec) = self.pushsection_stack.last() {
+                                let top_is_exec = self.extra_sections[top_sec].flags & elf::SHF_EXECINSTR != 0;
+                                if top_is_exec {
+                                    if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
+                                        let size = self.code.len() as u64 - start;
+                                        if size > 0 {
+                                            let align = self.extra_sections[sec_idx].align.max(16);
+                                            let len = self.extra_sections[sec_idx].data.len();
+                                            let aligned = (len + align as usize - 1) & !(align as usize - 1);
+                                            self.pad_custom_section_to(sec_idx, aligned);
+                                            let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                                            self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
+                                            self.pushsection_code_ranges.push((start, size, sec_idx, sec_off));
+                                        }
+                                    }
+                                }
+                                self.pushsection_stack.pop();
+                            }
+                            if let Some(prev_sec) = self.section_stack.pop() {
+                                let prev_is_exec = self.extra_sections[prev_sec].flags & elf::SHF_EXECINSTR != 0;
+                                if prev_is_exec {
+                                    self.pushsection_exec_stack.push((prev_sec, self.code.len() as u64));
+                                }
+                                self.pushsection_stack.push(prev_sec);
+                                self.section_active = true;
+                            } else {
+                                self.section_active = false;
+                            }
+                        }
+                        continue;
                     }
                     if trimmed.starts_with(".popsection") {
                         let top_is_exec = self.pushsection_stack.last()
