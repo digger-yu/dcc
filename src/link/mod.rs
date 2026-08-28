@@ -41,6 +41,7 @@ pub mod resolve;
 pub mod symver;
 pub mod target_clones;
 pub mod vdso;
+pub mod ar_archive;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -134,6 +135,9 @@ pub struct LinkConfig {
     pub linker_script: Option<PathBuf>,
     /// 输出文件格式 (ELF / PE)
     pub output_format: OutputFormat,
+    /// --whole-archive 强制提取的静态库列表
+    /// 这些库的所有成员都会被提取, 而不仅是解析未定义符号的成员
+    pub whole_archive_libs: Vec<String>,
 }
 
 /// build-id 风格
@@ -194,6 +198,7 @@ impl Default for LinkConfig {
             lib_search_paths: vec![],
             linker_script: None,
             output_format: OutputFormat::Elf,
+            whole_archive_libs: vec![],
         }
     }
 }
@@ -276,8 +281,38 @@ pub fn link_multi_tu(
     output: &Path,
     cfg: &LinkConfig,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
-    let bundle = InputBundle::from_files(inputs).map_err(|e| diag("E0301", e.to_string()))?;
-    link_from_bundle(&bundle, output, cfg)
+    // --whole-archive: 提取静态库所有成员并加入输入列表
+    let mut all_inputs: Vec<PathBuf> = inputs.to_vec();
+    let extracted_members = if !cfg.whole_archive_libs.is_empty() {
+        match ar_archive::extract_whole_archive_libs(
+            &cfg.whole_archive_libs,
+            &cfg.lib_search_paths,
+            None,
+            cfg.verbose,
+        ) {
+            Ok(members) => {
+                all_inputs.extend(members.clone());
+                members
+            }
+            Err(e) => {
+                return Err(diag("E0320", format!("--whole-archive: {}", e)));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let result = {
+        let bundle = InputBundle::from_files(&all_inputs).map_err(|e| diag("E0301", e.to_string()))?;
+        link_from_bundle(&bundle, output, cfg)
+    };
+
+    // 清理临时提取的归档成员
+    if !extracted_members.is_empty() {
+        ar_archive::cleanup_extracted_members(&extracted_members);
+    }
+
+    result
 }
 
 pub fn link_from_bundle(

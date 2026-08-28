@@ -201,9 +201,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // -r 多 .o 可重定位链接（host ld -r 兼容路径）
+    // 支持 -T script.lds + -r 组合 (内核模块构建需要)
     if cfg.link_mode && !cfg.built_link {
         let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
-        return crate::link::link_relocatable(&cfg.inputs, &cfg.output, lto_enabled, cfg.verbose);
+        return crate::link::legacy::link_relocatable_with_script(
+            &cfg.inputs,
+            &cfg.output,
+            lto_enabled,
+            cfg.verbose,
+            cfg.linker_script.as_deref(),
+        );
     }
 
     // -pie / -shared / -fbuiltin-linker / .o 自动链接：走内置全链接器
@@ -2029,6 +2036,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         } else {
             link::OutputFormat::Elf
         },
+        whole_archive_libs: cfg.whole_archive_libs.clone(),
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
@@ -2170,6 +2178,7 @@ fn needs_host_cc_link(cfg: &Config) -> bool {
 fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let final_output = cfg.output.clone();
     let link_libs = cfg.link_libs.clone();
+    let whole_archive_libs = cfg.whole_archive_libs.clone();
     let sysroot = cfg.sysroot.clone();
     let verbose = cfg.verbose;
     let input_name = cfg
@@ -2235,6 +2244,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         &tmp_o,
         &final_output,
         &link_libs,
+        &whole_archive_libs,
         sysroot.as_deref(),
         verbose,
         &sanitizer_flags,
@@ -2511,6 +2521,7 @@ fn link_with_host_cc(
     obj_path: &Path,
     output: &Path,
     link_libs: &[String],
+    whole_archive_libs: &[String],
     sysroot: Option<&Path>,
     verbose: bool,
     sanitizer_flags: &[String],
@@ -2541,7 +2552,14 @@ fn link_with_host_cc(
         cmd.arg(format!("--sysroot={}", sr.display()));
     }
     for lib in link_libs {
+        // --whole-archive 库: 包裹 -Wl,--whole-archive / --no-whole-archive
+        if whole_archive_libs.contains(lib) {
+            cmd.arg("-Wl,--whole-archive");
+        }
         cmd.arg(format!("-l{}", lib));
+        if whole_archive_libs.contains(lib) {
+            cmd.arg("-Wl,--no-whole-archive");
+        }
     }
     for sf in sanitizer_flags {
         cmd.arg(sf);

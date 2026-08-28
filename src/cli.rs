@@ -110,6 +110,8 @@ pub struct Config {
     pub link_opts: crate::link::link_opts::LinkOpts,
     /// 链接库名 (-lxxx)
     pub link_libs: Vec<String>,
+    /// --whole-archive 强制提取所有成员的静态库名
+    pub whole_archive_libs: Vec<String>,
     /// 库搜索路径 (-L)
     pub lib_search_paths: Vec<PathBuf>,
     /// gc-sections 显式根符号 (-u)
@@ -643,6 +645,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut lto_partitions: Option<u32> = None;
     let mut gc_sections_root: Vec<String> = Vec::new();
     let mut link_libs: Vec<String> = Vec::new();
+    let mut whole_archive_libs: Vec<String> = Vec::new();
+    let mut in_whole_archive = false;
         let mut lib_search_paths: Vec<PathBuf> = Vec::new();
     let mut trapv = false;
     let mut bounds_check = false;
@@ -884,6 +888,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "--gdb-index" => {
                 gdb_index = true;
             }
+            "--whole-archive" => {
+                in_whole_archive = true;
+            }
+            "--no-whole-archive" => {
+                in_whole_archive = false;
+            }
             // --compress-debug-sections
             a if a.starts_with("-Wa,--compress-debug-sections=") => {
                 compress_debug = Some(a[31..].to_string());
@@ -912,14 +922,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // -lxxx 转 so 名 (从 .a 库解析, 此处简化为收集库名)
             "-l" => {
                 i += 1;
-                link_libs.push(
-                    args.get(i)
+                let lib = args.get(i)
                         .ok_or_else(|| CliError::new("missing arg after -l"))?
-                        .clone(),
-                );
+                        .clone();
+                if in_whole_archive {
+                    whole_archive_libs.push(lib.clone());
+                }
+                link_libs.push(lib);
             }
             a if a.starts_with("-l") && a.len() > 2 => {
-                link_libs.push(a[2..].to_string());
+                let lib = a[2..].to_string();
+                if in_whole_archive {
+                    whole_archive_libs.push(lib.clone());
+                }
+                link_libs.push(lib);
             }
             // -L, -l, -T 等链接器选项
             "-L" => {
@@ -945,7 +961,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 linker_script = Some(PathBuf::from(&a[2..]));
             }
             // -Wl,* : 传递给链接器的选项
-            a if a.starts_with("-Wl,") => {} // 忽略
+            "-Wl,--whole-archive" => { in_whole_archive = true; }
+            "-Wl,--no-whole-archive" => { in_whole_archive = false; }
+            a if a.starts_with("-Wl,") => {} // 忽略其他 -Wl 选项
             // -Wp,* : 仅白名单预处理器子选项；未知项报错，避免静默丢参
             "-Wp" => return Err(CliError::new("empty -Wp option")),
             a if a.starts_with("-Wp,") => {
@@ -2136,6 +2154,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             no_undefined_version,
             link_opts: all_link_opts,
             link_libs: link_libs.clone(),
+            whole_archive_libs: whole_archive_libs.clone(),
                         lib_search_paths: lib_search_paths.clone(),
             gc_sections_root: gc_sections_root.clone(),
             no_semantic_interposition,
@@ -2244,6 +2263,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             no_undefined_version: false,
             link_opts: crate::link::link_opts::LinkOpts::from_env(),
             link_libs: Vec::new(),
+            whole_archive_libs: Vec::new(),
                         lib_search_paths: Vec::new(),
             gc_sections_root: Vec::new(),
             no_semantic_interposition: false,
