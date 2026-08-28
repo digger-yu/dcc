@@ -19770,3 +19770,42 @@ int ok = 1;
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 variadic macros without leading fixed parameters
+#[test]
+fn c23_variadic_macro_no_leading_param() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-va-no-lead-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        r#"
+#define FOO(...) __VA_ARGS__
+#define BAR(...) sizeof(__VA_ARGS__)
+#define EMPTY(...)
+int a = FOO(42);
+int b = BAR(int);
+int c = EMPTY();
+"#,
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "preprocessing should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("int a = 42"),
+        "FOO(42) should expand to 42, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("int b = sizeof(int)"),
+        "BAR(int) should expand to sizeof(int), got: {stdout}"
+    );
+}
