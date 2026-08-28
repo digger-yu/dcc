@@ -1818,6 +1818,26 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     if cfg.emit_asm {
         cmd.arg("-S");
     }
+    // Pass dependency generation flags to subprocess
+    if cfg.gen_dep {
+        if cfg.dep_no_compile {
+            // -M/-MM: only generate deps, don't compile
+            cmd.arg(if cfg.dep_mmd_only { "-MMD" } else { "-MD" });
+        } else {
+            // -MD/-MMD: compile and generate deps
+            cmd.arg(if cfg.dep_mmd_only { "-MMD" } else { "-MD" });
+        }
+        if let Some(ref dep_file) = cfg.dep_file {
+            cmd.arg("-MF").arg(dep_file);
+        }
+        if cfg.dep_phony {
+            cmd.arg("-MP");
+        }
+        if let Some(ref dep_target) = cfg.dep_target {
+            cmd.arg(if cfg.dep_quote_target { "-MQ" } else { "-MT" });
+            cmd.arg(dep_target);
+        }
+    }
     cmd.arg("-o").arg(&compile_output);
     cmd.arg(&tmp);
 
