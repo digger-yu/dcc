@@ -693,6 +693,29 @@ pub fn preprocess(
     } else {
         pp.define_builtin("__STDC_HOSTED__", "1");
     }
+    // C11/C23 Unicode 支持声明 (ISO/IEC 10646:2020)
+    // __STDC_UTF_16__: char16_t 使用 UTF-16 编码
+    // __STDC_UTF_32__: char32_t 使用 UTF-32 编码
+    pp.define_builtin("__STDC_UTF_16__", "1");
+    pp.define_builtin("__STDC_UTF_32__", "1");
+    // C11 7.20.2.4: wchar_t 使用 Unicode (ISO/IEC 10646)
+    pp.define_builtin("__STDC_ISO_10646__", "201706L");
+    // C11 Annex F: IEC 60559 浮点标准合规 (IEEE 754)
+    // x86_64 使用 IEEE 754 double/float, 始终合规
+    if !freestanding {
+        pp.define_builtin("__STDC_IEC_559__", "1");
+        pp.define_builtin("__STDC_IEC_559_COMPLEX__", "1");
+    }
+    // offsetof 宏: 使用 __builtin_offsetof 实现
+    // 标准库 <stddef.h> 应定义 offsetof, 编译器预置以保证可用性
+    pp.macros.insert(
+        "offsetof".to_string(),
+        MacroDef {
+            params: Some(vec!["__type".to_string(), "__member".to_string()]),
+            body: "__builtin_offsetof(__type, __member)".to_string(),
+            variadic: false,
+        },
+    );
     pp.define_builtin("NULL", "((void*)0)");
     // GCC 兼容宏 (Linux 内核头文件大量使用)
     pp.define_builtin("__GNUC__", "13");

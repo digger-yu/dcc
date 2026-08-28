@@ -19664,3 +19664,58 @@ int main(void) { return 0; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C11/C23 standard library compliance macros
+#[test]
+fn c11_std_compliance_macros() {
+    let src = include_str!("fixtures/c/c11_std_compliance_macros.c");
+    let output = run_syntax_test("c11-std-compliance", src);
+    assert!(
+        output.status.success(),
+        "standard compliance macros should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// __STDC_IEC_559__ and __STDC_ISO_10646__ in hosted mode
+#[test]
+fn hosted_iec559_iso10646_macros() {
+    let src = r#"
+#ifndef __STDC_IEC_559__
+#error "__STDC_IEC_559__ not defined in hosted mode"
+#endif
+#ifndef __STDC_ISO_10646__
+#error "__STDC_ISO_10646__ not defined"
+#endif
+#ifndef __STDC_UTF_16__
+#error "__STDC_UTF_16__ not defined"
+#endif
+#ifndef __STDC_UTF_32__
+#error "__STDC_UTF_32__ not defined"
+#endif
+int ok = 1;
+"#;
+    let output = run_syntax_test("hosted-compliance", src);
+    assert!(
+        output.status.success(),
+        "hosted mode compliance macros. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// offsetof macro works via __builtin_offsetof
+#[test]
+fn offsetof_macro_via_builtin() {
+    let src = r#"
+struct s { int a; char b; long c; };
+int x = offsetof(struct s, b);
+int y = offsetof(struct s, c);
+_Static_assert(offsetof(struct s, a) == 0, "a offset");
+"#;
+    let output = run_syntax_test("offsetof-macro", src);
+    assert!(
+        output.status.success(),
+        "offsetof macro should work. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
