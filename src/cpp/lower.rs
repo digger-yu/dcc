@@ -211,16 +211,301 @@ pub fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// 预处理 C++ 源文本, 将复杂 C++ 构造替换为 C 兼容形式.
+/// 在 strip_cpp_keywords 的字符级处理之前调用.
+fn replace_cpp_constructs(s: &str) -> String {
+    let mut result = s.to_string();
+    // class → struct (简单替换, 仅独立的 class 关键字)
+    result = replace_word(&result, "class", "struct");
+    // 删除访问说明符 public: / private: / protected:
+    for kw in &["public", "private", "protected"] {
+        result = replace_access_specifier(&result, kw);
+    }
+    // explicit → 删除
+    result = replace_word(&result, "explicit", "");
+    // virtual → 删除
+    result = replace_word(&result, "virtual", "");
+    // typename → 删除 (在模板参数之外的地方)
+    // Lambda 表达式: [] (...) { ... } → 0
+    result = replace_lambdas(&result);
+    // 析构函数定义: ClassName::~ClassName(...) → void _dtor_ClassName(...)
+    result = replace_destructors(&result);
+    // 构造函数定义: ClassName::ClassName(...) : init_list { body }
+    // → void _ctor_ClassName(...) { body }
+    result = replace_constructors(&result);
+    // 作用域解析: ClassName::member → ClassName_member
+    // (仅在函数定义名中, 不在一般表达式中)
+    result
+}
+
+/// 替换独立的单词 (前后必须是标识符边界)
+fn replace_word(s: &str, from: &str, to: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let flen = from.len();
+    let mut i = 0;
+    while i < len {
+        if i + flen <= len && &bytes[i..i + flen] == from.as_bytes() {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + flen >= len || !is_ident_char(bytes[i + flen]);
+            if before_ok && after_ok {
+                result.push_str(to);
+                // 保留空格避免粘连
+                if !to.is_empty() && to.as_bytes().last().map_or(false, |b| b.is_ascii_alphanumeric()) {
+                    // 检查后面是否需要空格
+                    if i + flen < len && is_ident_char(bytes[i + flen]) {
+                        result.push(' ');
+                    }
+                }
+                i += flen;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 删除访问说明符 "public:" / "private:" / "protected:"
+fn replace_access_specifier(s: &str, kw: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let kw_bytes = kw.as_bytes();
+    let kw_len = kw_bytes.len();
+    let mut i = 0;
+    while i < len {
+        if i + kw_len <= len && &bytes[i..i + kw_len] == kw_bytes {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
+            if before_ok && after_ok {
+                // 跳过 kw 和后面的 ':' 以及空白
+                let mut j = i + kw_len;
+                while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b':' {
+                    j += 1; // 跳过 ':'
+                    // 检查不是 '::'
+                    if j < len && bytes[j] == b':' {
+                        // 这是 '::', 不是访问说明符
+                        result.push(bytes[i] as char);
+                        i += 1;
+                        continue;
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 替换 lambda 表达式 [...] (...) { ... } → 0
+fn replace_lambdas(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 检测 '[' 开始的可能 lambda
+        if bytes[i] == b'[' {
+            // 检查是否是 lambda: [...] 后跟 (...) 或 {...}
+            let mut j = i + 1;
+            // 跳过捕获列表内容
+            let mut bracket_depth = 1i32;
+            while j < len && bracket_depth > 0 {
+                if bytes[j] == b'[' {
+                    bracket_depth += 1;
+                } else if bytes[j] == b']' {
+                    bracket_depth -= 1;
+                }
+                j += 1;
+            }
+            // 跳过空白
+            let after_bracket = j;
+            while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            // 检查后跟 '(' (参数列表) 或 '{' (无参数 lambda)
+            if j < len && (bytes[j] == b'(' || bytes[j] == b'{') {
+                // 跳过参数列表 (如果有)
+                if bytes[j] == b'(' {
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'(' { depth += 1; } else if bytes[j] == b')' { depth -= 1; }
+                        j += 1;
+                    }
+                    // 跳过空白
+                    while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                        j += 1;
+                    }
+                }
+                // 跳过可能的 mutable / noexcept / -> 返回类型
+                // 简单处理: 跳过到 '{'
+                while j < len && bytes[j] != b'{' && bytes[j] != b';' {
+                    j += 1;
+                }
+                // 跳过 body { ... }
+                if j < len && bytes[j] == b'{' {
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'{' { depth += 1; } else if bytes[j] == b'}' { depth -= 1; }
+                        j += 1;
+                    }
+                    // 成功匹配 lambda, 替换为 0
+                    result.push_str("0");
+                    i = j;
+                    continue;
+                }
+            }
+            // 不是 lambda, 原样输出
+            let _ = after_bracket;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 替换析构函数定义: ClassName::~ClassName(...) → void _dtor_ClassName(...)
+fn replace_destructors(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 查找 ~ 字符
+        if bytes[i] == b'~' {
+            // 检查前面是 '::' (析构函数定义)
+            let mut before = i;
+            if before >= 2 && bytes[before-1] == b':' && bytes[before-2] == b':' {
+                // 找到类名
+                let mut class_end = before - 2;
+                let mut class_start = class_end;
+                while class_start > 0 && is_ident_char(bytes[class_start - 1]) {
+                    class_start -= 1;
+                }
+                let class_name = &s[class_start..class_end];
+                // 跳过 ~ClassName
+                let mut j = i + 1;
+                while j < len && is_ident_char(bytes[j]) {
+                    j += 1;
+                }
+                // 替换: 从 class_start 到 j 替换为 _dtor_ClassName
+                // 先输出 class_start 之前的内容 (已经输出了)
+                // 回退到 class_start
+                let backtrack = result.len() - (class_end - class_start) - 2; // -2 for '::'
+                result.truncate(backtrack);
+                result.push_str(&format!("void _dtor_{}", class_name));
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 替换构造函数定义: ClassName::ClassName(...) : init_list { body }
+/// → void _ctor_ClassName(...) { body }
+fn replace_constructors(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 查找 ClassName::ClassName 模式 (类名与函数名相同)
+        if bytes[i] == b':' && i + 1 < len && bytes[i+1] == b':' {
+            // 前面是类名
+            let mut class_end = i;
+            let mut class_start = class_end;
+            while class_start > 0 && is_ident_char(bytes[class_start - 1]) {
+                class_start -= 1;
+            }
+            let class_name = &s[class_start..class_end];
+            if class_name.is_empty() {
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            // :: 后面应该是相同的类名 (构造函数)
+            let mut j = i + 2;
+            let mut name_end = j;
+            while name_end < len && is_ident_char(bytes[name_end]) {
+                name_end += 1;
+            }
+            let fn_name = &s[j..name_end];
+            if fn_name == class_name {
+                // 确认是构造函数: 后面跟 '(' 或空白后 '(' 
+                let mut k = name_end;
+                while k < len && (bytes[k] as char).is_ascii_whitespace() {
+                    k += 1;
+                }
+                if k < len && bytes[k] == b'(' {
+                    // 是构造函数! 找到参数列表结束
+                    let mut depth = 1i32;
+                    k += 1;
+                    while k < len && depth > 0 {
+                        if bytes[k] == b'(' { depth += 1; } else if bytes[k] == b')' { depth -= 1; }
+                        k += 1;
+                    }
+                    // 跳过空白
+                    while k < len && (bytes[k] as char).is_ascii_whitespace() {
+                        k += 1;
+                    }
+                    // 跳过构造函数初始化列表 : member(init), ...
+                    if k < len && bytes[k] == b':' {
+                        // 检查不是 '::'
+                        if k + 1 < len && bytes[k+1] != b':' {
+                            k += 1; // 跳过 ':'
+                            // 跳过到 '{'
+                            let mut brace_depth = 0i32;
+                            while k < len {
+                                if bytes[k] == b'(' { brace_depth += 1; }
+                                else if bytes[k] == b')' { brace_depth -= 1; }
+                                else if bytes[k] == b'{' && brace_depth == 0 { break; }
+                                k += 1;
+                            }
+                        }
+                    }
+                    // 回退并替换
+                    let backtrack = result.len() - (class_end - class_start) - 2;
+                    result.truncate(backtrack);
+                    result.push_str(&format!("void _ctor_{}", class_name));
+                    i = k;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 去除 C++ 特有关键字, 使 extern "C" 块内的声明可被 C 编译器接受.
 /// 目前去除:
 ///   - `noexcept` / `noexcept(expr)`
 ///   - `constexpr` (函数声明中)
 ///   - `__extension__` (GCC 扩展, 某些 C 模式不接受)
-fn strip_cpp_keywords(s: &str) -> String {
+pub fn strip_cpp_keywords(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
+    // 先做整体文本替换 (多 token 构造需要先处理)
+    let s = replace_cpp_constructs(s);
+    let bytes = s.as_bytes();
+    let len = bytes.len();
     while i < len {
         // 检查 extern "C" { -> 去掉 extern "C" 包装, 只保留 { 内容
         // "extern" 是 6 字节
@@ -319,6 +604,120 @@ fn strip_cpp_keywords(s: &str) -> String {
                 continue;
             }
         }
+        // decltype(expr) → void* (C 后端不接受 decltype)
+        if i + 8 <= len && &bytes[i..i + 8] == b"decltype" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 8 >= len || !is_ident_char(bytes[i + 8]);
+            if before_ok && after_ok {
+                let mut j = i + 8;
+                while j < len && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'(' {
+                    // 跳过括号内容 (包括嵌套括号)
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        j += 1;
+                    }
+                }
+                result.push_str("void*");
+                i = j;
+                continue;
+            }
+        }
+        // nullptr → ((void*)0)
+        if i + 9 <= len && &bytes[i..i + 9] == b"nullptr" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 9 >= len || !is_ident_char(bytes[i + 9]);
+            if before_ok && after_ok {
+                result.push_str("((void*)0)");
+                i += 9;
+                continue;
+            }
+        }
+        // static_cast<T>(e) / dynamic_cast<T>(e) / const_cast<T>(e) /
+        // reinterpret_cast<T>(e) → (T)(e)
+        for &(kw, kw_len) in &[
+            (b"static_cast" as &[u8], 11usize),
+            (b"dynamic_cast", 12),
+            (b"const_cast", 10),
+            (b"reinterpret_cast", 16),
+        ] {
+            if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
+                if before_ok && after_ok {
+                    let mut j = i + kw_len;
+                    while j < len && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    // 解析 <T> 部分
+                    if j < len && bytes[j] == b'<' {
+                        let mut depth = 1i32;
+                        let type_start = j + 1;
+                        j += 1;
+                        while j < len && depth > 0 {
+                            if bytes[j] == b'<' {
+                                depth += 1;
+                            } else if bytes[j] == b'>' {
+                                depth -= 1;
+                            }
+                            j += 1;
+                        }
+                        let type_end = j - 1;
+                        let type_str = &s[type_start..type_end];
+                        result.push('(');
+                        result.push_str(type_str);
+                        result.push(')');
+                        // 跳过 (expr)
+                        while j < len && bytes[j] == b' ' {
+                            j += 1;
+                        }
+                        if j < len && bytes[j] == b'(' {
+                            let mut depth = 1i32;
+                            let expr_start = j + 1;
+                            j += 1;
+                            while j < len && depth > 0 {
+                                if bytes[j] == b'(' {
+                                    depth += 1;
+                                } else if bytes[j] == b')' {
+                                    depth -= 1;
+                                }
+                                j += 1;
+                            }
+                            let expr_end = j - 1;
+                            let expr_str = &s[expr_start..expr_end];
+                            result.push('(');
+                            result.push_str(expr_str);
+                            result.push(')');
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        // override / final (类方法后) → 删除
+        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5)] {
+            if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
+                if before_ok && after_ok {
+                    let mut j = i + kw_len;
+                    while j < len && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
         result.push(bytes[i] as char);
         i += 1;
     }
@@ -346,7 +745,16 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         MangleType::LongDouble => "long double".into(),
         MangleType::Pointer(t) => format!("{}*", mangle_to_c(t)),
         MangleType::Reference(t) => format!("{}*", mangle_to_c(t)),
-        MangleType::Class(n) => format!("struct {}", n),
+        MangleType::Class(n) => {
+            // enum/struct/union 前缀: 保留原始关键字而非一律加 struct
+            if n.starts_with("enum ") || n.starts_with("union ")
+                || n.starts_with("struct ")
+            {
+                n.clone()
+            } else {
+                format!("struct {}", n)
+            }
+        }
         MangleType::Ellipsis => "...".into(),
         // M17.0: Auto / DecltypeAuto 在所有变量声明点都应已被解析;
         // 若此处仍出现, 说明 lower 顺序错误, 输出占位 int 并发出警告.
@@ -410,6 +818,20 @@ impl Lower {
                 // 直接使用 typedef 名, 不再前缀 `struct `.
                 if self.enum_types.contains(n) {
                     return self.qualify_name(n);
+                }
+                // enum/union/struct 前缀: 保留原始关键字而非加 struct
+                if n.starts_with("enum ") || n.starts_with("union ")
+                    || n.starts_with("struct ")
+                {
+                    return n.clone();
+                }
+                // 提取 enum/struct/union 后的裸名检查 enum_types
+                for prefix in &["struct ", "enum ", "union "] {
+                    if let Some(bare) = n.strip_prefix(prefix) {
+                        if self.enum_types.contains(bare) {
+                            return self.qualify_name(bare);
+                        }
+                    }
                 }
                 if !self.ns.stack.is_empty() && !n.contains('_') {
                     let q = format!("{}_{}", self.ns.stack.join("_"), n);
@@ -888,7 +1310,9 @@ impl Lower {
     pub fn lower_decls(&mut self, decls: &[CppDecl]) {
         self.out
             .push_str("/* dcc C++ frontend M7+M8 lowered output */\n");
-        // stddef.h / stdint.h 仅在 M9 (异常 / RTTI) 真正用到 size_t 等类型时引入
+        // 根据代码是否使用 new/delete/throw 决定是否引入系统头文件.
+        // 注意: 系统头文件在 __cplusplus 下会包含 C++ 代码 (如 decltype),
+        // C 后端无法解析, 因此仅在必要时引入.
         let needs_system_headers = decls.iter().any(|d| self.decl_needs_system_headers(d));
         if needs_system_headers {
             self.out.push_str("#include <stddef.h>\n");
@@ -902,6 +1326,65 @@ impl Lower {
             self.out.push_str("typedef long long int64_t;\n");
             self.out.push_str("typedef unsigned long long uint64_t;\n");
         }
+        // POSIX / glibc 常用类型: 系统头文件中的定义可能被 C++ parser
+        // 容错跳过而丢失, 这里无条件补充 (重复 typedef 在 C 中合法,
+        // 只要类型相同).
+        self.out.push_str("typedef long int __off_t;\n");
+        self.out.push_str("typedef long int __off64_t;\n");
+        self.out.push_str("typedef long int __ssize_t;\n");
+        self.out.push_str("typedef unsigned long int __dev_t;\n");
+        self.out.push_str("typedef unsigned int __uid_t;\n");
+        self.out.push_str("typedef unsigned int __gid_t;\n");
+        self.out.push_str("typedef unsigned long int __ino_t;\n");
+        self.out.push_str("typedef unsigned int __mode_t;\n");
+        self.out.push_str("typedef unsigned long int __nlink_t;\n");
+        self.out.push_str("typedef long int __time_t;\n");
+        self.out.push_str("typedef long int __blksize_t;\n");
+        self.out.push_str("typedef long int __blkcnt_t;\n");
+        self.out.push_str("typedef long int __syscall_slong_t;\n");
+        self.out.push_str("typedef unsigned long int __syscall_ulong_t;\n");
+        self.out.push_str("typedef long int __loff_t;\n");
+        self.out.push_str("typedef long int off_t;\n");
+        self.out.push_str("typedef long int ssize_t;\n");
+        self.out.push_str("typedef __builtin_va_list __gnuc_va_list;\n");
+        self.out.push_str("typedef __builtin_va_list va_list;\n");
+        // glibc 内部整数类型 (<bits/types.h>): GCC 源码广泛使用,
+        // C++ parser 处理系统头文件时可能丢失定义.
+        self.out.push_str("typedef signed char __int8_t;\n");
+        self.out.push_str("typedef short int __int16_t;\n");
+        self.out.push_str("typedef int __int32_t;\n");
+        self.out.push_str("typedef long int __int64_t;\n");
+        self.out.push_str("typedef unsigned char __uint8_t;\n");
+        self.out.push_str("typedef unsigned short int __uint16_t;\n");
+        self.out.push_str("typedef unsigned int __uint32_t;\n");
+        self.out.push_str("typedef unsigned long int __uint64_t;\n");
+        self.out.push_str("typedef long int __clock_t;\n");
+        self.out.push_str("typedef long int __suseconds_t;\n");
+        self.out.push_str("typedef int __pid_t;\n");
+        self.out.push_str("typedef int __key_t;\n");
+        self.out.push_str("typedef char* __caddr_t;\n");
+        self.out.push_str("typedef int __daddr_t;\n");
+        self.out.push_str("typedef long int __quad_t;\n");
+        self.out.push_str("typedef unsigned long int __u_quad_t;\n");
+        self.out.push_str("typedef unsigned int __id_t;\n");
+        self.out.push_str("typedef unsigned long int __ino64_t;\n");
+        self.out.push_str("typedef long int __blkcnt64_t;\n");
+        self.out.push_str("typedef unsigned long int __fsblkcnt_t;\n");
+        self.out.push_str("typedef unsigned long int __fsblkcnt64_t;\n");
+        self.out.push_str("typedef unsigned long int __fsfilcnt_t;\n");
+        self.out.push_str("typedef unsigned long int __fsfilcnt64_t;\n");
+        self.out.push_str("typedef long int __ssize_t;\n");
+        self.out.push_str("typedef void* __locale_t;\n");
+        self.out.push_str("typedef struct __dcc_fsid { int __val[2]; } __fsid_t;\n");
+        // BSD 兼容类型 (<sys/types.h>)
+        self.out.push_str("typedef unsigned char __u_char;\n");
+        self.out.push_str("typedef unsigned short int __u_short;\n");
+        self.out.push_str("typedef unsigned int __u_int;\n");
+        self.out.push_str("typedef unsigned long int __u_long;\n");
+        self.out.push_str("typedef unsigned int __useconds_t;\n");
+        self.out.push_str("typedef int __socklen_t;\n");
+        self.out.push_str("typedef int __timer_t;\n");
+        self.out.push_str("typedef int __clockid_t;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
@@ -3192,7 +3675,11 @@ impl Lower {
                 }
                 self.out.push(';');
                 if let Some(s) = step {
-                    self.emit_stmt(s);
+                    // step 是表达式, 不能用 emit_stmt (会多加 ';')
+                    match s.as_ref() {
+                        CppStmt::Expr(e) => self.emit_expr(e),
+                        other => self.emit_stmt(other),
+                    }
                 }
                 self.out.push_str(") {\n");
                 for s in &body.stmts {
