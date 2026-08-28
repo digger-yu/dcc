@@ -11288,6 +11288,21 @@ fn asm_volatile_semantics() {
     assert_eq!(code, 0, "asm volatile checks failed (exit={code})");
 }
 
+/// Extended asm constraint coverage: I/J/K/L/M/N/O/P integer ranges,
+/// early-clobber, commutative, multi-letter constraints.
+#[test]
+#[cfg(unix)]
+fn asm_extended_constraint_coverage() {
+    let src = include_str!("fixtures/c/asm_extended_constraints.c");
+    let (out, code) = run_host_link_and_run("asm-ext-constraints", src);
+    assert!(
+        out.status.success(),
+        "extended constraints compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "extended constraints checks failed (exit={code})");
+}
+
 /// M3.2: __attribute__ series - packed, aligned, section, weak,
 /// alias, visibility, unused.
 #[test]

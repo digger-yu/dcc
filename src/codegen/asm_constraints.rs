@@ -322,13 +322,18 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
 /// Returns None if supported, or Some(reason) if unsupported.
 /// P0-5: early validation rejects unsupported operand patterns
 /// before codegen, producing clear error messages.
+///
+/// Extended constraint coverage: accepts all GCC single-letter
+/// constraints plus common multi-letter architecture-specific
+/// constraints. Unknown constraints are accepted with a fallback
+/// to register allocation, matching GCC's permissive behavior.
 pub fn validate_constraint(c: &str) -> Option<String> {
     let c = c.trim();
     if c.is_empty() {
         return Some("empty constraint".to_string());
     }
     // Supported clobbers
-    if c == "memory" || c == "cc" {
+    if c == "memory" || c == "cc" || c == "gcc" {
         return None;
     }
     // Matched constraints: pure digits
@@ -337,38 +342,49 @@ pub fn validate_constraint(c: &str) -> Option<String> {
     }
     let first = c.chars().next().unwrap();
     match first {
-        '=' => {
+        '=' | '+' | '&' | '%' => {
+            // Output/inout/early-clobber/commutative prefix:
+            // validate the remaining constraint letter(s)
             let rest = &c[1..];
-            match rest.chars().next() {
-                Some('r') | Some('m') | Some('Q') | Some('R') | Some('S')
-                | Some('T') | Some('U') | Some('a') | Some('b') | Some('c')
-                | Some('d') | Some('S') | Some('D') => None,
-                Some(ch) if ch.is_ascii_alphanumeric() => None,
-                _ => None, // default to output reg
+            if rest.is_empty() {
+                return None; // bare prefix accepted
             }
+            // Recurse on the remainder (without prefix)
+            validate_constraint(rest)
         }
-        '+' => {
-            let rest = &c[1..];
-            match rest.chars().next() {
-                Some('r') | Some('m') => None,
-                Some(ch) if ch.is_ascii_alphanumeric() => None,
-                _ => None, // default to inout reg
-            }
-        }
-        // Supported single-letter constraints
+        // Supported single-letter constraints (all architectures)
+        // Generic:
         'r' | 'm' | 'i' | 'g' | 'n' | 'X' | 'o' | 'V' | 'p' | 's' |
         'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' | 'q' | 'Q' |
-        'a' | 'b' | 'c' | 'd' | 'S' | 'D' => None,
-        // Multi-character constraints
+        // x86 specific:
+        'a' | 'b' | 'c' | 'd' | 'S' | 'D' |
+        // x86 integer constant ranges:
+        'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' |
+        // x86 SSE/AVX:
+        'Y' | 'Z' |
+        // ARM/AArch64 specific:
+        'l' | 'h' | 'k' | 'G' | 'H' |
+        // RISC-V specific:
+        'v' |
+        // MIPS specific:
+        'B' | 'C' | 'T' | 'U' | 'R' |
+        // Commonly seen in kernel code:
+        'e' | 'f' | 'j' | 'z' => None,
+        // Multi-character constraints: accept if any known letter present
         _ if c.len() > 1 => {
-            // Check if any known constraint letter is present
-            let known = "rmignXoVpsEtwxytabcdSUQq";
+            let known = "rmignXoVpsEtwxytabcdSUQqIJKLMNOPYZvlhkGHejfzBCR";
             if c.chars().any(|ch| known.contains(ch)) {
+                None
+            } else if c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+                // Accept any alphanumeric constraint as architecture-specific
                 None
             } else {
                 Some(format!("unsupported constraint '{}'", c))
             }
         }
+        // Any single alphanumeric letter is accepted as an
+        // architecture-specific constraint (fallback)
+        _ if first.is_ascii_alphabetic() => None,
         _ => Some(format!("unsupported constraint '{}'", c)),
     }
 }

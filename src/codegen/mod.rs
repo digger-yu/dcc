@@ -567,7 +567,7 @@ fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
 fn asm_constraint_is_immediate(constraint: &str) -> bool {
     constraint
         .chars()
-        .any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M' | 'X' | 'E'))
+        .any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M' | 'X' | 'E' | 'J' | 'K' | 'L' | 'O' | 'P'))
 }
 
 fn asm_expr_can_be_immediate(expr: &Expr) -> bool {
@@ -595,7 +595,8 @@ fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static st
     if letters.iter().any(|c| {
         matches!(
             c,
-            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'X' | 'E' | 'F' | 'G' | 'H' | 's'
+            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P'
+            | 'X' | 'E' | 'F' | 'G' | 'H' | 's'
         )
     }) {
         return "i";
