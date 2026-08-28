@@ -7899,7 +7899,11 @@ impl<'a> Parser<'a> {
                 } else {
                     s_clean
                 };
-                let v: f64 = v_s.parse().unwrap_or(0.0);
+                let v: f64 = if v_s.starts_with("0x") || v_s.starts_with("0X") {
+                    parse_hex_float(v_s)
+                } else {
+                    v_s.parse().unwrap_or(0.0)
+                };
                 let ty = if s.ends_with('f') || s.ends_with('F') {
                     Type::Float
                 } else if s.ends_with('l') || s.ends_with('L') {
@@ -8834,6 +8838,71 @@ fn parse_chr(raw: &str) -> i128 {
         result = (result << 8) | (ch & 0xff);
     }
     result
+}
+
+/// Parse a C99 hexadecimal floating-point constant.
+/// Format: [0x] hex_digits [.hex_digits] [p/P [+/-] decimal_exp]
+/// Value = mantissa * 2^exponent
+/// The input string may include the 0x prefix and type/imag suffixes.
+fn parse_hex_float(s: &str) -> f64 {
+    let s = s.trim();
+    // Strip 0x/0X prefix
+    let s = if s.starts_with("0x") || s.starts_with("0X") {
+        &s[2..]
+    } else {
+        s
+    };
+    // Strip type suffixes (f/F/l/L) and imaginary suffixes (i/I/j/J)
+    let s = s.trim_end_matches(['f', 'F', 'l', 'L', 'i', 'I', 'j', 'J']);
+
+    // Split into mantissa and exponent at 'p'/'P'
+    let (mantissa_str, exp_str) = if let Some(p_pos) = s.find(|c: char| c == 'p' || c == 'P') {
+        (&s[..p_pos], Some(&s[p_pos + 1..]))
+    } else {
+        (s, None)
+    };
+
+    // Parse mantissa: integer_part.fractional_part (in hex)
+    let (int_part, frac_part) = if let Some(dot_pos) = mantissa_str.find('.') {
+        (&mantissa_str[..dot_pos], &mantissa_str[dot_pos + 1..])
+    } else {
+        (mantissa_str, "")
+    };
+
+    let mut mantissa: f64 = 0.0;
+    // Parse integer part
+    for ch in int_part.chars() {
+        let digit = match ch {
+            '0'..='9' => ch as u8 - b'0',
+            'a'..='f' => ch as u8 - b'a' + 10,
+            'A'..='F' => ch as u8 - b'A' + 10,
+            '_' | '\'' => continue, // digit separators
+            _ => break,
+        };
+        mantissa = mantissa * 16.0 + digit as f64;
+    }
+    // Parse fractional part
+    let mut frac_scale = 1.0 / 16.0;
+    for ch in frac_part.chars() {
+        let digit = match ch {
+            '0'..='9' => ch as u8 - b'0',
+            'a'..='f' => ch as u8 - b'a' + 10,
+            'A'..='F' => ch as u8 - b'A' + 10,
+            '_' | '\'' => continue,
+            _ => break,
+        };
+        mantissa += digit as f64 * frac_scale;
+        frac_scale /= 16.0;
+    }
+
+    // Parse binary exponent
+    let binary_exp: i32 = if let Some(exp_s) = exp_str {
+        exp_s.parse().unwrap_or(0)
+    } else {
+        0
+    };
+
+    mantissa * (2.0f64).powi(binary_exp)
 }
 
 #[cfg(test)]

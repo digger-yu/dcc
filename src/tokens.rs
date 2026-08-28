@@ -545,8 +545,29 @@ impl<'a> Lexer<'a> {
                     }
                     if c.is_ascii_hexdigit() {
                         self.bump();
+                    } else if c == b'.' && !is_float {
+                        // hex float: 0x1.5p3
+                        is_float = true;
+                        self.bump();
                     } else {
                         break;
+                    }
+                }
+                // hex float exponent: p/P followed by decimal exponent
+                if is_float || matches!(self.peek(), Some(b'p') | Some(b'P')) {
+                    if matches!(self.peek(), Some(b'p') | Some(b'P')) {
+                        is_float = true;
+                        self.bump();
+                        if let Some(b'+') | Some(b'-') = self.peek() {
+                            self.bump();
+                        }
+                        while let Some(c) = self.peek() {
+                            if c.is_ascii_digit() {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
                     }
                 }
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {

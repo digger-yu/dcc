@@ -19300,3 +19300,35 @@ fn multichar_const_run_returns_zero() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "multichar_const should return 0, got {rc}");
 }
+
+/// C99 hexadecimal floating-point constants: 0x1.5p3 form
+#[test]
+fn hex_float_syntax_ok() {
+    let src = r#"
+double a = 0x1.0p0;
+double b = 0x1.4p3;
+double c = 0x1p10;
+float d = 0x1.0p-1f;
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("hex-float", src);
+    assert!(
+        output.status.success(),
+        "Hex float constants should parse. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 hex float runtime value verification
+#[test]
+fn hex_float_run_returns_zero() {
+    let source = include_str!("fixtures/c/hex_float.c");
+    let (output, exe) = run_compile_and_run("hex-float-run", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "hex_float should return 0, got {rc}");
+}
