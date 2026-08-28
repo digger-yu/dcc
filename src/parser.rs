@@ -76,6 +76,8 @@ struct ParsedAttrs {
     /// __attribute__((tls_model("model")))
     /// TLS 访问模型: "global-dynamic", "local-dynamic", "initial-exec", "local-exec"
     tls_model: Option<String>,
+    /// __asm__("label"): GNU asm 标签, 覆盖 ELF 符号名
+    asm_label: Option<String>,
 }
 
 /// 解析选项（Driver 传入）
@@ -232,6 +234,9 @@ impl ParsedAttrs {
         }
         if other.tls_model.is_some() {
             self.tls_model = other.tls_model;
+        }
+        if other.asm_label.is_some() {
+            self.asm_label = other.asm_label;
         }
     }
 }
@@ -2672,6 +2677,7 @@ impl<'a> Parser<'a> {
             quals: QualifierFlags::NONE,
             addr_space: AddrSpace::None,
             tls_model: None,
+            asm_label: None,
         })])
     }
 
@@ -2926,6 +2932,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    asm_label: attrs.asm_label.clone(),
                 })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
@@ -2979,6 +2986,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    asm_label: attrs.asm_label.clone(),
                 })])
             }
         } else if self.cur.kind == TokKind::LBracket {
@@ -3061,6 +3069,7 @@ impl<'a> Parser<'a> {
                 quals: self.spec_quals.iso_c(),
                 addr_space: self.spec_addr_space,
                 tls_model: arr_attrs.tls_model.clone(),
+                asm_label: arr_attrs.asm_label.clone(),
             })])
         } else {
             // extern 变量可以是 void 类型: 内核使用 `extern const void __nosave_begin, __nosave_end;`
@@ -3086,6 +3095,9 @@ impl<'a> Parser<'a> {
             if let Some(asm_label) = self.skip_asm_label() {
                 if storage.is_register && attrs.register_name.is_none() {
                     attrs.register_name = Some(asm_label);
+                } else {
+                    // GNU asm 标签, 覆盖 ELF 符号名
+                    attrs.asm_label = Some(asm_label);
                 }
             }
             if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
@@ -3134,6 +3146,7 @@ impl<'a> Parser<'a> {
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
                     tls_model: attrs.tls_model.clone(),
+                    asm_label: attrs.asm_label.clone(),
                 })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3165,6 +3178,7 @@ impl<'a> Parser<'a> {
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
                     tls_model: attrs.tls_model.clone(),
+                    asm_label: attrs.asm_label.clone(),
                 })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3195,6 +3209,7 @@ impl<'a> Parser<'a> {
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
                     tls_model: attrs.tls_model.clone(),
+                    asm_label: attrs.asm_label.clone(),
                 })])
             } else {
                 self.err_here(
@@ -3324,6 +3339,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    asm_label: attrs.asm_label.clone(),
                 })])
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
@@ -3407,6 +3423,7 @@ impl<'a> Parser<'a> {
                 is_host: attrs.is_host,
                 is_naked: attrs.is_naked,
                 is_noreturn: attrs.is_noreturn,
+                asm_label: attrs.asm_label.clone(),
             })])
         }
         // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -3517,6 +3534,7 @@ impl<'a> Parser<'a> {
                 quals: self.spec_quals.iso_c(),
                 addr_space: self.spec_addr_space,
                 tls_model: attrs.tls_model.clone(),
+                asm_label: attrs.asm_label.clone(),
             })]);
         }
         // 不是函数指针, 只是带括号的指针变量 (罕见)
@@ -3567,6 +3585,7 @@ impl<'a> Parser<'a> {
             quals: self.spec_quals.iso_c(),
             addr_space: self.spec_addr_space,
             tls_model: attrs.tls_model.clone(),
+            asm_label: attrs.asm_label.clone(),
         })])
     }
 

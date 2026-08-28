@@ -87,6 +87,8 @@ pub struct VarDecl {
     /// TLS 访问模型: "global-dynamic", "local-dynamic",
     /// "initial-exec", "local-exec"
     pub tls_model: Option<String>,
+    /// __asm__("label"): GNU asm 标签, 覆盖 ELF 符号名
+    pub asm_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +160,8 @@ pub struct FuncDecl {
     /// 编译器应在函数末尾插入 trap 指令（ud2 / brk / 等价指令）防止
     /// 执行流落入后续代码；优化器可利用此信息进行死代码消除。
     pub is_noreturn: bool,
+    /// __asm__("label"): GNU asm 标签, 覆盖 ELF 符号名
+    pub asm_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]

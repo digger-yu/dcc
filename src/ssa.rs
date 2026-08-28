@@ -1419,6 +1419,7 @@ pub fn rebuild_block(func: &Function) -> Block {
             quals: crate::ast::QualifierFlags::NONE,
             addr_space: crate::ast::AddrSpace::None,
             tls_model: None,
+            asm_label: None,
         })));
     }
 
