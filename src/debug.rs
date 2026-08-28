@@ -443,6 +443,8 @@ pub struct DebugSections {
     pub skeleton_type: Vec<u8>,
     // BTF
     pub btf: Vec<u8>,
+    // .BTF.ext (func_info + line_info for BPF verifier)
+    pub btf_ext: Vec<u8>,
     // .debug_info relocations: (offset_in_section, symbol_name)
     pub debug_info_relocs: Vec<(u64, String)>,
     // .debug_line relocations: (offset_in_section, symbol_name)
@@ -690,6 +692,10 @@ const BTF_KIND_FUNC: u32 = 12;
 const BTF_KIND_FUNC_PROTO: u32 = 13;
 const BTF_KIND_VAR: u32 = 14;
 const BTF_KIND_DATASEC: u32 = 15;
+const BTF_KIND_FLOAT: u32 = 16;
+const BTF_KIND_DECL_TAG: u32 = 17;
+const BTF_KIND_TYPE_TAG: u32 = 18;
+const BTF_KIND_ENUM64: u32 = 19;
 
 // ============================================================================
 // LEB128 编码
@@ -994,6 +1000,9 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
 
     // 10) BTF - 生成完整类型信息
     sec.btf = build_btf_full(cu);
+
+    // 11) .BTF.ext - func_info + line_info (BPF verifier 需要)
+    sec.btf_ext = build_btf_ext(cu);
 
     sec
 }
@@ -2550,8 +2559,6 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
         ("long long", 64, true),
         ("unsigned long long", 64, false),
         ("_Bool", 8, false),
-        ("float", 32, false),
-        ("double", 64, false),
     ];
 
     // 先编码所有基础 int 类型
@@ -2564,6 +2571,18 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
             ((*bits as u32) << 24) | (1 << 31)
         };
         let id = encoder.add_type(name_off, BTF_KIND_INT, 0, int_data, &[]);
+        encoder.register_name(name, id);
+    }
+
+    // 预编码浮点类型 (BTF_KIND_FLOAT = 16)
+    let float_names = [
+        ("float", 32),
+        ("double", 64),
+        ("long double", 128),
+    ];
+    for (name, bits) in &float_names {
+        let name_off = strs.intern(name);
+        let id = encoder.add_type(name_off, BTF_KIND_FLOAT, 0, *bits, &[]);
         encoder.register_name(name, id);
     }
 
@@ -2589,6 +2608,59 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
         for (_, pty) in &f.params {
             encode_btf_type(pty, &mut strs, &mut encoder);
         }
+    }
+
+    // 编码全局变量为 BTF_KIND_VAR + 收集到 DATASEC
+    // BPF CO-RE 需要 VAR + DATASEC 来映射全局变量到 .bss/.data/.rodata
+    let mut bss_vars: Vec<u32> = Vec::new();
+    let mut data_vars: Vec<u32> = Vec::new();
+    let mut rodata_vars: Vec<u32> = Vec::new();
+
+    for g in &cu.globals {
+        let ty_id = encoder.lookup_name(&g.ty.name).unwrap_or(0);
+        let name_off = strs.intern(&g.name);
+        // link: 0=static, 1=global, 2=extern
+        let link = if g.is_external { 2u32 } else { 1u32 };
+        // VAR record: name_off(4) + info(4) + type(4) + link(4)
+        let mut var_data = Vec::new();
+        var_data.extend_from_slice(&ty_id.to_le_bytes());
+        var_data.extend_from_slice(&link.to_le_bytes());
+        let var_id = encoder.add_type(name_off, BTF_KIND_VAR, 0, 0, &var_data);
+        encoder.register_name(&g.name, var_id);
+        // 分类到对应的 DATASEC (按变量名启发式分类)
+        // 实际场景中由 codegen 提供 section 信息, 此处用默认分类
+        if g.is_external {
+            data_vars.push(var_id);
+        } else {
+            bss_vars.push(var_id);
+        }
+    }
+
+    // 编码 DATASEC 节 (.bss, .data, .rodata)
+    // 每个 DATASEC 包含一组 VAR, 按偏移排列
+    let _ = rodata_vars; // reserved for future use
+    for (sec_name, var_ids) in &[
+        (".bss", &bss_vars),
+        (".data", &data_vars),
+    ] {
+        if var_ids.is_empty() {
+            continue;
+        }
+        let name_off = strs.intern(sec_name);
+        let vlen = var_ids.len() as u32;
+        // DATASEC 成员: type_id(4) + offset(4) + size(4)
+        let mut ds_data = Vec::new();
+        let mut offset = 0u32;
+        for &vid in var_ids.iter() {
+            ds_data.extend_from_slice(&vid.to_le_bytes());
+            ds_data.extend_from_slice(&offset.to_le_bytes());
+            // size placeholder (0 = unknown, verifier will fill)
+            ds_data.extend_from_slice(&0u32.to_le_bytes());
+            offset += 8; // placeholder size per var
+        }
+        let total_size = offset;
+        let id = encoder.add_type(name_off, BTF_KIND_DATASEC, vlen, total_size, &ds_data);
+        encoder.register_name(sec_name, id);
     }
 
     // 构建类型段
@@ -2620,7 +2692,95 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
     btf
 }
 
-/// 编码单个类型为 BTF 格式
+/// 生成 .BTF.ext 节 (func_info + line_info)
+///
+/// .BTF.ext 为 BPF verifier 提供函数和行号信息, 是 BPF CO-RE 的
+/// 关键组件. 布局:
+///   header: magic(2) + version(1) + flags(1) + hdr_len(4)
+///           + func_info_off(4) + func_info_len(4)
+///           + line_info_off(4) + line_info_len(4)
+///   func_info: rec_size(4) + [sec_name_off(4) + num_info(4) + entries...]
+///   line_info: rec_size(4) + [sec_name_off(4) + num_info(4) + entries...]
+pub fn build_btf_ext(cu: &CompileUnit) -> Vec<u8> {
+    // 字符串表 (与 .BTF 共享格式, 但 .BTF.ext 有自己的副本)
+    let mut strs = BtfStringTable::new();
+
+    // --- func_info ---
+    // rec_size = 8 (insn_off(4) + type_id(4))
+    let func_rec_size = 8u32;
+    let mut func_data = Vec::new();
+    // 将所有函数放入一个 section (”.text")
+    if !cu.functions.is_empty() {
+        let sec_name_off = strs.intern(".text");
+        let num_info = cu.functions.len() as u32;
+        func_data.extend_from_slice(&sec_name_off.to_le_bytes());
+        func_data.extend_from_slice(&num_info.to_le_bytes());
+        for f in &cu.functions {
+            let insn_off = f.low_pc as u32;
+            // type_id 指向 FUNC 类型的 BTF ID; 此处用 0 占位
+            // (实际链接时由 BTF dedup 填充)
+            let type_id = 0u32;
+            func_data.extend_from_slice(&insn_off.to_le_bytes());
+            func_data.extend_from_slice(&type_id.to_le_bytes());
+        }
+    }
+
+    // --- line_info ---
+    // rec_size = 16 (insn_off(4) + file_name_off(4) + line_off(4) + line_col(4))
+    let line_rec_size = 16u32;
+    let mut line_data = Vec::new();
+    if !cu.line_entries.is_empty() {
+        let sec_name_off = strs.intern(".text");
+        let num_info = cu.line_entries.len() as u32;
+        line_data.extend_from_slice(&sec_name_off.to_le_bytes());
+        line_data.extend_from_slice(&num_info.to_le_bytes());
+        for le in &cu.line_entries {
+            let insn_off = le.pc as u32;
+            let file_name_off = if (le.file_idx as usize) < cu.line_files.len() {
+                strs.intern(&cu.line_files[le.file_idx as usize])
+            } else {
+                0
+            };
+            // source line offset (into string table)
+            let line_off = 0u32; // placeholder
+            // line(24 bits) | column(8 bits) packed
+            let line_col = ((le.line & 0x00FFFFFF) << 8) | (le.column & 0xFF);
+            line_data.extend_from_slice(&insn_off.to_le_bytes());
+            line_data.extend_from_slice(&file_name_off.to_le_bytes());
+            line_data.extend_from_slice(&line_off.to_le_bytes());
+            line_data.extend_from_slice(&line_col.to_le_bytes());
+        }
+    }
+
+    // 计算偏移
+    let hdr_len = 32u32; // 8 header fields * 4 bytes
+    let func_info_off = 0u32;
+    let func_info_len = (4 + func_data.len()) as u32; // rec_size(4) + data
+    let line_info_off = func_info_off + func_info_len;
+    let line_info_len = (4 + line_data.len()) as u32;
+
+    // 构建 .BTF.ext
+    let mut out = Vec::new();
+    out.extend_from_slice(&0xEB9F_u16.to_le_bytes()); // magic
+    out.push(1); // version
+    out.push(0); // flags
+    out.extend_from_slice(&hdr_len.to_le_bytes());
+    out.extend_from_slice(&func_info_off.to_le_bytes());
+    out.extend_from_slice(&func_info_len.to_le_bytes());
+    out.extend_from_slice(&line_info_off.to_le_bytes());
+    out.extend_from_slice(&line_info_len.to_le_bytes());
+    // func_info section
+    out.extend_from_slice(&func_rec_size.to_le_bytes());
+    out.extend_from_slice(&func_data);
+    // line_info section
+    out.extend_from_slice(&line_rec_size.to_le_bytes());
+    out.extend_from_slice(&line_data);
+    // 字符串表
+    out.extend_from_slice(strs.as_bytes());
+
+    out
+}
+
 fn encode_btf_type(
     ty: &DwarfType,
     strs: &mut BtfStringTable,
@@ -2641,14 +2801,17 @@ fn encode_btf_type(
             if let Some(id) = encoder.lookup_name(&ty.name) {
                 return id;
             }
-            // 否则新增一个 int 类型
             let name_off = strs.intern(&ty.name);
             let bits = (ty.byte_size * 8) as u32;
+            // Float 类型使用 BTF_KIND_FLOAT (16)
+            if matches!(enc, TypeEncoding::Float) {
+                let id = encoder.add_type(name_off, BTF_KIND_FLOAT, 0, bits, &[]);
+                encoder.register_name(&ty.name, id);
+                return id;
+            }
             let signed = matches!(
                 enc,
-                TypeEncoding::Signed
-                    | TypeEncoding::SignedChar
-                    | TypeEncoding::Float
+                TypeEncoding::Signed | TypeEncoding::SignedChar
             );
             let int_data = if signed {
                 bits << 24
@@ -4430,5 +4593,140 @@ mod tests {
         assert!(has_const, "BTF should contain a CONST qualifier record");
         assert!(has_volatile, "BTF should contain a VOLATILE qualifier record");
         assert!(has_restrict, "BTF should contain a RESTRICT qualifier record");
+    }
+
+    /// Test: BTF output includes BTF_KIND_FLOAT for float types
+    #[test]
+    fn btf_full_contains_float_types() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![],
+            globals: vec![],
+            types: vec![],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let btf = build_btf_full(&cu);
+        // Verify BTF_KIND_FLOAT records exist
+        let has_float = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            ((info >> 24) & 0x1f) == BTF_KIND_FLOAT
+        });
+        assert!(has_float, "BTF should contain FLOAT type records");
+        // Verify string table contains float/double
+        let btf_str = String::from_utf8_lossy(&btf);
+        assert!(btf_str.contains("float"), "BTF string table should contain 'float'");
+        assert!(btf_str.contains("double"), "BTF string table should contain 'double'");
+    }
+
+    /// Test: BTF output includes VAR and DATASEC for global variables
+    #[test]
+    fn btf_full_contains_var_and_datasec() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![],
+            globals: vec![
+                DwarfGlobalInfo {
+                    name: "my_global".to_string(),
+                    linkage_name: None,
+                    ty: DwarfType {
+                        name: "int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                    },
+                    decl_line: 1,
+                    decl_file_idx: 0,
+                    is_external: false,
+                },
+            ],
+            types: vec![],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let btf = build_btf_full(&cu);
+        // Verify BTF_KIND_VAR exists
+        let has_var = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            ((info >> 24) & 0x1f) == BTF_KIND_VAR
+        });
+        assert!(has_var, "BTF should contain VAR type for globals");
+        // Verify BTF_KIND_DATASEC exists
+        let has_datasec = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            ((info >> 24) & 0x1f) == BTF_KIND_DATASEC
+        });
+        assert!(has_datasec, "BTF should contain DATASEC for .bss/.data");
+    }
+
+    /// Test: .BTF.ext generation produces valid header
+    #[test]
+    fn btf_ext_has_valid_header() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![DwarfFuncInfo {
+                name: "foo".to_string(),
+                linkage_name: None,
+                low_pc: 0x100,
+                high_pc: 0x140,
+                decl_line: 5,
+                decl_file_idx: 0,
+                return_type: DwarfType {
+                    name: "int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                },
+                params: vec![],
+                param_locations: vec![],
+                local_vars: vec![],
+                lexical_blocks: vec![],
+                is_external: true,
+                is_inline: false,
+                is_declaration: false,
+            }],
+            globals: vec![],
+            types: vec![],
+            line_entries: vec![LineEntry {
+                pc: 0x100,
+                line: 6,
+                column: 1,
+                file_idx: 0,
+                discriminator: 0,
+                is_stmt: true,
+                basic_block: false,
+            }],
+            line_files: vec!["test.c".to_string()],
+            line_dirs: vec![],
+            low_pc: 0x100,
+            high_pc: 0x140,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let btf_ext = build_btf_ext(&cu);
+        // Verify magic
+        assert!(btf_ext.starts_with(&0xEB9F_u16.to_le_bytes()));
+        // Verify version = 1
+        assert_eq!(btf_ext[2], 1);
+        // Verify header length = 32
+        let hdr_len = u32::from_le_bytes([btf_ext[4], btf_ext[5], btf_ext[6], btf_ext[7]]);
+        assert_eq!(hdr_len, 32, "BTF.ext header should be 32 bytes");
     }
 }

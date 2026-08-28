@@ -1405,6 +1405,17 @@ pub fn emit(
                         group_name: None,
                     });
                 }
+                // .BTF.ext: func_info + line_info (BPF verifier)
+                if !dbg.btf_ext.is_empty() {
+                    cg.extra_sections.push(elf::ElfSection {
+                        name: ".BTF.ext".to_string(),
+                        data: dbg.btf_ext,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                        group_name: None,
+                    });
+                }
             }
             if cg.emit_cfi && relocatable && target.unwind_tables {
                 // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
@@ -1638,6 +1649,17 @@ pub fn emit(
                         group_name: None,
                     });
                 }
+                // .BTF.ext: func_info + line_info (BPF verifier)
+                if !dbg.btf_ext.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".BTF.ext".to_string(),
+                        data: dbg.btf_ext,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                        group_name: None,
+                    });
+                }
             }
             if relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
@@ -1725,6 +1747,17 @@ pub fn emit(
                     cg.push_extra_section(elf::ElfSection {
                         name: ".BTF".to_string(),
                         data: dbg.btf,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                        group_name: None,
+                    });
+                }
+                // .BTF.ext: func_info + line_info (BPF verifier)
+                if !dbg.btf_ext.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".BTF.ext".to_string(),
+                        data: dbg.btf_ext,
                         ty: elf::SHT_PROGBITS,
                         flags: 0,
                         align: 4,
