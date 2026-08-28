@@ -2303,6 +2303,12 @@ impl Preprocessor {
                 // 保证输出行号与输入物理行号一一对应), 位置精确。
                 self.openmp_pragmas
                     .push((self.file.clone(), line_no, rest.trim().to_string()));
+            } else if pragma_text.starts_with("ident") {
+                // #pragma ident "string" — SCCS 标识, 静默接受
+                // Solaris/GCC 扩展, 将字符串嵌入目标文件供 what(1) 提取
+            } else if pragma_text.starts_with("sccs") {
+                // #pragma sccs "string" — SCCS 标识, 静默接受
+                // 与 #pragma ident 类似
             }
             // 其他 #pragma 忽略
         } else if let Some(rest) = directive.strip_prefix("error") {
@@ -10886,5 +10892,58 @@ int ok = 1;\n";
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         assert!(output.contains("unknown_ok"), "output: {output}");
+    }
+
+    // ===== #pragma ident / #pragma sccs =====
+
+    #[test]
+    fn pragma_ident_accepted() {
+        let out = preprocess(
+            b"#pragma ident \"@(#)test.c 1.0\"\n\
+             int x;\n",
+            "pragma-ident.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        // Should not produce any diagnostics
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(out.text.contains("int x;"), "output: {}", out.text);
+    }
+
+    #[test]
+    fn pragma_sccs_accepted() {
+        let out = preprocess(
+            b"#pragma sccs \"@(#)test.c 1.0\"\n\
+             int y;\n",
+            "pragma-sccs.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(out.text.contains("int y;"), "output: {}", out.text);
     }
 }
