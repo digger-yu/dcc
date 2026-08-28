@@ -19234,3 +19234,36 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ==========================================================================
+// P1-1: LTO cross-TU inline candidate enhancement
+// ==========================================================================
+
+#[test]
+fn lto_inline_config_default() {
+    // Verify that LTO cross-TU inline is enabled by default
+    let cfg = dcc::link::lto_bitcode::LtoConfig::default_opt();
+    assert!(cfg.cross_tu_inline, "LTO cross-TU inline should be enabled by default");
+}
+
+#[test]
+fn lto_inline_small_function_compiles() {
+    // Test that small static functions compile correctly with LTO
+    let src = r#"
+static inline int add_one(int x) {
+    return x + 1;
+}
+static inline int add_two(int x) {
+    return x + 2;
+}
+int main(void) {
+    return add_one(add_two(10));
+}
+"#;
+    let output = run_syntax_test("lto-inline-small", src);
+    assert!(
+        output.status.success(),
+        "Small static inline functions should compile with LTO. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

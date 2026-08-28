@@ -772,33 +772,38 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
 }
 
 /// 内联候选判定：
-///   - 函数名以 .L 或 __dcc_local_ 开头 (static)
-///   - body 简短：≤ 4 个 stmt，每 stmt ≤ 4 个 expression
+///   - body 简短：≤ 8 个 stmt，总表达式复杂度 ≤ 16
 ///   - 无递归调用
+///   - 内部函数（.L 或 __dcc_local_ 前缀）优先，公开函数需足够小（≤ 2 stmts）
 fn is_inline_candidate(f: &Function) -> bool {
-    if !f.name.starts_with('.') && !f.name.starts_with("__dcc_local_") {
+    // 检查函数体大小 (放宽到 8 个 stmt)
+    if f.body.len() > 8 {
         return false;
     }
-    if f.body.len() > 4 {
-        return false;
-    }
+
+    // 计算总表达式复杂度
+    let mut total_complexity = 0;
     for stmt in &f.body {
-        if stmt.expressions.len() > 4 {
-            return false;
-        }
+        total_complexity += stmt.expressions.len();
         for n in &stmt.nested {
-            if n.expressions.len() > 4 {
-                return false;
-            }
+            total_complexity += n.expressions.len();
         }
     }
+    // 复杂度上限 (放宽到 16)
+    if total_complexity > 16 {
+        return false;
+    }
+
     // 无递归调用
     for stmt in &f.body {
         if has_recursive_call(stmt, &f.name) {
             return false;
         }
     }
-    true
+
+    // 内部函数总是候选，公开函数需足够小 (≤ 2 stmts)
+    let is_internal = f.name.starts_with('.') || f.name.starts_with("__dcc_local_");
+    is_internal || f.body.len() <= 2
 }
 
 fn has_recursive_call(stmt: &TypedStmt, name: &str) -> bool {
