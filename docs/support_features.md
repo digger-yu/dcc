@@ -428,6 +428,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | ARM 重定位（18 种） | `NONE` / `ABS32` / `ABS16` / `ABS8` / `PREL32` / `PC24` / `CALL` / `JUMP24` / `THM_CALL` / `THM_JUMP24` / `THM_JUMP19` / `MOVW_ABS_NC` / `MOVT_ABS` / `MOVW_PREL_NC` / `MOVT_PREL` / `THM_MOVW_ABS_NC` / `THM_MOVT_ABS` / `THM_MOVW_PREL_NC` / `THM_MOVT_PREL` |
 | TLS 重定位 | x86-64: `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOTPC32_TLSDESC`; AArch64: TLSDESC/TLSIE/TLSLE 全序列; RISC-V: `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
 | TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；RISC-V TLS Local Exec 序列 (tp 寄存器 + TPREL_HI20/LO12_I 重定位)；linker 全类型解析 |
+| `__attribute__((tls_model("model")))` | 解析存入 `VarDecl.tls_model`，codegen 预扫描收集到 `tls_var_models` 映射；支持 `local-exec` / `initial-exec` / `local-dynamic` / `global-dynamic` 四种模型；ET_REL 模式 TLS 重定位根据模型选择类型 (LE/IE → `R_X86_64_TPOFF32`；GD/LD 降级为 LE)；内核 per-cpu 变量使用 `local-exec`。测试: `tests/fixtures/c/tls_model_codegen.c` |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab` / `.strtab` |
 | 链接脚本 OVERLAY 支持 | `OVERLAY [addr] : [NOCROSSREFS] [AT(lma)] { ... }` 完整解析与执行；所有子节共享相同 VMA 但可有不同的 LMA；支持 NOCROSSREFS 防止交叉引用、AT() 指定加载地址、子节内符号赋值和输入节匹配；测试: `tests/fixtures/c/overlay_test.lds` |
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
@@ -447,8 +448,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 链接器脚本 :NONE PHDR 映射 | `:NONE` 表示输出节不属于任何程序头（LOAD 段）；解析器将 `NONE` 作为特殊 PHDR 名收集，执行器设置 `is_none_phdr` 标记，布局时该节被排除在所有 LOAD 段之外；用于将调试节等排除在加载段外 |
 | 链接器脚本 PHDRS 执行 | `PHDRS { name PT_type FLAGS(N); }` 解析后在执行阶段生成 `ScriptSegment`，包含段类型/标志/包含节列表/VMA/filesz/memsz；layout 层优先使用脚本定义的段而非默认 2-segment 模型；已通过 `exec_phdr_segment_generation` 验证 PT_LOAD/PT_NOTE 等类型和 FLAGS 正确传播 |
 | 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
-| 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
-| 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
+| 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；解析和执行时构建符号→输出节映射，用于内核节隔离 |
+| 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 解析和执行均支持；`execute_script()` 在所有输出节放置后按 INSERT 命令重排节顺序 |
 | 链接器脚本 VERSION 块 | `VERSION { version_id [(@parent)] { global: sym; local: sym; }; }` 完整解析符号版本控制块；支持多版本节点、父版本继承、global/local 符号列表、通配符 `*`；解析结果导入 VersionTable 与 `.symver` 指令统一生成 `.gnu.version` / `.gnu.version_d` 节 |
 | 链接器脚本 REGION_ALIAS | `REGION_ALIAS(alias, region)` 内存区域别名；架构特定脚本中使用 |
 | COMDAT 组 (SHF_GROUP/SHT_GROUP) | 完整解析 ELF COMDAT 组：识别 `SHT_GROUP` 节，读取 flag word (`GRP_COMDAT`) 和成员节索引列表，通过关联符号表解析组签名；链接时按签名去重，相同签名的多个 COMDAT 组只保留第一份，丢弃其余组的成员节；保留的 COMDAT 组在输出 ELF 中正确发射 `SHT_GROUP` 节头（含 flag word + 成员节索引），成员节设置 `SHF_GROUP` 标志；x86_64/AArch64/RISC-V 后端在代码生成时为 `__attribute__((weak))` 函数创建 COMDAT 组并发射 `STB_WEAK` 符号绑定；汇编输出中 weak 函数使用 `.weak` 指令；支持 C++ 模板实例化、内联函数、`-flto` 等场景产生的重复定义 |
