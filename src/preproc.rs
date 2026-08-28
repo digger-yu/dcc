@@ -6311,6 +6311,42 @@ impl Preprocessor {
                 | "builtin_add_overflow"
                 | "builtin_sub_overflow"
                 | "builtin_mul_overflow"
+                // C11 特性
+                | "c_alignas"
+                | "c_alignof"
+                | "c_atomic"
+                | "c_generic_selections"
+                | "c_static_assert"
+                | "c_thread_local"
+                // C23 特性
+                | "c23_aligned_alloc"
+                | "c23_attribute_deprecated"
+                | "c23_attribute_fallthrough"
+                | "c23_attribute_nodiscard"
+                | "c23_constexpr"
+                | "c23_true_false_nullptr"
+                // GCC 兼容特性
+                | "attribute_weak"
+                | "attribute_visibility"
+                | "attribute_section"
+                | "attribute_cleanup"
+                | "attribute_format"
+                | "attribute_always_inline"
+                | "attribute_noinline"
+                | "attribute_noreturn"
+                | "attribute_packed"
+                | "attribute_used"
+                | "attribute_constructor"
+                | "attribute_destructor"
+                // 类型支持
+                | "int128"
+                | "char16_t"
+                | "char32_t"
+                // 其他
+                | "attribute_cf_returns_not_retained"
+                | "attribute_cf_returns_retained"
+                | "objc"
+                | "modules"
         )
     }
 

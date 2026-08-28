@@ -19719,3 +19719,54 @@ _Static_assert(offsetof(struct s, a) == 0, "a offset");
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// __has_feature returns correct values for known features
+#[test]
+fn has_feature_known_features() {
+    let src = r#"
+/* C11 features dcc supports */
+#if !__has_feature(c_atomic)
+#error "c_atomic should be detected"
+#endif
+#if !__has_feature(tls)
+#error "tls should be detected"
+#endif
+#if !__has_feature(c_alignas)
+#error "c_alignas should be detected"
+#endif
+#if !__has_feature(c_alignof)
+#error "c_alignof should be detected"
+#endif
+#if !__has_feature(c_static_assert)
+#error "c_static_assert should be detected"
+#endif
+#if !__has_feature(c_generic_selections)
+#error "c_generic_selections should be detected"
+#endif
+/* GCC attribute features */
+#if !__has_feature(attribute_weak)
+#error "attribute_weak should be detected"
+#endif
+#if !__has_feature(attribute_visibility)
+#error "attribute_visibility should be detected"
+#endif
+#if !__has_feature(attribute_noreturn)
+#error "attribute_noreturn should be detected"
+#endif
+/* Type support */
+#if !__has_feature(int128)
+#error "int128 should be detected"
+#endif
+/* Unknown feature should return 0 */
+#if __has_feature(totally_unknown_feature_xyz)
+#error "unknown feature should return 0"
+#endif
+int ok = 1;
+"#;
+    let output = run_syntax_test("has-feature", src);
+    assert!(
+        output.status.success(),
+        "__has_feature should detect known features. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
