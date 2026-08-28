@@ -4413,11 +4413,12 @@ impl Codegen {
         //   local-dynamic/global-dynamic → R_X86_64_TPOFF32 (降级为 LE,
         //     GD/LD 需要运行时 TLS resolver 支持，内核不使用)
         for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
-            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
-            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
-            let model = self.tls_var_models.get(&resolved)
+            // tls_var_models 以 C 名为键，需在 asm label 解析前查找
+            let model = self.tls_var_models.get(&var_name)
                 .map(|s| s.as_str())
                 .unwrap_or("local-exec");
+            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             let rel_type = match model {
                 "initial-exec" | "local-exec" => elf::R_X86_64_TPOFF32,
                 // GD/LD 降级为 LE: 内核不使用动态 TLS resolver
