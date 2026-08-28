@@ -906,6 +906,19 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
             }
             // 检查前面是否是 '(' 或 ',' (函数参数位置), 如果是, 则当前名字是变量名
             let is_func_arg = k > 0 && (result.as_bytes()[k-1] == b'(' || result.as_bytes()[k-1] == b',');
+            // 检查前面是否是 'return' (构造函数返回), 如果是, 不添加 struct 前缀
+            let is_after_return = {
+                let rbytes = result.as_bytes();
+                let rlen = rbytes.len();
+                // 跳过尾部空白
+                let mut kend = rlen;
+                while kend > 0 && (rbytes[kend-1] as char).is_ascii_whitespace() {
+                    kend -= 1;
+                }
+                // 检查是否以 "return" 结尾
+                kend >= 6 && &rbytes[kend-6..kend] == b"return"
+                    && (kend == 6 || !is_ident_char(rbytes[kend-7]))
+            };
             // 检查后面是否是 struct 定义的开始 ({ 或 ; 或 :)
             let mut j = skip_ws(bytes, i + name_len);
             let is_struct_def = j < len && (bytes[j] == b'{' || bytes[j] == b';' || bytes[j] == b':');
@@ -921,6 +934,7 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
                 result.push_str("struct ");
             } else if !has_struct_prefix && !is_struct_def && !is_func_call
                 && !is_var_after_ptr && !is_var_after_type && !is_func_arg
+                && !is_after_return
             {
                 result.push_str("struct ");
             }
