@@ -1,0 +1,46 @@
+/* dcc C++ frontend M7+M8 lowered output */
+typedef unsigned long size_t;
+extern void *_Znwm(size_t);
+extern void _ZdlPv(void*);
+extern void *_Znam(size_t);
+extern void _ZdaPv(void*);
+extern void __cxa_throw(void*, void*, void(*)(void*));
+extern void* __cxa_allocate_exception(size_t);
+extern void __cxa_free_exception(void*);
+typedef struct __cxa_eh_context { void* matched; int rethrown; } __cxa_eh_context_t;
+extern int __cxa_try(__cxa_eh_context_t*, void* (*)(void*), void*);
+extern void* __cxa_begin_catch(void*);
+extern void __cxa_end_catch(void);
+/* dcc GCC ABI: __cxa_guard_* thread-safe static init (weak: multi-TU safe) */
+__attribute__((weak)) int _cxa_guard_acquire(unsigned char* g) {
+    if (*g != 0) return 0;
+    *g = 1;
+    return 1;
+}
+__attribute__((weak)) void _cxa_guard_release(unsigned char* g) { *g = 2; }
+__attribute__((weak)) void _cxa_guard_abort(unsigned char* g) { *g = 0; }
+__attribute__((weak)) int __cxa_guard_acquire(unsigned char* g) { return _cxa_guard_acquire(g); }
+__attribute__((weak)) void __cxa_guard_release(unsigned char* g) { _cxa_guard_release(g); }
+__attribute__((weak)) void __cxa_guard_abort(unsigned char* g) { _cxa_guard_abort(g); }
+typedef struct __dcc_typeinfo { const char* name; } __dcc_typeinfo_t;
+/* dcc GCC ABI: __dynamic_cast (cross-virtual cast helper; weak: multi-TU safe) */
+__attribute__((weak)) void* __dynamic_cast(void* ptr, void* src_ti, void* dst_ti, long offset) {
+    (void)src_ti;
+    (void)dst_ti;
+    if (ptr == 0) return 0;
+    if (offset < 0) return ptr;
+    return (void*)((char*)ptr - offset);
+}
+/* dcc GCC ABI: std::initializer_list layout */
+typedef struct __dcc_initializer_list {
+    const void* _M_array;
+    unsigned long _M_len;
+} __dcc_initializer_list_t;
+#define __dcc_make_il(arr, n) \
+    ((__dcc_initializer_list_t){ (const void*)(arr), (unsigned long)(n) })
+/* dcc GCC ABI: member pointer offset helpers */
+#define __dcc_mbr_off(T, f) ((unsigned long)(&(((T*)0)->f)))
+int _ZN4mainEv () {
+return 0;
+}
+int main() { return _ZN4mainEv(); }

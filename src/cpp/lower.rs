@@ -715,7 +715,13 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                             }
                             let args = s[k+1..m-1].trim().to_string();
                             let after = skip_ws(bytes, m);
-                            if after < len && bytes[after] == b';' {
+                            // 检查 args 是否看起来像参数声明 (包含类型关键字)
+                            // 如果是, 这可能是函数定义而不是构造函数调用
+                            let looks_like_params = args.contains("void") || args.contains("int ")
+                                || args.contains("char") || args.contains("unsigned")
+                                || args.contains("long") || args.contains("float")
+                                || args.contains("double") || args.contains("struct ");
+                            if after < len && bytes[after] == b';' && !looks_like_params {
                                 if args.is_empty() {
                                     result.push_str(&format!(
                                         "{} {}; _ctor_{}(&{});",
@@ -903,7 +909,7 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
             i = skip_ws(bytes, i + 7);
             continue;
         }
-        // namespace XXX { → 删除 namespace XXX, 保留 {
+        // namespace XXX { ... } → 删除 namespace XXX 和匹配的 }
         if match_word_at(bytes, i, "namespace") {
             let mut j = skip_ws(bytes, i + 9);
             // 跳过 namespace 名 (如果有)
@@ -911,17 +917,33 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 let (_, name_end) = read_ident(bytes, j);
                 j = skip_ws(bytes, name_end);
             }
-            // 不输出 namespace 关键字和名字, 继续从 '{' 或其他位置
+            // 如果后面是 '{', 跳过整个 namespace 块
+            if j < len && bytes[j] == b'{' {
+                // 找到匹配的 '}'
+                let mut depth = 1i32;
+                let mut k = j + 1;
+                while k < len && depth > 0 {
+                    if bytes[k] == b'{' { depth += 1; }
+                    else if bytes[k] == b'}' { depth -= 1; }
+                    k += 1;
+                }
+                // 输出 namespace 块的内容 (不含 namespace 关键字和 { })
+                result.push_str(&s[j+1..k-1]);
+                i = k;
+                continue;
+            }
+            // 没有 '{', 只跳过 namespace 关键字和名字
             i = j;
             continue;
         }
         // 在函数参数列表中, 将 Type &name 转换为 Type *name
         // 检测: 在括号内, '&' 前面是类型/空白, 后面是标识符
         if paren_depth > 0 && bytes[i] == b'&' {
-            // 检查不是 && (移动语义)
+            // 检查不是 && (移动语义或逻辑与)
             if i + 1 < len && bytes[i+1] == b'&' {
-                // && → 跳过 (当作普通 token)
-                result.push_str("/* && */");
+                // && 在参数列表中可能是移动语义, 在表达式中是逻辑与
+                // 不替换, 原样输出
+                result.push_str("&&");
                 i += 2;
                 continue;
             }
@@ -976,9 +998,9 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_constructors(&result);
     // 替换花括号初始化: Type var{args} → Type var = {args}
     result = replace_brace_init(&result);
-    // 注意: 不再自动替换构造函数调用和成员函数调用,
-    // 因为这些转换需要类型信息, 文本级处理容易产生错误代码.
-    // 仅对 errors.cc 等特定文件做针对性处理.
+    // 替换函数体中的构造函数调用: Type var(args); → Type var; _ctor_Type(&var, args);
+    result = replace_ctor_calls_in_bodies(&result);
+    // 注意: 不自动替换成员函数调用, 因为需要类型信息.
     result
 }
 
@@ -1224,6 +1246,10 @@ fn replace_constructors(s: &str) -> String {
                     // 回退并替换
                     let backtrack = result.len() - (class_end - class_start) - 2;
                     result.truncate(backtrack);
+                    // 确保 void 前有换行 (避免 }void 粘连)
+                    if result.as_bytes().last() == Some(&b'}') {
+                        result.push('\n');
+                    }
                     result.push_str(&format!("void _ctor_{}", class_name));
                     i = k;
                     continue;
