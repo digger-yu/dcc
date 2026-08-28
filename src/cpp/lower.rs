@@ -768,12 +768,9 @@ fn clean_struct_bodies(s: &str) -> String {
                     i = j;
                     continue;
                 }
-                // 如果只是声明 (found_semi), 保留原样但去掉默认参数
+                // 如果只是声明 (found_semi), 删除它 (C struct 体内不能有函数声明)
                 if found_paren && found_semi {
-                    // 提取声明, 去掉默认参数
-                    let decl = &s[i..j+1];
-                    let cleaned = remove_default_args(decl);
-                    result.push_str(&cleaned);
+                    // 跳过整个声明
                     i = j + 1;
                     continue;
                 }
