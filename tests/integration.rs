@@ -19833,3 +19833,20 @@ fn c23_char8_t_type() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 constexpr variables are implicitly const
+#[test]
+fn c23_constexpr_variables() {
+    let src = r#"
+constexpr int x = 42;
+constexpr int y = x + 1;
+constexpr int arr[3] = {1, 2, 3};
+int main(void) { return x + y; }
+"#;
+    let output = run_syntax_test("c23-constexpr-vars", src);
+    assert!(
+        output.status.success(),
+        "constexpr variables should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

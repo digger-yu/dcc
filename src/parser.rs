@@ -2295,10 +2295,11 @@ impl<'a> Parser<'a> {
         }
         // C23 [[attributes]]: 静默跳过
         self.skip_std_attributes();
-        // constexpr: C23 编译期常量函数, 等价 inline + always_inline.
-        // 不强制编译期求值, 仅设置 always_inline 提示.
+        // constexpr: C23 编译期常量声明.
+        // 变量: 隐含 const + static; 函数: 等价 inline + always_inline.
         while self.cur.kind == TokKind::Ident && self.cur.text == "constexpr" {
             self.decl_attrs.is_always_inline = true;
+            self.spec_quals |= QualifierFlags::CONST;
             self.advance();
             self.skip_std_attributes();
         }
@@ -3880,9 +3881,12 @@ impl<'a> Parser<'a> {
                 TokKind::KwInline => {
                     self.advance();
                 }
-                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
+                // constexpr: C23 编译期常量声明.
+                // 变量: 隐含 const, 必须以常量表达式初始化
+                // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
                 // C23 auto: 类型由初始化表达式推导（同 __auto_type）
@@ -4217,9 +4221,12 @@ impl<'a> Parser<'a> {
                         8, // va_list align: max field = ptr (8)
                     ));
                 }
-                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
+                // constexpr: C23 编译期常量声明.
+                // 变量: 隐含 const, 必须以常量表达式初始化
+                // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
                 // ISO/IEC TS 18661 / GCC：_FloatN 二进制浮点类型
@@ -4838,9 +4845,12 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
+                // constexpr: C23 编译期常量声明.
+                // 变量: 隐含 const, 必须以常量表达式初始化
+                // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
                 _ => break,
