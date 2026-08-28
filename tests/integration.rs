@@ -19152,3 +19152,37 @@ int main(void) { return foo(); }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ==========================================================================
+// P1-5: RISC-V TLS support (TLSLE, TLSIE, TLSDESC)
+// ==========================================================================
+
+#[test]
+fn riscv64_tls_local_exec_compiles() {
+    // Verify TLS Local Exec model compiles for RISC-V
+    let src = r#"
+__thread int tls_var = 42;
+int get_tls(void) { return tls_var; }
+int main(void) { return get_tls(); }
+"#;
+    let tmp = std::env::temp_dir().join(format!("dcc-tls-rv64-{}", std::process::id()));
+    let src_path = tmp.with_extension("c");
+    let obj_path = tmp.with_extension("o");
+    fs::write(&src_path, src).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "--target=riscv64-linux-gnu"])
+        .arg("-o")
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc riscv64 tls");
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    assert!(
+        output.status.success(),
+        "RISC-V TLS should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

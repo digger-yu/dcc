@@ -243,6 +243,14 @@ pub const R_RISCV_RVC_JUMP: u32 = 45;
 pub const R_RISCV_TPREL_HI20: u32 = 29;
 pub const R_RISCV_TPREL_LO12_I: u32 = 32;
 pub const R_RISCV_TPREL_LO12_S: u32 = 33;
+// TLSGD (Global Dynamic) relocations
+pub const R_RISCV_TLS_GD_HI20: u32 = 34;
+pub const R_RISCV_TLS_GD_LO12_I: u32 = 35;
+// TLSDESC (Descriptor) relocations
+pub const R_RISCV_TLSDESC_HI20: u32 = 36;
+pub const R_RISCV_TLSDESC_LOAD_LO12: u32 = 37;
+pub const R_RISCV_TLSDESC_ADD_LO12: u32 = 38;
+pub const R_RISCV_TLSDESC_CALL: u32 = 56;
 
 // MIPS 重定位类型
 pub const R_MIPS_NONE: u32 = 0;
