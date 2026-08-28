@@ -19809,3 +19809,15 @@ int c = EMPTY();
         "BAR(int) should expand to sizeof(int), got: {stdout}"
     );
 }
+
+/// C11 anonymous struct/union members (used by kernel struct_group)
+#[test]
+fn c11_anonymous_struct_union_members() {
+    let src = include_str!("fixtures/c/c11_anonymous_member.c");
+    let output = run_syntax_test("c11-anon-member", src);
+    assert!(
+        output.status.success(),
+        "anonymous struct/union members should be accessible. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
