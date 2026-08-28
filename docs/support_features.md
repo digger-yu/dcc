@@ -342,7 +342,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 运行时检查 | `-fbounds-check` 数组下标边界检查；`-ftrapv` 有符号算术溢出 trap |
 | 严格类型检查 | `-Wint-truncation` / `-Wint-conversion`；仅 warning 不阻塞 |
 | QualType 限定符系统 | Clang 式 `QualType { base: Type, quals: QualifierFlags }` 包装；`Type` 递归变体 (`Ptr`/`Array`/`Func`/`Complex`/`Imaginary`/`Vector`/`Atomic`/`Enum`) 使用 `Box<QualType>` 实现多级指针限定符传播；`QualifierFlags` 位标志 (`CONST`/`VOLATILE`/`RESTRICT`/`ATOMIC`/`NODEREF`)；IR 层 `TypedExpr.quals` 传播到后端；volatile 表达式受 `is_side_effect_free`/`gvn_key_string` 保护不被优化消除；BTF/DWARF 输出 `BTF_KIND_CONST`/`VOLATILE`/`RESTRICT` 节点。测试：`tests/fixtures/c/qual_type.c` |
-| GNU 扩展 | 嵌套函数 / computed goto 跨函数 / `Expr::Unary` 浮点取负 / `AddrOf` REX.R 编码 / `_Complex` 字面量 / `__real__`/`__imag__` |
+| GNU 扩展 | 嵌套函数 / computed goto 跨函数 / `Expr::Unary` 浮点取负 / `AddrOf` REX.R 编码 / `_Complex` 字面量 / `__real__`/`__imag__` / switch/case range (`case low ... high`) 有符号/无符号比较正确性 (根据 switch 表达式类型选择 jl/jg 或 jb/ja) + gen_expr 求值 case 边界后从栈重新加载 switch 值防止 rcx 被覆写 |
 | 嵌套块重声明 (C99 6.2.1) | 函数体内遮蔽允许 (不同类型不报 E0007)；文件作用域类型不匹配仍报 E0007 |
 | K&R 函数 | 解析自动检测 + `is_old_style` |
 | `(*name)[N]` 指针到数组声明符 | `pmd_t (*early_pgts)[512]` 形式；局部变量 + 全局变量 |
