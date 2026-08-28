@@ -431,8 +431,47 @@ impl ArmCodegen {
             self.emitted_return = false;
             if let Some(body) = ast.and_then(|f| f.body.as_ref()) {
                 for item in &body.items {
-                    if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item {
-                        self.gen_naked_asm_expr(e);
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                            self.gen_naked_asm_expr(e);
+                        }
+                        BlockItem::Stmt(Stmt::AsmGoto {
+                            asm_str,
+                            outputs,
+                            output_names: _,
+                            output_constraints: _,
+                            inputs: _,
+                            input_names: _,
+                            input_constraints: _,
+                            clobbers: _,
+                            goto_labels,
+                            volatile: _,
+                            span,
+                        }) => {
+                            let mut resolved = asm_str.clone();
+                            let label_base = outputs.len();
+                            for (i, label) in goto_labels.iter().enumerate().rev() {
+                                resolved = resolved.replace(
+                                    &format!("%l{}", i),
+                                    &label.name,
+                                );
+                                resolved = resolved.replace(
+                                    &format!("%l{}", label_base + i),
+                                    &label.name,
+                                );
+                                resolved = resolved.replace(
+                                    &format!("%l[{}]", label.name),
+                                    &label.name,
+                                );
+                            }
+                            for line in resolved.split('\n') {
+                                let line = line.trim();
+                                if !line.is_empty() {
+                                    self.emit_asm_line_naked(line, span);
+                                }
+                            }
+                        }
+                        _ => {} // naked 函数忽略非 asm 语句
                     }
                 }
             }
@@ -588,7 +627,30 @@ impl ArmCodegen {
                     span.line,
                 );
             }
-            _ => {}
+            // 语句表达式 ({...}) 可能包含 asm: 递归处理
+            Expr::StmtExpr { block, .. } => {
+                for item in &block.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e: inner, .. }) = item {
+                        self.gen_naked_asm_expr(inner);
+                    }
+                }
+            }
+            _ => {} // 忽略非 asm 表达式
+        }
+    }
+
+    /// naked 函数中发射单条 asm 文本行 (asm goto 用)
+    fn emit_asm_line_naked(
+        &mut self,
+        line: &str,
+        span: &crate::diagnostics::Span,
+    ) {
+        if self.asm_text_mode {
+            self.raw_func_asm_lines
+                .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
+            self.label_serial += 1;
+        } else {
+            self.encode_and_emit_asm(line, &span.file, span.line);
         }
     }
 
