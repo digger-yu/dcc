@@ -247,6 +247,8 @@ pub enum Stmt {
         input_constraints: Vec<String>,
         clobbers: Vec<String>,
         goto_labels: Vec<Ident>,
+        /// asm goto is always volatile (GCC semantics)
+        volatile: bool,
         span: Span,
     },
 }
@@ -440,6 +442,8 @@ pub enum Expr {
         input_names: Vec<Option<String>>,
         input_constraints: Vec<String>,
         clobbers: Vec<String>,
+        /// asm volatile: 阻止优化器删除/移动该 asm 语句
+        volatile: bool,
         span: Span,
         ty: Type,
     },

@@ -1558,10 +1558,16 @@ impl<'a> Parser<'a> {
     }
 
     /// 跳过 asm/__asm__ 与括号之间的限定符（volatile、inline 等）
-    fn skip_asm_qualifiers(&mut self) {
+    /// 返回是否包含 volatile 限定符
+    fn skip_asm_qualifiers(&mut self) -> bool {
+        let mut is_volatile = false;
         loop {
             match self.cur.kind {
-                TokKind::KwVolatile | TokKind::KwConst | TokKind::KwInline => {
+                TokKind::KwVolatile | TokKind::KwConst => {
+                    is_volatile = true;
+                    self.advance();
+                }
+                TokKind::KwInline => {
                     self.advance();
                 }
                 TokKind::Ident
@@ -1570,15 +1576,19 @@ impl<'a> Parser<'a> {
                         "__volatile__" | "__const__" | "__inline__" | "__inline" | "inline"
                     ) =>
                 {
+                    if self.cur.text == "__volatile__" || self.cur.text == "__const__" {
+                        is_volatile = true;
+                    }
                     self.advance();
                 }
                 _ => break,
             }
         }
+        is_volatile
     }
 
     /// 解析内联汇编表达式: asm("..." : outs : ins : clobbers)
-    fn parse_asm_expr(&mut self, sp: Span) -> Option<Expr> {
+    fn parse_asm_expr(&mut self, sp: Span, is_volatile: bool) -> Option<Expr> {
         if self.cur.kind == TokKind::LParen {
             self.advance();
         } else {
@@ -1641,6 +1651,7 @@ impl<'a> Parser<'a> {
             input_names,
             input_constraints,
             clobbers,
+            volatile: is_volatile,
             span: sp,
             ty: Type::Void,
         })
@@ -2213,13 +2224,8 @@ impl<'a> Parser<'a> {
         {
             let sp = self.cur.span.clone();
             self.advance();
-            // 可选的 volatile/const
-            while matches!(self.cur.kind, TokKind::KwVolatile | TokKind::KwConst)
-                || (self.cur.kind == TokKind::Ident
-                    && (self.cur.text == "__volatile__" || self.cur.text == "__const__"))
-            {
-                self.advance();
-            }
+            // 可选的 volatile/const/inline
+            let global_asm_volatile = self.skip_asm_qualifiers();
             // 解析带约束的内联汇编表达式
             if self.cur.kind == TokKind::LParen {
                 if let Some(Expr::AsmExpr {
@@ -2233,7 +2239,7 @@ impl<'a> Parser<'a> {
                     clobbers,
                     span,
                     ..
-                }) = self.parse_asm_expr(sp.clone())
+                }) = self.parse_asm_expr(sp.clone(), global_asm_volatile)
                 {
                     if !self.expect(TokKind::Semi, "';'") {
                         return None;
@@ -6127,6 +6133,7 @@ impl<'a> Parser<'a> {
                     self.skip_asm_qualifiers();
                     self.advance(); // goto
                     self.skip_asm_qualifiers();
+                    // asm goto is always volatile per GCC semantics
                     if self.cur.kind != TokKind::LParen {
                         self.err_here("E0001", "expected '(' after asm goto", None);
                         return None;
@@ -6203,6 +6210,7 @@ impl<'a> Parser<'a> {
                         input_constraints,
                         clobbers,
                         goto_labels,
+                        volatile: true, // asm goto is always volatile
                         span: sp,
                     })
                 } else {
@@ -6928,8 +6936,8 @@ impl<'a> Parser<'a> {
                     || self.cur.text == "asm" =>
             {
                 self.advance();
-                self.skip_asm_qualifiers();
-                self.parse_asm_expr(sp)
+                let is_volatile = self.skip_asm_qualifiers();
+                self.parse_asm_expr(sp, is_volatile)
             }
             // 语句表达式: ({...})
             TokKind::LParen if self.peek.kind == TokKind::LBrace => {

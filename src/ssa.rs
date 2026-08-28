@@ -113,6 +113,8 @@ pub enum InstKind {
         input_names: Vec<Option<String>>,
         input_constraints: Vec<String>,
         clobbers: Vec<String>,
+        /// asm volatile: 阻止优化器删除/移动
+        volatile: bool,
         ty: Type,
     },
 }
@@ -801,6 +803,7 @@ impl Builder {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ty,
             } => {
@@ -839,6 +842,7 @@ impl Builder {
                         input_names: input_names.clone(),
                         input_constraints: input_constraints.clone(),
                         clobbers: clobbers.clone(),
+                        volatile: *volatile,
                         ty: ty.clone(),
                     },
                     span: span.clone(),
@@ -1506,17 +1510,20 @@ fn is_pass_hint_inst(kind: &InstKind) -> bool {
     }
 }
 
-/// 指令是否带有不可消除的副作用 (Call / Store / InlineAsm 等)。
+/// 指令是否带有不可消除的副作用 (Call / Store / volatile InlineAsm 等)。
 /// SSA→AST 重建时, 即使其结果未被使用也不能整条丢弃。
 fn inst_has_side_effect(kind: &InstKind) -> bool {
-    matches!(
-        kind,
+    match kind {
         InstKind::Call { .. }
-            | InstKind::Store { .. }
-            | InstKind::IndexStore { .. }
-            | InstKind::MemberStore { .. }
-            | InstKind::InlineAsm { .. }
-    )
+        | InstKind::Store { .. }
+        | InstKind::IndexStore { .. }
+        | InstKind::MemberStore { .. } => true,
+        // volatile asm 始终保留；非 volatile asm 带输出也保留
+        InstKind::InlineAsm { volatile, outputs, .. } => {
+            *volatile || !outputs.is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn rebuild_bb(
@@ -1855,6 +1862,7 @@ fn inst_to_expr_resolved(
             input_names,
             input_constraints,
             clobbers,
+            volatile,
             ty,
             output_vars,
             ..
@@ -1889,6 +1897,7 @@ fn inst_to_expr_resolved(
                 input_names: input_names.clone(),
                 input_constraints: input_constraints.clone(),
                 clobbers: clobbers.clone(),
+                volatile: *volatile,
                 span: sp.clone(),
                 ty: ty.clone(),
             }
@@ -2219,6 +2228,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             input_names,
             input_constraints,
             clobbers,
+            volatile,
             ty,
             ..
         } => Expr::AsmExpr {
@@ -2234,6 +2244,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             input_names: input_names.clone(),
             input_constraints: input_constraints.clone(),
             clobbers: clobbers.clone(),
+            volatile: *volatile,
             span: sp.clone(),
             ty: ty.clone(),
         },

@@ -94,9 +94,23 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
                     true
                 }
             }
-            // inline asm 即使没有输出、clobber 或显式输入，也可能包含
-            // 用户需要保留的不可见副作用，DCE 不能把它当 pure 指令删除。
-            InstKind::InlineAsm { .. } => true,
+            // inline asm: volatile asm 或带输出的 asm 保留，
+            // 无输出且非 volatile 的纯 asm 可在结果未用时消除。
+            InstKind::InlineAsm { volatile, outputs, output_vars, .. } => {
+                if *volatile {
+                    true
+                } else if !output_vars.is_empty() || !outputs.is_empty() {
+                    // 带输出的 asm: 结果被使用时保留
+                    if let Some(d) = &i.dest {
+                        used.contains(&d.name())
+                    } else {
+                        true
+                    }
+                } else {
+                    // 无输出的非 volatile asm: 保留 (可能有不可见副作用)
+                    true
+                }
+            }
             _ => true,
         });
         if b.insts.len() != before {
@@ -584,17 +598,31 @@ fn inst_reads_memory(kind: &InstKind) -> bool {
 }
 
 fn inst_is_full_barrier(kind: &InstKind) -> bool {
-    matches!(
-        kind,
+    match kind {
         InstKind::Store { .. }
-            | InstKind::IndexStore { .. }
-            | InstKind::MemberStore { .. }
-            | InstKind::Call { .. }
-    )
+        | InstKind::IndexStore { .. }
+        | InstKind::MemberStore { .. }
+        | InstKind::Call { .. } => true,
+        // volatile asm 作为完整屏障，阻止任何指令跨越
+        InstKind::InlineAsm { volatile, .. } => *volatile,
+        _ => false,
+    }
 }
 
 fn inst_is_side_effecting(kind: &InstKind) -> bool {
-    inst_is_full_barrier(kind) || matches!(kind, InstKind::InlineAsm { .. })
+    match kind {
+        InstKind::Store { .. }
+        | InstKind::IndexStore { .. }
+        | InstKind::MemberStore { .. }
+        | InstKind::Call { .. } => true,
+        // 只有 volatile asm 或带 memory clobber 的 asm 才有副作用
+        InstKind::InlineAsm { volatile, clobbers, output_constraints, .. } => {
+            *volatile
+                || asm_has_memory_clobber(clobbers)
+                || asm_constraints_touch_memory(output_constraints)
+        }
+        _ => false,
+    }
 }
 
 fn inst_is_memory_ordered(kind: &InstKind) -> bool {
@@ -2306,6 +2334,7 @@ mod tests {
                     input_names: vec![],
                     input_constraints: vec![],
                     clobbers: vec!["cc".into()],
+                    volatile: false,
                     ty: Type::Void,
                 },
                 span: span.clone(),
@@ -2380,6 +2409,7 @@ mod tests {
                     input_names: vec![],
                     input_constraints: vec![],
                     clobbers: vec!["memory".into()],
+                    volatile: true,
                     ty: Type::Void,
                 },
                 span: span.clone(),
@@ -2444,6 +2474,7 @@ mod tests {
                     input_names: vec![],
                     input_constraints: vec![],
                     clobbers: vec!["memory".into()],
+                    volatile: false,
                     ty: Type::Void,
                 },
                 span: span.clone(),
@@ -2537,6 +2568,7 @@ mod tests {
                     input_names: vec![None],
                     input_constraints: vec!["r".into()],
                     clobbers: vec![],
+                    volatile: true,
                     ty: Type::Void,
                 },
                 span: span.clone(),

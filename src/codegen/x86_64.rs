@@ -5517,6 +5517,7 @@ impl Codegen {
                         input_constraints,
                         clobbers,
                         goto_labels,
+                        volatile: _,
                         span,
                     }) => {
                         self.current_asm_src_line = span.line;
@@ -6307,6 +6308,7 @@ impl Codegen {
                 input_constraints,
                 clobbers,
                 goto_labels,
+                volatile: _,
                 span,
             } => {
                 // 记录 asm 语句的源行号, 使 mini-asm 警告能附带源位置

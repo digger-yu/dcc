@@ -11273,6 +11273,21 @@ fn m3_1_inline_asm() {
     assert_eq!(code, 0, "inline asm checks failed (exit={code})");
 }
 
+/// asm volatile semantics: volatile flag propagated from parser through
+/// SSA to codegen; asm goto always volatile; plain asm may be eliminated.
+#[test]
+#[cfg(unix)]
+fn asm_volatile_semantics() {
+    let src = include_str!("fixtures/c/asm_volatile_semantics.c");
+    let (out, code) = run_host_link_and_run("asm-volatile-semantics", src);
+    assert!(
+        out.status.success(),
+        "asm volatile compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "asm volatile checks failed (exit={code})");
+}
+
 /// M3.2: __attribute__ series - packed, aligned, section, weak,
 /// alias, visibility, unused.
 #[test]
