@@ -627,20 +627,34 @@ pub fn preprocess(
     }
     pp.define_builtin("__ELF__", "1");
     pp.define_builtin("__STDC__", "1");
-    // __STDC_VERSION__ 根据选择的 C 标准设置
+    // __STDC_VERSION__ 根据选择的 C 标准设置 (C++ 模式不定义)
     let stc_version = match std_mode {
         StdMode::C89 | StdMode::Gnu89 => None, // C89/C90 不定义 __STDC_VERSION__
         StdMode::C99 | StdMode::Gnu99 => Some("199901"),
         StdMode::C11 | StdMode::Gnu11 => Some("201112"),
         StdMode::C17 | StdMode::Gnu17 => Some("201710"),
         StdMode::C23 | StdMode::Gnu23 => Some("202312L"),
+        // C++ 模式不定义 __STDC_VERSION__
+        _ => None,
     };
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);
     }
-    // C11 <stdnoreturn.h>: noreturn → _Noreturn (C11/C17/C23)
+    // __cplusplus: C++ 模式定义, 值取决于标准版本
+    if let Some(v) = std_mode.cplusplus_value() {
+        pp.define_builtin("__cplusplus", v);
+    }
+    // C11 <stdnoreturn.h>: noreturn → _Noreturn (仅 C11/C17/C23, C++ 不需要)
     // C23 中 noreturn 仍是宏 (非关键字), 映射到 _Noreturn 关键字
-    if !matches!(std_mode, StdMode::C89 | StdMode::Gnu89) {
+    if matches!(
+        std_mode,
+        StdMode::C11
+            | StdMode::Gnu11
+            | StdMode::C17
+            | StdMode::Gnu17
+            | StdMode::C23
+            | StdMode::Gnu23
+    ) {
         pp.macros.insert(
             "noreturn".to_string(),
             MacroDef {

@@ -207,6 +207,16 @@ pub enum StdMode {
     Gnu11,
     Gnu17,
     Gnu23, // GNU 扩展
+    Cpp11,
+    Cpp14,
+    Cpp17,
+    Cpp20,
+    Cpp23,
+    GnuCpp11,
+    GnuCpp14,
+    GnuCpp17,
+    GnuCpp20,
+    GnuCpp23,
 }
 
 impl StdMode {
@@ -222,6 +232,45 @@ impl StdMode {
             StdMode::Gnu17 => "gnu17",
             StdMode::C23 => "c23",
             StdMode::Gnu23 => "gnu23",
+            StdMode::Cpp11 => "c++11",
+            StdMode::Cpp14 => "c++14",
+            StdMode::Cpp17 => "c++17",
+            StdMode::Cpp20 => "c++20",
+            StdMode::Cpp23 => "c++23",
+            StdMode::GnuCpp11 => "gnu++11",
+            StdMode::GnuCpp14 => "gnu++14",
+            StdMode::GnuCpp17 => "gnu++17",
+            StdMode::GnuCpp20 => "gnu++20",
+            StdMode::GnuCpp23 => "gnu++23",
+        }
+    }
+
+    /// Returns true if this is a C++ standard mode (not C).
+    pub fn is_cpp(self) -> bool {
+        matches!(
+            self,
+            StdMode::Cpp11
+                | StdMode::Cpp14
+                | StdMode::Cpp17
+                | StdMode::Cpp20
+                | StdMode::Cpp23
+                | StdMode::GnuCpp11
+                | StdMode::GnuCpp14
+                | StdMode::GnuCpp17
+                | StdMode::GnuCpp20
+                | StdMode::GnuCpp23
+        )
+    }
+
+    /// Returns the `__cplusplus` value for C++ modes, or None for C modes.
+    pub fn cplusplus_value(self) -> Option<&'static str> {
+        match self {
+            StdMode::Cpp11 | StdMode::GnuCpp11 => Some("201103L"),
+            StdMode::Cpp14 | StdMode::GnuCpp14 => Some("201402L"),
+            StdMode::Cpp17 | StdMode::GnuCpp17 => Some("201703L"),
+            StdMode::Cpp20 | StdMode::GnuCpp20 => Some("202002L"),
+            StdMode::Cpp23 | StdMode::GnuCpp23 => Some("202302L"),
+            _ => None,
         }
     }
 }
@@ -1497,6 +1546,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=gnu17" => std = StdMode::Gnu17,
             "-std=gnu18" => std = StdMode::Gnu17, // gnu18 = gnu17 别名
             "-std=gnu23" => std = StdMode::Gnu23,
+            "-std=gnu2x" => std = StdMode::Gnu23, // gnu2x = gnu23 别名
+            // C++ 标准模式
+            "-std=c++11" | "-std=c++0x" => std = StdMode::Cpp11,
+            "-std=c++14" | "-std=c++1y" => std = StdMode::Cpp14,
+            "-std=c++17" | "-std=c++1z" => std = StdMode::Cpp17,
+            "-std=c++20" | "-std=c++2a" => std = StdMode::Cpp20,
+            "-std=c++23" | "-std=c++2b" => std = StdMode::Cpp23,
+            "-std=gnu++11" | "-std=gnu++0x" => std = StdMode::GnuCpp11,
+            "-std=gnu++14" | "-std=gnu++1y" => std = StdMode::GnuCpp14,
+            "-std=gnu++17" | "-std=gnu++1z" => std = StdMode::GnuCpp17,
+            "-std=gnu++20" | "-std=gnu++2a" => std = StdMode::GnuCpp20,
+            "-std=gnu++23" | "-std=gnu++2b" => std = StdMode::GnuCpp23,
             "-ffreestanding" => freestanding = true,
             "-fpermissive" => permissive = true,
             "-I" => {
@@ -1950,8 +2011,39 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 println!("{}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
+            "-dumpfullversion" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "-dumpmachine" => {
                 println!("{}", target.as_str());
+                std::process::exit(0);
+            }
+            // GCC 兼容: -V / -qversion 输出版本信息
+            "-V" | "-qversion" => {
+                println!("dcc (GCC) {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            // GCC 兼容: --print-prog-name=<name> 输出程序路径
+            a if a.starts_with("--print-prog-name=") => {
+                let prog = &a["--print-prog-name=".len()..];
+                // 在 PATH 中查找程序, 找到则输出完整路径, 否则输出名字
+                if let Ok(path) = which(prog) {
+                    println!("{}", path);
+                } else {
+                    println!("{}", prog);
+                }
+                std::process::exit(0);
+            }
+            "-print-prog-name" => {
+                // -print-prog-name <name> (两参数形式)
+                i += 1;
+                let prog = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                if let Ok(path) = which(prog) {
+                    println!("{}", path);
+                } else {
+                    println!("{}", prog);
+                }
                 std::process::exit(0);
             }
             "--version" => {
@@ -2363,6 +2455,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             profile: merge_profile_config(profile, offload),
         })
     }
+}
+
+/// 简易 `which` 实现: 在 PATH 中查找可执行文件。
+fn which(prog: &str) -> Result<String, ()> {
+    if prog.contains('/') {
+        return if std::path::Path::new(prog).exists() {
+            Ok(prog.to_string())
+        } else {
+            Err(())
+        };
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            let full = format!("{}/{}", dir, prog);
+            if std::path::Path::new(&full).exists() {
+                return Ok(full);
+            }
+        }
+    }
+    Err(())
 }
 
 /// 拆分 `-fopenmp-targets=` 的逗号分隔 triple 列表 (去空白/去空项).
