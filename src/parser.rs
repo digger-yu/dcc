@@ -5172,13 +5172,18 @@ impl<'a> Parser<'a> {
             // 这样可避免下个字段的类型名被当作当前匿名 struct/union 的字段名
             // (内核 struct_group(..., MEMBERS...) 展开丢失尾 `;` 后常出
             // 现这种状态)。
+            // 深层嵌套 (3+ 层) 场景: 匿名 struct/union 内嵌匿名 struct/union,
+            // 后续字段可能以 __attribute__ 开头 (GCC/内核宏常见模式).
+            // __attribute__ 是 Ident 但不是字段名, 必须排除.
             let nm = if self.cur.kind == TokKind::Ident
+                && self.cur.text != "__attribute__"
                 && !(matches!(ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
-                    && Self::is_type_specifier_ident(
+                    && (Self::is_type_specifier_ident(
                         &self.cur.text,
                         &self.typedefs,
                         self.opts.is_c23,
-                    )) {
+                    ) || self.cur.text == "__attribute__"))
+            {
                 let n = self.cur.text.clone();
                 self.advance();
                 n
