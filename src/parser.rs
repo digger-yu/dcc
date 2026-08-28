@@ -4221,11 +4221,12 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // __const__/__volatile__/__restrict__: GNU 扩展拼写, 同 const/volatile/restrict
+                // __const__/__volatile__/__restrict__/__restrict: GNU 扩展拼写, 同 const/volatile/restrict
                 TokKind::Ident
                     if self.cur.text == "__const__"
                         || self.cur.text == "__volatile__"
-                        || self.cur.text == "__restrict__" =>
+                        || self.cur.text == "__restrict__"
+                        || self.cur.text == "__restrict" =>
                 {
                     self.advance();
                 }
@@ -5169,6 +5170,7 @@ impl<'a> Parser<'a> {
             && matches!(
                 self.cur.text.as_str(),
                 "__restrict__"
+                    | "__restrict"
                     | "__const__"
                     | "__volatile__"
                     | "__attribute__"
@@ -5199,6 +5201,7 @@ impl<'a> Parser<'a> {
                         self.decl_quals |= QualifierFlags::VOLATILE
                     }
                     TokKind::Ident if self.cur.text == "__restrict__"
+                        || self.cur.text == "__restrict"
                         || self.cur.text == "_ms_restrict"
                         || self.cur.text == "_restrict" =>
                     {
