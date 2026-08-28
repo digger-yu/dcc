@@ -19821,3 +19821,15 @@ fn c11_anonymous_struct_union_members() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 char8_t type support
+#[test]
+fn c23_char8_t_type() {
+    let src = include_str!("fixtures/c/c23_char8_t.c");
+    let output = run_syntax_test("c23-char8t", src);
+    assert!(
+        output.status.success(),
+        "char8_t type should be recognized. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

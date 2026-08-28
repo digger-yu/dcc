@@ -547,7 +547,7 @@ impl Lowering {
                 bits: 8,
                 signed: true,
             },
-            Type::UChar => ValueType::Integer {
+            Type::UChar | Type::Char8 => ValueType::Integer {
                 bits: 8,
                 signed: false,
             },

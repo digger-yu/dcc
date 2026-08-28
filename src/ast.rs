@@ -940,6 +940,7 @@ pub enum Type {
     Char,
     SChar,
     UChar,
+    Char8,  // char8_t (C23, 8-bit UTF-8)
     Char16, // char16_t (C11/C++11, 16-bit)
     Char32, // char32_t (C11/C++11, 32-bit)
     Short,
@@ -1048,7 +1049,7 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
-            Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
+            Type::Bool | Type::Char | Type::SChar | Type::UChar | Type::Char8 => 1,
             Type::Char16 | Type::Short | Type::UShort => 2,
             Type::Char32 | Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
             Type::Enum(_, _, under) => match under {
@@ -1095,7 +1096,7 @@ impl Type {
     pub fn align(&self) -> usize {
         match self {
             Type::Void => 1,
-            Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
+            Type::Bool | Type::Char | Type::SChar | Type::UChar | Type::Char8 => 1,
             Type::Char16 | Type::Short | Type::UShort => 2,
             Type::Char32 | Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
             Type::Enum(_, _, under) => match under {
@@ -1134,6 +1135,7 @@ impl Type {
                 | Type::Char
                 | Type::SChar
                 | Type::UChar
+                | Type::Char8
                 | Type::Char16
                 | Type::Char32
                 | Type::Short
@@ -1333,6 +1335,7 @@ impl std::fmt::Display for Type {
             Type::Char => write!(f, "char"),
             Type::SChar => write!(f, "signed char"),
             Type::UChar => write!(f, "unsigned char"),
+            Type::Char8 => write!(f, "char8_t"),
             Type::Char16 => write!(f, "char16_t"),
             Type::Char32 => write!(f, "char32_t"),
             Type::Short => write!(f, "short"),

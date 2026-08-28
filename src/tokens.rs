@@ -63,6 +63,7 @@ pub enum TokKind {
     KwRegister,
     KwAtomic, // _Atomic
     KwBool,   // _Bool (C99)
+    KwChar8,  // char8_t (C23)
     KwChar16, // char16_t (C11)
     KwChar32, // char32_t (C11)
     KwFract,
@@ -319,6 +320,7 @@ impl<'a> Lexer<'a> {
                 "decltype" => TokKind::KwDecltype, // M17.0
                 "_Atomic" => TokKind::KwAtomic,
                 "_Bool" => TokKind::KwBool,
+                "char8_t" => TokKind::KwChar8,
                 "char16_t" => TokKind::KwChar16,
                 "char32_t" => TokKind::KwChar32,
                 "_Fract" => TokKind::KwFract,

@@ -4741,6 +4741,11 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
+                TokKind::KwChar8 => {
+                    base = Some(Type::Char8);
+                    self.advance();
+                    break;
+                }
                 TokKind::KwChar16 => {
                     base = Some(Type::Char16);
                     self.advance();
@@ -6032,6 +6037,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
                 | TokKind::KwBool
+                | TokKind::KwChar8
                 | TokKind::KwChar16
                 | TokKind::KwChar32
                 | TokKind::KwInt128
@@ -6111,6 +6117,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
                 | TokKind::KwBool
+                | TokKind::KwChar8
                 | TokKind::KwChar16
                 | TokKind::KwChar32
                 | TokKind::KwInt128
@@ -7450,6 +7457,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwFract
                 | TokKind::KwAccum
                 | TokKind::KwBool
+                | TokKind::KwChar8
                 | TokKind::KwChar16
                 | TokKind::KwChar32
                 | TokKind::KwInt128
@@ -7649,6 +7657,7 @@ impl<'a> Parser<'a> {
                                 | Type::Char
                                 | Type::SChar
                                 | Type::UChar
+                                | Type::Char8
                                 | Type::Char16
                                 | Type::Char32
                                 | Type::Short

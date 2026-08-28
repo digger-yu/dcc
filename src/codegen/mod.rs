@@ -814,6 +814,11 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             byte_size: 1,
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::UnsignedChar),
         },
+        Type::Char8 => debug::DwarfType {
+            name: "char8_t".to_string(),
+            byte_size: 1,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::UnsignedChar),
+        },
         Type::Char16 => debug::DwarfType {
             name: "char16_t".to_string(),
             byte_size: 2,
