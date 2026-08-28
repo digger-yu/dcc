@@ -4843,9 +4843,10 @@ impl Preprocessor {
             "short" | "short int" | "signed short" | "unsigned short"
             | "short unsigned" | "int16_t" | "uint16_t" => 2,
             "int" | "signed int" | "unsigned int" | "unsigned" | "signed"
-            | "long" | "long int" | "signed long" | "unsigned long"
-            | "long unsigned" | "int32_t" | "uint32_t" | "float" => 4,
-            "long long" | "long long int" | "signed long long"
+            | "int32_t" | "uint32_t" | "float" => 4,
+            "long" | "long int" | "signed long" | "unsigned long"
+            | "long unsigned"
+            | "long long" | "long long int" | "signed long long"
             | "unsigned long long" | "long long unsigned" | "double"
             | "int64_t" | "uint64_t" | "size_t" | "ptrdiff_t"
             | "intptr_t" | "uintptr_t" => 8,
@@ -4863,11 +4864,14 @@ impl Preprocessor {
     /// 替换 sizeof(type) 为数值
     fn replace_sizeof(&self, expr: &str) -> String {
         let mut result = expr.to_string();
-        while let Some(pos) = result.find("sizeof") {
+        let mut search_from = 0;
+        while let Some(rel) = result[search_from..].find("sizeof") {
+            let pos = search_from + rel;
             if pos > 0 {
                 let prev = result.as_bytes()[pos - 1];
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
-                    break;
+                    search_from = pos + 6;
+                    continue;
                 }
             }
             let after = &result[pos + 6..];
@@ -4888,11 +4892,12 @@ impl Preprocessor {
                     let type_name = &after[1..end - 1];
                     let size = Self::type_size(type_name);
                     result = format!("{}{}{}", &result[..pos], size, &after[end..]);
+                    search_from = pos;
                 } else {
-                    break;
+                    search_from = pos + 6;
                 }
             } else {
-                break;
+                search_from = pos + 6;
             }
         }
         result
@@ -4902,14 +4907,18 @@ impl Preprocessor {
     fn replace_alignof(&self, expr: &str) -> String {
         let mut result = expr.to_string();
         for keyword in &["__alignof__", "_Alignof", "__alignof"] {
-            while let Some(pos) = result.find(keyword) {
+            let kw_len = keyword.len();
+            let mut search_from = 0;
+            while let Some(rel) = result[search_from..].find(keyword) {
+                let pos = search_from + rel;
                 if pos > 0 {
                     let prev = result.as_bytes()[pos - 1];
                     if prev.is_ascii_alphanumeric() || prev == b'_' {
-                        break;
+                        search_from = pos + kw_len;
+                        continue;
                     }
                 }
-                let after = &result[pos + keyword.len()..];
+                let after = &result[pos + kw_len..];
                 let after = after.trim_start();
                 if after.starts_with('(') {
                     let mut depth = 1;
@@ -4928,11 +4937,12 @@ impl Preprocessor {
                         let align = Self::type_align(type_name);
                         result =
                             format!("{}{}{}", &result[..pos], align, &after[end..]);
+                        search_from = pos;
                     } else {
-                        break;
+                        search_from = pos + kw_len;
                     }
                 } else {
-                    break;
+                    search_from = pos + kw_len;
                 }
             }
         }
@@ -4943,11 +4953,14 @@ impl Preprocessor {
     /// 预处理阶段无法准确计算结构体偏移, 返回 0
     fn replace_offsetof(&self, expr: &str) -> String {
         let mut result = expr.to_string();
-        while let Some(pos) = result.find("__builtin_offsetof") {
+        let mut search_from = 0;
+        while let Some(rel) = result[search_from..].find("__builtin_offsetof") {
+            let pos = search_from + rel;
             if pos > 0 {
                 let prev = result.as_bytes()[pos - 1];
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
-                    break;
+                    search_from = pos + 18;
+                    continue;
                 }
             }
             let after = &result[pos + 18..]; // "__builtin_offsetof" is 18 chars
@@ -4966,11 +4979,12 @@ impl Preprocessor {
                 }
                 if depth == 0 {
                     result = format!("{}0{}", &result[..pos], &after[end..]);
+                    search_from = pos;
                 } else {
-                    break;
+                    search_from = pos + 18;
                 }
             } else {
-                break;
+                search_from = pos + 18;
             }
         }
         result
