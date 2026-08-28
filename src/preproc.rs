@@ -3895,9 +3895,15 @@ impl Preprocessor {
                             } else {
                                 "0"
                             }
+                        } else if ident == "__has_feature" {
+                            if Self::is_known_feature(&arg) {
+                                "1"
+                            } else {
+                                "0"
+                            }
                         } else {
                             "0"
-                        }; // __has_feature: always 0 for now
+                        };
                         out.push_str(val);
                         if j < len {
                             j += 1;
@@ -5424,7 +5430,7 @@ impl Preprocessor {
         result =
             self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
         result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
-        result = self.replace_has_attr_like(&result, "__has_feature", |_| false);
+        result = self.replace_has_attr_like(&result, "__has_feature", Self::is_known_feature);
         result = self.replace_has_cpp_attribute(&result);
         result
     }
@@ -5991,6 +5997,35 @@ impl Preprocessor {
                 | "__builtin_rotateright16"
                 | "__builtin_rotateright32"
                 | "__builtin_rotateright64"
+        )
+    }
+
+    /// Clang __has_feature: 检测编译器特性支持
+    /// 返回 DCC 实际支持或兼容的特性列表
+    fn is_known_feature(name: &str) -> bool {
+        let name = name.trim();
+        matches!(
+            name,
+            // 原子操作
+            "c_atomic"
+                | "cxx_atomic"
+                // 线程局部存储
+                | "tls"
+                // 属性支持
+                | "enumerator_attributes"
+                | "aligned_alloc"
+                // 诊断相关
+                | "diagnose_if"
+                // 类型特征 (Clang 兼容)
+                | "is_identifier"
+                // 标准特性
+                | "blocks"
+                | "attribute_deprecated_with_message"
+                | "attribute_unused"
+                // 溢出内建
+                | "builtin_add_overflow"
+                | "builtin_sub_overflow"
+                | "builtin_mul_overflow"
         )
     }
 
@@ -10769,6 +10804,70 @@ int ok = 1;\n";
              unknown_ok\n\
              #endif\n",
             "has-cpp-attr-unknown.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("unknown_ok"), "output: {output}");
+    }
+
+    // ===== __has_feature =====
+
+    #[test]
+    fn has_feature_known() {
+        let out = preprocess(
+            b"#if __has_feature(c_atomic)\n\
+             atomic_ok\n\
+             #endif\n\
+             #if __has_feature(tls)\n\
+             tls_ok\n\
+             #endif\n\
+             #if __has_feature(builtin_add_overflow)\n\
+             overflow_ok\n\
+             #endif\n",
+            "has-feature.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("atomic_ok"), "output: {output}");
+        assert!(output.contains("tls_ok"), "output: {output}");
+        assert!(output.contains("overflow_ok"), "output: {output}");
+    }
+
+    #[test]
+    fn has_feature_unknown() {
+        let out = preprocess(
+            b"#if __has_feature(totally_unknown_feature) == 0\n\
+             unknown_ok\n\
+             #endif\n",
+            "has-feature-unknown.c",
             &[],
             &[],
             &[],
