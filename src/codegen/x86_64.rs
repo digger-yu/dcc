@@ -1797,6 +1797,25 @@ impl Codegen {
     }
     /// 确保自定义 section 存在于 extra_sections 中，返回其在 vec 中的索引
     fn ensure_custom_section(&mut self, name: &str, is_exec: bool, is_writable: bool) -> usize {
+        // Auto-detect SHF_MERGE/SHF_STRINGS from section name patterns
+        let is_merge = name.contains(".rodata.str") || name.contains(".merge")
+            || name.starts_with(".gnu.debuglto");
+        let is_strings = name.contains(".rodata.str") || name.contains(".str");
+        self.ensure_custom_section_with_flags(
+            name, is_exec, is_writable, is_merge, is_strings, if is_strings { 1 } else { 0 },
+        )
+    }
+
+    /// 确保自定义 section 存在，支持 SHF_MERGE/SHF_STRINGS 标志
+    fn ensure_custom_section_with_flags(
+        &mut self,
+        name: &str,
+        is_exec: bool,
+        is_writable: bool,
+        is_merge: bool,
+        is_strings: bool,
+        entsize: u64,
+    ) -> usize {
         if let Some(&idx) = self.custom_sec_indices.get(name) {
             return idx;
         }
@@ -1808,31 +1827,63 @@ impl Codegen {
         if is_exec {
             flags |= SHF_EXECINSTR;
         }
+        if is_merge {
+            flags |= elf::SHF_MERGE;
+        }
+        if is_strings {
+            flags |= elf::SHF_STRINGS;
+        }
+        // SHF_MERGE sections with SHF_STRINGS have entsize=1 (char)
+        // SHF_MERGE sections without SHF_STRINGS have entsize=entry_size
+        let align = if is_exec {
+            16
+        } else if is_merge && is_strings {
+            1
+        } else if is_merge && entsize > 0 {
+            entsize
+        } else {
+            8
+        };
         self.extra_sections.push(ElfSection {
             name: name.to_string(),
             data: Vec::new(),
             ty: SHT_PROGBITS,
             flags,
-            align: if is_exec { 16 } else { 8 },
+            align,
             group_name: None,
         });
         self.custom_sec_indices.insert(name.to_string(), idx);
         idx
     }
 
-    /// 解析 `.pushsection name, "flags"` 中的 flags (a/w/x 等), 返回 (is_writable, is_exec)
-    fn parse_pushsection_flags(line: &str) -> (bool, bool) {
+    /// 解析 `.pushsection name, "flags"` 中的 flags (a/w/x/M/S 等)
+    /// 返回 (is_writable, is_exec, is_merge, is_strings, entsize)
+    fn parse_pushsection_flags(line: &str) -> (bool, bool, bool, bool, u64) {
         let mut is_writable = false;
         let mut is_exec = false;
+        let mut is_merge = false;
+        let mut is_strings = false;
+        let mut entsize: u64 = 0;
         if let Some(q_start) = line.find('"') {
             let after = &line[q_start + 1..];
             if let Some(q_len) = after.find('"') {
                 let flags = &after[..q_len];
                 is_writable = flags.contains('w') || flags.contains('W');
                 is_exec = flags.contains('x') || flags.contains('X');
+                is_merge = flags.contains('M');
+                is_strings = flags.contains('S');
+            }
+            // 解析 entsize (最后一个逗号后的数字)
+            // .section .name, "flags", @type, entsize
+            let after_quote = &line[q_start + 1 + after.find('"').unwrap_or(0) + 1..];
+            let parts: Vec<&str> = after_quote.split(',').map(|s| s.trim()).collect();
+            if let Some(last) = parts.last() {
+                if let Ok(n) = last.parse::<u64>() {
+                    entsize = n;
+                }
             }
         }
-        (is_writable, is_exec)
+        (is_writable, is_exec, is_merge, is_strings, entsize)
     }
 
     fn pad_custom_section_to(&mut self, sec_idx: usize, len: usize) {
@@ -17623,9 +17674,12 @@ impl Codegen {
                     .unwrap_or("")
                     .trim();
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
-                    // 解析 flags ("ax" → 可执行, "aw" → 可写)
-                    let (is_writable, is_exec) = Self::parse_pushsection_flags(trimmed);
-                    let sec_idx = self.ensure_custom_section(sec_name, is_exec, is_writable);
+                    // 解析 flags ("ax" → 可执行, "aw" → 可写, "aMS" → merge/strings)
+                    let (is_writable, is_exec, is_merge, is_strings, entsize) =
+                        Self::parse_pushsection_flags(trimmed);
+                    let sec_idx = self.ensure_custom_section_with_flags(
+                        sec_name, is_exec, is_writable, is_merge, is_strings, entsize,
+                    );
                     // 可执行节 (.fixup/.altinstr_replacement): 代码先发射到
                     // self.code, .popsection 时记录区间, 最终整体搬迁到自定义节.
                     if is_exec {
@@ -17681,8 +17735,11 @@ impl Codegen {
                         let second_token = trimmed.split_whitespace().nth(1).unwrap_or("");
                         let sec_name = second_token.split(',').next().unwrap_or("").trim();
                         if !sec_name.starts_with(".text") && !sec_name.is_empty() {
-                            let (is_w, is_e) = Self::parse_pushsection_flags(trimmed);
-                            let nested_idx = self.ensure_custom_section(sec_name, is_e, is_w);
+                            let (is_w, is_e, is_m, is_s, ent) =
+                                Self::parse_pushsection_flags(trimmed);
+                            let nested_idx = self.ensure_custom_section_with_flags(
+                                sec_name, is_e, is_w, is_m, is_s, ent,
+                            );
                             if is_e {
                                 self.pushsection_exec_stack.push((nested_idx, self.code.len() as u64));
                             }

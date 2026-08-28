@@ -68,6 +68,13 @@ pub const SHF_COMPRESSED: u32 = 0x800;
 pub const SHF_INFO_LINK: u32 = 0x40;
 /// SHF_GROUP: section is a member of a COMDAT group
 pub const SHF_GROUP: u32 = 0x200;
+/// SHF_MERGE: section contains data that can be merged to eliminate
+/// duplication. Used for string merge sections (.rodata.str) and
+/// constant pool sections. The entry size is specified by sh_entsize.
+pub const SHF_MERGE: u32 = 0x10;
+/// SHF_STRINGS: section contains null-terminated strings. Always
+/// used together with SHF_MERGE for string deduplication.
+pub const SHF_STRINGS: u32 = 0x20;
 
 // COMDAT group flags (first word of SHT_GROUP section)
 pub const GRP_COMDAT: u32 = 0x1;
