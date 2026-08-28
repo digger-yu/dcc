@@ -317,6 +317,8 @@ mod tests {
             freestanding: false,
             include_paths: vec![],
             system_paths: vec![],
+            quote_paths: vec![],
+            after_paths: vec![],
             defines: vec![],
             dump_ast: false,
             verbose: false,

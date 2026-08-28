@@ -48,6 +48,10 @@ pub struct Config {
     pub freestanding: bool,
     pub include_paths: Vec<PathBuf>,
     pub system_paths: Vec<PathBuf>,
+    /// -iquote 搜索路径: 仅用于 "..." 引号包含
+    pub quote_paths: Vec<PathBuf>,
+    /// -idirafter 搜索路径: 在所有其他路径之后搜索
+    pub after_paths: Vec<PathBuf>,
     pub defines: Vec<(String, Option<String>)>, // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose: bool,
@@ -578,6 +582,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut permissive = false;
     let mut include_paths: Vec<PathBuf> = vec![];
     let mut system_paths: Vec<PathBuf> = vec![];
+    let mut quote_paths: Vec<PathBuf> = vec![];
+    let mut after_paths: Vec<PathBuf> = vec![];
     let mut defines: Vec<(String, Option<String>)> = vec![];
     let mut dump_ast = false;
     let mut verbose = false;
@@ -1053,6 +1059,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                         }
                         option if option.starts_with("-isystem") && option.len() > 8 => {
                             system_paths.push(PathBuf::from(&option[8..]));
+                        }
+                        "-iquote" => {
+                            j += 1;
+                            let path = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-iquote"))?;
+                            quote_paths.push(PathBuf::from(path));
+                        }
+                        option if option.starts_with("-iquote") && option.len() > 7 => {
+                            quote_paths.push(PathBuf::from(&option[7..]));
+                        }
+                        "-idirafter" => {
+                            j += 1;
+                            let path = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-idirafter"))?;
+                            after_paths.push(PathBuf::from(path));
+                        }
+                        option if option.starts_with("-idirafter") && option.len() > 10 => {
+                            after_paths.push(PathBuf::from(&option[10..]));
                         }
                         "-U" => {
                             j += 1;
@@ -1745,6 +1771,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-isystem") => {
                 system_paths.push(PathBuf::from(&a[8..]));
             }
+            "-iquote" => {
+                i += 1;
+                quote_paths.push(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| CliError::new("missing arg after -iquote"))?,
+                ));
+            }
+            a if a.starts_with("-iquote") => {
+                quote_paths.push(PathBuf::from(&a[7..]));
+            }
+            "-idirafter" => {
+                i += 1;
+                after_paths.push(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| CliError::new("missing arg after -idirafter"))?,
+                ));
+            }
+            a if a.starts_with("-idirafter") => {
+                after_paths.push(PathBuf::from(&a[10..]));
+            }
             // -M/-MM: 仅生成依赖文件, 不编译 (输出到 stdout 或 -MF 指定文件)
             "-M" => {
                 gen_dep = true;
@@ -2037,6 +2083,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             freestanding,
             include_paths,
             system_paths,
+            quote_paths,
+            after_paths,
             defines,
             dump_ast,
             verbose,
@@ -2143,6 +2191,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             freestanding,
             include_paths,
             system_paths,
+            quote_paths,
+            after_paths,
             defines,
             dump_ast,
             verbose,

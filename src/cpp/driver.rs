@@ -55,6 +55,8 @@ pub fn compile_cpp(
         file,
         &all_includes,
         &[], /* system paths */
+        &[], /* quote paths */
+        &[], /* after paths */
         &[], /* defines */
         crate::cli::StdMode::Gnu11,
         &[],                                    /* force includes */

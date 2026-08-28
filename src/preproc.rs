@@ -54,6 +54,10 @@ pub struct Preprocessor {
     include_paths: Vec<PathBuf>,
     /// 系统搜索路径 (-isystem, 在用户路径之后、标准路径之前)
     system_paths: Vec<PathBuf>,
+    /// -iquote 搜索路径: 仅用于 "..." 引号包含的搜索路径
+    quote_paths: Vec<PathBuf>,
+    /// -idirafter 搜索路径: 在所有其他路径之后搜索的目录
+    after_paths: Vec<PathBuf>,
     /// #pragma once 文件
     pragma_once: HashSet<String>,
     diags: Vec<Diagnostic>,
@@ -464,6 +468,8 @@ pub fn preprocess(
     file: &str,
     include_paths: &[PathBuf],
     system_paths: &[PathBuf],
+    quote_paths: &[PathBuf],
+    after_paths: &[PathBuf],
     defines: &[(String, Option<String>)],
     std_mode: StdMode,
     force_includes: &[String],
@@ -499,6 +505,8 @@ pub fn preprocess(
         macros: HashMap::new(),
         include_paths: include_paths.to_vec(),
         system_paths: system_paths.to_vec(),
+        quote_paths: quote_paths.to_vec(),
+        after_paths: after_paths.to_vec(),
         pragma_once: HashSet::new(),
         diags: vec![],
         cond_stack: vec![],
@@ -2785,6 +2793,8 @@ impl Preprocessor {
         let mut dirs = Vec::new();
         if !is_system {
             dirs.push(self.base_dir.clone());
+            // -iquote 路径仅用于引号包含
+            dirs.extend(self.quote_paths.iter().cloned());
         }
         dirs.extend(self.include_paths.iter().cloned());
         dirs.extend(self.system_paths.iter().cloned());
@@ -2804,6 +2814,8 @@ impl Preprocessor {
         ] {
             dirs.push(PathBuf::from(d));
         }
+        // -idirafter 路径在最后
+        dirs.extend(self.after_paths.iter().cloned());
         dirs
     }
 
@@ -2856,21 +2868,30 @@ impl Preprocessor {
                 return Some(p);
             }
         }
-        // 2. 用户 -I 路径
+        // 2. -iquote 路径 (仅用于 "file" 形式的引号包含)
+        if !is_system {
+            for dir in &self.quote_paths {
+                let p = dir.join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+        // 3. 用户 -I 路径
         for dir in &self.include_paths {
             let p = dir.join(name);
             if p.exists() {
                 return Some(p);
             }
         }
-        // 3. 系统 -isystem 路径
+        // 4. 系统 -isystem 路径
         for dir in &self.system_paths {
             let p = dir.join(name);
             if p.exists() {
                 return Some(p);
             }
         }
-        // 4. 标准系统路径 (含多架构支持)
+        // 5. 标准系统路径 (含多架构支持)
         let system_dirs = [
             "/usr/local/include",
             "/usr/include",
@@ -2884,14 +2905,14 @@ impl Preprocessor {
                 return Some(p);
             }
         }
-        // 5. GCC 内建 include（stddef.h/stdbool.h 等；优先于 linux UAPI 同名头）
+        // 6. GCC 内建 include（stddef.h/stdbool.h 等；优先于 linux UAPI 同名头）
         for dir in host_gcc_include_dirs() {
             let p = dir.join(name);
             if p.exists() {
                 return Some(p);
             }
         }
-        // 6. Linux 内核 UAPI 路径（仅当标准/GCC 头不存在时）
+        // 7. Linux 内核 UAPI 路径（仅当标准/GCC 头不存在时）
         let kernel_dirs = [
             "/usr/include/linux",
             "/usr/include/asm",
@@ -2899,6 +2920,13 @@ impl Preprocessor {
         ];
         for dir in &kernel_dirs {
             let p = Path::new(dir).join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        // 8. -idirafter 路径: 在所有其他路径之后搜索
+        for dir in &self.after_paths {
+            let p = dir.join(name);
             if p.exists() {
                 return Some(p);
             }
@@ -6106,6 +6134,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6133,6 +6163,8 @@ mod tests {
         let out = preprocess(
             b"int value = FORCED_VALUE;\n",
             "comment-regression.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6166,6 +6198,8 @@ mod tests {
                   : : \"i\" (0) : : lbl);\n\
               lbl: ; }\n",
             "asm-goto-expand.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6203,6 +6237,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6229,6 +6265,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6251,6 +6289,8 @@ mod tests {
         let out = preprocess(
             b"int value;\n/* never closed\n",
             "unterminated.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6284,6 +6324,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6305,6 +6347,8 @@ mod tests {
         let out = preprocess(
             b"#if 0x41 == 65\n#define OK 1\n#else\n#define OK 0\n#endif\nint x = OK;\n",
             "hex-if.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6332,6 +6376,8 @@ mod tests {
               #define XA_MARK_LONGS DIV_ROUND_UP((1UL << 6), 64)\n\
               unsigned long tags[3][XA_MARK_LONGS];\n",
             "div-round.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6366,6 +6412,8 @@ mod tests {
               #define G(x) F(x)\n\
               int v = F(F(1));\n",
             "nested-macro.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6411,6 +6459,8 @@ mod tests {
             &[],
             &[dir.join("a"), dir.join("b")],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6434,6 +6484,8 @@ mod tests {
         let out = preprocess(
             b"#define F() 42\nint x = F();\n",
             "zero-arg-fn.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6462,6 +6514,8 @@ mod tests {
               struct thread_info { unsigned long syscall_work; };\n\
               void *p = &current_thread_info()->syscall_work;\n",
             "cti.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6501,6 +6555,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6529,6 +6585,8 @@ mod tests {
               int c = __COUNTER__;\n\
               int x = __COUNTER__;\n",
             "counter.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6564,6 +6622,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6596,6 +6656,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6622,6 +6684,8 @@ mod tests {
                 return 0;\n\
               }\n",
             "va-opt-args.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6659,6 +6723,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -6692,6 +6758,8 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -6722,6 +6790,8 @@ mod tests {
               int x1 = NESTED(1);\n\
               int x2 = NESTED(1, 2);\n",
             "va-opt-nested.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6759,6 +6829,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6792,6 +6864,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6817,6 +6891,8 @@ n\
               #pragma locale reset\n\
               int x = 0;\n",
             "pragma-locale.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6848,6 +6924,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6867,6 +6945,8 @@ n\
         let out_on = preprocess(
             b"#pragma STDC FENV_ACCESS ON\nint x = 0;\n",
             "p4_1_on.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6892,6 +6972,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6911,6 +6993,8 @@ n\
         let out_lower = preprocess(
             b"#pragma STDC FENV_ACCESS on\nint x = 0;\n",
             "p4_1_lower.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -6957,6 +7041,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -6995,6 +7081,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7018,6 +7106,8 @@ n\
               #pragma STDC CX_LIMITED_RANGE DEFAULT\n\
               int x = 0;\n",
             "p4_1_fp_default.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7076,6 +7166,8 @@ n\
             "t1.c",
             &includes,
             &[],
+            &[],
+            &[],
             &[("_FORTIFY_SOURCE".to_string(), Some("2".to_string()))],
             StdMode::Gnu11,
             &[],
@@ -7092,6 +7184,8 @@ n\
             src.as_bytes(),
             "t2.c",
             &includes,
+            &[],
+            &[],
             &[],
             &[("_FORTIFY_SOURCE".to_string(), Some("0".to_string()))],
             StdMode::Gnu11,
@@ -7127,6 +7221,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7146,6 +7242,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7162,6 +7260,8 @@ n\
         let out = preprocess(
             b"#pragma locale \"POSIX\"\n#pragma locale reset\nint x = 0;\n",
             "charset.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7426,6 +7526,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7482,6 +7584,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7525,6 +7629,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7564,6 +7670,8 @@ n\
         let out = preprocess(
             b"#define A 1\nint x = A;\n",
             "x.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7610,6 +7718,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7645,6 +7755,8 @@ n\
         let _ = preprocess(
             b"int x;",
             "x.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7734,6 +7846,8 @@ n\
         let out = preprocess(
             b"#define FOO 1 + \\\n  2\n#error boom\n",
             "cont.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7871,6 +7985,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -7904,6 +8020,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -7931,6 +8049,8 @@ n\
               int x = 2;\n\
               #endif\n",
             "elifndef.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -7967,6 +8087,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -7997,6 +8119,8 @@ n\
               int x = 3;\n\
               #endif\n",
             "elifdef-else.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8037,6 +8161,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8066,6 +8192,8 @@ n\
               int x = 0;\n\
               #endif\n",
             "predef-if.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8099,6 +8227,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -8125,6 +8255,8 @@ n\
               int x = 2;\n\
               #endif\n",
             "endian-c11.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8342,6 +8474,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -8411,6 +8545,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -8437,6 +8573,8 @@ n\
               int x = 2;\n\
               #endif\n",
             "has-cattr-miss.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8506,6 +8644,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8535,6 +8675,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8561,6 +8703,8 @@ n\
               int x = 2;\n\
               #endif\n",
             "has-builtin-miss.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8628,6 +8772,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8660,6 +8806,8 @@ n\
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8679,6 +8827,8 @@ n\
         let out = preprocess(
             b"int a;\n#error boom\nint b;\n",
             "err.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8725,6 +8875,8 @@ n\
             &[],
             &[dir.join("a"), dir.join("b")],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8761,6 +8913,8 @@ n\
         let out = preprocess(
             src.as_bytes(),
             "depth-limit.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -8915,6 +9069,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -8968,6 +9124,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9005,6 +9163,8 @@ int ok = 1;\n";
              #warning after system_header\n\
              int x;\n",
             "sys-header.h",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9061,6 +9221,8 @@ int ok = 1;\n";
         let out = preprocess(
             src_text.as_bytes(),
             &src_path.to_string_lossy(),
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9202,6 +9364,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9305,6 +9469,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9361,6 +9527,8 @@ int ok = 1;\n";
             &[],
             &[dir.join("b")], // -isystem dir/b
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9402,6 +9570,8 @@ int ok = 1;\n";
         let out = preprocess(
             &fs::read(&src).unwrap(),
             src.to_str().unwrap(),
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9566,6 +9736,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9608,6 +9780,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9639,6 +9813,8 @@ int ok = 1;\n";
              int b = bar;\n\
              int c = baz;\n",
             "poison-multi.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9675,6 +9851,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9704,6 +9882,8 @@ int ok = 1;\n";
             b"int x = printf(\"ok\");\n\
              #pragma GCC poison printf\n",
             "poison-order.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9738,6 +9918,8 @@ int ok = 1;\n";
             b"#pragma GCC diagnostic ignored \"-Wwarning\"\n\
              #warning this should be suppressed\n",
             "diag-ign.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9777,6 +9959,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9807,6 +9991,8 @@ int ok = 1;\n";
             b"#pragma GCC diagnostic error \"-Wwarning\"\n\
              #warning this should be error\n",
             "diag-error.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9847,6 +10033,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9876,6 +10064,8 @@ int ok = 1;\n";
             b"_Pragma(\"GCC poison myident\")\n\
              int x = myident;\n",
             "pragma-op-poison.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9911,6 +10101,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9936,6 +10128,8 @@ int ok = 1;\n";
             b"_Pragma(\"weak my_weak_sym\")\n\
              int my_weak_sym = 42;\n",
             "pragma-op-weak.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -9967,6 +10161,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -9991,6 +10187,8 @@ int ok = 1;\n";
             b"#define F(...) f(0 __VA_OPT__(, __VA_ARGS__))\n\
              F(1, 2);\n",
             "vaopt-nonempty.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -10021,6 +10219,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -10047,6 +10247,8 @@ int ok = 1;\n";
             &[],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -10068,6 +10270,8 @@ int ok = 1;\n";
         let out = preprocess(
             b"#line 50 \"remapped_file.c\"\nint x = __LINE__;\n",
             "line_test.c",
+            &[],
+            &[],
             &[],
             &[],
             &[],
