@@ -769,9 +769,49 @@ impl<'a> CppParser<'a> {
                 self.bump();
                 continue;
             }
-            decls.push(self.parse_decl()?);
+            match self.parse_decl() {
+                Ok(d) => decls.push(d),
+                Err(_) => {
+                    // 容错: 跳过无法解析的顶层构造, 到下一个 ';' 或 '}'
+                    // 使 C++ 前端能处理包含复杂系统头文件的 GCC 构建
+                    self.skip_to_next_toplevel();
+                }
+            }
         }
         Ok(decls)
+    }
+
+    /// 跳过 token 直到下一个顶层声明起点 (';' 或匹配所有括号后)
+    fn skip_to_next_toplevel(&mut self) {
+        let mut depth = 0i32;
+        while let Some(tok) = &self.peek {
+            match tok {
+                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                    self.bump();
+                    return;
+                }
+                CppTok::C(Tok { kind: TokKind::LBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::LParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                    depth += 1;
+                    self.bump();
+                }
+                CppTok::C(Tok { kind: TokKind::RBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::RParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    self.bump();
+                    if depth <= 0 {
+                        return;
+                    }
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
     }
 
     /// 解析一条声明
