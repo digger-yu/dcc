@@ -3283,6 +3283,21 @@ fn percpu_full_support_compiles() {
     assert_eq!(rc, 0, "percpu full runtime check failed");
 }
 
+/// per_cpu_offset() 由内核提供, 编译器层面只需正确支持 per_cpu() 宏展开.
+/// 测试验证: per_cpu_offset() 调用模式、per_cpu() 宏使用 offset 计算.
+#[test]
+#[cfg(unix)]
+fn percpu_offset_compiles() {
+    let src = include_str!("fixtures/c/percpu_offset.c");
+    let (out, obj) = run_object_test("percpu-offset", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "percpu offset compile failed: {stderr}"
+    );
+    let _ = fs::remove_file(obj);
+}
+
 /// __attribute__((section("a" "b"))) 相邻字符串拼接
 #[test]
 fn section_concat_attribute_compiles() {
