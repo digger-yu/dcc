@@ -638,6 +638,42 @@ pub fn preprocess(
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);
     }
+    // C11 <stdnoreturn.h>: noreturn → _Noreturn (C11/C17/C23)
+    // C23 中 noreturn 仍是宏 (非关键字), 映射到 _Noreturn 关键字
+    if !matches!(std_mode, StdMode::C89 | StdMode::Gnu89) {
+        pp.macros.insert(
+            "noreturn".to_string(),
+            MacroDef {
+                params: None,
+                body: "_Noreturn".to_string(),
+                variadic: false,
+            },
+        );
+    }
+    // C11 <stdalign.h>: alignas/alignof 宏 (仅 C11/C17)
+    // C23 中 alignas/alignof 是关键字, 不需要宏定义;
+    // <stdalign.h> 在 C23 中也不应定义它们
+    if matches!(
+        std_mode,
+        StdMode::C11 | StdMode::Gnu11 | StdMode::C17 | StdMode::Gnu17
+    ) {
+        pp.macros.insert(
+            "alignas".to_string(),
+            MacroDef {
+                params: None,
+                body: "_Alignas".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "alignof".to_string(),
+            MacroDef {
+                params: None,
+                body: "_Alignof".to_string(),
+                variadic: false,
+            },
+        );
+    }
     // C23 字节序宏 (C23 7.1.1): 仅 C23 模式定义; 根据 target 字节序设置
     if matches!(std_mode, StdMode::C23 | StdMode::Gnu23) {
         pp.define_builtin("__STDC_ENDIAN_LITTLE__", "1234");

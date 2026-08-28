@@ -19624,3 +19624,43 @@ fn c23_stdc_version_value() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C11 <stdnoreturn.h> noreturn macro and <stdalign.h> macros
+#[test]
+fn c11_stdnoreturn_stdalign_macros() {
+    // Test noreturn macro (works in all C11+ modes)
+    let src = r#"
+noreturn void die(void) { while(1) {} }
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("stdnoreturn-macro", src);
+    assert!(
+        output.status.success(),
+        "noreturn macro should expand to _Noreturn. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C11 <stdalign.h> alignas/alignof macros in C11 mode
+#[test]
+fn c11_stdalign_macros_c11_mode() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-stdalign-c11-{}.c", std::process::id()));
+    fs::write(&src_path, r#"
+#include <stddef.h>
+alignas(16) int aligned_var;
+int align_check = alignof(int);
+int main(void) { return 0; }
+"#).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only", "-std=c11"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "alignas/alignof macros should work in C11 mode. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
