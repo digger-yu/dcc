@@ -19345,3 +19345,45 @@ fn void_ptr_implicit_conversion_syntax_ok() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C89 #line directive: remap line numbers and file names
+#[test]
+fn line_directive_syntax_ok() {
+    let source = include_str!("fixtures/c/line_directive.c");
+    let output = run_syntax_test("line-directive", source);
+    assert!(
+        output.status.success(),
+        "#line directive should be accepted. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GNU range initializer: [first ... last] = val
+#[test]
+fn gnu_range_init_syntax_ok() {
+    let src = r#"
+int a[10] = { [1 ... 5] = 42 };
+int b[8] = { [0 ... 7] = 1 };
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("gnu-range-init", src);
+    assert!(
+        output.status.success(),
+        "GNU range initializer should parse. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GNU range initializer runtime value verification
+#[test]
+fn gnu_range_init_run_returns_zero() {
+    let source = include_str!("fixtures/c/gnu_range_init.c");
+    let (output, exe) = run_compile_and_run("gnu-range-init-run", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "gnu_range_init should return 0, got {rc}");
+}
