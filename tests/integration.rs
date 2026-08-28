@@ -19332,3 +19332,16 @@ fn hex_float_run_returns_zero() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "hex_float should return 0, got {rc}");
 }
+
+/// C89 void* implicit conversion to/from any object pointer type
+/// C89 3.3.16, C99 6.3.2.3: void* is compatible with any pointer
+#[test]
+fn void_ptr_implicit_conversion_syntax_ok() {
+    let source = include_str!("fixtures/c/void_ptr_implicit.c");
+    let output = run_syntax_test("void-ptr-implicit", source);
+    assert!(
+        output.status.success(),
+        "void* implicit conversion should be accepted. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
