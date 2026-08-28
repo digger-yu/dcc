@@ -6528,6 +6528,22 @@ impl<'a> Parser<'a> {
                     })
                 }
             }
+            // __attribute__((...)) 作为独立语句: 跳过属性和后续分号.
+            // GCC 代码中常用 __attribute__((fallthrough)); 标记 switch case 贯穿.
+            TokKind::Ident if self.cur.text == "__attribute__" => {
+                self.skip_attributes();
+                if self.cur.kind == TokKind::Semi {
+                    self.advance();
+                }
+                Some(Stmt::Expr {
+                    e: Expr::Int {
+                        v: 0,
+                        span: sp.clone(),
+                        ty: int_t(),
+                    },
+                    span: sp,
+                })
+            }
             // asm goto 语句；普通 asm 在同 arm 内走 parse_expr
             TokKind::Ident if matches!(self.cur.text.as_str(), "__asm__" | "__asm" | "asm") => {
                 if self.probe_asm_goto() {
@@ -7670,6 +7686,9 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
+            // 局部变量遮蔽 typedef 时不应视为 cast
+            // (如 `int macro = ...; (macro ? ... : 0)` 中 macro 是变量非类型)
+            && !self.locals.contains_key(&self.peek.text)
             && (Self::is_type_specifier_ident(&self.peek.text, &self.typedefs, self.opts.is_c23)
                 || self.peek.text == "__attribute__"
                 || self.peek.text == "__vector_size__"))
