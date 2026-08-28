@@ -955,13 +955,29 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
             // 如果是, 则当前名字是类型名, 应添加 struct 前缀
             let is_type_before_ident = j < len && is_ident_char(bytes[j])
                 && bytes[j] != b'{' && bytes[j] != b';' && bytes[j] != b':';
+            // 检查后面是否是 '[' (数组索引), 如果是, 则当前名字是变量名
+            let is_array_access = j < len && bytes[j] == b'[';
+            // 检查后面是否是 '.' 或 '->' (成员访问的左边), 如果是, 则当前名字是变量名
+            let is_member_lhs = j < len && bytes[j] == b'.';
+            // 检查后面是否是赋值/比较运算符 (变量在表达式中)
+            let is_expr_operator = j < len && (bytes[j] == b'=' || bytes[j] == b'<' 
+                || bytes[j] == b'>' || bytes[j] == b'!' || bytes[j] == b'+'
+                || bytes[j] == b'-' || bytes[j] == b'*' || bytes[j] == b'/'
+                || bytes[j] == b'%' || bytes[j] == b'|' || bytes[j] == b'&'
+                || bytes[j] == b'^' || bytes[j] == b'?' || bytes[j] == b':');
+            // 检查前面是否是 '.' 或 '->' (成员访问), 如果是, 则当前名字是成员名
+            let is_member_access = k > 0 && (result.as_bytes()[k-1] == b'.' 
+                || (k >= 2 && result.as_bytes()[k-1] == b'>' && result.as_bytes()[k-2] == b'-'));
+            // 检查前面是否是 '[' (数组索引内部), 如果是, 则当前名字是变量/表达式
+            let is_inside_brackets = k > 0 && result.as_bytes()[k-1] == b'[';
             
             // 如果后面是标识符 (类型位置), 强制添加 struct 前缀
             if is_type_before_ident && !has_struct_prefix && !is_struct_def {
                 result.push_str("struct ");
             } else if !has_struct_prefix && !is_struct_def && !is_func_call
                 && !is_var_after_ptr && !is_var_after_type && !is_func_arg
-                && !is_after_return
+                && !is_after_return && !is_array_access && !is_expr_operator
+                && !is_member_access && !is_member_lhs && !is_inside_brackets
             {
                 result.push_str("struct ");
             }
@@ -1461,6 +1477,8 @@ fn remove_all_default_args(s: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
     let mut paren_depth = 0i32;
+    // 跟踪每个括号层级是否包含 ';' (for 循环的特征)
+    let mut paren_has_semi: Vec<bool> = Vec::new();
     while i < len {
         // 跳过字符串和注释
         if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
@@ -1468,10 +1486,27 @@ fn remove_all_default_args(s: &str) -> String {
             let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
         }
         // 跟踪括号深度
-        if bytes[i] == b'(' { paren_depth += 1; }
-        if bytes[i] == b')' { paren_depth = (paren_depth - 1).max(0); }
-        // 在括号内, 删除 `= value` 默认参数
-        if paren_depth > 0 && bytes[i] == b'=' {
+        if bytes[i] == b'(' { 
+            paren_depth += 1; 
+            // 预扫描检查括号内是否有 ';' (for 循环的特征)
+            let mut has_semi = false;
+            let mut d = 1i32;
+            let mut k = i + 1;
+            while k < len && d > 0 {
+                if bytes[k] == b'(' { d += 1; }
+                else if bytes[k] == b')' { d -= 1; }
+                else if bytes[k] == b';' && d == 1 { has_semi = true; break; }
+                k += 1;
+            }
+            paren_has_semi.push(has_semi);
+        }
+        if bytes[i] == b')' { 
+            paren_depth = (paren_depth - 1).max(0); 
+            paren_has_semi.pop();
+        }
+        // 在括号内, 删除 `= value` 默认参数 (但不在 for 循环中)
+        let in_for_loop = paren_has_semi.last().copied().unwrap_or(false);
+        if paren_depth > 0 && bytes[i] == b'=' && !in_for_loop {
             // 检查不是 ==, !=, <=, >= (比较/赋值运算符)
             if i + 1 < len && bytes[i+1] == b'=' {
                 result.push_str("==");
