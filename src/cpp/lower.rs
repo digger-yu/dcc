@@ -1287,6 +1287,28 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 }
             }
         }
+        // 在函数参数列表外, 将 Type & 转换为 Type * (引用返回类型)
+        // 检测: 不在括号内, '&' 前面是类型, 后面是换行或标识符 (函数名)
+        if paren_depth == 0 && bytes[i] == b'&' {
+            // 检查不是 &&
+            if i + 1 < len && bytes[i+1] == b'&' {
+                result.push_str("&&");
+                i += 2;
+                continue;
+            }
+            // 检查前面是标识符字符或空格 (类型结束)
+            let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
+            if is_ident_char(prev_char) || prev_char == b'>' || prev_char == b' ' {
+                // 检查后面是否是空白+换行或标识符 (函数名)
+                let j = skip_ws(bytes, i + 1);
+                if j < len && (bytes[j] == b'\n' || bytes[j] == b'\r' || is_ident_char(bytes[j])) {
+                    // 这是引用返回类型, 替换 & 为 *
+                    result.push('*');
+                    i += 1;
+                    continue;
+                }
+            }
+        }
         // 空 {} 处理: 不在此处统一替换, 避免影响函数体中的空块.
         // 空 struct 由 clean_struct_bodies 处理.
 
