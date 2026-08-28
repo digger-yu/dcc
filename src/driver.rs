@@ -1751,6 +1751,26 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             crate::diagnostics::Span::point(&file_name, 0, 0),
         )]
     })?;
+
+    // 判断是否需要链接为可执行文件
+    let output_str = cfg.output.to_string_lossy();
+    let needs_link = !output_str.ends_with(".o")
+        && !output_str.ends_with(".s")
+        && !cfg.emit_asm
+        && !cfg.relocatable;
+
+    // 如果需要链接, 先编译到临时 .o, 再用 host cc 链接
+    let (compile_output, tmp_obj) = if needs_link {
+        let tmp = std::env::temp_dir().join(format!(
+            "dcc-cpp-link-{}-{}.o",
+            std::process::id(),
+            input.file_name().and_then(|n| n.to_str()).unwrap_or("input")
+        ));
+        (tmp.clone(), Some(tmp))
+    } else {
+        (cfg.output.clone(), None)
+    };
+
     let mut cmd = Command::new(&dcc_bin);
     cmd.arg("-c");
     cmd.arg("-fpermissive");
@@ -1775,14 +1795,14 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     if cfg.emit_asm {
         cmd.arg("-S");
     }
-    cmd.arg("-o").arg(&cfg.output);
+    cmd.arg("-o").arg(&compile_output);
     cmd.arg(&tmp);
 
     if cfg.verbose {
         eprintln!(
             "dcc: dcc -c -fpermissive -O{} -o {} {}",
             cfg.opt,
-            cfg.output.display(),
+            compile_output.display(),
             tmp.display()
         );
     }
@@ -1799,12 +1819,53 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if let Some(ref tmp_obj) = tmp_obj {
+            let _ = fs::remove_file(tmp_obj);
+        }
         return Err(vec![Diagnostic::err(
             "E0301",
             format!("dcc C backend failed for {}: {}", file_name, stderr),
             crate::diagnostics::Span::point(&file_name, 0, 0),
         )]);
     }
+
+    // 5. 如果需要链接, 用 host cc 链接临时 .o 到最终可执行文件
+    if let Some(ref tmp_obj) = tmp_obj {
+        let cc = match std::env::var("CC") {
+            Ok(v)
+                if v != std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.to_str().map(String::from))
+                    .unwrap_or_default() =>
+            {
+                v
+            }
+            _ => "cc".to_string(),
+        };
+        let mut link_cmd = Command::new(&cc);
+        link_cmd.arg(tmp_obj).arg("-o").arg(&cfg.output);
+        if cfg.verbose {
+            eprintln!("dcc: host-link: {} -> {}", tmp_obj.display(), cfg.output.display());
+        }
+        let link_out = link_cmd.output().map_err(|e| {
+            let _ = fs::remove_file(tmp_obj);
+            vec![Diagnostic::err(
+                "E0202",
+                format!("cannot invoke {}: {}", cc, e),
+                crate::diagnostics::Span::point(&file_name, 0, 0),
+            )]
+        })?;
+        let _ = fs::remove_file(tmp_obj);
+        if !link_out.status.success() {
+            let stderr = String::from_utf8_lossy(&link_out.stderr);
+            return Err(vec![Diagnostic::err(
+                "E0202",
+                format!("{} link failed: {}", cc, stderr.trim_end()),
+                crate::diagnostics::Span::point(&file_name, 0, 0),
+            )]);
+        }
+    }
+
     eprintln!("dcc: wrote {}", cfg.output.display());
     Ok(())
 }
@@ -2166,14 +2227,28 @@ fn needs_host_cc_link(cfg: &Config) -> bool {
     if cfg.dump_ast {
         return false;
     } // -dump-ast
-    if cfg.inputs.len() != 1 {
-        return false;
-    }
     let out = cfg.output.to_string_lossy();
     if out.ends_with(".o") || out.ends_with(".s") || out.ends_with(".a") || out.ends_with(".so") {
         return false;
     }
+    // 多输入且全部是 .o/.a: 纯链接任务, 委托 host cc
+    if cfg.inputs.len() != 1 && all_inputs_are_objects(&cfg.inputs) {
+        return true;
+    }
+    if cfg.inputs.len() != 1 {
+        return false;
+    }
     true
+}
+
+/// 检查所有输入是否都是目标文件或归档 (.o / .obj / .a)
+fn all_inputs_are_objects(inputs: &[std::path::PathBuf]) -> bool {
+    inputs.iter().all(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e, "o" | "obj" | "a"))
+            .unwrap_or(false)
+    })
 }
 
 /// 委托 host `cc` 做最终链接：dcc 先以 -c 产生临时 .o，再调 cc 链接。
@@ -2188,6 +2263,31 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let whole_archive_libs = cfg.whole_archive_libs.clone();
     let sysroot = cfg.sysroot.clone();
     let verbose = cfg.verbose;
+
+    // 纯链接模式: 所有输入都是 .o/.a, 无需编译, 直接委托 host cc 链接
+    if all_inputs_are_objects(&cfg.inputs) {
+        let input_strs: Vec<String> = cfg.inputs.iter().map(|p| p.display().to_string()).collect();
+        if verbose {
+            eprintln!(
+                "dcc: host-link (pure): {} -> {}",
+                input_strs.join(", "),
+                final_output.display()
+            );
+        }
+        let link_result = link_objects_with_host_cc(
+            &cfg.inputs,
+            &final_output,
+            &link_libs,
+            &whole_archive_libs,
+            sysroot.as_deref(),
+            verbose,
+        );
+        if link_result.is_ok() {
+            eprintln!("dcc: {}", final_output.display());
+        }
+        return link_result;
+    }
+
     let input_name = cfg
         .inputs
         .first()
@@ -2578,6 +2678,73 @@ fn link_with_host_cc(
         vec![Diagnostic::err(
             "E0202",
             format!("cannot invoke {}: {} (set CC= or install gcc)", cc, e),
+            crate::diagnostics::Span::point("", 0, 0),
+        )]
+    })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut msg = format!("{} link failed (exit {:?})", cc, out.status.code());
+        for chunk in [stderr.trim_end(), stdout.trim_end()] {
+            if !chunk.is_empty() {
+                msg.push_str(": ");
+                msg.push_str(chunk);
+            }
+        }
+        return Err(vec![Diagnostic::err(
+            "E0202",
+            msg,
+            crate::diagnostics::Span::point(&output.display().to_string(), 0, 0),
+        )]);
+    }
+    Ok(())
+}
+
+/// 多个 .o/.a 文件纯链接: 委托 host cc 完成链接.
+/// 与 link_with_host_cc 相同逻辑, 但接受多个输入文件.
+fn link_objects_with_host_cc(
+    objects: &[std::path::PathBuf],
+    output: &Path,
+    link_libs: &[String],
+    whole_archive_libs: &[String],
+    sysroot: Option<&Path>,
+    verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    let cc = match std::env::var("CC") {
+        Ok(v)
+            if v != std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from))
+                .unwrap_or_default() =>
+        {
+            v
+        }
+        _ => "cc".to_string(),
+    };
+    let mut cmd = Command::new(&cc);
+    for obj in objects {
+        cmd.arg(obj);
+    }
+    cmd.arg("-o").arg(output);
+    if let Some(sr) = sysroot {
+        cmd.arg(format!("--sysroot={}", sr.display()));
+    }
+    for lib in link_libs {
+        if whole_archive_libs.contains(lib) {
+            cmd.arg("-Wl,--whole-archive");
+        }
+        cmd.arg(format!("-l{}", lib));
+        if whole_archive_libs.contains(lib) {
+            cmd.arg("-Wl,--no-whole-archive");
+        }
+    }
+    if verbose {
+        eprintln!("dcc: invoking {}: {:?}", cc, cmd);
+    }
+    let out = cmd.output().map_err(|e| {
+        vec![Diagnostic::err(
+            "E0202",
+            format!("cannot invoke {}: {}", cc, e),
             crate::diagnostics::Span::point("", 0, 0),
         )]
     })?;

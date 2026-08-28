@@ -2035,6 +2035,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 }
                 std::process::exit(0);
             }
+            // --print-prog-name (无参数, configure 探测用)
+            "--print-prog-name" => {
+                std::process::exit(0);
+            }
             "-print-prog-name" => {
                 // -print-prog-name <name> (两参数形式)
                 i += 1;
@@ -2115,7 +2119,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         let all_sources = inputs.iter().all(is_source);
         let all_objects = inputs
             .iter()
-            .all(|p| p.extension().and_then(|e| e.to_str()) == Some("o"));
+            .all(|p| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("o") | Some("a") | Some("obj")
+                )
+            });
         if all_sources && (relocatable || emit_asm || preprocess_only || syntax_only) {
             // Multi-file -c/-S/-E/-fsyntax-only: allowed, each file
             // compiled independently. -o is forbidden with multiple inputs.
@@ -2128,11 +2137,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                  compile each with -c, then link with gcc(1) or dcc -r",
             ));
         } else if all_objects {
-            // 所有输入是 .o 文件, 自动启用内置链接器
-            built_link = true;
-            if cfg!(debug_assertions) && verbose {
-                eprintln!("dcc: auto-enabling built-in linker for .o inputs");
-            }
+            // 所有输入是 .o/.a 文件: 不设置 built_link,
+            // 让 driver 的 needs_host_cc_link 决定是否委托 host cc
+            // (包含 .a 文件时必须走 host cc)
         } else {
             return Err(CliError::new(
                 "mixed input types; compile sources with -c first, then link .o files",
