@@ -249,6 +249,24 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
     }
     let first = c.chars().next().unwrap();
     match first {
+        // '%' 前缀: 可交换操作数标记, 跳过前缀解析剩余部分
+        '%' => {
+            let rest = &c[1..];
+            if rest.is_empty() {
+                return ConstraintKind::Other;
+            }
+            // 递归解析去掉 '%' 后的约束
+            parse_single_constraint(rest)
+        }
+        // '&' 前缀: early-clobber 标记, 跳过前缀解析剩余部分
+        '&' => {
+            let rest = &c[1..];
+            if rest.is_empty() {
+                return ConstraintKind::Other;
+            }
+            // 递归解析去掉 '&' 后的约束
+            parse_single_constraint(rest)
+        }
         '=' => {
             let rest = &c[1..];
             match rest.chars().next() {
@@ -521,6 +539,90 @@ fn alloc_reg(pool: &ArchRegPool, used: &[u8]) -> Option<AllocReg> {
 // 增强版模板替换
 // ---------------------------------------------------------------------------
 
+/// 解析标签后的偏移表达式 (支持复杂表达式)
+///
+/// 支持的形式:
+/// - `+N` / `-N` (十进制/十六进制数字)
+/// - `+symbol` / `-symbol` (标识符)
+/// - `+(expr)` / `-(expr)` (括号表达式)
+/// - 链式运算: `+a-b+0x10`
+///
+/// 返回解析后的新位置索引。
+fn parse_label_offset_expr(
+    chars: &[char],
+    mut pos: usize,
+    result: &mut String,
+) -> usize {
+    let len = chars.len();
+    while pos < len && (chars[pos] == '+' || chars[pos] == '-') {
+        let sign = chars[pos] as char;
+        result.push(sign);
+        pos += 1;
+        if pos >= len {
+            break;
+        }
+        // 括号表达式: +(expr)
+        if chars[pos] == '(' {
+            result.push('(');
+            pos += 1;
+            let mut depth = 1;
+            while pos < len && depth > 0 {
+                if chars[pos] == '(' {
+                    depth += 1;
+                } else if chars[pos] == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        result.push(')');
+                        pos += 1;
+                        break;
+                    }
+                }
+                result.push(chars[pos]);
+                pos += 1;
+            }
+            continue;
+        }
+        // 数字 (十进制或十六进制 0x...)
+        if chars[pos].is_ascii_digit() {
+            let start = pos;
+            // 检查是否是 0x 前缀
+            if chars[pos] == '0' && pos + 1 < len
+                && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
+            {
+                pos += 2;
+                while pos < len && chars[pos].is_ascii_hexdigit() {
+                    pos += 1;
+                }
+            } else {
+                while pos < len && chars[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+            }
+            let num: String = chars[start..pos].iter().collect();
+            result.push_str(&num);
+            continue;
+        }
+        // 标识符 (符号名)
+        if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' || chars[pos] == '.' {
+            let start = pos;
+            while pos < len
+                && (chars[pos].is_ascii_alphanumeric()
+                    || chars[pos] == '_'
+                    || chars[pos] == '.')
+            {
+                pos += 1;
+            }
+            let ident: String = chars[start..pos].iter().collect();
+            result.push_str(&ident);
+            continue;
+        }
+        // 无法识别的字符, 停止解析
+        // 回滚 sign 字符 (已经推入 result)
+        break;
+    }
+    pos
+}
+
 /// 架构类型 (用于选择寄存器名格式和修饰符语义)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AsmArch {
@@ -598,28 +700,10 @@ pub fn resolve_asm_template_enhanced(
                                 .unwrap_or_else(|| name.clone());
                             result.push_str(&resolved);
                             let mut new_i = i + 3 + end + 1;
-                            // Support label+offset: %l[name]+N or %l[name]-N
-                            if new_i < chars.len()
-                                && (chars[new_i] == '+' || chars[new_i] == '-')
-                            {
-                                let sign = chars[new_i] as char;
-                                new_i += 1;
-                                let off_start = new_i;
-                                // Skip decimal or hex digits (e.g. 0x10)
-                                while new_i < chars.len()
-                                    && (chars[new_i].is_ascii_digit()
-                                        || chars[new_i] == 'x'
-                                        || chars[new_i] == 'X')
-                                {
-                                    new_i += 1;
-                                }
-                                let offset: String =
-                                    chars[off_start..new_i].iter().collect();
-                                if !offset.is_empty() {
-                                    result.push(sign);
-                                    result.push_str(&offset);
-                                }
-                            }
+                            // Support complex label expressions: %l[name]±offset
+                            new_i = parse_label_offset_expr(
+                                &chars, new_i, &mut result,
+                            );
                             i = new_i;
                         } else {
                             result.push(chars[i]);
@@ -641,23 +725,10 @@ pub fn resolve_asm_template_enhanced(
                             }
                         }
                         let mut new_i = num_end;
-                        // Support label+offset: %lN+M or %lN-M
-                        if new_i < chars.len()
-                            && (chars[new_i] == '+' || chars[new_i] == '-')
-                        {
-                            let sign = chars[new_i] as char;
-                            new_i += 1;
-                            let off_start = new_i;
-                            while new_i < chars.len() && chars[new_i].is_ascii_digit() {
-                                new_i += 1;
-                            }
-                            let offset: String =
-                                chars[off_start..new_i].iter().collect();
-                            if !offset.is_empty() {
-                                result.push(sign);
-                                result.push_str(&offset);
-                            }
-                        }
+                        // Support complex label expressions: %lN±offset
+                        new_i = parse_label_offset_expr(
+                            &chars, new_i, &mut result,
+                        );
                         i = new_i;
                     } else {
                         result.push(chars[i]);
@@ -1245,5 +1316,131 @@ mod tests {
         assert_eq!(ops.len(), 1);
         // 'q' has no fixed_reg, so it gets first available from pool
         assert!(ops[0].reg.is_some());
+    }
+
+    // --- Early-clobber (&) and commutative (%) prefix tests ---
+
+    #[test]
+    fn parse_early_clobber_output() {
+        // "=&r" → early-clobber output register
+        assert_eq!(parse_single_constraint("=&r"), ConstraintKind::OutputReg);
+    }
+
+    #[test]
+    fn parse_early_clobber_bare() {
+        // "&" alone → Other (no constraint letter after prefix)
+        assert_eq!(parse_single_constraint("&"), ConstraintKind::Other);
+    }
+
+    #[test]
+    fn parse_commutative_prefix() {
+        // "%0" → commutative + matched constraint
+        assert_eq!(parse_single_constraint("%0"), ConstraintKind::Matched(0));
+    }
+
+    #[test]
+    fn parse_commutative_with_reg() {
+        // "%r" → commutative + input register
+        assert_eq!(parse_single_constraint("%r"), ConstraintKind::InputReg);
+    }
+
+    #[test]
+    fn parse_early_clobber_inout() {
+        // "&+r" → early-clobber + inout register
+        assert_eq!(parse_single_constraint("&+r"), ConstraintKind::InOutReg);
+    }
+
+    #[test]
+    fn validate_early_clobber_accepted() {
+        assert!(validate_constraint("=&r").is_none());
+        assert!(validate_constraint("=&m").is_none());
+    }
+
+    #[test]
+    fn validate_commutative_accepted() {
+        assert!(validate_constraint("%r").is_none());
+        assert!(validate_constraint("%0").is_none());
+    }
+
+    // --- Complex asm goto label expression tests ---
+
+    #[test]
+    fn label_expr_hex_offset() {
+        // %l0+0x10 → label + hex offset
+        let goto_labels = vec![("out".to_string(), ".Lgoto0".to_string())];
+        let result = resolve_asm_template_enhanced(
+            "\"jmp %l0+0x10\"",
+            &[],
+            &[],
+            &[],
+            &goto_labels,
+            AsmArch::AArch64,
+            false,
+        );
+        assert!(result.contains(".Lgoto0+0x10"));
+    }
+
+    #[test]
+    fn label_expr_symbol_offset() {
+        // %l[label]+my_symbol → label + symbol offset
+        let goto_labels = vec![("done".to_string(), ".Lgoto_done".to_string())];
+        let result = resolve_asm_template_enhanced(
+            "\"lea %l[done]+my_offset(%rip), %rax\"",
+            &[],
+            &[],
+            &[],
+            &goto_labels,
+            AsmArch::AArch64,
+            false,
+        );
+        assert!(result.contains(".Lgoto_done+my_offset"));
+    }
+
+    #[test]
+    fn label_expr_chained_arithmetic() {
+        // %l0+8-4 → label + chained arithmetic
+        let goto_labels = vec![("err".to_string(), ".Lgoto_err".to_string())];
+        let result = resolve_asm_template_enhanced(
+            "\"jmp %l0+8-4\"",
+            &[],
+            &[],
+            &[],
+            &goto_labels,
+            AsmArch::AArch64,
+            false,
+        );
+        assert!(result.contains(".Lgoto_err+8-4"));
+    }
+
+    #[test]
+    fn label_expr_parenthesized() {
+        // %l[label]+(a+b) → label + parenthesized expression
+        let goto_labels = vec![("target".to_string(), ".Ltgt".to_string())];
+        let result = resolve_asm_template_enhanced(
+            "\"jmp %l[target]+(base+off)\"",
+            &[],
+            &[],
+            &[],
+            &goto_labels,
+            AsmArch::AArch64,
+            false,
+        );
+        assert!(result.contains(".Ltgt+(base+off)"));
+    }
+
+    #[test]
+    fn label_expr_named_decimal_offset() {
+        // %l[name]+16 → named label + decimal offset
+        let goto_labels = vec![("skip".to_string(), ".Lskip".to_string())];
+        let result = resolve_asm_template_enhanced(
+            "\"jmp %l[skip]+16\"",
+            &[],
+            &[],
+            &[],
+            &goto_labels,
+            AsmArch::AArch64,
+            false,
+        );
+        assert!(result.contains(".Lskip+16"));
     }
 }
