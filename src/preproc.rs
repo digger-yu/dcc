@@ -633,7 +633,7 @@ pub fn preprocess(
         StdMode::C99 | StdMode::Gnu99 => Some("199901"),
         StdMode::C11 | StdMode::Gnu11 => Some("201112"),
         StdMode::C17 | StdMode::Gnu17 => Some("201710"),
-        StdMode::C23 | StdMode::Gnu23 => Some("202311"),
+        StdMode::C23 | StdMode::Gnu23 => Some("202312L"),
     };
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);

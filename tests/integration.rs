@@ -19612,3 +19612,15 @@ int main(void) { return 0; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 __STDC_VERSION__ must be 202312L per ISO C23 standard
+#[test]
+fn c23_stdc_version_value() {
+    let src = include_str!("fixtures/c/c23_stdc_version.c");
+    let output = run_syntax_test("c23-stdc-version", src);
+    assert!(
+        output.status.success(),
+        "__STDC_VERSION__ should be 202312L. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
