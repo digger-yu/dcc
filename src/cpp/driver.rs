@@ -17,13 +17,27 @@ use crate::cpp::parser::CppParser;
 use crate::cpp::CppError;
 
 /// M11 stdlib 默认 include 路径 (含本 crate 的 stdlib/headers)
+/// 搜索顺序: CWD 相对路径 → 二进制位置相对路径 (支持从任意目录运行 dcc)
 pub fn default_stdlib_include() -> Option<PathBuf> {
+    // 1. CWD 相对 (开发时 cargo run / 测试)
     let p = PathBuf::from("src/cpp/stdlib/headers");
     if p.is_dir() {
-        Some(p)
-    } else {
-        None
+        return Some(p);
     }
+    // 2. 相对于二进制位置 (release 安装后从任意目录调用)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            // target/release/dcc → ../../.. 回到项目根
+            for ancestor in [bin_dir, bin_dir.parent().unwrap_or(bin_dir),
+                             bin_dir.parent().and_then(|p| p.parent()).unwrap_or(bin_dir)] {
+                let candidate = ancestor.join("src/cpp/stdlib/headers");
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 编译 C++ 源到 .o

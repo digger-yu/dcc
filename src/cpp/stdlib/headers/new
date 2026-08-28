@@ -1,0 +1,15 @@
+// <new> - dcc++ C++ 标准库 stub
+// GCC libcpp system.h includes <new> for operator new declarations.
+// This stub provides minimal declarations to satisfy the include.
+
+#ifndef _DCCPP_STUB_NEW
+#define _DCCPP_STUB_NEW
+
+#include <stddef.h>
+
+namespace std {
+    struct nothrow_t {};
+    typedef void (*new_handler)();
+}
+
+#endif // _DCCPP_STUB_NEW

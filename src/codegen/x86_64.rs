@@ -13663,8 +13663,25 @@ impl Codegen {
                 true
             }
             // __builtin_strcpy/__builtin_strncpy/__builtin_strcmp 等
-            "__builtin_strcpy" | "__builtin_strncpy" | "__builtin_strcmp" | "__builtin_strlen" => {
+            "__builtin_strcpy" | "__builtin_strncpy" | "__builtin_strcmp" | "__builtin_strlen"
+            | "__builtin_strchr" | "__builtin_strrchr"
+            | "__builtin_strstr" | "__builtin_strpbrk" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_index / __builtin_rindex: BSD 别名, 分别转发到 strchr / strrchr.
+            "__builtin_index" | "__builtin_rindex" => {
+                let libc_name = if name == "__builtin_index" { "strchr" } else { "strrchr" };
                 let ar = [7u8, 6, 2, 1, 8, 9];
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);

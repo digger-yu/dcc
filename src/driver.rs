@@ -1658,41 +1658,64 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     emit_preproc_warnings(&pp_diags);
 
     // 2. C++ lex + parse + lower
+    //    当 CppParser 失败或有错误时, 回退到“预处理 + strip C++ 关键字 → C 后端”
+    //    直通模式. 此外, 当源文件本身不含 C++ 关键字 (class/template/namespace)
+    //    时也使用直通模式, 以避免系统头文件中的类型定义在 lower 过程中丢失.
+    let src_has_cpp = {
+        let raw = String::from_utf8_lossy(&src);
+        raw.contains("class ") || raw.contains("template") || raw.contains("namespace ")
+            || raw.contains("try {") || raw.contains("throw ")
+    };
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
-    let decls = parser
-        .parse_top_level()
-        .map_err(|e| vec![e.to_diag(&file_name)])?;
-    // M26.4: 解析 import / export module, 加载 BMF 模块接口 (跨 TU import)
-    let mut search_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(p) = input.parent() {
-        search_dirs.push(p.to_path_buf());
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        if !search_dirs.contains(&cwd) {
-            search_dirs.push(cwd);
+    let (decls, c_src, module_bmf) = match parser.parse_top_level() {
+        Ok(ref decls) if src_has_cpp
+            && !parser.diags.iter().any(|d| matches!(d.sev, Severity::Error)) =>
+        {
+            let mut search_dirs: Vec<PathBuf> = Vec::new();
+            if let Some(p) = input.parent() {
+                search_dirs.push(p.to_path_buf());
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                if !search_dirs.contains(&cwd) {
+                    search_dirs.push(cwd);
+                }
+            }
+            search_dirs.extend(cfg.include_paths.iter().cloned());
+            search_dirs.extend(cfg.system_paths.iter().cloned());
+            let imported = crate::cpp::modules::load_imported_modules(&decls, &search_dirs);
+            let mut lower = Lower::new();
+            lower.imported_modules = imported;
+            lower.lower_decls(&decls);
+            if let Some(msg) = lower.odr_check() {
+                return Err(vec![Diagnostic::err(
+                    "E0103",
+                    msg,
+                    crate::diagnostics::Span::point(&file_name, 0, 0),
+                )]);
+            }
+            let module_bmf = lower.module_bmf();
+            (Some(decls.clone()), lower.finish(), module_bmf)
         }
-    }
-    search_dirs.extend(cfg.include_paths.iter().cloned());
-    search_dirs.extend(cfg.system_paths.iter().cloned());
-    let imported = crate::cpp::modules::load_imported_modules(&decls, &search_dirs);
-    let mut lower = Lower::new();
-    lower.imported_modules = imported;
-    lower.lower_decls(&decls);
-    // M26.4: export module 时生成 BMF 文本 (--emit-module-file 写出)
-    let module_bmf = lower.module_bmf();
-    // M26.5: 跨 TU ODR 检查 - 本模块导出与导入模块导出同名不同定义即报错
-    if let Some(msg) = lower.odr_check() {
-        return Err(vec![Diagnostic::err(
-            "E0103",
-            msg,
-            crate::diagnostics::Span::point(&file_name, 0, 0),
-        )]);
-    }
-    let c_src = lower.finish();
+        Err(_) | Ok(_) => {
+            // Fallback: C++ parser 失败或解析中有错误,
+            // 预处理文本 → strip C++ 关键字 → 直接交 C 后端
+            if cfg.verbose {
+                eprintln!(
+                    "dcc: C++ parser had errors, falling back to strip-keywords mode"
+                );
+            }
+            let stripped = crate::cpp::lower::strip_cpp_keywords(&pp_out.text);
+            (None, stripped, None)
+        }
+    };
 
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {
-        println!("{:#?}", decls);
+        if let Some(ref d) = decls {
+            println!("{:#?}", d);
+        } else {
+            eprintln!("dcc: no AST available (fallback mode)");
+        }
         return Ok(());
     }
 
