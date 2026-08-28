@@ -18799,6 +18799,70 @@ impl Codegen {
                 }
                 true
             }
+            ".incbin" => {
+                // .incbin "file" [, skip [, count]]
+                // 将文件二进制内容嵌入当前节
+                if self.emit_asm_text {
+                    // 文本模式: 保留为 .s 输出行
+                    self.asm_directives_at
+                        .push((self.pos(), t.to_string()));
+                    self.asm_directives.push(t.to_string());
+                } else {
+                    let args_str = t[".incbin".len()..].trim();
+                    let filename = Self::parse_asm_quoted_string(args_str);
+                    if !filename.is_empty() {
+                        // 解析可选的 skip 和 count 参数
+                        let after_quote = args_str
+                            .find('"')
+                            .and_then(|p| args_str[p + 1..].find('"'))
+                            .map(|p| p + 1)
+                            .unwrap_or(0);
+                        let rest = if after_quote < args_str.len() {
+                            &args_str[after_quote + 1..]
+                        } else {
+                            ""
+                        };
+                        let params: Vec<&str> = rest
+                            .split(',')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let skip = params
+                            .first()
+                            .and_then(|s| {
+                                let s = s.trim_end_matches(',');
+                                if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                                    usize::from_str_radix(hex, 16).ok()
+                                } else {
+                                    s.parse().ok()
+                                }
+                            })
+                            .unwrap_or(0);
+                        let count: Option<usize> = params
+                            .get(1)
+                            .and_then(|s| {
+                                let s = s.trim_end_matches(',');
+                                if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                                    usize::from_str_radix(hex, 16).ok()
+                                } else {
+                                    s.parse().ok()
+                                }
+                            });
+                        // 读取文件并嵌入
+                        if let Ok(data) = std::fs::read(&filename) {
+                            let start = skip.min(data.len());
+                            let end = match count {
+                                Some(c) => (start + c).min(data.len()),
+                                None => data.len(),
+                            };
+                            if start < data.len() {
+                                self.emit(&data[start..end]);
+                            }
+                        }
+                    }
+                }
+                true
+            }
             _ => t.starts_with('.'),
         }
     }
