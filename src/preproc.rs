@@ -4226,11 +4226,13 @@ impl Preprocessor {
                 }
 
                 // __has_attribute(xxx) / __has_builtin(xxx) / __has_feature(xxx)
+                // __has_extension(xxx): Clang 兼容, 等价 __has_feature 但含标准基线
                 // __has_c_attribute(xxx): C23 属性检测
                 // __has_cpp_attribute(xxx): C++20 属性检测
                 if ident == "__has_attribute"
                     || ident == "__has_builtin"
                     || ident == "__has_feature"
+                    || ident == "__has_extension"
                     || ident == "__has_c_attribute"
                     || ident == "__has_cpp_attribute"
                 {
@@ -4275,6 +4277,15 @@ impl Preprocessor {
                                 "0"
                             }
                         } else if ident == "__has_feature" {
+                            if Self::is_known_feature(&arg) {
+                                "1"
+                            } else {
+                                "0"
+                            }
+                        } else if ident == "__has_extension" {
+                            // Clang 语义: __has_extension 等价于 __has_feature
+                            // 但额外包含已成为标准基线的特性. 对 dcc 而言
+                            // 两者委托同一检测函数即可.
                             if Self::is_known_feature(&arg) {
                                 "1"
                             } else {
@@ -5813,7 +5824,7 @@ impl Preprocessor {
 
     // ===== __has_* 特殊宏求值 (在宏展开之前执行) =====
     /// 替换 __has_include/__has_include_next/__has_attribute/__has_builtin/
-    /// __has_feature/__has_embed/__has_c_attribute 为实际值
+    /// __has_feature/__has_extension/__has_embed/__has_c_attribute 为实际值
     fn replace_has_macros(&self, expr: &str) -> String {
         let mut result = expr.to_string();
         result = self.replace_has_include(&result);
@@ -5824,6 +5835,7 @@ impl Preprocessor {
             self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
         result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
         result = self.replace_has_attr_like(&result, "__has_feature", Self::is_known_feature);
+        result = self.replace_has_attr_like(&result, "__has_extension", Self::is_known_feature);
         result = self.replace_has_cpp_attribute(&result);
         result
     }

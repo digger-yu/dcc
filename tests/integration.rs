@@ -11649,6 +11649,20 @@ fn c23_alignas() {
 }
 
 #[test]
+fn has_extension_macro() {
+    // __has_extension: Clang 兼容特性检测宏
+    let src = include_str!("fixtures/c/has_extension.c");
+    let (out, exe) = run_compile_and_run("has-extension", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "has_extension: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
 #[cfg(unix)]
 fn c23_bool() {
     let src = include_str!("fixtures/c/c23_bool.c");
