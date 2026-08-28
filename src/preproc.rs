@@ -143,6 +143,9 @@ pub struct Preprocessor {
     /// #pragma GCC poison: 被禁用的标识符集合.
     /// 后续预处理中遇到这些标识符时发出错误 (系统头文件中豁免).
     poisoned_ids: HashSet<String>,
+    /// #line 行号重映射: (触发物理行号, 重映射后的行号, 可选文件名)
+    /// 在 __LINE__ 展开时查找最近的映射, 计算偏移后的行号
+    line_remapping: Vec<(u32, u32, Option<String>)>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -536,6 +539,7 @@ pub fn preprocess(
         include_level: 0,
         poisoned_ids: HashSet::new(),
         asm_mode: file.ends_with(".S") || file.ends_with(".s"),
+        line_remapping: Vec::new(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -2306,8 +2310,14 @@ impl Preprocessor {
             }
         } else if directive.starts_with("embed") && self.is_active() {
             self.do_embed(directive[5..].trim(), line_no);
+        } else if let Some(rest) = directive.strip_prefix("line") {
+            // #line number ["filename"]
+            // C99 6.10.4: 重映射行号和文件名
+            if self.is_active() {
+                self.handle_line_directive(rest.trim(), line_no);
+            }
         }
-        // 忽略未知指令 (line markers 等)
+        // 忽略未知指令
     }
 
     fn do_define(&mut self, rest: &str) {
@@ -3015,6 +3025,72 @@ impl Preprocessor {
         }
     }
 
+    /// 处理 #line 指令: 重映射行号和文件名
+    /// 语法: #line number ["filename"]
+    /// C99 6.10.4: 后续行的行号从 number 开始，文件名变为 filename (若提供)
+    fn handle_line_directive(&mut self, rest: &str, line_no: u32) {
+        let rest = rest.trim();
+        // 解析行号
+        let mut parts = rest.splitn(2, |c: char| c.is_whitespace());
+        let num_str = parts.next().unwrap_or("");
+        match num_str.parse::<u32>() {
+            Ok(n) => {
+                if n == 0 {
+                    self.diags.push(self.err_at(
+                        "E0203",
+                        "#line number must be positive".to_string(),
+                        line_no,
+                    ));
+                    return;
+                }
+                // 记录行号重映射: 从下一行开始, 行号变为 n
+                // line_no 是当前 #line 指令所在的物理行
+                // 下一行的物理行号是 line_no + 1, 其逻辑行号应为 n
+                let filename = {
+                    let remainder = parts.next().unwrap_or("").trim();
+                    if let Some(stripped) = remainder.strip_prefix('"') {
+                        if let Some(end) = stripped.find('"') {
+                            let f = stripped[..end].to_string();
+                            self.file = f.clone();
+                            Some(f)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                // 记录重映射: (触发物理行号, 重映射后的行号, 可选文件名)
+                // 对于物理行 line_no + 1, 其逻辑行号为 n
+                self.line_remapping.push((line_no, n, filename));
+                // 同时更新 cur_line 以保持 __LINE__ 在非展开路径的一致性
+                self.cur_line = n.saturating_sub(1);
+            }
+            Err(_) => {
+                self.diags.push(self.err_at(
+                    "E0203",
+                    format!("invalid #line argument: {}", num_str),
+                    line_no,
+                ));
+            }
+        }
+    }
+
+    /// 应用 #line 行号重映射: 给定物理行号, 返回重映射后的逻辑行号
+    /// 查找最近的 #line 指令, 计算偏移: 逻辑行号 = 重映射行号 + (物理行号 - 触发行号 - 1)
+    fn apply_line_remapping(&self, phys_line: u32) -> u32 {
+        // 从后向前查找第一个触发行号 < phys_line 的重映射
+        for &(trigger_line, mapped_line, _) in self.line_remapping.iter().rev() {
+            if phys_line > trigger_line {
+                // 计算偏移: 物理行号与触发行号的差值
+                let offset = phys_line - trigger_line - 1;
+                return mapped_line + offset;
+            }
+        }
+        // 没有重映射, 返回原始物理行号
+        phys_line
+    }
+
     /// 处理 #pragma pack() / pack(n) / pack(push[,n]) / pack(pop[,n])
     ///
     /// 栈顶元素代表当前生效的 packing 对齐 (None=默认 8)。
@@ -3599,7 +3675,10 @@ impl Preprocessor {
                     continue;
                 }
                 if ident == "__LINE__" {
-                    out.push_str(&map.line(nl).to_string());
+                    // 应用 #line 重映射
+                    let phys_line = map.line(nl);
+                    let remapped = self.apply_line_remapping(phys_line);
+                    out.push_str(&remapped.to_string());
                     continue;
                 }
                 if ident == "__DATE__" {
@@ -9956,6 +10035,60 @@ int ok = 1;\n";
             out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),
             "nested __VA_OPT__ should expand, output: {}",
             out.text
+        );
+    }
+
+    /// #line directive: remap line number
+    #[test]
+    fn line_directive_remap_line_number() {
+        let out = preprocess(
+            b"#line 100\nint x = __LINE__;\n",
+            "line_test.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        // __LINE__ should be expanded to 100 (the remapped line number)
+        assert!(out.text.contains("100"), "output: {}", out.text);
+    }
+
+    /// #line directive: remap line number and filename
+    #[test]
+    fn line_directive_remap_filename() {
+        let out = preprocess(
+            b"#line 50 \"remapped_file.c\"\nint x = __LINE__;\n",
+            "line_test.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        // __LINE__ should be 50
+        assert!(out.text.contains("50"), "output: {}", out.text);
+        // line_map should reference the remapped filename
+        assert!(
+            out.line_map.iter().any(|s| s.file == "remapped_file.c"),
+            "line_map should contain remapped_file.c, line_map: {:?}",
+            out.line_map
         );
     }
 }
