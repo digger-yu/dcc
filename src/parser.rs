@@ -114,6 +114,9 @@ pub struct ParseOptions {
     pub cx_limited_range: bool,
     /// `-fshort-wchar`: wchar_t 为 2 字节 (UTF-16LE), 而非默认 4 字节 (UTF-32LE)
     pub short_wchar: bool,
+    /// LP64 数据模型 (64-bit long/pointer): x86_64/AArch64/RISC-V 64/MIPS64.
+    /// 供编译器内置 typedef (size_t/ptrdiff_t 等) 选择正确底层类型.
+    pub is_lp64: bool,
 }
 
 impl ParsedAttrs {
@@ -324,6 +327,23 @@ impl<'a> Parser<'a> {
         // types_compatible 允许兼容重定义, 不会报错.
         p.typedefs
             .insert("nullptr_t".to_string(), Type::Ptr(Box::new(Type::Void.into())));
+        // 编译器内置 typedef: size_t/ptrdiff_t/intptr_t/uintptr_t.
+        // GCC/Clang 在编译器层提供这些类型, 不依赖系统头文件.
+        // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
+        // is_integer_typedef 允许整型别名覆盖, 不会报错.
+        if p.opts.is_lp64 {
+            // LP64: long = 64-bit, size_t = unsigned long
+            p.typedefs.insert("size_t".to_string(), Type::ULong);
+            p.typedefs.insert("ptrdiff_t".to_string(), Type::Long);
+            p.typedefs.insert("intptr_t".to_string(), Type::Long);
+            p.typedefs.insert("uintptr_t".to_string(), Type::ULong);
+        } else {
+            // ILP32: int = 32-bit, size_t = unsigned int
+            p.typedefs.insert("size_t".to_string(), Type::UInt);
+            p.typedefs.insert("ptrdiff_t".to_string(), Type::Int);
+            p.typedefs.insert("intptr_t".to_string(), Type::Int);
+            p.typedefs.insert("uintptr_t".to_string(), Type::UInt);
+        }
         p
     }
     fn advance(&mut self) {

@@ -107,6 +107,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | C11 匿名 struct/union 成员 | 无名字段透明穿透查找, `find_field()` 递归支持; 内核 `struct_group()` 模式兼容 |
 | C23 enum 底层类型 | `enum E : unsigned char { ... }` 完整支持; 所有整数类型说明符 |
 | C23 alignas struct 成员 | `_Alignas(N)` / `alignas(N)` 在 struct 字段上生效, 通过 `field_align` 影响布局 |
+| 编译器内置 typedef | `size_t` / `ptrdiff_t` / `intptr_t` / `uintptr_t` 由编译器直接提供, 无需系统头文件; LP64 目标映射为 `unsigned long` / `long`, ILP32 目标映射为 `unsigned int` / `int`; 系统头重复定义按 `is_integer_typedef` 允许兼容覆盖 |
 | 数字分隔符 | `1'000'000` |
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
 | 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告；`-fmacro-backtrace-limit=N` 可配置深度上限 (默认 128) |

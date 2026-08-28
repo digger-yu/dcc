@@ -548,6 +548,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             fp_contract,
             cx_limited_range,
             short_wchar: cfg.short_wchar,
+            is_lp64: matches!(
+                cfg.target.arch,
+                crate::cli::Arch::X86_64
+                    | crate::cli::Arch::AArch64
+                    | crate::cli::Arch::RiscV64
+                    | crate::cli::Arch::Mips64
+            ),
         },
     );
     drop(preprocessed);

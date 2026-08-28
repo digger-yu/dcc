@@ -11663,6 +11663,21 @@ fn has_extension_macro() {
 }
 
 #[test]
+fn builtin_typedefs_size_ptrdiff() {
+    // 编译器内置 typedef: size_t/ptrdiff_t/intptr_t/uintptr_t
+    // 无需系统头文件, 编译器直接提供
+    let src = include_str!("fixtures/c/builtin_typedefs.c");
+    let (out, exe) = run_compile_and_run("builtin-typedefs", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "builtin_typedefs: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
 #[cfg(unix)]
 fn c23_bool() {
     let src = include_str!("fixtures/c/c23_bool.c");
