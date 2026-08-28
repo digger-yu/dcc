@@ -6283,12 +6283,16 @@ impl Codegen {
                 // 计算switch表达式到rax
                 self.gen_expr(expr, 0);
                 self.push(0); // 保存switch值
+                // 判断 switch 表达式是否有符号类型 (决定范围比较使用
+                // 有符号 jl/jg 还是无符号 jb/ja 跳转指令).
+                let switch_is_signed = match expr.ty() {
+                    Type::Enum(_, _, Some(inner)) => Self::is_signed_int(&inner.base),
+                    ref ty => Self::is_signed_int(ty),
+                };
                 let mut case_bodies: Vec<(&crate::ast::Case, String)> = Vec::new();
                 for case in cases {
                     if let Some(ref val) = case.val {
                         let l_case = self.fresh_label();
-                        // 重新加载switch值到rcx
-                        self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
                         if let Some(ref hi) = case.range_end {
                             // GNU case low ... high: 范围匹配
                             // 保存 low 到临时栈槽, 防止 gen_expr(hi) 求值时
@@ -6297,16 +6301,35 @@ impl Codegen {
                             self.gen_expr(val, 2); // rdx = low
                             self.emit(&[0x48, 0x89, 0x54, 0x24, 0xF8]); // mov [rsp-8], rdx
                             self.gen_expr(hi, 8); // r8 = high
+                            // Bug fix: gen_expr 可能将 rcx 用作临时寄存器,
+                            // 每次比较前从栈上重新加载 switch 值到 rcx.
+                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
                             self.emit(&[0x48, 0x8B, 0x54, 0x24, 0xF8]); // mov rdx, [rsp-8]
                             self.emit(&[0x48, 0x39, 0xD1]); // cmp rcx, rdx
-                            self.jmp_rel32(&l_next, JumpKind::Jl);
+                            // 有符号用 jl (skip if < low), 无符号用 jb
+                            let jk_lo = if switch_is_signed {
+                                JumpKind::Jl
+                            } else {
+                                JumpKind::Jb
+                            };
+                            self.jmp_rel32(&l_next, jk_lo);
+                            // 重新加载 switch 值 (gen_expr(hi) 可能覆写 rcx)
+                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
                             self.emit(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
-                            self.jmp_rel32(&l_next, JumpKind::Jg);
+                            // 有符号用 jg (skip if > high), 无符号用 ja
+                            let jk_hi = if switch_is_signed {
+                                JumpKind::Jg
+                            } else {
+                                JumpKind::Ja
+                            };
+                            self.jmp_rel32(&l_next, jk_hi);
                             self.jmp_rel32(&l_case, JumpKind::Jmp);
                             self.label(&l_next);
                         } else {
                             // case N: 比较 rcx == N, 相等跳 case 体
                             self.gen_expr(val, 2);
+                            // gen_expr 可能覆写 rcx, 比较前重新加载
+                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
                             self.emit(&[0x48, 0x39, 0xD1]);
                             self.jmp_rel32(&l_case, JumpKind::Je);
                         }
@@ -10547,7 +10570,7 @@ impl Codegen {
             self.emit(&[rex, 0xC7, 0xC0 + (reg & 7)]);
             self.emit(&(v as i32).to_le_bytes());
         } else {
-            self.emit(&[0x48 + if reg >= 8 { 0x41 } else { 0 }]);
+            self.emit(&[0x48 + if reg >= 8 { 0x01 } else { 0 }]);
             self.emit(&[0xb8 + (reg & 7)]);
             self.emit(&(v as i64).to_le_bytes());
         }
