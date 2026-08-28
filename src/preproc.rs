@@ -3848,10 +3848,12 @@ impl Preprocessor {
 
                 // __has_attribute(xxx) / __has_builtin(xxx) / __has_feature(xxx)
                 // __has_c_attribute(xxx): C23 属性检测
+                // __has_cpp_attribute(xxx): C++20 属性检测
                 if ident == "__has_attribute"
                     || ident == "__has_builtin"
                     || ident == "__has_feature"
                     || ident == "__has_c_attribute"
+                    || ident == "__has_cpp_attribute"
                 {
                     let mut j = i;
                     while j < len && chars[j].is_whitespace() {
@@ -3885,6 +3887,8 @@ impl Preprocessor {
                             } else {
                                 "0"
                             }
+                        } else if ident == "__has_cpp_attribute" {
+                            Self::cpp_attribute_value(&arg)
                         } else if ident == "__has_builtin" {
                             if Self::is_known_builtin(&arg) {
                                 "1"
@@ -5421,6 +5425,7 @@ impl Preprocessor {
             self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
         result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
         result = self.replace_has_attr_like(&result, "__has_feature", |_| false);
+        result = self.replace_has_cpp_attribute(&result);
         result
     }
 
@@ -5651,6 +5656,58 @@ impl Preprocessor {
         result
     }
 
+    /// 替换 __has_cpp_attribute(name) 为属性版本号
+    /// 与 replace_has_attr_like 类似，但返回属性日期值而非 0/1
+    fn replace_has_cpp_attribute(&self, expr: &str) -> String {
+        let mut result = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let name = b"__has_cpp_attribute";
+        let name_len = name.len();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + name_len <= bytes.len()
+                && &bytes[i..i + name_len] == name
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+                && (i + name_len >= bytes.len()
+                    || !bytes[i + name_len].is_ascii_alphanumeric()
+                        && bytes[i + name_len] != b'_')
+            {
+                let mut j = i + name_len;
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    let arg_start = j;
+                    let mut depth = 1;
+                    while j < bytes.len() && depth > 0 {
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
+                    }
+                    let arg = expr[arg_start..j].trim();
+                    result.push_str(Self::cpp_attribute_value(arg));
+                    if j < bytes.len() {
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
+    }
+
     fn find_has_include(&self, path: &str) -> bool {
         let path = path.trim();
         let abs = Path::new(path);
@@ -5789,6 +5846,24 @@ impl Preprocessor {
                 | "nonnull"
                 | "returns_nonnull"
         )
+    }
+
+    /// C++20 __has_cpp_attribute: 返回属性标准化版本号 (YYYYMML)
+    /// 未知属性返回 "0"
+    fn cpp_attribute_value(attr: &str) -> &'static str {
+        let a = attr.trim().trim_matches('_');
+        match a {
+            "nodiscard" => "201603L",
+            "maybe_unused" => "201603L",
+            "fallthrough" => "201603L",
+            "deprecated" => "201309L",
+            "carries_dependency" => "200809L",
+            "no_unique_address" => "201803L",
+            "likely" => "201803L",
+            "unlikely" => "201803L",
+            "assume" => "202207L",
+            _ => "0",
+        }
     }
 
     fn is_known_builtin(name: &str) -> bool {
@@ -10648,5 +10723,69 @@ int ok = 1;\n";
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         assert!(output.contains("offsetof_zero"), "output: {output}");
+    }
+
+    // ===== __has_cpp_attribute =====
+
+    #[test]
+    fn has_cpp_attribute_known() {
+        let out = preprocess(
+            b"#if __has_cpp_attribute(nodiscard) > 0\n\
+             nodiscard_ok\n\
+             #endif\n\
+             #if __has_cpp_attribute(maybe_unused) > 0\n\
+             maybe_unused_ok\n\
+             #endif\n\
+             #if __has_cpp_attribute(fallthrough) > 0\n\
+             fallthrough_ok\n\
+             #endif\n",
+            "has-cpp-attr.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("nodiscard_ok"), "output: {output}");
+        assert!(output.contains("maybe_unused_ok"), "output: {output}");
+        assert!(output.contains("fallthrough_ok"), "output: {output}");
+    }
+
+    #[test]
+    fn has_cpp_attribute_unknown() {
+        let out = preprocess(
+            b"#if __has_cpp_attribute(nonexistent_attr) == 0\n\
+             unknown_ok\n\
+             #endif\n",
+            "has-cpp-attr-unknown.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("unknown_ok"), "output: {output}");
     }
 }
