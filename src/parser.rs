@@ -6,7 +6,7 @@ use crate::ast::*;
 use crate::const_eval::{self, ConstEvalError};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Lexer, Tok, TokKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// 解析后的 GNU 属性
@@ -80,6 +80,10 @@ struct ParsedAttrs {
     asm_label: Option<String>,
     /// C23 constexpr: 变量必须常量初始化, 函数等价 inline + always_inline
     is_constexpr: bool,
+    /// C23 [[fallthrough]]: 标记 switch case 有意贯穿
+    is_fallthrough: bool,
+    /// C23 [[nodiscard]]: 函数返回值不应被忽略
+    is_nodiscard: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -246,6 +250,12 @@ impl ParsedAttrs {
         if other.is_constexpr {
             self.is_constexpr = true;
         }
+        if other.is_fallthrough {
+            self.is_fallthrough = true;
+        }
+        if other.is_nodiscard {
+            self.is_nodiscard = true;
+        }
     }
 }
 
@@ -273,6 +283,7 @@ pub struct Parser<'a> {
     locals: HashMap<String, Type>,             // 变量名 → 类型 (函数内会清除)
     var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const检查用)
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
+    nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
     in_function: bool,                         // 是否在函数体内
     current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
     pub last_variadic: bool,                   // parse_params 是否遇到 ...
@@ -314,6 +325,7 @@ impl<'a> Parser<'a> {
             locals: HashMap::new(),
             var_quals: HashMap::new(),
             globals: HashMap::new(),
+            nodiscard_fns: HashSet::new(),
             in_function: false,
             current_function: None,
             last_variadic: false,
@@ -430,6 +442,24 @@ impl<'a> Parser<'a> {
             d.hint = Some(h.into());
         }
         self.diags.push(d);
+    }
+    /// C23 [[nodiscard]] 检查: 如果表达式是对 nodiscard 函数的调用,
+    /// 且返回值被丢弃 (作为语句表达式), 发射警告.
+    fn check_nodiscard_call(&mut self, e: &Expr) {
+        if let Expr::Call { callee, span, .. } = e {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if self.nodiscard_fns.contains(&name.name) {
+                    self.diags.push(Diagnostic::warn(
+                        "W0401",
+                        format!(
+                            "ignoring return value of '{}' declared with [[nodiscard]]",
+                            name.name
+                        ),
+                        span.clone(),
+                    ));
+                }
+            }
+        }
     }
     /// 严格类型转换检查: 返回 Some(diag) 当出现以下情况:
     ///   1. 整型截断 (例如 (char)0x100, 由 warn_int_truncation 控制)
@@ -1528,10 +1558,12 @@ impl<'a> Parser<'a> {
                 });
             } else if attr_trimmed == "fallthrough" {
                 // [[fallthrough]]: 标记 switch case 有意贯穿
-                // 当前无贯穿警告, 但记录属性以兼容代码
+                // 记录属性, 用于 switch case 末尾验证
+                self.decl_attrs.is_fallthrough = true;
             } else if attr_trimmed == "nodiscard" {
                 // [[nodiscard]]: 返回值不应被忽略
-                // 映射到 returns_nonnull 语义 (近似)
+                // 映射到 FuncDecl.is_nodiscard, 调用结果被丢弃时发射警告
+                self.decl_attrs.is_nodiscard = true;
             } else if attr_trimmed == "maybe_unused" {
                 // [[maybe_unused]]: 抑制未使用警告
                 self.decl_attrs.is_unused = true;
@@ -2384,10 +2416,12 @@ impl<'a> Parser<'a> {
         // 解析声明开头的 __attribute__: GCC 扩展, 如 __attribute__((section(".init.text"))) int foo()
         let leading_attrs = self.parse_attributes();
         self.decl_storage = StorageClass::default();
-        // 保留 constexpr 标志: 上面已解析, 重置 decl_attrs 后需恢复
+        // 保留 C23 标志: 上面已解析, 重置 decl_attrs 后需恢复
         let was_constexpr = self.decl_attrs.is_constexpr;
+        let was_nodiscard = self.decl_attrs.is_nodiscard;
         self.decl_attrs = ParsedAttrs::default();
         self.decl_attrs.is_constexpr = was_constexpr;
+        self.decl_attrs.is_nodiscard = was_nodiscard;
         // 文件级 asm: 必须在 skip_asm_label 之前, 因为 __asm__("...") 与 asm 标签共享相同 token 模式
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "asm")
         {
@@ -3027,6 +3061,9 @@ impl<'a> Parser<'a> {
                 // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
                 // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定
                 let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
+                if attrs.is_nodiscard {
+                    self.nodiscard_fns.insert(name_for_decl.name.clone());
+                }
                 Some(vec![Decl::Func(FuncDecl {
                     ret_ty: ty,
                     name: name_for_decl,
@@ -3072,6 +3109,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
             } else {
@@ -3081,6 +3119,9 @@ impl<'a> Parser<'a> {
                 // 恢复外层 current_function
                 self.current_function = saved_func;
                 let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
+                if attrs.is_nodiscard {
+                    self.nodiscard_fns.insert(name_for_decl.name.clone());
+                }
                 Some(vec![Decl::Func(FuncDecl {
                     ret_ty: ty,
                     name: name_for_decl,
@@ -3126,6 +3167,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
             }
@@ -3512,6 +3554,7 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
             }
@@ -3596,6 +3639,7 @@ impl<'a> Parser<'a> {
                 is_host: attrs.is_host,
                 is_naked: attrs.is_naked,
                 is_noreturn: attrs.is_noreturn,
+                is_nodiscard: attrs.is_nodiscard,
                 asm_label: attrs.asm_label.clone(),
             })])
         }
@@ -6524,6 +6568,7 @@ impl<'a> Parser<'a> {
                     })
                 } else {
                     let e = self.parse_expr()?;
+                    self.check_nodiscard_call(&e);
                     if !self.expect(TokKind::Semi, "';'") {
                         return None;
                     }
@@ -6594,6 +6639,8 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let e = self.parse_expr()?;
+                // C23 [[nodiscard]]: 调用结果被丢弃时发射警告
+                self.check_nodiscard_call(&e);
                 if !self.expect(TokKind::Semi, "';'") {
                     return None;
                 }
@@ -6629,6 +6676,11 @@ impl<'a> Parser<'a> {
                 self.cur.kind,
                 TokKind::KwCase | TokKind::KwDefault | TokKind::RBrace | TokKind::Eof
             ) {
+                // C23 [[attributes]] in case body (e.g. [[fallthrough]])
+                if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
+                    self.parse_std_attributes();
+                    continue;
+                }
                 if self.is_decl_start() {
                     match self.parse_decl() {
                         Some(ds) => {

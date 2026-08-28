@@ -538,6 +538,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
             asm_label: None,
             })],
             fenv_access: false,

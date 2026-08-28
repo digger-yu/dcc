@@ -1879,6 +1879,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
             asm_label: None,
             })],
             fenv_access: false,
@@ -2025,6 +2026,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
             asm_label: None,
             })],
             fenv_access: false,
@@ -2126,6 +2128,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         });
         let main_fn = Decl::Func(FuncDecl {
@@ -2198,6 +2201,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         });
         let prog = Program {
@@ -2307,6 +2311,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         });
         let prog = Program {
@@ -2568,6 +2573,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         };
 

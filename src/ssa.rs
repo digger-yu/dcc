@@ -2411,6 +2411,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
@@ -2495,6 +2496,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
@@ -2563,6 +2565,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_nodiscard: false,
         asm_label: None,
         };
         assert!(build_from_func(&f).is_none());

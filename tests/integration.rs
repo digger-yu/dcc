@@ -11784,6 +11784,38 @@ fn c23_constexpr_var_error() {
     );
 }
 
+/// C23 [[fallthrough]] / [[nodiscard]]: 解析兼容 + 运行时正确
+#[test]
+#[cfg(unix)]
+fn c23_fallthrough_nodiscard_compile_and_run() {
+    let src = include_str!("fixtures/c/c23_fallthrough_nodiscard.c");
+    let (out, exe) = run_compile_and_run("c23-fallthrough-nodiscard", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "c23 fallthrough/nodiscard compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "c23_fallthrough_nodiscard should return 0, got {rc}");
+}
+
+/// C23 [[nodiscard]]: 丢弃返回值时发射 W0401 警告
+#[test]
+fn c23_nodiscard_warn_emits_w0401() {
+    let src = include_str!("fixtures/c/c23_nodiscard_warn.c");
+    let out = run_syntax_test("c23-nodiscard-warn", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("W0401"),
+        "expected W0401 nodiscard warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("nodiscard") || stderr.contains("ignoring"),
+        "warning should mention nodiscard/ignoring: {stderr}"
+    );
+}
+
 /// COMDAT: weak functions get STB_WEAK binding and COMDAT group entries
 #[test]
 #[cfg(unix)]
