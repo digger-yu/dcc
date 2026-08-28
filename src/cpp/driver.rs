@@ -125,7 +125,12 @@ pub fn compile_cpp(
     let out = cmd
         .output()
         .map_err(|e| CppError::Io(std::io::Error::new(e.kind(), format!("spawn dcc: {}", e))))?;
-    let _ = fs::remove_file(&tmp);
+    // Keep temp file if DCC_KEEP_TEMP=1 is set (for debugging)
+    if std::env::var("DCC_KEEP_TEMP").as_deref() != Ok("1") {
+        let _ = fs::remove_file(&tmp);
+    } else {
+        eprintln!("[dcc] kept temp file: {}", tmp.display());
+    }
     if !out.status.success() {
         let mut span = crate::diagnostics::Span::point(file, 0, 0);
         span.file = file.to_string();

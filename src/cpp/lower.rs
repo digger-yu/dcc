@@ -321,6 +321,8 @@ fn clean_struct_bodies(s: &str) -> String {
     let mut i = 0;
     // 跟踪 struct 名栈, 用于识别构造函数
     let mut struct_name_stack: Vec<String> = Vec::new();
+    // 收集内联成员函数, 在 struct 体结束后输出
+    let mut pending_functions: Vec<String> = Vec::new();
 
     while i < len {
         // 跳过字符串
@@ -360,6 +362,23 @@ fn clean_struct_bodies(s: &str) -> String {
                 struct_name_stack.pop();
                 result.push('}');
                 i += 1;
+                // 检查后面是否有 typedef 名称 (如果有, 不添加分号)
+                let mut j = skip_ws(bytes, i);
+                if j < len && is_ident_char(bytes[j]) {
+                    // 后面有标识符, 可能是 typedef 名称, 不添加分号
+                } else if i < len && bytes[i] == b';' {
+                    // 后面已经有分号
+                    result.push(';');
+                    i += 1;
+                } else {
+                    // 需要添加分号
+                    result.push(';');
+                }
+                // 输出收集到的内联成员函数
+                for func in &pending_functions {
+                    result.push_str(func);
+                }
+                pending_functions.clear();
                 continue;
             }
 
@@ -537,13 +556,20 @@ fn clean_struct_bodies(s: &str) -> String {
                     // 提取返回类型和函数名, 转为独立函数
                     // 先提取 struct_name 和函数签名
                     let sig_start = i;
-                    // 找到函数名: 最后一个 '(' 前的标识符
+                    // 找到函数名: 第一个 '(' 前的标识符
                     let mut paren_start = sig_start;
                     {
                         let mut d = 0i32;
                         let mut k = sig_start;
+                        let mut found_first_paren = false;
                         while k < j {
-                            if bytes[k] == b'(' { if d == 0 { paren_start = k; } d += 1; }
+                            if bytes[k] == b'(' {
+                                if d == 0 && !found_first_paren {
+                                    paren_start = k;
+                                    found_first_paren = true;
+                                }
+                                d += 1;
+                            }
                             else if bytes[k] == b')' { d -= 1; }
                             else if bytes[k] == b'{' && d == 0 { break; }
                             k += 1;
@@ -554,7 +580,56 @@ fn clean_struct_bodies(s: &str) -> String {
                     while fn_end > sig_start && !is_ident_char(bytes[fn_end-1]) { fn_end -= 1; }
                     let mut fn_start = fn_end;
                     while fn_start > sig_start && is_ident_char(bytes[fn_start-1]) { fn_start -= 1; }
-                    let fn_name = &s[fn_start..fn_end];
+                    let fn_name_base = &s[fn_start..fn_end];
+                    // 如果是 operator，捕获后面的操作符符号
+                    let fn_name = if fn_name_base == "operator" {
+                        // 从 fn_end 开始捕获操作符符号
+                        let mut op_end = fn_end;
+                        while op_end < len && !is_ident_char(bytes[op_end]) && bytes[op_end] != b'(' && bytes[op_end] != b')' {
+                            op_end += 1;
+                        }
+                        let op_symbols = s[fn_end..op_end].trim();
+                        if !op_symbols.is_empty() {
+                            format!("operator{}", op_symbols)
+                        } else {
+                            fn_name_base.to_string()
+                        }
+                    } else {
+                        fn_name_base.to_string()
+                    };
+
+                    // 如果是构造函数（函数名等于 struct 名），跳过整个定义
+                    if fn_name == struct_name {
+                        // 跳过到 ';' 或 '{'
+                        let mut skip_j = paren_start + 1;
+                        let mut skip_depth = 1i32;
+                        while skip_j < len && skip_depth > 0 {
+                            if bytes[skip_j] == b'(' { skip_depth += 1; }
+                            else if bytes[skip_j] == b')' { skip_depth -= 1; }
+                            skip_j += 1;
+                        }
+                        skip_j = skip_ws(bytes, skip_j);
+                        // 跳过可能的初始化列表 ': member(init), ...'
+                        if skip_j < len && bytes[skip_j] == b':' && (skip_j+1 >= len || bytes[skip_j+1] != b':') {
+                            skip_j += 1;
+                            while skip_j < len && bytes[skip_j] != b'{' && bytes[skip_j] != b';' { skip_j += 1; }
+                        }
+                        // 如果是内联定义 (有 '{')
+                        if skip_j < len && bytes[skip_j] == b'{' {
+                            // 跳过整个 body
+                            let mut brace_depth = 1i32;
+                            skip_j += 1;
+                            while skip_j < len && brace_depth > 0 {
+                                if bytes[skip_j] == b'{' { brace_depth += 1; }
+                                else if bytes[skip_j] == b'}' { brace_depth -= 1; }
+                                skip_j += 1;
+                            }
+                        } else if skip_j < len && bytes[skip_j] == b';' {
+                            skip_j += 1;
+                        }
+                        i = skip_j;
+                        continue;
+                    }
 
                     // 提取参数列表
                     let mut paren_end = paren_start + 1;
@@ -571,10 +646,20 @@ fn clean_struct_bodies(s: &str) -> String {
                     let params_str = &s[paren_start+1..paren_end];
                     // 去掉默认参数 (= xxx)
                     let params_clean = remove_default_args(params_str);
+                    // 将引用参数 Type& name 转换为 Type* name
+                    let params_clean = convert_ref_params(&params_clean);
+                    // 为已知 struct 类型添加 struct 前缀
+                    let params_clean = add_struct_prefix(&params_clean, &struct_name);
 
                     // 生成独立函数: ret_type struct_name_fnname(struct struct_name *this, params)
                     let ret_type = s[sig_start..fn_start].trim();
                     let ret = if ret_type.is_empty() { "void" } else { ret_type };
+                    // 为返回类型添加 struct 前缀
+                    let ret = if ret == struct_name {
+                        format!("struct {}", struct_name)
+                    } else {
+                        ret.to_string()
+                    };
 
                     // 构建参数
                     let this_param = format!("struct {} *this_", struct_name);
@@ -584,33 +669,101 @@ fn clean_struct_bodies(s: &str) -> String {
                         format!("{}, {}", this_param, params_clean.trim())
                     };
 
-                    result.push_str(&format!("\n{} {}_{}({}) ", ret, struct_name, fn_name, all_params));
+                    // 处理 operator 函数名: operator== → operator_eq, operator!= → operator_ne
+                    let fn_name_clean = if fn_name.starts_with("operator") {
+                        let op = fn_name.trim_start_matches("operator").trim();
+                        match op {
+                            "==" => "operator_eq".to_string(),
+                            "!=" => "operator_ne".to_string(),
+                            "<" => "operator_lt".to_string(),
+                            ">" => "operator_gt".to_string(),
+                            "<=" => "operator_le".to_string(),
+                            ">=" => "operator_ge".to_string(),
+                            "+" => "operator_add".to_string(),
+                            "-" => "operator_sub".to_string(),
+                            "*" => "operator_mul".to_string(),
+                            "/" => "operator_div".to_string(),
+                            "%" => "operator_mod".to_string(),
+                            "=" => "operator_assign".to_string(),
+                            "[]" => "operator_index".to_string(),
+                            "()" => "operator_call".to_string(),
+                            _ => format!("operator_{}", op.replace(' ', "_")),
+                        }
+                    } else {
+                        fn_name.to_string()
+                    };
+
+                    let mut func_body = String::new();
+                    func_body.push_str(&format!("\n{} {}_{}({}) ", ret, struct_name, fn_name_clean, all_params));
 
                     // 跳过 body { ... }
                     j = skip_ws(bytes, paren_end + 1);
                     // 跳过可能的 const/noexcept/override
                     while j < len && bytes[j] != b'{' { j += 1; }
                     if j < len && bytes[j] == b'{' {
-                        // 输出 body 但替换 this-> 为 this_->
-                        result.push('{');
+                        // 输出 body 但替换 this-> 为 this_->, 替换 param.field 为 param->field
+                        func_body.push('{');
                         let mut brace_depth = 1i32;
                         j += 1;
+                        // 收集参数名 (用于替换 param.field → param->field)
+                        let param_names: Vec<String> = params_clean.split(',')
+                            .filter_map(|p| {
+                                let parts: Vec<&str> = p.trim().split_whitespace().collect();
+                                if parts.len() >= 2 {
+                                    // 最后一个部分是参数名 (可能包含 * 或 &)
+                                    let name = parts.last().unwrap().trim_start_matches('*').trim_start_matches('&');
+                                    if !name.is_empty() && name != "void" {
+                                        return Some(name.to_string());
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
                         while j < len && brace_depth > 0 {
                             if bytes[j] == b'{' { brace_depth += 1; }
                             else if bytes[j] == b'}' { brace_depth -= 1; }
                             if brace_depth > 0 {
                                 // 替换 this-> 为 this_->
                                 if match_word_at(bytes, j, "this") && j+4 < len && bytes[j+4] == b'-' && j+5 < len && bytes[j+5] == b'>' {
-                                    result.push_str("this_->");
+                                    func_body.push_str("this_->");
                                     j += 6;
                                     continue;
                                 }
-                                // 替换 m_field 为 this_->m_field (对于已知字段)
-                                result.push(bytes[j] as char);
+                                // 替换 struct_name 为 struct struct_name (用于返回类型和局部变量)
+                                if match_word_at(bytes, j, &struct_name) {
+                                    let name_len = struct_name.len();
+                                    // 检查前面是否已经有 struct 前缀
+                                    let before = if func_body.len() >= 7 { &func_body[func_body.len()-7..] } else { &func_body };
+                                    if !before.ends_with("struct ") && !before.ends_with("struct\t") {
+                                        func_body.push_str("struct ");
+                                    }
+                                    func_body.push_str(&struct_name);
+                                    j += name_len;
+                                    continue;
+                                }
+                                // 替换 param.field 为 param->field
+                                let mut replaced = false;
+                                for pname in &param_names {
+                                    if match_word_at(bytes, j, pname) {
+                                        let plen = pname.len();
+                                        let k = skip_ws(bytes, j + plen);
+                                        if k < len && bytes[k] == b'.' {
+                                            func_body.push_str(pname);
+                                            func_body.push_str("->");
+                                            j = k + 1;
+                                            replaced = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if replaced { continue; }
+                                func_body.push(bytes[j] as char);
                             }
                             j += 1;
                         }
-                        result.push_str("}\n");
+                        func_body.push_str("}\n");
+                        // 将函数添加到待输出列表
+                        pending_functions.push(func_body);
                     }
                     i = j;
                     continue;
@@ -653,6 +806,68 @@ fn remove_default_args(s: &str) -> String {
             // 跳过默认值到 ',' 或结尾
             i += 1;
             while i < len && bytes[i] != b',' { i += 1; }
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 将引用参数转换为指针参数: `Type& name` → `Type* name`
+fn convert_ref_params(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut depth = 0i32; // 括号深度
+    while i < len {
+        if bytes[i] == b'(' { depth += 1; result.push('('); i += 1; continue; }
+        if bytes[i] == b')' { depth -= 1; result.push(')'); i += 1; continue; }
+        // 在参数列表中 (depth == 0), 将 '&' 转换为 '*'
+        if bytes[i] == b'&' && depth == 0 {
+            // 检查不是 '&&' (移动语义)
+            if i + 1 < len && bytes[i+1] == b'&' {
+                // && 转换为 * (简化处理)
+                result.push('*');
+                i += 2;
+                continue;
+            }
+            // 检查前面是标识符字符或 '*' (类型结束)
+            let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
+            if is_ident_char(prev_char) || prev_char == b'*' || prev_char == b'>' {
+                // 检查后面是标识符开始或空白+标识符 (参数名)
+                let mut j = skip_ws(bytes, i + 1);
+                if j < len && (is_ident_char(bytes[j]) || bytes[j] == b'*') {
+                    // 这是引用参数, 替换 & 为 *
+                    result.push('*');
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 为已知 struct 类型添加 struct 前缀: `pair* p` → `struct pair* p`
+fn add_struct_prefix(s: &str, struct_name: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 检查是否是 struct_name
+        if match_word_at(bytes, i, struct_name) {
+            // 检查前面是否已经有 struct 前缀
+            let before = if result.len() >= 7 { &result[result.len()-7..] } else { &result };
+            if !before.ends_with("struct ") && !before.ends_with("struct\t") {
+                result.push_str("struct ");
+            }
+            result.push_str(struct_name);
+            i += struct_name.len();
             continue;
         }
         result.push(bytes[i] as char);
