@@ -6,7 +6,7 @@
 |------|------|
 | `test_all.sh` | 本地全量测试 |
 | `ci-trigger.sh` | CI 触发 |
-| `bench.sh` / `bench_phase_e.sh` | 性能与阶段 E 基准 |
+| `bench_phase_e.sh` | 性能基准（串行/并行、O2 折叠、aarch64） |
 
 ## 内核 / Linux 7.1
 
@@ -14,7 +14,7 @@
 |------|------|
 | `kernel_full_check.sh` | modpost / QEMU / vmlinux 编排；`STRICT_FULL_BUILD=1` 禁止核心门禁 SKIP |
 | `kernel_full_build.sh` | 全树构建 |
-| `kernel_build_smoke.sh` / `kernel_phase_b_check.sh` | smoke / phase B |
+| `kernel_build_smoke.sh` | vmlinux / bzImage smoke 测试 |
 | `prepare0_check.sh` / `prepare0_full.sh` | prepare0 窄/全链路 |
 | `modpost_link.sh` | modpost 链接 + fixdep |
 | `pahole_regress.sh` / `objtool_regress.sh` / `vmlinux_regress.sh` | 回归 |

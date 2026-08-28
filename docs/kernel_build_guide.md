@@ -35,13 +35,12 @@ bash scripts/objtool_regress.sh
 2. `scripts/test_kernel_features.sh`（含 `-S` 自定义节 / lock cmpxchg）
 3. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
 4. `prepare0_check.sh`、`pahole_regress.sh`、`objtool_regress.sh`
-5. `kernel_phase_b_check.sh` 或 `kernel_full_check.sh`（modpost / prepare0 / QEMU / vmlinux）
+5. `kernel_full_check.sh`（modpost / prepare0 / QEMU / vmlinux）
 
 ### 阶段 B 质量门禁（步骤 7–10）
 
 ```bash
 # 本地（脚本须 LF；Windows scp 后执行 perl -pi -e 's/\x0d//g' scripts/*.sh）
-bash scripts/kernel_phase_b_check.sh          # modpost + prepare0 → PASS
 bash scripts/vmlinux_regress.sh               # 无 vmlinux 时 SKIP
 bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP；有 bzImage 时硬门禁
 BUILD_BZIMAGE=1 BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh  # 全树 smoke
@@ -59,7 +58,6 @@ STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict: 禁止核心门
 | `dcc-host-wrapper.sh` | HOSTCC 包装：dcc -c + gcc 链接；fixdep 走 Rust |
 | `gen_elfconfig_h.sh` | 从 empty.o 生成 elfconfig.h |
 | `prepare0_full.sh` | prepare0 全链路（等价窄目标 + modpost） |
-| `kernel_phase_b_check.sh` | 阶段 B 编排 |
 | `pahole_regress.sh` / `objtool_regress.sh` | 单 TU BTF / eh_frame 回归 |
 | `qemu_boot_matrix.sh` | QEMU 加载 bzImage；无镜像默认 SKIP，镜像存在后要求 QEMU 与 boot log 关键字符串通过 |
 | `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
@@ -149,10 +147,10 @@ CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 ```
 
-**混合编译模式**：`scripts/kernel-cc.sh` 包装脚本实现 C 文件用 dcc、汇编文件用 gcc：
+**混合编译模式**：`scripts/dcc-kernel-cc.sh` 包装脚本实现 C 文件用 dcc、汇编文件用 gcc：
 
 ```bash
-make CC=/path/to/kernel-cc.sh bzImage
+make CC=/path/to/dcc-kernel-cc.sh bzImage
 ```
 
 这解决了复杂 GAS 宏（如 `ALT_INSTR`、`FILL_RETURN_BUFFER`）在 dcc 预处理后的兼容性问题。
@@ -433,7 +431,7 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验
 | DEFINE() .ascii 输出 | -S 模式下发射 `.ascii "->..."` 行 | ✅ **已完成**（2026-08-28，与 GCC 输出一致） |
 | .S 文件预处理 | 续接行处理与 GCC 行为一致 | ✅ **已验证**（entry_64.S 预处理后可通过 GAS 汇编） |
 | const_eval offsetof | 复杂内核结构体偏移量求值 | ⚠️ 部分结构体返回 0，需用 gcc 编译 asm-offsets.c |
-| .S 文件全链路编译 | dcc 预处理 + gcc fallback | ✅ **已完成**（2026-08-28，kernel-cc.sh 用 dcc 编译 .S，失败自动回退 gcc；51 个 .S 文件全部处理，QEMU 启动验证通过） |
+| .S 文件全链路编译 | dcc 预处理 + gcc fallback | ✅ **已完成**（2026-08-28，dcc-kernel-cc.sh 用 dcc 编译 .S，失败自动回退 gcc；51 个 .S 文件全部处理，QEMU 启动验证通过） |
 | 字符字面量跨行扫描 | 注释中 `'` 吞掉后续行宏展开 | ✅ **已修复**（2026-08-28，三处扫描循环增加 `\n` 终止条件） |
 
 ## 6. 调试技巧

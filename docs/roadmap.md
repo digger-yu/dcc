@@ -12,7 +12,7 @@
 | **M5** | **自举 (dcc 编 dcc)** | ✅ 完成 | `scripts/bootstrap.sh` 5 阶段流程: dcc0 构建 → 编译自举测试 (14 组) → 运行验证 → 确定性对比 (byte + semantic) → 多文件一致性; `tests/fixtures/c/bootstrap_selftest.c` 覆盖 struct/func_ptr/recursion/linked_list/bitops/enum+union/string/long_long/inline_asm/variadic_macro/_Static_assert/stmt_expr/goto/switch_range/static_array；`src/bootstrap.rs` 三层对比基础设施；`make bootstrap` 一键验证 |
 | **M6** | Linux 内核 benchmark | ✅ 完成 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M6b** | GCC libiberty（短期） | ✅ 完成 | 本地 125/129 OK；见 `docs/gcc_build_guide.md` |
-| **M6c** | 内核全树验收脚本 | ✅ 完成 | Rust fixdep；modpost_link / prepare0_full / kernel_phase_b_check |
+| **M6c** | 内核全树验收脚本 | ✅ 完成 | Rust fixdep；modpost_link / prepare0_full / kernel_full_check |
 | **M7** | ARM64 + RISC-V | ✅ 完成 | aarch64/riscv64 typed IR + 控制流/调用/rodata |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ✅ 完成 | GitHub-style 行+指针+hint；码表见 [diagnostics.md](./diagnostics.md)；snapshot 回归 `tests/errors.rs` |

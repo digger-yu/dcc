@@ -227,7 +227,7 @@ BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh   # 步骤 6 启用时
 ### 2026-07-16（内核脚本 + LTO gc）
 
 - [x] `scripts/modpost_link.sh` — Rust fixdep + dcc file2alias（2026-07-16 本地 PASS）
-- [x] `scripts/prepare0_full.sh` + `kernel_phase_b_check.sh`
+- [x] `scripts/prepare0_full.sh` + `scripts/kernel_full_check.sh`
 - [x] `scripts/qemu_boot_matrix.sh` + `scripts/kernel_full_check.sh`
 - [x] `scripts/vmlinux_regress.sh`
 - [x] LTO dead symbol：`-ffunction-sections` + `ld --gc-sections` + objcopy strip
