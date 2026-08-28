@@ -464,6 +464,7 @@ mod tests {
                             is_used_attr: false,
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
+                            tls_model: None,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -490,6 +491,7 @@ mod tests {
                             is_used_attr: false,
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
+                            tls_model: None,
                         })),
                     ],
                     span: sp.clone(),

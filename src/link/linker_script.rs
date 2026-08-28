@@ -59,6 +59,7 @@ enum Token {
     NoCrossRefs,
     Insert,
     Version,
+    Overlay,
     Common,
     Global,
     Local,
@@ -504,6 +505,7 @@ impl Lexer {
                     "NOCROSSREFS" => Token::NoCrossRefs,
                     "INSERT" => Token::Insert,
                     "VERSION" => Token::Version,
+                    "OVERLAY" => Token::Overlay,
                     "COMMON" => Token::Common,
                     "global" => Token::Global,
                     "local" => Token::Local,
@@ -619,6 +621,16 @@ impl LinkerScript {
                         }
                     }
                 }
+                SectionCommand::Overlay(overlay) => {
+                    // OVERLAY 块中每个子节的 body 中可能有符号赋值
+                    for sec in &overlay.sections {
+                        for item in &sec.body {
+                            if let SectionBodyItem::SymbolAssign(a) = item {
+                                syms.push(a.name.clone());
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -703,6 +715,41 @@ pub enum SectionCommand {
     AssertCmd(Expr, String),
     /// PROVIDE at top level after SECTIONS
     ProvideCmd(String, Expr),
+    /// OVERLAY 块
+    Overlay(OverlayDef),
+}
+
+/// OVERLAY 块定义
+/// 所有子节共享相同 VMA 起始地址，但可有不同的 LMA
+#[derive(Debug, Clone)]
+pub struct OverlayDef {
+    /// 起始地址 (可选)
+    pub address: Option<Expr>,
+    /// LMA (AT 表达式)
+    pub lma: Option<Expr>,
+    /// 是否 NOCROSSREFS
+    pub no_cross_refs: bool,
+    /// 关联的 PHDR
+    pub phdrs: Vec<String>,
+    /// 子节列表
+    pub sections: Vec<OverlaySection>,
+}
+
+/// OVERLAY 块中的子节
+#[derive(Debug, Clone)]
+pub struct OverlaySection {
+    /// 节名
+    pub name: String,
+    /// 节体内容
+    pub body: Vec<SectionBodyItem>,
+    /// 子节的 LMA 偏移
+    pub lma: Option<Expr>,
+    /// 对齐
+    pub align: Option<Expr>,
+    /// 填充值
+    pub fill: Option<u64>,
+    /// 关联的 PHDR
+    pub phdrs: Vec<String>,
 }
 
 /// 符号赋值
@@ -1406,6 +1453,14 @@ impl Parser {
                         self.next();
                     }
                 }
+                Token::Overlay => {
+                    // OVERLAY [addr] : [NOCROSSREFS] [AT(lma)] { ... }
+                    if let Some(overlay) = self.try_parse_overlay()? {
+                        cmds.push(SectionCommand::Overlay(overlay));
+                    } else {
+                        self.next();
+                    }
+                }
                 _ => {
                     self.next(); // skip unknown
                 }
@@ -1611,6 +1666,130 @@ impl Parser {
             body,
             is_discard,
             is_info: false,
+        }))
+    }
+
+    /// 解析 OVERLAY 块
+    /// OVERLAY [addr] : [NOCROSSREFS] [AT(lma)] [phdr] {
+    ///   secname1 { body1 }
+    ///   secname2 { body2 }
+    /// }
+    fn try_parse_overlay(&mut self) -> Result<Option<OverlayDef>, String> {
+        self.next(); // consume OVERLAY
+
+        // 可选的起始地址
+        let address = if !matches!(self.peek(), Token::Colon) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        // 期望 :
+        if !self.eat(&Token::Colon) {
+            return Err("OVERLAY: expected ':'".into());
+        }
+
+        // 可选的 NOCROSSREFS
+        let no_cross_refs = if matches!(self.peek(), Token::NoCrossRefs) {
+            self.next();
+            true
+        } else {
+            false
+        };
+
+        // 可选的 AT(lma)
+        let lma = if let Token::Ident(ref s) = self.peek().clone() {
+            if s == "AT" {
+                self.next();
+                self.expect(&Token::LParen)?;
+                let expr = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                Some(expr)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 可选的 phdrs
+        let phdrs = self.parse_section_phdrs();
+
+        // 期望 {
+        self.expect(&Token::LBrace)?;
+
+        // 解析子节列表
+        let mut sections = Vec::new();
+        while !self.eat(&Token::RBrace) {
+            if matches!(self.peek(), Token::Eof) {
+                break;
+            }
+
+            // 子节名
+            let name = if let Token::Ident(s) = self.next() {
+                s
+            } else {
+                return Err("OVERLAY: expected section name".into());
+            };
+
+            // 可选的 AT(lma) 在子节级别
+            let sub_lma = if let Token::Ident(ref s) = self.peek().clone() {
+                if s == "AT" {
+                    self.next();
+                    self.expect(&Token::LParen)?;
+                    let expr = self.parse_expr()?;
+                    self.expect(&Token::RParen)?;
+                    Some(expr)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // 可选的 ALIGN
+            let align = if let Token::Ident(ref s) = self.peek().clone() {
+                if s == "ALIGN" {
+                    self.next();
+                    self.expect(&Token::LParen)?;
+                    let expr = self.parse_expr()?;
+                    self.expect(&Token::RParen)?;
+                    Some(expr)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // 期望 {
+            self.expect(&Token::LBrace)?;
+            let body = self.parse_section_body()?;
+
+            // 可选的填充值
+            let fill = self.try_parse_fill();
+
+            // 可选的 phdrs
+            let sub_phdrs = self.parse_section_phdrs();
+
+            self.eat(&Token::Semicolon);
+
+            sections.push(OverlaySection {
+                name,
+                body,
+                lma: sub_lma,
+                align,
+                fill,
+                phdrs: sub_phdrs,
+            });
+        }
+
+        Ok(Some(OverlayDef {
+            address,
+            lma,
+            no_cross_refs,
+            phdrs,
+            sections,
         }))
     }
 
@@ -4424,6 +4603,84 @@ mod tests {
         assert_eq!(note_seg.ty, 4); // PT_NOTE
         assert_eq!(note_seg.flags, 0);
     }
+
+    #[test]
+    fn parse_overlay_basic() {
+        // Test basic OVERLAY parsing
+        let text = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) }
+                OVERLAY 0x2000 : AT(0x10000) {
+                    .data1 { *(.data1) }
+                    .data2 { *(.data2) }
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        // Find the OVERLAY command
+        let overlay_cmd = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
+        }).expect("should have OVERLAY command");
+        
+        // Check OVERLAY properties
+        assert!(overlay_cmd.address.is_some());
+        assert!(overlay_cmd.lma.is_some());
+        assert!(!overlay_cmd.no_cross_refs);
+        assert_eq!(overlay_cmd.sections.len(), 2);
+        assert_eq!(overlay_cmd.sections[0].name, ".data1");
+        assert_eq!(overlay_cmd.sections[1].name, ".data2");
+    }
+
+    #[test]
+    fn parse_overlay_with_nocrossrefs() {
+        // Test OVERLAY with NOCROSSREFS
+        let text = r#"
+            SECTIONS {
+                OVERLAY : NOCROSSREFS {
+                    .overlay_a { *(.overlay_a) }
+                    .overlay_b { *(.overlay_b) }
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let overlay_cmd = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
+        }).expect("should have OVERLAY command");
+        
+        assert!(overlay_cmd.no_cross_refs);
+        assert!(overlay_cmd.address.is_none());
+        assert!(overlay_cmd.lma.is_none());
+    }
+
+    #[test]
+    fn parse_overlay_with_symbols() {
+        // Test OVERLAY with symbol assignments inside
+        let text = r#"
+            SECTIONS {
+                OVERLAY : {
+                    .sec1 {
+                        _start_sec1 = .;
+                        *(.sec1)
+                        _end_sec1 = .;
+                    }
+                    .sec2 {
+                        _start_sec2 = .;
+                        *(.sec2)
+                        _end_sec2 = .;
+                    }
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let overlay_cmd = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
+        }).expect("should have OVERLAY command");
+        
+        // Check that symbol assignments are in the section bodies
+        assert!(!overlay_cmd.sections[0].body.is_empty());
+        assert!(!overlay_cmd.sections[1].body.is_empty());
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
@@ -4602,6 +4859,121 @@ pub fn execute_script(
                         is_provide: true,
                     });
                 }
+            }
+            SectionCommand::Overlay(overlay) => {
+                // OVERLAY: 所有子节共享相同 VMA，但可有不同的 LMA
+                let base_vma = if let Some(ref addr) = overlay.address {
+                    ctx.eval(addr).unwrap_or(ctx.location_counter)
+                } else {
+                    ctx.location_counter
+                };
+
+                let base_lma = if let Some(ref lma_expr) = overlay.lma {
+                    ctx.eval(lma_expr).unwrap_or(0)
+                } else {
+                    base_vma
+                };
+
+                let mut max_size: u64 = 0;
+
+                for sec in &overlay.sections {
+                    // 每个子节创建为独立输出节，VMA 相同
+                    let mut out_sec = ScriptOutputSection {
+                        name: sec.name.clone(),
+                        vma: base_vma,
+                        lma: base_lma,
+                        align: 1,
+                        fill: sec.fill.unwrap_or(0),
+                        size: 0,
+                        data: Vec::new(),
+                        flags: 0,
+                        ty: SHT_PROGBITS,
+                        phdrs: sec.phdrs.clone(),
+                        input_sections: Vec::new(),
+                        is_discard: false,
+                        is_info: false,
+                        is_none_phdr: sec.phdrs.iter().any(|p| p == "NONE"),
+                    };
+
+                    // 处理子节 body
+                    let mut current_offset: u64 = 0;
+                    for item in &sec.body {
+                        match item {
+                            SectionBodyItem::InputSection(spec) => {
+                                // 匹配输入节
+                                let matches = match_input_sections(spec, bundle, &mut ctx, &mut used_sections);
+                                for m in matches {
+                                    let in_sec = &bundle.sections[m.input_index as usize];
+                                    // 更新节标志
+                                    out_sec.flags |= in_sec.flags;
+                                    if in_sec.ty == SHT_NOBITS {
+                                        out_sec.ty = SHT_NOBITS;
+                                    }
+                                    // 对齐
+                                    let align = in_sec.align.max(1);
+                                    let aligned = (current_offset + align - 1) & !(align - 1);
+                                    if aligned > current_offset && out_sec.ty != SHT_NOBITS {
+                                        let pad = aligned - current_offset;
+                                        if pad < 0x10000000 {
+                                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                                        }
+                                    }
+                                    current_offset = aligned;
+                                    // 添加数据
+                                    if in_sec.ty != SHT_NOBITS {
+                                        out_sec.data.extend_from_slice(&in_sec.data);
+                                        current_offset += in_sec.data.len() as u64;
+                                    }
+                                    // 记录匹配
+                                    out_sec.input_sections.push(InputSectionMatch {
+                                        input_index: m.input_index,
+                                        pattern: m.pattern,
+                                        offset: aligned,
+                                    });
+                                }
+                            }
+                            SectionBodyItem::SymbolAssign(a) => {
+                                let value = ctx.eval(&a.expr).unwrap_or(0);
+                                ctx.symbols.insert(a.name.clone(), value);
+                                result.symbols.push(ScriptSymbol {
+                                    name: a.name.clone(),
+                                    value,
+                                    is_provide: a.is_provide,
+                                });
+                            }
+                            SectionBodyItem::LocationAssign(expr) => {
+                                let val = ctx.eval(expr).unwrap_or(0);
+                                let new_offset = if val >= out_sec.vma {
+                                    ctx.location_counter = val;
+                                    val.wrapping_sub(out_sec.vma)
+                                } else {
+                                    ctx.location_counter = out_sec.vma.wrapping_add(val);
+                                    val
+                                };
+                                if new_offset > out_sec.data.len() as u64 {
+                                    let pad = new_offset - out_sec.data.len() as u64;
+                                    if pad < 0x10000000 {
+                                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                                    }
+                                }
+                                current_offset = new_offset.max(out_sec.data.len() as u64);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    out_sec.size = out_sec.data.len() as u64;
+                    if out_sec.size > max_size {
+                        max_size = out_sec.size;
+                    }
+
+                    ctx.section_addrs.insert(sec.name.clone(), out_sec.vma);
+                    ctx.section_sizes.insert(sec.name.clone(), out_sec.size);
+                    result.sections.push(out_sec);
+                }
+
+                // 位置计数器前进到最大子节之后
+                ctx.location_counter = base_vma.wrapping_add(max_size);
             }
         }
     }

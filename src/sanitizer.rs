@@ -3461,6 +3461,7 @@ mod tests {
             is_used_attr: false,
             quals: crate::ast::QualifierFlags::NONE,
             addr_space: crate::ast::AddrSpace::None,
+            tls_model: None,
         };
         f.body = Some(Block {
             items: vec![

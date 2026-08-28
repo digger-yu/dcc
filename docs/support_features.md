@@ -402,6 +402,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | TLS 重定位 | x86-64: `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOTPC32_TLSDESC`; AArch64: TLSDESC/TLSIE/TLSLE 全序列; RISC-V: `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
 | TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；RISC-V TLS Local Exec 序列 (tp 寄存器 + TPREL_HI20/LO12_I 重定位)；linker 全类型解析 |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab` / `.strtab` |
+| 链接脚本 OVERLAY 支持 | `OVERLAY [addr] : [NOCROSSREFS] [AT(lma)] { ... }` 完整解析与执行；所有子节共享相同 VMA 但可有不同的 LMA；支持 NOCROSSREFS 防止交叉引用、AT() 指定加载地址、子节内符号赋值和输入节匹配；测试: `tests/fixtures/c/overlay_test.lds` |
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
 | signal libc 转发 | `sigaction` / `sigaltstack` / `signal` 白名单 |
 | 复杂数学 libm 转发 | `cproj` / `cabs` / `carg` 白名单 |
