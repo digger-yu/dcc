@@ -83,6 +83,10 @@ pub struct VarDecl {
     /// 地址空间 (x86 段寄存器: __seg_gs / __seg_fs).
     /// 用于 per-cpu 变量访问: 变量本身位于特定段地址空间.
     pub addr_space: AddrSpace,
+    /// __attribute__((tls_model("model")))
+    /// TLS 访问模型: "global-dynamic", "local-dynamic",
+    /// "initial-exec", "local-exec"
+    pub tls_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]

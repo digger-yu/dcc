@@ -2487,6 +2487,7 @@ fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
         is_used_attr: false,
         quals: crate::ast::QualifierFlags::NONE,
         addr_space: crate::ast::AddrSpace::None,
+        tls_model: None,
     }))
 }
 

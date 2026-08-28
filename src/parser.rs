@@ -73,6 +73,9 @@ struct ParsedAttrs {
     may_alias: bool,
     /// __attribute__((packed/__packed__))
     is_packed: bool,
+    /// __attribute__((tls_model("model")))
+    /// TLS 访问模型: "global-dynamic", "local-dynamic", "initial-exec", "local-exec"
+    tls_model: Option<String>,
 }
 
 /// 解析选项（Driver 传入）
@@ -226,6 +229,9 @@ impl ParsedAttrs {
         }
         if other.is_packed {
             self.is_packed = true;
+        }
+        if other.tls_model.is_some() {
+            self.tls_model = other.tls_model;
         }
     }
 }
@@ -1293,6 +1299,24 @@ impl<'a> Parser<'a> {
                     "packed" => {
                         attrs.is_packed = true;
                         self.advance();
+                    }
+                    // __attribute__((tls_model("model")))
+                    // TLS 访问模型: "global-dynamic", "local-dynamic",
+                    // "initial-exec", "local-exec"
+                    "tls_model" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance(); // (
+                            if self.cur.kind == TokKind::StringLit {
+                                attrs.tls_model = Some(
+                                    Self::decode_string_literal(&self.cur.text),
+                                );
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance(); // )
+                            }
+                        }
                     }
                     // CUDA/HIP 属性拼写 (__attribute__((global)) 等形式):
                     // 只在 -fcuda / -fhip 时生效, 否则按未知属性跳过
@@ -2647,6 +2671,7 @@ impl<'a> Parser<'a> {
             is_used_attr: false,
             quals: QualifierFlags::NONE,
             addr_space: AddrSpace::None,
+            tls_model: None,
         })])
     }
 
@@ -3035,6 +3060,7 @@ impl<'a> Parser<'a> {
                 is_used_attr: arr_attrs.is_used,
                 quals: self.spec_quals.iso_c(),
                 addr_space: self.spec_addr_space,
+                tls_model: arr_attrs.tls_model.clone(),
             })])
         } else {
             // extern 变量可以是 void 类型: 内核使用 `extern const void __nosave_begin, __nosave_end;`
@@ -3107,6 +3133,7 @@ impl<'a> Parser<'a> {
                     is_used_attr: attrs.is_used,
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
+                    tls_model: attrs.tls_model.clone(),
                 })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3137,6 +3164,7 @@ impl<'a> Parser<'a> {
                     is_used_attr: attrs.is_used,
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
+                    tls_model: attrs.tls_model.clone(),
                 })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3166,6 +3194,7 @@ impl<'a> Parser<'a> {
                     is_used_attr: attrs.is_used,
                     quals: self.spec_quals.iso_c(),
                     addr_space: self.spec_addr_space,
+                    tls_model: attrs.tls_model.clone(),
                 })])
             } else {
                 self.err_here(
@@ -3487,6 +3516,7 @@ impl<'a> Parser<'a> {
                 is_used_attr: attrs.is_used,
                 quals: self.spec_quals.iso_c(),
                 addr_space: self.spec_addr_space,
+                tls_model: attrs.tls_model.clone(),
             })]);
         }
         // 不是函数指针, 只是带括号的指针变量 (罕见)
@@ -3536,6 +3566,7 @@ impl<'a> Parser<'a> {
             is_used_attr: attrs.is_used,
             quals: self.spec_quals.iso_c(),
             addr_space: self.spec_addr_space,
+            tls_model: attrs.tls_model.clone(),
         })])
     }
 

@@ -1418,6 +1418,7 @@ pub fn rebuild_block(func: &Function) -> Block {
             is_used_attr: false,
             quals: crate::ast::QualifierFlags::NONE,
             addr_space: crate::ast::AddrSpace::None,
+            tls_model: None,
         })));
     }
 
@@ -2332,6 +2333,7 @@ mod tests {
                         is_used_attr: false,
                         quals: crate::ast::QualifierFlags::NONE,
                         addr_space: crate::ast::AddrSpace::None,
+                        tls_model: None,
                     })),
                     BlockItem::Stmt(Stmt::Return {
                         val: Some(Expr::Ident {

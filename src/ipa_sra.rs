@@ -704,6 +704,7 @@ fn inject_scalar_locals(
         is_used_attr: false,
         quals: QualifierFlags::NONE,
         addr_space: crate::ast::AddrSpace::None,
+        tls_model: None,
     });
 
     // 从标量参数组装字段赋值: `param.field = field_scalar;`
