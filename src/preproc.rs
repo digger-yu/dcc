@@ -4759,6 +4759,8 @@ impl Preprocessor {
         let expr = self.replace_has_macros(&expr);
         // 替换已知宏
         let expr = self.expand_macros(&expr, &[self.cur_line]);
+        // 处理 sizeof(type)/__alignof__(type)/__builtin_offsetof(type,member)
+        let expr = self.replace_sizeof_alignof_offsetof(&expr);
         // 宏展开后去除残留注释 (内核宏体可能含注释)
         let expr = Self::strip_comments(&expr);
         // 简单求值: 非零 = true
@@ -4790,6 +4792,169 @@ impl Preprocessor {
                 let name = &after[..name_end];
                 let val = if self.macros.contains_key(name) { "1" } else { "0" };
                 result = format!("{}{}{}", &result[..pos], val, &after[name_end..]);
+            }
+        }
+        result
+    }
+
+    /// 替换 sizeof(type)/__alignof__(type)/__builtin_offsetof(type,member) 为数值
+    /// 用于 #if 表达式求值。仅支持基本类型和简单指针。
+    fn replace_sizeof_alignof_offsetof(&self, expr: &str) -> String {
+        let mut result = expr.to_string();
+        result = self.replace_sizeof(&result);
+        result = self.replace_alignof(&result);
+        result = self.replace_offsetof(&result);
+        result
+    }
+
+    /// 计算基本类型的大小 (字节)
+    fn type_size(type_name: &str) -> usize {
+        let t = type_name.trim();
+        // 移除 const/volatile 限定符
+        let t = t.replace("const ", "").replace("volatile ", "");
+        let t = t.trim();
+        // 指针类型: 8 字节 (64 位)
+        if t.ends_with('*') {
+            return 8;
+        }
+        // 数组类型: 无法在预处理阶段确定大小
+        if t.contains('[') {
+            return 0;
+        }
+        match t {
+            "void" => 0,
+            "char" | "signed char" | "unsigned char" | "_Bool" | "bool" => 1,
+            "short" | "short int" | "signed short" | "unsigned short"
+            | "short unsigned" | "int16_t" | "uint16_t" => 2,
+            "int" | "signed int" | "unsigned int" | "unsigned" | "signed"
+            | "long" | "long int" | "signed long" | "unsigned long"
+            | "long unsigned" | "int32_t" | "uint32_t" | "float" => 4,
+            "long long" | "long long int" | "signed long long"
+            | "unsigned long long" | "long long unsigned" | "double"
+            | "int64_t" | "uint64_t" | "size_t" | "ptrdiff_t"
+            | "intptr_t" | "uintptr_t" => 8,
+            "long double" | "__int128" | "unsigned __int128" => 16,
+            _ => 4, // 默认假设为 int 大小
+        }
+    }
+
+    /// 计算基本类型的对齐
+    fn type_align(type_name: &str) -> usize {
+        let size = Self::type_size(type_name);
+        size.min(16).max(1)
+    }
+
+    /// 替换 sizeof(type) 为数值
+    fn replace_sizeof(&self, expr: &str) -> String {
+        let mut result = expr.to_string();
+        while let Some(pos) = result.find("sizeof") {
+            if pos > 0 {
+                let prev = result.as_bytes()[pos - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    break;
+                }
+            }
+            let after = &result[pos + 6..];
+            let after = after.trim_start();
+            if after.starts_with('(') {
+                let mut depth = 1;
+                let mut end = 1;
+                let chars: Vec<char> = after.chars().collect();
+                while end < chars.len() && depth > 0 {
+                    if chars[end] == '(' {
+                        depth += 1;
+                    } else if chars[end] == ')' {
+                        depth -= 1;
+                    }
+                    end += 1;
+                }
+                if depth == 0 {
+                    let type_name = &after[1..end - 1];
+                    let size = Self::type_size(type_name);
+                    result = format!("{}{}{}", &result[..pos], size, &after[end..]);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    /// 替换 __alignof__(type) 为数值
+    fn replace_alignof(&self, expr: &str) -> String {
+        let mut result = expr.to_string();
+        for keyword in &["__alignof__", "_Alignof", "__alignof"] {
+            while let Some(pos) = result.find(keyword) {
+                if pos > 0 {
+                    let prev = result.as_bytes()[pos - 1];
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        break;
+                    }
+                }
+                let after = &result[pos + keyword.len()..];
+                let after = after.trim_start();
+                if after.starts_with('(') {
+                    let mut depth = 1;
+                    let mut end = 1;
+                    let chars: Vec<char> = after.chars().collect();
+                    while end < chars.len() && depth > 0 {
+                        if chars[end] == '(' {
+                            depth += 1;
+                        } else if chars[end] == ')' {
+                            depth -= 1;
+                        }
+                        end += 1;
+                    }
+                    if depth == 0 {
+                        let type_name = &after[1..end - 1];
+                        let align = Self::type_align(type_name);
+                        result =
+                            format!("{}{}{}", &result[..pos], align, &after[end..]);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// 替换 __builtin_offsetof(type, member) 为数值
+    /// 预处理阶段无法准确计算结构体偏移, 返回 0
+    fn replace_offsetof(&self, expr: &str) -> String {
+        let mut result = expr.to_string();
+        while let Some(pos) = result.find("__builtin_offsetof") {
+            if pos > 0 {
+                let prev = result.as_bytes()[pos - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    break;
+                }
+            }
+            let after = &result[pos + 18..]; // "__builtin_offsetof" is 18 chars
+            let after = after.trim_start();
+            if after.starts_with('(') {
+                let mut depth = 1;
+                let mut end = 1;
+                let chars: Vec<char> = after.chars().collect();
+                while end < chars.len() && depth > 0 {
+                    if chars[end] == '(' {
+                        depth += 1;
+                    } else if chars[end] == ')' {
+                        depth -= 1;
+                    }
+                    end += 1;
+                }
+                if depth == 0 {
+                    result = format!("{}0{}", &result[..pos], &after[end..]);
+                } else {
+                    break;
+                }
+            } else {
+                break;
             }
         }
         result
@@ -7405,6 +7570,8 @@ n\
             std::slice::from_ref(&dir),
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7435,6 +7602,8 @@ n\
             b"int a = FROM_COMMON; int b = SQUARE(3);",
             "tu.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -7469,6 +7638,8 @@ n\
             b"#include \"common.h\"\nint a = FROM_COMMON; int b = SQUARE(3);",
             "tu.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -7549,6 +7720,8 @@ n\
         let out = preprocess(
             b"int x = 1;",
             "x.c",
+            &[],
+            &[],
             &[],
             &[],
             &[("EXTRA".to_string(), Some("1".to_string()))],
@@ -7798,6 +7971,8 @@ n\
             std::slice::from_ref(&dir),
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7888,6 +8063,8 @@ n\
                 std::slice::from_ref(&dir),
                 &[],
                 &[],
+                &[],
+                &[],
                 StdMode::Gnu11,
                 &[],
                 false,
@@ -7930,6 +8107,8 @@ n\
             std::slice::from_ref(&dir),
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -7947,6 +8126,8 @@ n\
             src.as_bytes(),
             "nested-dep.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -8295,6 +8476,8 @@ n\
             std::slice::from_ref(&dir),
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -8329,6 +8512,8 @@ n\
             src.as_bytes(),
             "embed-limit.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu23,
@@ -8368,6 +8553,8 @@ n\
             std::slice::from_ref(&dir),
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu23,
             &[],
             false,
@@ -8402,6 +8589,8 @@ n\
             src.as_bytes(),
             "embed-ie.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu23,
@@ -8442,6 +8631,8 @@ n\
             src.as_bytes(),
             "has-embed.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu23,
@@ -8513,6 +8704,8 @@ n\
             src.as_bytes(),
             "has-embed-limit.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu23,
@@ -8612,6 +8805,8 @@ n\
             src.as_bytes(),
             "has-inc.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -8738,6 +8933,8 @@ n\
             src.as_bytes(),
             "pragma-once.c",
             std::slice::from_ref(&dir),
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -9278,6 +9475,8 @@ int ok = 1;\n";
             &[],
             &[sys_dir.clone()],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9325,6 +9524,8 @@ int ok = 1;\n";
             b"#include <user_header.h>\nint main(void) { return user_var; }\n",
             "main.c",
             &[user_dir.clone()],
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -9419,6 +9620,8 @@ int ok = 1;\n";
             "main.c",
             &[user_dir.clone()],
             &[sys_dir.clone()],
+            &[],
+            &[],
             &[],
             StdMode::Gnu11,
             &[],
@@ -9632,6 +9835,8 @@ int ok = 1;\n";
             &[dir.clone()],
             &[],
             &[],
+            &[],
+            &[],
             StdMode::Gnu11,
             &[],
             false,
@@ -9686,6 +9891,8 @@ int ok = 1;\n";
             &fs::read(&src).unwrap(),
             src.to_str().unwrap(),
             &[dir.clone()],
+            &[],
+            &[],
             &[],
             &[],
             StdMode::Gnu11,
@@ -10294,5 +10501,152 @@ int ok = 1;\n";
             "line_map should contain remapped_file.c, line_map: {:?}",
             out.line_map
         );
+    }
+
+    // ===== sizeof / __alignof__ / __builtin_offsetof in #if =====
+
+    #[test]
+    fn sizeof_in_if_basic_types() {
+        let out = preprocess(
+            b"#if sizeof(int) == 4\n\
+             int_ok\n\
+             #else\n\
+             int_fail\n\
+             #endif\n\
+             #if sizeof(char) == 1\n\
+             char_ok\n\
+             #else\n\
+             char_fail\n\
+             #endif\n\
+             #if sizeof(long long) == 8\n\
+             ll_ok\n\
+             #else\n\
+             ll_fail\n\
+             #endif\n",
+            "sizeof-basic.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("int_ok"), "output: {output}");
+        assert!(!output.contains("int_fail"), "output: {output}");
+        assert!(output.contains("char_ok"), "output: {output}");
+        assert!(!output.contains("char_fail"), "output: {output}");
+        assert!(output.contains("ll_ok"), "output: {output}");
+        assert!(!output.contains("ll_fail"), "output: {output}");
+    }
+
+    #[test]
+    fn sizeof_in_if_pointer() {
+        let out = preprocess(
+            b"#if sizeof(void*) == 8\n\
+             ptr_ok\n\
+             #else\n\
+             ptr_fail\n\
+             #endif\n",
+            "sizeof-ptr.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("ptr_ok"), "output: {output}");
+        assert!(!output.contains("ptr_fail"), "output: {output}");
+    }
+
+    #[test]
+    fn alignof_in_if_basic() {
+        let out = preprocess(
+            b"#if __alignof__(int) == 4\n\
+             align_int_ok\n\
+             #else\n\
+             align_int_fail\n\
+             #endif\n\
+             #if __alignof__(char) == 1\n\
+             align_char_ok\n\
+             #else\n\
+             align_char_fail\n\
+             #endif\n\
+             #if __alignof__(double) == 8\n\
+             align_double_ok\n\
+             #else\n\
+             align_double_fail\n\
+             #endif\n",
+            "alignof-basic.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("align_int_ok"), "output: {output}");
+        assert!(!output.contains("align_int_fail"), "output: {output}");
+        assert!(output.contains("align_char_ok"), "output: {output}");
+        assert!(!output.contains("align_char_fail"), "output: {output}");
+        assert!(output.contains("align_double_ok"), "output: {output}");
+        assert!(!output.contains("align_double_fail"), "output: {output}");
+    }
+
+    #[test]
+    fn offsetof_in_if() {
+        let out = preprocess(
+            b"#if __builtin_offsetof(struct foo, bar) == 0\n\
+             offsetof_zero\n\
+             #endif\n",
+            "offsetof-basic.c",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+            &x86_target(),
+            &[],
+            128,
+        );
+        let output = out.text;
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+        assert!(output.contains("offsetof_zero"), "output: {output}");
     }
 }
