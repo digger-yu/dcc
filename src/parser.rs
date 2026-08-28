@@ -4929,7 +4929,18 @@ impl<'a> Parser<'a> {
             }
             self.advance();
             self.skip_ptr_qualifiers();
-            ty = Type::Ptr(Box::new(ty.into()));
+            // 将 __seg_gs/__seg_fs 地址空间传播到指针类型的 QualType.
+            // 例如 `int __seg_gs *p` 或 cast `(__seg_gs int *)` 中,
+            // spec_addr_space 在类型说明符循环中被设置, 此处捕获并
+            // 写入指针的 QualType.addr_space, 使代码生成阶段能在
+            // 解引用时发射正确的段前缀 (%gs:/%fs:).
+            if matches!(self.spec_addr_space, AddrSpace::GS | AddrSpace::FS) {
+                let addr_space = self.spec_addr_space;
+                self.spec_addr_space = AddrSpace::None;
+                ty = Type::Ptr(Box::new(QualType::with_addr_space(ty, addr_space)));
+            } else {
+                ty = Type::Ptr(Box::new(ty.into()));
+            }
         }
         ty
     }
