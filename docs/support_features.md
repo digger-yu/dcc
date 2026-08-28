@@ -91,8 +91,22 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#pragma STDC CX_LIMITED_RANGE` | ON/OFF/DEFAULT 三态；ON 时 x86_64 complex 乘除法使用内联有限范围公式，OFF/DEFAULT 使用 `__mulsc3` / `__muldc3` / `__divsc3` / `__divdc3` range-safe helper |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |
 | 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`)；时间宏 `__DATE__` / `__TIME__` / `__TIMESTAMP__` (源文件修改时间)；文件宏 `__FILE__` / `__BASE_FILE__` (主源文件名) / `__INCLUDE_LEVEL__` (include 嵌套深度，主文件为 0) |
-| `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_cpp_attribute` / `__has_feature` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径；`__has_cpp_attribute(name)` 返回 C++20 属性版本号 (如 nodiscard→201603L)；`__has_feature(name)` 检测 Clang 特性 (c_atomic/tls/builtin_*_overflow 等) |
+| `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_cpp_attribute` / `__has_feature` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径；`__has_cpp_attribute(name)` 返回 C++20 属性版本号 (如 nodiscard→201603L)；`__has_feature(name)` 检测 40+ Clang 兼容特性 (c_atomic/tls/c_alignas/c_alignof/c_static_assert/c_generic_selections/c_thread_local/c23_constexpr/attribute_weak/attribute_visibility/attribute_noreturn/int128/char16_t/char32_t 等) |
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
+| `__STDC_UTF_16__` / `__STDC_UTF_32__` | Unicode 编码支持声明，始终定义为 1 |
+| `__STDC_ISO_10646__` | wchar_t 使用 ISO 10646 (Unicode) 声明，定义为 201706L |
+| `__STDC_IEC_559__` / `__STDC_IEC_559_COMPLEX__` | hosted 模式下定义，IEEE 754 浮点合规声明 |
+| `__STDC_VERSION_STDBIT_H__` (C23) | C23 模式预定义为 202312L |
+| `offsetof` 宏 | 预定义为 `__builtin_offsetof(type, member)` |
+| `<stdnoreturn.h>` 宏 | `noreturn` → `_Noreturn` (C11+ 所有模式) |
+| `<stdalign.h>` 宏 | `alignas` → `_Alignas`, `alignof` → `_Alignof` (C11/C17 模式) |
+| C23 `<stdbit.h>` 位操作宏 | `stdc_count_ones_*` / `stdc_count_zeros_*` / `stdc_has_single_bit_*` / `stdc_log2_floor_*` / `stdc_log2_ceil_*` 全系列 (uc/us/ui/ul/ull) |
+| C23 `[[...]]` 属性语法 | 解析并应用语义效果: `[[deprecated]]`/`[[deprecated("msg")]` → deprecated 标记; `[[maybe_unused]]` → 抑制未使用警告; `[[noreturn]]` → 函数不返回; `[[fallthrough]]`/`[[nodiscard]]` 解析兼容 |
+| C23 `constexpr` 变量 | 隐含 const 限定符 + always_inline 提示; 变量必须常量初始化 |
+| C23 `char8_t` 类型 | 8-bit UTF-8 字符类型, size=1, align=1, 完整类型系统支持 |
+| C11 匿名 struct/union 成员 | 无名字段透明穿透查找, `find_field()` 递归支持; 内核 `struct_group()` 模式兼容 |
+| C23 enum 底层类型 | `enum E : unsigned char { ... }` 完整支持; 所有整数类型说明符 |
+| C23 alignas struct 成员 | `_Alignas(N)` / `alignas(N)` 在 struct 字段上生效, 通过 `field_align` 影响布局 |
 | 数字分隔符 | `1'000'000` |
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
 | 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告；`-fmacro-backtrace-limit=N` 可配置深度上限 (默认 128) |
