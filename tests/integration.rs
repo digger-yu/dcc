@@ -19924,3 +19924,42 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 <stdbit.h> bit manipulation macros
+#[test]
+fn c23_stdbit_macros() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-stdbit-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        r#"
+/* __STDC_VERSION_STDBIT_H__ should be defined in C23 mode */
+#ifndef __STDC_VERSION_STDBIT_H__
+#error "__STDC_VERSION_STDBIT_H__ not defined"
+#endif
+/* stdc_count_ones_ui should expand to __builtin_popcount */
+int ones = stdc_count_ones_ui(0xFF);
+/* stdc_has_single_bit_ui should detect powers of 2 */
+int pow2 = stdc_has_single_bit_ui(64);
+/* stdc_log2_floor_ui should compute floor(log2(x)) */
+int lg = stdc_log2_floor_ui(256);
+"#,
+    )
+    .expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdbit preprocessing should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("__builtin_popcount"),
+        "stdc_count_ones_ui should expand to popcount. got: {stdout}"
+    );
+}

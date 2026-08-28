@@ -683,6 +683,116 @@ pub fn preprocess(
         } else {
             pp.define_builtin("__STDC_ENDIAN_NATIVE__", "__STDC_ENDIAN_LITTLE__");
         }
+        // C23 <stdbit.h>: 版本宏
+        pp.define_builtin("__STDC_VERSION_STDBIT_H__", "202312L");
+        // C23 <stdbit.h> 位操作宏: 类型通用, 用 _Generic 分派到 builtin
+        // stdc_count_ones: 计算 1 的位数 (popcount)
+        pp.macros.insert("stdc_count_ones_uc".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(x)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_ones_us".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(x)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_ones_ui".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(x)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_ones_ul".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcountl(x)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_ones_ull".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcountll(x)".to_string(), variadic: false,
+        });
+        // stdc_count_zeros: 计算 0 的位数
+        pp.macros.insert("stdc_count_zeros_uc".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_zeros_us".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_zeros_ui".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_zeros_ul".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcountl(~(x))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_count_zeros_ull".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "__builtin_popcountll(~(x))".to_string(), variadic: false,
+        });
+        // stdc_bit_ceil: 向上取整到 2 的幂
+        // stdc_bit_floor: 向下取整到 2 的幂
+        // stdc_has_single_bit: 是否为 2 的幂
+        pp.macros.insert("stdc_has_single_bit_uc".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_has_single_bit_us".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_has_single_bit_ui".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_has_single_bit_ul".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_has_single_bit_ull".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
+        });
+        // stdc_log2_floor: floor(log2(x))
+        pp.macros.insert("stdc_log2_floor_uc".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) ? 7 - __builtin_clz(x) : 0)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_floor_us".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) ? 15 - __builtin_clz(x) : 0)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_floor_ui".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) ? 31 - __builtin_clz(x) : 0)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_floor_ul".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) ? (int)(sizeof(long)*8-1) - __builtin_clzl(x) : 0)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_floor_ull".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) ? 63 - __builtin_clzll(x) : 0)".to_string(), variadic: false,
+        });
+        // stdc_log2_ceil: ceil(log2(x))
+        pp.macros.insert("stdc_log2_ceil_uc".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) <= 1 ? 0 : stdc_log2_floor_uc((x) - 1) + 1)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_ceil_us".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) <= 1 ? 0 : stdc_log2_floor_us((x) - 1) + 1)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_ceil_ui".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) <= 1 ? 0 : stdc_log2_floor_ui((x) - 1) + 1)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_ceil_ul".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) <= 1 ? 0 : stdc_log2_floor_ul((x) - 1) + 1)".to_string(), variadic: false,
+        });
+        pp.macros.insert("stdc_log2_ceil_ull".to_string(), MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "((x) <= 1 ? 0 : stdc_log2_floor_ull((x) - 1) + 1)".to_string(), variadic: false,
+        });
     }
     if freestanding {
         // 独立 (freestanding) 实现: C11 § 4/6 允许省略 <stdatomic.h>,
