@@ -5078,6 +5078,18 @@ fn builtin_m12_extra_run_returns_zero() {
     assert_eq!(rc, 0, "test_m12_builtins should return 0, got {rc}");
 }
 
+/// __builtin_expect_with_probability / __builtin_nonzero_p / __builtin_constant_p
+/// 编译期折叠: x86_64 后端直接求值, 非 x86 后端 (aarch64/riscv64) gen_call 兑底.
+#[test]
+fn builtin_expect_nonzero_p_run_returns_zero() {
+    let source = include_str!("fixtures/c/builtin_expect_nonzero.c");
+    let (output, exe) = run_compile_and_run("builtin-expect-nonzero", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "builtin_expect_nonzero should return 0, got {rc}");
+}
+
 /// M12+ builtins: rotate / clrsb / fma 综合测试
 #[test]
 fn builtin_rotate_clrsb_run_returns_zero() {

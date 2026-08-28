@@ -160,7 +160,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_trap` | ud2 |
 | `__builtin_debugtrap` | int3 (0xCC) |
 | `__builtin_assume_aligned` | 透传指针，codegen 优化对齐 |
-| `__builtin_expect_with_probability` | 字面量首参编译期折叠 |
+| `__builtin_expect_with_probability` | 字面量首参编译期折叠；全后端支持 (x86_64/aarch64/riscv64 gen_call + gen_expr_from_ast 兑底) |
+| `__builtin_nonzero_p` | 编译期判断参数是否为已知非零常量；非常量时保守返回 0；全后端支持 |
 | `__builtin_strlen` / `abs` / `labs` / `llabs` / `expect` / `popcount*` | 编译期折叠 |
 | `__builtin___memcpy_chk` / `memmove_chk` / `memset_chk` / `strcpy_chk` / `strncpy_chk` / `strcat_chk` / `strncat_chk` | Linux FORTIFY：识别 `__builtin___*_chk` 并剥离 `__builtin_` 前缀，链接到 libc `__*_chk` 符号；汇编输出 `call __memcpy_chk` |
 

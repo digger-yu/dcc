@@ -1882,6 +1882,47 @@ impl Aarch64Codegen {
             return;
         }
 
+        // GCC 兼容内建函数: 编译期折叠, 不生成实际调用
+        // __builtin_expect / __builtin_expect_with_probability:
+        //   分支预测提示, 返回第一个实参的值
+        if callee == "__builtin_expect" || callee == "__builtin_expect_with_probability" {
+            if let Some(arg0) = args.first() {
+                self.gen_expr(arg0);
+            } else {
+                self.mov_w0_imm(0);
+            }
+            return;
+        }
+        // __builtin_nonzero_p(x): x 为已知非常量返回 0
+        if callee == "__builtin_nonzero_p" {
+            let value = args.first().and_then(|a| {
+                a.literal.as_ref().and_then(|l| match l {
+                    ExprLiteral::Int(v) => Some(if *v != 0 { 1i128 } else { 0i128 }),
+                    _ => None,
+                })
+            }).unwrap_or(0);
+            self.mov_w0_imm(value as u32);
+            return;
+        }
+        // __builtin_constant_p(x): 编译期常量判断
+        if callee == "__builtin_constant_p" {
+            let value = args.first()
+                .and_then(|a| a.literal.as_ref())
+                .map_or(0, |_| 1);
+            self.mov_w0_imm(value as u32);
+            return;
+        }
+        // __builtin_object_size(ptr, type): 未知时返回 (size_t)-1
+        if callee == "__builtin_object_size" || callee == "__builtin_dynamic_object_size" {
+            self.mov_w0_imm(u32::MAX);
+            return;
+        }
+        // __builtin_mul_loop: 非标准, 返回 0
+        if callee == "__builtin_mul_loop" {
+            self.mov_w0_imm(0);
+            return;
+        }
+
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)
         // 限制: 仅当 caller 有显式 local sret 时使用; 简化版只在调用方分配
         //       一个 <sret> 局部, callee 写到 [x0]
@@ -2461,6 +2502,41 @@ impl Aarch64Codegen {
             }
             Expr::Cast { e, .. } => self.gen_expr_from_ast(e),
             Expr::Call { callee, args, .. } => {
+                // GCC 兼容内建函数: AST 路径编译期折叠
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    match name.name.as_str() {
+                        "__builtin_expect" | "__builtin_expect_with_probability" => {
+                            if let Some(arg0) = args.first() {
+                                self.gen_expr_from_ast(arg0);
+                            } else {
+                                self.mov_w0_imm(0);
+                            }
+                            return;
+                        }
+                        "__builtin_nonzero_p" => {
+                            let v = args.first()
+                                .and_then(|a| crate::const_eval::eval(a).ok())
+                                .map_or(0, |v| if v != 0 { 1i128 } else { 0i128 });
+                            self.mov_w0_imm(trunc_i32(v));
+                            return;
+                        }
+                        "__builtin_constant_p" => {
+                            let v = args.first()
+                                .map_or(0u32, |a| crate::const_eval::is_constant(a) as u32);
+                            self.mov_w0_imm(v);
+                            return;
+                        }
+                        "__builtin_object_size" | "__builtin_dynamic_object_size" => {
+                            self.mov_w0_imm(u32::MAX);
+                            return;
+                        }
+                        "__builtin_mul_loop" => {
+                            self.mov_w0_imm(0);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 for (i, arg) in args.iter().enumerate().take(8) {
                     self.gen_expr_from_ast(arg);
                     self.mov_w_reg_w0(i as u8);
