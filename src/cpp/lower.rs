@@ -2255,10 +2255,20 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                             // extern "C" { ... } -> 去掉 extern "C" { 和匹配的 }
                             // 只保留内容, 让内部声明成为顶层声明
                             if j < len && bytes[j] == b'{' {
-                                // 找到匹配的 }
+                                // 找到匹配的 } (跳过字符串和注释)
                                 let mut depth = 1i32;
                                 let mut k = j + 1;
                                 while k < len && depth > 0 {
+                                    // 跳过字符串
+                                    if bytes[k] == b'"' {
+                                        k = skip_string_literal(bytes, k);
+                                        continue;
+                                    }
+                                    // 跳过注释
+                                    if k + 1 < len && bytes[k] == b'/' && (bytes[k+1] == b'/' || bytes[k+1] == b'*') {
+                                        k = skip_comment(bytes, k);
+                                        continue;
+                                    }
                                     if bytes[k] == b'{' {
                                         depth += 1;
                                     } else if bytes[k] == b'}' {
