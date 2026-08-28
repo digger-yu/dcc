@@ -177,6 +177,9 @@ pub struct Function {
     pub span: Span,
     /// 原始 AST 中声明的局部变量名 (用于 rebuild_block 避免重复声明)
     pub original_locals: HashSet<String>,
+    /// 原始局部变量的类型限定符 (volatile/const/restrict),
+    /// 用于 SSA→AST 重建时保留 volatile 语义,防止优化器错误移除读写
+    pub local_quals: HashMap<String, crate::ast::QualifierFlags>,
 }
 
 impl Function {
@@ -194,6 +197,7 @@ impl Function {
             is_noreturn: false,
             span,
             original_locals: HashSet::new(),
+            local_quals: HashMap::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -1296,29 +1300,38 @@ fn lower_lvalue(
 }
 
 /// 递归收集 block 中所有 Decl::Var 的变量名
-fn collect_local_decls(items: &[BlockItem], out: &mut HashSet<String>) {
+fn collect_local_decls(
+    items: &[BlockItem],
+    out: &mut HashSet<String>,
+    quals: &mut HashMap<String, crate::ast::QualifierFlags>,
+) {
     for item in items {
         match item {
             BlockItem::Decl(Decl::Var(v)) => {
                 out.insert(v.name.name.clone());
+                quals.insert(v.name.name.clone(), v.quals);
             }
-            BlockItem::Stmt(s) => collect_local_decls_stmt(s, out),
+            BlockItem::Stmt(s) => collect_local_decls_stmt(s, out, quals),
             _ => {}
         }
     }
 }
 
-fn collect_local_decls_stmt(s: &Stmt, out: &mut HashSet<String>) {
+fn collect_local_decls_stmt(
+    s: &Stmt,
+    out: &mut HashSet<String>,
+    quals: &mut HashMap<String, crate::ast::QualifierFlags>,
+) {
     match s {
-        Stmt::Block { b, .. } => collect_local_decls(&b.items, out),
+        Stmt::Block { b, .. } => collect_local_decls(&b.items, out, quals),
         Stmt::If { then_, else_, .. } => {
-            collect_local_decls_stmt(then_, out);
+            collect_local_decls_stmt(then_, out, quals);
             if let Some(e) = else_ {
-                collect_local_decls_stmt(e, out);
+                collect_local_decls_stmt(e, out, quals);
             }
         }
         Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-            collect_local_decls_stmt(body, out);
+            collect_local_decls_stmt(body, out, quals);
         }
         _ => {}
     }
@@ -1333,8 +1346,8 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     func.is_cold = f.is_cold;
     func.is_hot = f.is_hot;
     func.is_noreturn = f.is_noreturn;
-    // Collect original local variable names for rebuild_block
-    collect_local_decls(&body.items, &mut func.original_locals);
+    // Collect original local variable names and qualifiers for rebuild_block
+    collect_local_decls(&body.items, &mut func.original_locals, &mut func.local_quals);
     let mut builder = Builder::new(func);
     for p in &f.params {
         if let Some(n) = &p.name {
@@ -1393,6 +1406,13 @@ pub fn rebuild_block(func: &Function) -> Block {
                     .map(|d| d.ty.clone())
             })
             .unwrap_or(Type::Int);
+        // 保留原始类型限定符 (volatile/const/restrict),
+        // 防止 volatile 变量的读写被优化器错误移除
+        let quals = func
+            .local_quals
+            .get(name)
+            .copied()
+            .unwrap_or(crate::ast::QualifierFlags::NONE);
         items.push(BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
             ty,
             name: crate::ast::Ident {
@@ -1416,7 +1436,7 @@ pub fn rebuild_block(func: &Function) -> Block {
             copy_fn: None,
             is_retain: false,
             is_used_attr: false,
-            quals: crate::ast::QualifierFlags::NONE,
+            quals,
             addr_space: crate::ast::AddrSpace::None,
             tls_model: None,
             asm_label: None,

@@ -19042,3 +19042,51 @@ fn target_clones_resolver_vaddr_patching() {
         "default variant vaddr should be in resolver code"
     );
 }
+
+// ==========================================================================
+// P1-3: IR→SSA volatile qualifier preservation
+// ==========================================================================
+
+#[test]
+fn ssa_preserves_volatile_qualifier() {
+    // volatile variable reads/writes must not be optimized away
+    let src = r#"
+volatile int mmio_reg = 0;
+int read_mmio(void) {
+    volatile int local_v = mmio_reg;
+    return local_v;
+}
+int main(void) {
+    return read_mmio();
+}
+"#;
+    let output = run_syntax_test("ssa-volatile", src);
+    assert!(
+        output.status.success(),
+        "volatile qualifier should be preserved through SSA. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn ssa_volatile_not_eliminated() {
+    // Ensure volatile writes are not eliminated even if the value is unused
+    let src = r#"
+volatile int status_reg;
+void write_status(int val) {
+    volatile int tmp = val;
+    status_reg = tmp;
+}
+int main(void) {
+    write_status(42);
+    return status_reg;
+}
+"#;
+    let (output, obj) = run_object_test("ssa-volatile-write", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        output.status.success(),
+        "volatile writes must survive SSA optimization. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
