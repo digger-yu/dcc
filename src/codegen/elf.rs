@@ -663,6 +663,7 @@ pub fn build_elf_rel_aarch64(
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
     extra_sections: &[ElfSection],
+    comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
     build_elf_rel_generic(
         EM_AARCH64,
@@ -672,6 +673,7 @@ pub fn build_elf_rel_aarch64(
         relocations,
         rodata_relocations,
         extra_sections,
+        comdat_groups,
         ELFDATA2LSB,
     )
 }
@@ -727,6 +729,7 @@ pub fn build_elf_rel_riscv64(
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
     extra_sections: &[ElfSection],
+    comdat_groups: &[ComdatGroup],
 ) -> Vec<u8> {
     build_elf_rel_generic(
         EM_RISCV,
@@ -736,6 +739,7 @@ pub fn build_elf_rel_riscv64(
         relocations,
         rodata_relocations,
         extra_sections,
+        comdat_groups,
         ELFDATA2LSB,
     )
 }
@@ -749,6 +753,7 @@ fn build_elf_rel_generic(
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
     extra_sections: &[ElfSection],
+    comdat_groups: &[ComdatGroup],
     ei_data: u8,
 ) -> Vec<u8> {
     let mut shstr = vec![0u8];
@@ -777,6 +782,11 @@ fn build_elf_rel_generic(
     let extra_names: Vec<u32> = extra_sections
         .iter()
         .map(|s| sec_name_off(&mut shstr, &s.name))
+        .collect();
+    // COMDAT group section names (.group.<signature>)
+    let comdat_names: Vec<u32> = comdat_groups
+        .iter()
+        .map(|g| sec_name_off(&mut shstr, &format!(".group.{}", g.signature)))
         .collect();
 
     let mut sym_name_off = vec![0u32];
@@ -844,6 +854,20 @@ fn build_elf_rel_generic(
         extra_layout.push((name, off as u64, sec));
         cursor = off + sec.data.len();
     }
+    // COMDAT group sections (SHT_GROUP)
+    let mut comdat_layout: Vec<(u32, u64, Vec<u8>)> = Vec::new();
+    for (i, group) in comdat_groups.iter().enumerate() {
+        let off = align_up(cursor, 4);
+        let name = comdat_names[i];
+        // Build SHT_GROUP data: GRP_COMDAT flag + member section indices
+        let mut data = Vec::with_capacity(4 + group.member_sec_indices.len() * 4);
+        data.extend_from_slice(&GRP_COMDAT.to_le_bytes());
+        for &sec_idx in &group.member_sec_indices {
+            data.extend_from_slice(&sec_idx.to_le_bytes());
+        }
+        cursor = off + data.len();
+        comdat_layout.push((name, off as u64, data));
+    }
     let shoff = align_up(cursor, 8);
 
     let n_sections = 1
@@ -852,7 +876,8 @@ fn build_elf_rel_generic(
         + 3
         + 1
         + if rela_rodata.is_empty() { 0 } else { 1 }
-        + extra_sections.len();
+        + extra_sections.len()
+        + comdat_groups.len();
 
     let symtab_idx = if rodata.is_empty() { 2u32 } else { 3 };
     let strtab_idx = symtab_idx + 1;
@@ -900,6 +925,11 @@ fn build_elf_rel_generic(
     for (_, off, sec) in &extra_layout {
         pad_to(&mut out, *off as usize);
         out.extend_from_slice(&sec.data);
+    }
+    // Write COMDAT group section data (SHT_GROUP)
+    for (_, off, data) in &comdat_layout {
+        pad_to(&mut out, *off as usize);
+        out.extend_from_slice(data);
     }
     pad_to(&mut out, shoff);
 
@@ -1004,17 +1034,39 @@ fn build_elf_rel_generic(
         );
     }
     for (name, off, sec) in &extra_layout {
+        // Add SHF_GROUP flag if this section belongs to a COMDAT group
+        let flags = if sec.group_name.is_some() {
+            sec.flags | SHF_GROUP
+        } else {
+            sec.flags
+        };
         write_section_header(
             &mut out,
             *name,
             sec.ty,
-            sec.flags,
+            flags,
             0,
             *off,
             sec.data.len() as u64,
             0,
             0,
             sec.align.max(1),
+            0,
+        );
+    }
+    // Write COMDAT group section headers (SHT_GROUP)
+    for (name, off, data) in &comdat_layout {
+        write_section_header(
+            &mut out,
+            *name,
+            SHT_GROUP,
+            0,
+            0,
+            *off,
+            data.len() as u64,
+            0,
+            0,
+            4,
             0,
         );
     }
@@ -2021,6 +2073,7 @@ pub fn build_elf_rel_mips64(
         relocations,
         rodata_relocations,
         extra_sections,
+        &[], // no COMDAT groups for MIPS64 yet
         ELFDATA2MSB,
     )
 }

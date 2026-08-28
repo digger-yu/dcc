@@ -5,8 +5,8 @@ use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
 use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
-    STT_TLS,
+    self, ComdatGroup, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC,
+    STT_OBJECT, STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -62,6 +62,8 @@ pub struct Riscv64Codegen {
     label_serial: u32,
     pending_branches: Vec<(u64, String, BranchKind)>,
     extra_sections: Vec<ElfSection>,
+    /// COMDAT group definitions
+    comdat_groups: Vec<ComdatGroup>,
     current_return_ty: Option<ValueType>,
     aggregate_fields: HashMap<String, (Arc<Vec<Field>>, bool)>,
     rvv: RvvConfig,
@@ -115,6 +117,7 @@ impl Riscv64Codegen {
             label_serial: 0,
             pending_branches: Vec::new(),
             extra_sections: Vec::new(),
+            comdat_groups: Vec::new(),
             current_return_ty: None,
             aggregate_fields: HashMap::new(),
             rvv: RvvConfig::default(),
@@ -533,6 +536,7 @@ impl Riscv64Codegen {
                 &self.relocations,
                 &self.rodata_relocations,
                 &self.extra_sections,
+                &self.comdat_groups,
             )
         } else {
             elf::build_elf_riscv64(&self.code, &self.rodata, self.entry)

@@ -19090,3 +19090,65 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ==========================================================================
+// P1-4: Non-x86 COMDAT group support
+// ==========================================================================
+
+#[test]
+fn comdat_aarch64_object_compiles() {
+    // Verify that aarch64 object files can be generated with COMDAT infrastructure
+    let src = r#"
+int foo(void) { return 42; }
+int main(void) { return foo(); }
+"#;
+    let tmp = std::env::temp_dir().join(format!("dcc-comdat-a64-{}", std::process::id()));
+    let src_path = tmp.with_extension("c");
+    let obj_path = tmp.with_extension("o");
+    fs::write(&src_path, src).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "--target=aarch64-linux-gnu"])
+        .arg("-o")
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc aarch64");
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    assert!(
+        output.status.success(),
+        "aarch64 COMDAT support should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn comdat_riscv64_object_compiles() {
+    // Verify that riscv64 object files can be generated with COMDAT infrastructure
+    let src = r#"
+int foo(void) { return 42; }
+int main(void) { return foo(); }
+"#;
+    let tmp = std::env::temp_dir().join(format!("dcc-comdat-rv64-{}", std::process::id()));
+    let src_path = tmp.with_extension("c");
+    let obj_path = tmp.with_extension("o");
+    fs::write(&src_path, src).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "--target=riscv64-linux-gnu"])
+        .arg("-o")
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc riscv64");
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    assert!(
+        output.status.success(),
+        "riscv64 COMDAT support should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

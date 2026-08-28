@@ -1113,10 +1113,10 @@ mod tests {
     #[test]
     fn accepts_all_supported_object_classes_and_machines() {
         // ELF64 little-endian targets
-        let aarch64 = elf::build_elf_rel_aarch64(&[0], &[], &[], &[], &[], &[]);
+        let aarch64 = elf::build_elf_rel_aarch64(&[0], &[], &[], &[], &[], &[], &[]);
         assert!(parse_object(&aarch64, "aarch64.o").is_ok());
 
-        let riscv64 = elf::build_elf_rel_riscv64(&[0], &[], &[], &[], &[], &[]);
+        let riscv64 = elf::build_elf_rel_riscv64(&[0], &[], &[], &[], &[], &[], &[]);
         assert!(parse_object(&riscv64, "riscv64.o").is_ok());
 
         let x86_64 = elf::build_elf_rel_x86_64(

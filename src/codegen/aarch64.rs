@@ -5,9 +5,9 @@ use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
 use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, SHF_ALLOC,
-    SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_GNU_IFUNC, STT_OBJECT,
-    STT_TLS,
+    self, ComdatGroup, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21,
+    R_AARCH64_CALL26, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STT_FUNC,
+    STT_GNU_IFUNC, STT_OBJECT, STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -48,6 +48,8 @@ pub struct Aarch64Codegen {
     /// exec 模式 ADR 占位: (位置, rd, 绝对目标地址)
     pending_adr_exec: Vec<(u64, u8, u64)>,
     extra_sections: Vec<ElfSection>,
+    /// COMDAT group definitions
+    comdat_groups: Vec<ComdatGroup>,
     /// 当前函数返回类型 (sret/HFA 判定)
     current_return_ty: Option<ValueType>,
     /// AST struct/union 字段表 (HFA 分类)
@@ -130,6 +132,7 @@ impl Aarch64Codegen {
             pending_bl_calls: Vec::new(),
             pending_adr_exec: Vec::new(),
             extra_sections: Vec::new(),
+            comdat_groups: Vec::new(),
             current_return_ty: None,
             aggregate_fields: HashMap::new(),
             is_current_func_variadic: false,
@@ -616,6 +619,7 @@ impl Aarch64Codegen {
                 &self.relocations,
                 &self.rodata_relocations,
                 &self.extra_sections,
+                &self.comdat_groups,
             )
         } else {
             elf::build_elf_aarch64(&self.code, &self.rodata, self.entry)
