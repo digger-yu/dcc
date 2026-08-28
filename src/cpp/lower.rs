@@ -244,7 +244,7 @@ fn strip_cpp_keywords(s: &str) -> String {
                     if j < len {
                         j += 1; // 跳过结尾 "
                         let lit = &bytes[str_start..j];
-                        if lit == b"\"C\"" || lit == b"\"c\"" {
+                        if lit == b"\"C\"" || lit == b"\"c\"" || lit == b"\"C++\"" || lit == b"\"c++\"" {
                             // 跳过空白
                             while j < len && (bytes[j] as char).is_ascii_whitespace() {
                                 j += 1;
@@ -894,8 +894,13 @@ impl Lower {
             self.out.push_str("#include <stddef.h>\n");
             self.out.push_str("#include <stdint.h>\n");
         } else {
-            // 不用系统头时, 显式声明 size_t 为 unsigned long 以便本地 dcc 也能工作
+            // 不用系统头时, 显式声明常用类型以便本地 dcc 也能工作
             self.out.push_str("typedef unsigned long size_t;\n");
+            self.out.push_str("typedef long long intmax_t;\n");
+            self.out.push_str("typedef unsigned long long uintmax_t;\n");
+            self.out.push_str("typedef int wchar_t;\n");
+            self.out.push_str("typedef long long int64_t;\n");
+            self.out.push_str("typedef unsigned long long uint64_t;\n");
         }
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
