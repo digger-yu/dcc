@@ -19422,3 +19422,78 @@ fn const_correct_syntax_ok() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C99 <inttypes.h> format macros, <float.h>, <limits.h>, <errno.h> builtins
+#[test]
+fn c99_std_macros_syntax_ok() {
+    let source = include_str!("fixtures/c/c99_std_macros.c");
+    let output = run_syntax_test("c99-std-macros", source);
+    assert!(
+        output.status.success(),
+        "C99 standard macros should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 inttypes.h PRId64/PRIu64 format macros availability
+#[test]
+fn inttypes_format_macros_defined() {
+    let src = r#"
+#if !defined(__PRId64) || !defined(__PRIu64) || !defined(__PRIx64)
+#error "inttypes format macros not defined"
+#endif
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("inttypes-macros", src);
+    assert!(
+        output.status.success(),
+        "inttypes format macros should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 float.h builtin macros
+#[test]
+fn float_builtin_macros_defined() {
+    let src = r#"
+#if __FLT_RADIX__ != 2
+#error "FLT_RADIX"
+#endif
+#if __DBL_MANT_DIG__ != 53
+#error "DBL_MANT_DIG"
+#endif
+#if __FLT_MAX_10_EXP__ != 38
+#error "FLT_MAX_10_EXP"
+#endif
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("float-macros", src);
+    assert!(
+        output.status.success(),
+        "float.h macros should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 freestanding errno.h constants
+#[test]
+fn errno_constants_defined() {
+    let src = r#"
+#if EDOM != 33
+#error "EDOM"
+#endif
+#if ERANGE != 34
+#error "ERANGE"
+#endif
+#if EILSEQ != 84
+#error "EILSEQ"
+#endif
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("errno-consts", src);
+    assert!(
+        output.status.success(),
+        "errno constants should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

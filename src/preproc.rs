@@ -1177,7 +1177,203 @@ pub fn preprocess(
             variadic: false,
         },
     );
-    // 用户 -D 定义
+    // ===== C99 <inttypes.h> format macros =====
+    // PRIdN / PRIuN / PRIxN: printf format specifiers for fixed-width types
+    // These depend on the data model (LP64 vs ILP32)
+    pp.define_builtin("__PRId8", "\"d\"");
+    pp.define_builtin("__PRIi8", "\"i\"");
+    pp.define_builtin("__PRIo8", "\"o\"");
+    pp.define_builtin("__PRIu8", "\"u\"");
+    pp.define_builtin("__PRIx8", "\"x\"");
+    pp.define_builtin("__PRIX8", "\"X\"");
+    pp.define_builtin("__PRId16", "\"d\"");
+    pp.define_builtin("__PRIi16", "\"i\"");
+    pp.define_builtin("__PRIo16", "\"o\"");
+    pp.define_builtin("__PRIu16", "\"u\"");
+    pp.define_builtin("__PRIx16", "\"x\"");
+    pp.define_builtin("__PRIX16", "\"X\"");
+    pp.define_builtin("__PRId32", "\"d\"");
+    pp.define_builtin("__PRIi32", "\"i\"");
+    pp.define_builtin("__PRIo32", "\"o\"");
+    pp.define_builtin("__PRIu32", "\"u\"");
+    pp.define_builtin("__PRIx32", "\"x\"");
+    pp.define_builtin("__PRIX32", "\"X\"");
+    if is_lp64 {
+        // LP64: int64_t = long int
+        pp.define_builtin("__PRId64", "\"ld\"");
+        pp.define_builtin("__PRIi64", "\"li\"");
+        pp.define_builtin("__PRIo64", "\"lo\"");
+        pp.define_builtin("__PRIu64", "\"lu\"");
+        pp.define_builtin("__PRIx64", "\"lx\"");
+        pp.define_builtin("__PRIX64", "\"lX\"");
+    } else {
+        // ILP32: int64_t = long long int
+        pp.define_builtin("__PRId64", "\"lld\"");
+        pp.define_builtin("__PRIi64", "\"lli\"");
+        pp.define_builtin("__PRIo64", "\"llo\"");
+        pp.define_builtin("__PRIu64", "\"llu\"");
+        pp.define_builtin("__PRIx64", "\"llx\"");
+        pp.define_builtin("__PRIX64", "\"llX\"");
+    }
+    // inttypes.h PRIdMAX / PRIdPTR etc.
+    if is_lp64 {
+        pp.define_builtin("__PRIdMAX", "\"ld\"");
+        pp.define_builtin("__PRIuMAX", "\"lu\"");
+        pp.define_builtin("__PRIxMAX", "\"lx\"");
+        pp.define_builtin("__PRIdPTR", "\"ld\"");
+        pp.define_builtin("__PRIuPTR", "\"lu\"");
+        pp.define_builtin("__PRIxPTR", "\"lx\"");
+    } else {
+        pp.define_builtin("__PRIdMAX", "\"lld\"");
+        pp.define_builtin("__PRIuMAX", "\"llu\"");
+        pp.define_builtin("__PRIxMAX", "\"llx\"");
+        pp.define_builtin("__PRIdPTR", "\"d\"");
+        pp.define_builtin("__PRIuPTR", "\"u\"");
+        pp.define_builtin("__PRIxPTR", "\"x\"");
+    }
+    // SCNdN / SCNuN: scanf format specifiers (same as printf for standard types)
+    pp.define_builtin("__SCNd8", "\"hhd\"");
+    pp.define_builtin("__SCNu8", "\"hhu\"");
+    pp.define_builtin("__SCNd16", "\"hd\"");
+    pp.define_builtin("__SCNu16", "\"hu\"");
+    pp.define_builtin("__SCNd32", "\"d\"");
+    pp.define_builtin("__SCNu32", "\"u\"");
+    if is_lp64 {
+        pp.define_builtin("__SCNd64", "\"ld\"");
+        pp.define_builtin("__SCNu64", "\"lu\"");
+    } else {
+        pp.define_builtin("__SCNd64", "\"lld\"");
+        pp.define_builtin("__SCNu64", "\"llu\"");
+    }
+    // ===== C99 <float.h> macros =====
+    pp.define_builtin("__FLT_RADIX__", "2");
+    pp.define_builtin("__FLT_MANT_DIG__", "24");
+    pp.define_builtin("__FLT_DIG__", "6");
+    pp.define_builtin("__FLT_MIN_EXP__", "(-125)");
+    pp.define_builtin("__FLT_MIN_10_EXP__", "(-37)");
+    pp.define_builtin("__FLT_MAX_EXP__", "128");
+    pp.define_builtin("__FLT_MAX_10_EXP__", "38");
+    pp.define_builtin("__FLT_MAX__", "3.40282347e+38F");
+    pp.define_builtin("__FLT_MIN__", "1.17549435e-38F");
+    pp.define_builtin("__FLT_EPSILON__", "1.19209290e-7F");
+    pp.define_builtin("__FLT_HAS_DENORM__", "1");
+    pp.define_builtin("__DBL_MANT_DIG__", "53");
+    pp.define_builtin("__DBL_DIG__", "15");
+    pp.define_builtin("__DBL_MIN_EXP__", "(-1021)");
+    pp.define_builtin("__DBL_MIN_10_EXP__", "(-307)");
+    pp.define_builtin("__DBL_MAX_EXP__", "1024");
+    pp.define_builtin("__DBL_MAX_10_EXP__", "308");
+    pp.define_builtin("__DBL_MAX__", "1.7976931348623157e+308");
+    pp.define_builtin("__DBL_MIN__", "2.2250738585072014e-308");
+    pp.define_builtin("__DBL_EPSILON__", "2.2204460492503131e-16");
+    pp.define_builtin("__DBL_HAS_DENORM__", "1");
+    pp.define_builtin("__LDBL_MANT_DIG__", "64");
+    pp.define_builtin("__LDBL_DIG__", "18");
+    pp.define_builtin("__LDBL_MIN_EXP__", "(-16381)");
+    pp.define_builtin("__LDBL_MIN_10_EXP__", "(-4931)");
+    pp.define_builtin("__LDBL_MAX_EXP__", "16384");
+    pp.define_builtin("__LDBL_MAX_10_EXP__", "4932");
+    pp.define_builtin("__LDBL_MAX__", "1.18973149535723176502e+4932L");
+    pp.define_builtin("__LDBL_MIN__", "3.36210314311209350626e-4932L");
+    pp.define_builtin("__LDBL_EPSILON__", "1.08420217248550443401e-19L");
+    pp.define_builtin("__LDBL_HAS_DENORM__", "1");
+    pp.define_builtin("__DECIMAL_DIG__", "21");
+    // ===== C99 <limits.h> completeness =====
+    // CHAR_BIT already defined as __CHAR_BIT__
+    pp.define_builtin("__MB_LEN_MAX__", "16");
+    // SCHAR_MIN/SCHAR_MAX already via __INT8_MIN__/__INT8_MAX__
+    // UCHAR_MAX already via __UINT8_MAX__
+    // SHRT_MIN/SHRT_MAX already via __INT16_MIN__/__INT16_MAX__
+    // USHRT_MAX already via __UINT16_MAX__
+    // INT_MIN/INT_MAX already via __INT32_MIN__/__INT32_MAX__
+    // UINT_MAX already via __UINT32_MAX__
+    // LONG_MIN/LONG_MAX/LONG_ULONG_MAX depend on data model
+    if is_lp64 {
+        pp.define_builtin("__LONG_MIN__", "(-__LONG_MAX__ - 1L)");
+    } else {
+        pp.define_builtin("__LONG_MIN__", "(-__LONG_MAX__ - 1L)");
+    }
+    // LLONG_MIN/LLONG_MAX
+    pp.define_builtin("__LLONG_MIN__", "(-__LONG_LONG_MAX__ - 1LL)");
+    pp.define_builtin("__ULLONG_MAX__", "18446744073709551615ULL");
+    // ===== C99 <tgmath.h> support =====
+    // Type-generic math functions use _Generic (C11) to dispatch
+    // to the correct float/double/long double variant.
+    // These are defined as function-like macros using _Generic.
+    // Note: _Generic is handled at parse time, so we define the
+    // tgmath macros using the standard C11 pattern.
+    let tgmath_fns = [
+        "acos", "asin", "atan", "acosh", "asinh", "atanh",
+        "cos", "sin", "tan", "cosh", "sinh", "tanh",
+        "exp", "log", "log10", "log2", "exp2", "expm1", "log1p",
+        "pow", "sqrt", "cbrt", "hypot",
+        "fabs", "ceil", "floor", "round", "trunc", "rint", "nearbyint",
+        "fmod", "remainder", "remquo", "copysign", "nextafter", "nexttoward",
+        "fdim", "fmax", "fmin", "fma",
+        "erf", "erfc", "lgamma", "tgamma",
+    ];
+    for fn_name in &tgmath_fns {
+        // _Generic based type-generic dispatch
+        // For 1-arg functions: _Generic(x, float: fn##f, default: fn, long double: fn##l)
+        // For 2-arg functions: similar but with both args
+        let macro_body = format!(
+            "_Generic((x), float: {fn}f, default: {fn}, long double: {fn}l)(x)",
+            fn = fn_name
+        );
+        pp.macros.insert(
+            fn_name.to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: macro_body,
+                variadic: false,
+            },
+        );
+    }
+    // 2-argument tgmath functions
+    let tgmath_fns2 = [
+        "atan2", "pow", "hypot", "fmod", "remainder",
+        "copysign", "nextafter", "fdim", "fmax", "fmin",
+    ];
+    for fn_name in &tgmath_fns2 {
+        let macro_body = format!(
+            "_Generic((x)+(y), float: {fn}f, default: {fn}, long double: {fn}l)(x,y)",
+            fn = fn_name
+        );
+        pp.macros.insert(
+            format!("__tg_{}", fn_name),
+            MacroDef {
+                params: Some(vec!["x".to_string(), "y".to_string()]),
+                body: macro_body,
+                variadic: false,
+            },
+        );
+    }
+    // ===== C99 freestanding <errno.h> =====
+    pp.define_builtin("__errno", "(*__errno_location())");
+    pp.define_builtin("EDOM", "33");
+    pp.define_builtin("ERANGE", "34");
+    pp.define_builtin("EILSEQ", "84");
+    // ===== C99 freestanding <setjmp.h> =====
+    // jmp_buf size: x86_64 = 200 bytes (glibc), simplified to 64 for nolibc
+    pp.define_builtin("__JB_SIZE__", "200");
+    // ===== C99 freestanding <signal.h> =====
+    pp.define_builtin("__SIG_DFL", "0");
+    pp.define_builtin("__SIG_IGN", "1");
+    pp.define_builtin("__SIG_ERR", "-1");
+    pp.define_builtin("__SIGHUP", "1");
+    pp.define_builtin("__SIGINT", "2");
+    pp.define_builtin("__SIGQUIT", "3");
+    pp.define_builtin("__SIGILL", "4");
+    pp.define_builtin("__SIGTRAP", "5");
+    pp.define_builtin("__SIGABRT", "6");
+    pp.define_builtin("__SIGBUS", "7");
+    pp.define_builtin("__SIGFPE", "8");
+    pp.define_builtin("__SIGKILL", "9");
+    pp.define_builtin("__SIGSEGV", "11");
+    pp.define_builtin("__SIGPIPE", "13");
+    pp.define_builtin("__SIGALRM", "14");
+    pp.define_builtin("__SIGTERM", "15");
+    // User -D definitions
     for (name, val) in defines {
         let v = val.as_deref().unwrap_or("1");
         pp.define_builtin(name, v);
