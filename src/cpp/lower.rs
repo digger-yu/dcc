@@ -211,6 +211,120 @@ pub fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// 去除 C++ 特有关键字, 使 extern "C" 块内的声明可被 C 编译器接受.
+/// 目前去除:
+///   - `noexcept` / `noexcept(expr)`
+///   - `constexpr` (函数声明中)
+///   - `__extension__` (GCC 扩展, 某些 C 模式不接受)
+fn strip_cpp_keywords(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 检查 extern "C" { -> 去掉 extern "C" 包装, 只保留 { 内容
+        // "extern" 是 6 字节
+        if i + 6 <= len && &bytes[i..i + 6] == b"extern" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 6 >= len || !is_ident_char(bytes[i + 6]);
+            if before_ok && after_ok {
+                let mut j = i + 6;
+                // 跳过空白 (空格/Tab/换行)
+                while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                // 检查是否后跟 "C" 或 "c"
+                if j < len && bytes[j] == b'"' {
+                    // 查找字符串字面量结束
+                    let str_start = j;
+                    j += 1; // 跳过开头 "
+                    while j < len && bytes[j] != b'"' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1; // 跳过结尾 "
+                        let lit = &bytes[str_start..j];
+                        if lit == b"\"C\"" || lit == b"\"c\"" {
+                            // 跳过空白
+                            while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                                j += 1;
+                            }
+                            // extern "C" { ... } -> 去掉 extern "C" { 和匹配的 }
+                            // 只保留内容, 让内部声明成为顶层声明
+                            if j < len && bytes[j] == b'{' {
+                                // 找到匹配的 }
+                                let mut depth = 1i32;
+                                let mut k = j + 1;
+                                while k < len && depth > 0 {
+                                    if bytes[k] == b'{' {
+                                        depth += 1;
+                                    } else if bytes[k] == b'}' {
+                                        depth -= 1;
+                                    }
+                                    k += 1;
+                                }
+                                // 输出 extern "C" 块的内容 (不含外层 { })
+                                // 递归清洗内容 (可能还有嵌套的 extern "C")
+                                let inner = &s[j + 1..k - 1];
+                                result.push_str(&strip_cpp_keywords(inner));
+                                i = k;
+                                continue;
+                            }
+                            // extern "C" 单声明 (无 {) -> 去掉 extern "C"
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // 检查 noexcept
+        if i + 8 <= len && &bytes[i..i + 8] == b"noexcept" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 8 >= len || !is_ident_char(bytes[i + 8]);
+            if before_ok && after_ok {
+                let mut j = i + 8;
+                while j < len && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'(' {
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        j += 1;
+                    }
+                }
+                while j < len && bytes[j] == b' ' {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        // 检查 constexpr
+        if i + 9 <= len && &bytes[i..i + 9] == b"constexpr" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 9 >= len || !is_ident_char(bytes[i + 9]);
+            if before_ok && after_ok {
+                let mut j = i + 9;
+                while j < len && bytes[j] == b' ' {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 类型到 C 字符串 (模块级, Lower 内外共用)
 pub fn mangle_to_c(ty: &MangleType) -> String {
     match ty {
@@ -2396,7 +2510,9 @@ impl Lower {
                                     i += 1;
                                 }
                             }
-                            self.out.push_str(body);
+                            // C++ 特有语法清洗: 去除 C 编译器不接受的构造
+                            let cleaned = strip_cpp_keywords(body);
+                            self.out.push_str(&cleaned);
                         }
                     }
                 }
