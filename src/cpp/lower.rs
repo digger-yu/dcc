@@ -1409,6 +1409,11 @@ fn strip_gcc_attributes(s: &str) -> String {
                     continue;
                 }
             }
+            // __extension__ 可以单独出现，后面不跟括号
+            if ident == "__extension__" {
+                i = skip_ws(bytes, ident_end);
+                continue;
+            }
         }
         result.push(bytes[i] as char);
         i += 1;
