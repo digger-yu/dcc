@@ -5164,14 +5164,18 @@ impl Codegen {
                 self.code.push(0x90);
             }
             let func_start = self.pos();
-            self.label(&f.name.name);
+            // 使用 asm label 覆盖符号名 (如果有)
+            let sym_name = self.resolve_asm_label(&f.name.name);
+            self.label(sym_name);
             for _ in 0..suffix_len {
                 self.code.push(0x90);
             }
             func_start
         } else {
             let func_start = self.pos();
-            self.label(&f.name.name);
+            // 使用 asm label 覆盖符号名 (如果有)
+            let sym_name = self.resolve_asm_label(&f.name.name);
+            self.label(sym_name);
             func_start
         };
         // __attribute__((naked)): 不生成 prologue/epilogue，
@@ -5679,6 +5683,7 @@ impl Codegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -5692,6 +5697,7 @@ impl Codegen {
                     input_names,
                     input_constraints,
                     clobbers,
+                    *volatile,
                 );
             }
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
@@ -7580,6 +7586,7 @@ impl Codegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -7593,6 +7600,7 @@ impl Codegen {
                     input_names,
                     input_constraints,
                     clobbers,
+                    *volatile,
                 );
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -18376,6 +18384,7 @@ impl Codegen {
         input_names: &[Option<String>],
         input_constraints: &[String],
         clobbers: &[String],
+        volatile: bool,
     ) {
         let mut bindings = Vec::new();
         let op_map = self.build_asm_operand_map(
@@ -18420,6 +18429,10 @@ impl Codegen {
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>(),
         );
+        // volatile asm: 完整屏障，防止优化器重排
+        if volatile {
+            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+        }
         // 记录 asm 块起始 PC (用于 DWARF 行号表)
         let asm_pc_start = self.code.len() as u64;
         let asm_src_line = self.current_asm_src_line;
@@ -18437,8 +18450,8 @@ impl Codegen {
                 self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width);
             }
         }
-        if clobbers.iter().any(|c| c == "memory") {
-            // memory clobber: 编译器屏障，防止指令重排越过 asm
+        if clobbers.iter().any(|c| c == "memory") || volatile {
+            // memory clobber 或 volatile: 编译器屏障，防止指令重排越过 asm
             self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
         }
     }

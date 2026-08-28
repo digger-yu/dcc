@@ -92,6 +92,8 @@ pub struct Riscv64Codegen {
     _target: Target,
     /// break/continue 标签栈: (break_label, continue_label)
     break_continue_stack: Vec<(String, String)>,
+    /// GNU asm label 映射: C 名 → asm("label") 覆盖名
+    asm_label_map: HashMap<String, String>,
 }
 
 impl Riscv64Codegen {
@@ -134,6 +136,7 @@ impl Riscv64Codegen {
             tls_globals: HashMap::new(),
             _target: target,
             break_continue_stack: Vec::new(),
+            asm_label_map: HashMap::new(),
         }
     }
 
@@ -143,6 +146,31 @@ impl Riscv64Codegen {
 
     pub fn set_asm_text_mode(&mut self, v: bool) {
         self.asm_text_mode = v;
+    }
+
+    /// 解析 GNU asm label: 如果 C 名有对应的 asm 标签则返回 asm 标签名，
+    /// 否则返回原始 C 名。用于 ELF 符号名、重定位目标和汇编标签发射。
+    fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
+        self.asm_label_map.get(c_name).map(|s| s.as_str()).unwrap_or(c_name)
+    }
+
+    /// 收集 GNU asm label 映射和 TLS 变量访问模型
+    pub fn collect_asm_labels(&mut self, prog: &Program) {
+        for decl in &prog.decls {
+            match decl {
+                Decl::Func(f) => {
+                    if let Some(ref label) = f.asm_label {
+                        self.asm_label_map.insert(f.name.name.clone(), label.clone());
+                    }
+                }
+                Decl::Var(v) => {
+                    if let Some(ref label) = v.asm_label {
+                        self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Encode resolved asm text into machine code and emit to code buffer.
@@ -193,6 +221,7 @@ impl Riscv64Codegen {
 
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
+        self.collect_asm_labels(prog);
         self.build_aggregate_fields(prog);
         self.emit_globals(module);
         if self.relocatable {
@@ -376,12 +405,16 @@ impl Riscv64Codegen {
                     // RISC-V NOP: ADDI x0, x0, 0 = 0x00000013
                     self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
                 }
-                self.label(&func.name);
+                // 使用 asm label 覆盖符号名 (如果有)
+                let sym_name = self.resolve_asm_label(&func.name).to_string();
+                self.label(&sym_name);
                 for _ in 0..suffix_len {
                     self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
                 }
             } else {
-                self.label(&func.name);
+                // 使用 asm label 覆盖符号名 (如果有)
+                let sym_name = self.resolve_asm_label(&func.name).to_string();
+                self.label(&sym_name);
             }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
@@ -444,12 +477,16 @@ impl Riscv64Codegen {
                     // RISC-V NOP: ADDI x0, x0, 0 = 0x00000013
                     self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
                 }
-                self.label(&func.name);
+                // 使用 asm label 覆盖符号名 (如果有)
+                let sym_name = self.resolve_asm_label(&func.name).to_string();
+                self.label(&sym_name);
                 for _ in 0..suffix_len {
                     self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
                 }
             } else {
-                self.label(&func.name);
+                // 使用 asm label 覆盖符号名 (如果有)
+                let sym_name = self.resolve_asm_label(&func.name).to_string();
+                self.label(&sym_name);
             }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
@@ -787,6 +824,7 @@ impl Riscv64Codegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -801,6 +839,7 @@ impl Riscv64Codegen {
                     clobbers,
                     &span.file,
                     span.line,
+                    *volatile,
                 );
             }
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
@@ -2214,6 +2253,7 @@ impl Riscv64Codegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -2228,6 +2268,7 @@ impl Riscv64Codegen {
                     clobbers,
                     &span.file,
                     span.line,
+                    *volatile,
                 );
             }
             _ => {
@@ -2998,6 +3039,7 @@ impl Riscv64Codegen {
         clobbers: &[String],
         span_file: &str,
         span_line: u32,
+        volatile: bool,
     ) {
         let pool = asm_constraints::riscv64_reg_pool();
         let resolved_operands = resolve_asm_operands(
@@ -3007,6 +3049,11 @@ impl Riscv64Codegen {
             input_names,
             &pool,
         );
+
+        // --- volatile asm: 前置屏障 ---
+        if volatile {
+            self.emit_fence();
+        }
 
         // --- 加载 inout 输入值到分配的寄存器 ---
         for (i, op) in resolved_operands.iter().enumerate() {
@@ -3071,8 +3118,8 @@ impl Riscv64Codegen {
             }
         }
 
-        // --- memory clobber: FENCE 编译器屏障 ---
-        if clobbers.iter().any(|c| c == "memory") {
+        // --- memory clobber 或 volatile: FENCE 编译器屏障 ---
+        if clobbers.iter().any(|c| c == "memory") || volatile {
             self.emit_fence();
         }
 

@@ -684,6 +684,7 @@ impl MipsCodegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -698,6 +699,7 @@ impl MipsCodegen {
                     clobbers,
                     &span.file,
                     span.line,
+                    *volatile,
                 );
             }
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
@@ -1249,6 +1251,7 @@ impl MipsCodegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                volatile,
                 span,
                 ..
             } => {
@@ -1263,6 +1266,7 @@ impl MipsCodegen {
                     clobbers,
                     &span.file,
                     span.line,
+                    *volatile,
                 );
             }
             Expr::VaArg { ap, ty, .. } => {
@@ -1746,6 +1750,7 @@ impl MipsCodegen {
         clobbers: &[String],
         span_file: &str,
         span_line: u32,
+        volatile: bool,
     ) {
         let pool = asm_constraints::mips_reg_pool();
         let resolved_operands = resolve_asm_operands(
@@ -1755,6 +1760,11 @@ impl MipsCodegen {
             input_names,
             &pool,
         );
+
+        // --- volatile asm: 前置屏障 ---
+        if volatile {
+            self.emit_sync();
+        }
 
         // --- 加载 inout 输入值到分配的寄存器 ---
         for (i, op) in resolved_operands.iter().enumerate() {
@@ -1819,8 +1829,8 @@ impl MipsCodegen {
             }
         }
 
-        // --- memory clobber: SYNC 编译器屏障 ---
-        if clobbers.iter().any(|c| c == "memory") {
+        // --- memory clobber 或 volatile: SYNC 编译器屏障 ---
+        if clobbers.iter().any(|c| c == "memory") || volatile {
             self.emit_sync();
         }
 
