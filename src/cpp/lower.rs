@@ -1340,6 +1340,59 @@ fn strip_gcc_attributes(s: &str) -> String {
     result
 }
 
+/// 为所有 struct 生成 typedef, 使得 NAME 和 struct NAME 都有效
+/// 对于每个 struct NAME { ... }, 在文件末尾添加 typedef struct NAME NAME;
+fn generate_struct_typedefs(s: &str) -> String {
+    let mut struct_names: Vec<String> = Vec::new();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            i = skip_comment(bytes, i); continue;
+        }
+        if match_word_at(bytes, i, "struct") {
+            let mut j = skip_ws(bytes, i + 6);
+            // 跳过属性宏
+            while j < len && is_ident_char(bytes[j]) {
+                let (_, ident_end) = read_ident(bytes, j);
+                let k = skip_ws(bytes, ident_end);
+                if k < len && bytes[k] == b'(' {
+                    let mut depth = 1i32;
+                    let mut m = k + 1;
+                    while m < len && depth > 0 {
+                        if bytes[m] == b'(' { depth += 1; }
+                        else if bytes[m] == b')' { depth -= 1; }
+                        m += 1;
+                    }
+                    j = skip_ws(bytes, m);
+                } else {
+                    break;
+                }
+            }
+            if j < len && is_ident_char(bytes[j]) {
+                let (name, _) = read_ident(bytes, j);
+                if !name.is_empty() && !struct_names.contains(&name)
+                    && name != "_IO_FILE" && name != "_IO_marker"
+                {
+                    struct_names.push(name);
+                }
+            }
+        }
+        i += 1;
+    }
+    if struct_names.is_empty() { return s.to_string(); }
+    let mut result = String::with_capacity(s.len() + struct_names.len() * 50);
+    result.push_str("/* Generated struct typedefs */\n");
+    for name in &struct_names {
+        result.push_str(&format!("typedef struct {} {};\n", name, name));
+    }
+    result.push_str("\n");
+    result.push_str(s);
+    result
+}
+
 /// 预处理 C++ 源文本, 将复杂 C++ 构造替换为 C 兼容形式.
 /// 在 strip_cpp_keywords 的字符级处理之前调用.
 fn replace_cpp_constructs(s: &str) -> String {
@@ -1352,6 +1405,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = remove_struct_inheritance(&result);
     // 清理 struct 定义体: 删除构造函数/析构函数/默认参数/内联成员函数等
     result = clean_struct_bodies(&result);
+    // 为所有 struct 生成 typedef, 使得 NAME 和 struct NAME 都有效
+    result = generate_struct_typedefs(&result);
     // 为所有 struct 类型名称添加 struct 前缀 (在函数参数/返回类型/局部变量中)
     result = add_struct_prefix_to_types(&result);
     // 删除访问说明符 public: / private: / protected:
