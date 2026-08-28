@@ -6970,10 +6970,15 @@ impl Codegen {
                     }
                 } else if let Expr::Deref { e: ptr_e, .. } = lv {
                     // *ptr = val
+                    let seg_prefix = Self::ptr_seg_prefix(&ptr_e.ty());
                     self.gen_expr(ptr_e, 0); // rax = address
                     self.push(0); // save addr
                     self.gen_expr(r, 0); // rax = val
                     self.pop(1); // rcx = addr
+                    // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
+                    if let Some(seg) = seg_prefix {
+                        self.emit(&[seg]);
+                    }
                                  // 浮点指向: 值在 xmm0, 用 movsd/movss 存储
                     if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
@@ -7888,7 +7893,12 @@ impl Codegen {
                 let load_ty = ty.clone();
                 let load_size = load_ty.size().max(1);
                 self.gen_expr(e, 0);
-                self.emit_load_mem_typed(load_size, &load_ty);
+                // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)
+                if let Some(seg) = Self::ptr_seg_prefix(&e.ty()) {
+                    self.emit_load_mem_typed_seg(load_size, &load_ty, seg);
+                } else {
+                    self.emit_load_mem_typed(load_size, &load_ty);
+                }
                 if dst != 0 && !matches!(load_ty, Type::Float | Type::Double) {
                     self.mov(dst, 0);
                 }
@@ -9486,11 +9496,21 @@ impl Codegen {
         ) {
             // 内存 lvalue: (*p)++ / a[i]-- / s->f++
             let mem_sz = inner_ty.size().max(1);
+            // __seg_gs/__seg_fs 指针解引用的 inc/dec: 需要段前缀
+            let seg_prefix = if let Expr::Deref { e: ptr_e, .. } = lv {
+                Self::ptr_seg_prefix(&ptr_e.ty())
+            } else {
+                None
+            };
             if !self.gen_lvalue_addr(lv, 0) {
                 return;
             }
             self.push(0); // 保存地址
-            self.emit_load_mem_typed(mem_sz, &inner_ty); // rax = 值 (按类型符号/零扩展)
+            if let Some(seg) = seg_prefix {
+                self.emit_load_mem_typed_seg(mem_sz, &inner_ty, seg);
+            } else {
+                self.emit_load_mem_typed(mem_sz, &inner_ty); // rax = 值 (按类型符号/零扩展)
+            }
             if !is_pre {
                 self.push(0); // 后缀: 保存旧值 (栈: [旧值, 地址])
             }
@@ -9501,6 +9521,9 @@ impl Codegen {
             } else {
                 self.pop(2); // rdx = 旧值
                 self.pop(1); // rcx = 地址
+            }
+            if let Some(seg) = seg_prefix {
+                self.emit(&[seg]);
             }
             match mem_sz {
                 1 => self.emit(&[0x88, 0x01]),       // mov byte [rcx], al
@@ -11054,6 +11077,35 @@ impl Codegen {
             2 => self.emit(&[0x48, 0x0f, 0xb7, 0x00]), // movzwl (%rax), %rax
             4 => self.emit(&[0x8b, 0x00]),             // mov (%rax), %eax (零扩展到64位)
             _ => self.emit(&[0x48, 0x8b, 0x00]),       // mov (%rax), %rax
+        }
+    }
+
+    /// 从指针类型中提取地址空间段前缀字节.
+    /// `int __seg_gs *p` 的 pointee QualType.addr_space = GS → Some(0x65).
+    fn ptr_seg_prefix(ty: &Type) -> Option<u8> {
+        if let Type::Ptr(qt) = ty {
+            qt.addr_space.prefix_byte()
+        } else {
+            None
+        }
+    }
+
+    /// 带段前缀的按类型加载: 先发射段前缀字节 (如 %gs: = 0x65),
+    /// 再发射正常的 [rax] 加载指令. x86-64 编码中段前缀位于 REX 之前.
+    fn emit_load_mem_typed_seg(&mut self, size: usize, ty: &Type, seg_prefix: u8) {
+        self.emit(&[seg_prefix]);
+        self.emit_load_mem_typed(size, ty);
+    }
+
+    /// 带段前缀的存储到 [rax]: 根据值大小选择存储指令,
+    /// 段前缀字节在调用方发射.
+    fn emit_store_rax_seg(&mut self, seg_prefix: u8, size: usize) {
+        self.emit(&[seg_prefix]);
+        match size {
+            1 => self.emit(&[0x88, 0x00]),             // mov [rax], al
+            2 => self.emit(&[0x66, 0x89, 0x00]),       // mov [rax], ax
+            4 => self.emit(&[0x89, 0x00]),             // mov [rax], eax
+            _ => self.emit(&[0x48, 0x89, 0x00]),       // mov [rax], rax
         }
     }
 
@@ -13592,6 +13644,111 @@ impl Codegen {
                 if dst != 4 && dst != 12 {
                     let rex = if dst >= 8 { 0x49 } else { 0x48 };
                     self.emit(&[rex, 0x89, 0xe0 | (dst & 7)]); // mov dst, rsp
+                }
+                true
+            }
+            // === Per-CPU 内建函数 ===
+            // __builtin_dcc_this_cpu_read(var): 通过 %gs: 段前缀读取当前 CPU 的 per-cpu 变量
+            // 直接生成 mov %gs:var_addr, dst 而非内联汇编, 使编译器能追踪语义.
+            "__builtin_dcc_this_cpu_read" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let arg = &args[0];
+                let var_size = arg.ty().size().max(1);
+                // 取变量地址到 rax
+                if let Expr::Ident { name, .. } = arg {
+                    if self.globals.contains_key(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(0, off);
+                    }
+                } else {
+                    self.gen_expr(&Expr::AddrOf {
+                        e: Box::new(arg.clone()),
+                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        ty: Type::Ptr(Box::new(arg.ty().into())),
+                    }, 0);
+                }
+                // mov %gs:[rax], dst (段前缀 + 按类型加载)
+                self.emit(&[0x65]); // GS segment prefix
+                self.emit_load_mem_typed(var_size, &arg.ty());
+                if dst != 0 && !matches!(arg.ty(), Type::Float | Type::Double) {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_dcc_this_cpu_write(var, val): 通过 %gs: 段前缀写入 per-cpu 变量
+            "__builtin_dcc_this_cpu_write" => {
+                if args.len() < 2 {
+                    return true;
+                }
+                let var_arg = &args[0];
+                let var_size = var_arg.ty().size().max(1);
+                // 取变量地址到 rax, 保存到 rcx
+                if let Expr::Ident { name, .. } = var_arg {
+                    if self.globals.contains_key(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(0, off);
+                    }
+                } else {
+                    self.gen_expr(&Expr::AddrOf {
+                        e: Box::new(var_arg.clone()),
+                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        ty: Type::Ptr(Box::new(var_arg.ty().into())),
+                    }, 0);
+                }
+                self.push(0); // save addr
+                // 求值 val 到 rax
+                self.gen_expr(&args[1], 0);
+                self.pop(1); // rcx = addr
+                // mov %gs:[rcx], rax (段前缀 + 存储)
+                self.emit(&[0x65]); // GS segment prefix
+                match var_size {
+                    1 => self.emit(&[0x88, 0x01]),       // mov [rcx], al
+                    2 => self.emit(&[0x66, 0x89, 0x01]), // mov [rcx], ax
+                    4 => self.emit(&[0x89, 0x01]),       // mov [rcx], eax
+                    _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
+                }
+                true
+            }
+            // __builtin_dcc_this_cpu_add(var, val): 通过 %gs: 段前缀原子加 per-cpu 变量
+            "__builtin_dcc_this_cpu_add" => {
+                if args.len() < 2 {
+                    return true;
+                }
+                let var_arg = &args[0];
+                let var_size = var_arg.ty().size().max(1);
+                // 取变量地址到 rax, 保存到 rcx
+                if let Expr::Ident { name, .. } = var_arg {
+                    if self.globals.contains_key(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(0, off);
+                    }
+                } else {
+                    self.gen_expr(&Expr::AddrOf {
+                        e: Box::new(var_arg.clone()),
+                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        ty: Type::Ptr(Box::new(var_arg.ty().into())),
+                    }, 0);
+                }
+                self.push(0); // save addr
+                // 求值 val 到 rax
+                self.gen_expr(&args[1], 0);
+                self.pop(1); // rcx = addr
+                // add %gs:[rcx], rax (段前缀 + 加法)
+                self.emit(&[0x65]); // GS segment prefix
+                match var_size {
+                    1 => self.emit(&[0x00, 0x01]),       // add [rcx], al
+                    2 => self.emit(&[0x66, 0x01, 0x01]), // add [rcx], ax
+                    4 => self.emit(&[0x01, 0x01]),       // add [rcx], eax
+                    _ => self.emit(&[0x48, 0x01, 0x01]), // add [rcx], rax
                 }
                 true
             }
