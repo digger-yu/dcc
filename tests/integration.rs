@@ -19880,3 +19880,25 @@ void test(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 alignas on struct members
+#[test]
+fn c23_alignas_in_struct() {
+    let src = r#"
+struct aligned {
+    int a;
+    _Alignas(16) int b;
+    char c;
+};
+int main(void) {
+    struct aligned s;
+    return s.a + s.b + s.c;
+}
+"#;
+    let output = run_syntax_test("c23-alignas-struct", src);
+    assert!(
+        output.status.success(),
+        "alignas in struct should work. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
