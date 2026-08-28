@@ -11394,6 +11394,23 @@ fn asm_label_symbol_naming() {
     assert_eq!(code, 0, "asm label symbol checks failed (exit={code})");
 }
 
+/// TLS model codegen: __attribute__((tls_model("model"))) is parsed and
+/// stored. Kernel per-cpu variables use tls_model("local-exec").
+/// Tests ET_EXEC mode (dcc's own linker handles TLS layout).
+#[test]
+#[cfg(unix)]
+fn tls_model_codegen() {
+    let src = include_str!("fixtures/c/tls_model_codegen.c");
+    let (out, exe) = run_compile_and_run("tls-model-codegen", src);
+    assert!(
+        out.status.success(),
+        "tls model codegen compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "tls model codegen checks failed");
+    let _ = fs::remove_file(&exe);
+}
+
 /// Extended asm constraint coverage: I/J/K/L/M/N/O/P integer ranges,
 /// early-clobber, commutative, multi-letter constraints.
 #[test]

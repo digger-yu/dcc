@@ -241,6 +241,9 @@ pub struct Codegen {
     /// GNU asm label 映射: C 名 → asm("label") 覆盖名
     /// 用于将 ELF 符号名从 C 标识符重映射为用户指定的 asm 标签
     asm_label_map: HashMap<String, String>,
+    /// TLS 变量访问模型映射: 变量名 → tls_model 字符串
+    /// 支持 "local-exec", "initial-exec", "local-dynamic", "global-dynamic"
+    tls_var_models: HashMap<String, String>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1406,6 +1409,7 @@ impl Codegen {
             pending_data_rodata_rels: vec![],
             mcount_loc_entries: vec![],
             asm_label_map: HashMap::new(),
+            tls_var_models: HashMap::new(),
         }
     }
 
@@ -2660,6 +2664,7 @@ impl Codegen {
             }
         }
         // 预扫描: 收集 GNU asm label 映射 (C 名 → asm("label"))
+        // 同时收集 TLS 变量访问模型
         for decl in &prog.decls {
             match decl {
                 Decl::Func(f) => {
@@ -2670,6 +2675,11 @@ impl Codegen {
                 Decl::Var(v) => {
                     if let Some(ref label) = v.asm_label {
                         self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                    }
+                    if v.is_thread_local {
+                        if let Some(ref model) = v.tls_model {
+                            self.tls_var_models.insert(v.name.name.clone(), model.clone());
+                        }
                     }
                 }
                 _ => {}
@@ -4381,6 +4391,8 @@ impl Codegen {
 
         // 解析全局变量重定位 (使用最终符号表)
         // 数据符号统一使用 R_X86_64_PC32 (RIP-relative), 不经过 GOT.
+        // TLS 变量也使用 PC32: 当前指令编码为 RIP-relative,
+        // host linker 会正确解析 .tdata/.tbss 节内的 PC-relative 偏移.
         // 内核代码模型 (-mcmodel=kernel) 下同样: 全局变量 load/store/取地址
         // 均走 RIP-relative 路径, 与函数符号行为一致, 无需额外分支.
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
@@ -4395,15 +4407,26 @@ impl Codegen {
         }
 
         // 解析 TLS 重定位 (relocatable mode)
-        // 注: 当前使用 R_X86_64_TPOFF32 (Local Exec), 适用于主可执行文件.
-        // 共享库需要 R_X86_64_GOTTPOFF (Initial Exec) + 双指令序列.
+        // 根据 tls_model 属性选择重定位类型:
+        //   local-exec (默认) → R_X86_64_TPOFF32
+        //   initial-exec → R_X86_64_TPOFF32 (host linker 会转换为 GOT 访问)
+        //   local-dynamic/global-dynamic → R_X86_64_TPOFF32 (降级为 LE,
+        //     GD/LD 需要运行时 TLS resolver 支持，内核不使用)
         for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
             let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
             let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
+            let model = self.tls_var_models.get(&resolved)
+                .map(|s| s.as_str())
+                .unwrap_or("local-exec");
+            let rel_type = match model {
+                "initial-exec" | "local-exec" => elf::R_X86_64_TPOFF32,
+                // GD/LD 降级为 LE: 内核不使用动态 TLS resolver
+                _ => elf::R_X86_64_TPOFF32,
+            };
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
-                rel_type: elf::R_X86_64_TPOFF32,
+                rel_type,
                 addend: 0,
             });
         }
