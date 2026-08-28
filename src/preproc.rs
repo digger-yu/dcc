@@ -1085,22 +1085,31 @@ pub fn preprocess(
         },
     );
     // __get_cpu_var(var): 访问当前 CPU 的 per-cpu 变量
-    // 展开为通过 %gs 段前缀的直接引用
+    // 通过 __seg_gs 指针解引用生成 %gs: 段前缀访问.
+    // 展开流程: &(var) 取 per-cpu 变量地址 → 强转为 __seg_gs 指针
+    // → 解引用时代码生成发射 %gs: 段前缀.
     pp.macros.insert(
         "__get_cpu_var".to_string(),
         MacroDef {
             params: Some(vec!["var".to_string()]),
-            body: "(*({ __typeof__(&(var)) __percpu_ptr = (__typeof__(&(var)))&(var); __percpu_ptr; }))".to_string(),
+            body: "(*((__typeof__(var) __seg_gs *)(&(var))))".to_string(),
             variadic: false,
         },
     );
     // per_cpu(var, cpu): 访问指定 CPU 的 per-cpu 变量
-    // 简化版本: 仅支持当前 CPU (cpu = 0 或忽略 cpu 参数)
+    // 通过 per_cpu_offset(cpu) 计算目标 CPU 的 per-cpu 偏移,
+    // 加上变量基址后通过 __seg_gs 指针解引用访问.
+    // per_cpu_offset() 由内核提供 (arch/x86/include/asm/percpu.h).
     pp.macros.insert(
         "per_cpu".to_string(),
         MacroDef {
             params: Some(vec!["var".to_string(), "cpu".to_string()]),
-            body: "(*({ __typeof__(&(var)) __percpu_ptr = (__typeof__(&(var)))&(var); __percpu_ptr; }))".to_string(),
+            body: "(*({ \
+                unsigned long __pcpu_off = per_cpu_offset(cpu); \
+                __typeof__(var) __seg_gs *__pcpu_ptr = \
+                    (__typeof__(var) __seg_gs *)((unsigned long)(&(var)) + __pcpu_off); \
+                __pcpu_ptr; \
+            }))".to_string(),
             variadic: false,
         },
     );
