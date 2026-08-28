@@ -20093,7 +20093,7 @@ int main(void) {
     return c + b + s;
 }
 "#;
-    let output = run_syntax_test("c23-enum-under", src);
+    let output = run_syntax_test("c23-enum-underlying-type", src);
     assert!(
         output.status.success(),
         "enum with base type should compile. stderr: {}",

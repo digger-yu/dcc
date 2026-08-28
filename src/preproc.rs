@@ -6818,7 +6818,11 @@ impl Preprocessor {
             ));
         }
 
-        let _ = fs::write(cache_path, content);
+        // 原子写入: 先写临时文件再重命名,防止并行编译时缓存文件损坏
+        let tmp_path = cache_path.with_extension("tmp");
+        if fs::write(&tmp_path, &content).is_ok() {
+            let _ = fs::rename(&tmp_path, cache_path);
+        }
     }
 }
 
