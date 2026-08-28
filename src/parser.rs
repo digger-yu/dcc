@@ -2917,7 +2917,17 @@ impl<'a> Parser<'a> {
         // 再跳过指针限定符 (skip_ptr_qualifiers 会丢弃属性, 故须先捕获),
         // 最后再捕获限定符后可能残留的属性 (如 void const __attribute__((used)) *p).
         let mid_attrs = self.parse_attributes();
+        // 限定符在基类型与 * 之间: `T const *p` 中 const 属于 pointed-to 类型
+        // 保存当前 decl_quals, 在 skip_ptr_qualifiers 后恢复
+        let saved_dq = self.decl_quals;
         self.skip_ptr_qualifiers();
+        // 如果后面有 *, 则 skip_ptr_qualifiers 消费的限定符属于 pointed-to 类型
+        // 如果后面没有 *, 则限定符属于变量本身
+        if self.cur.kind == TokKind::Star {
+            // 有限定符在 * 之前: 属于 pointed-to 类型, 不属于变量
+            self.decl_quals = saved_dq;
+        }
+        // 否则: skip_ptr_qualifiers 设置的 decl_quals 属于变量, 保留
         let mid_attrs = Self::merge_attrs(mid_attrs, self.parse_attributes());
         let ty = self.parse_ptr_suffix(ty);
         // 函数指针: void * (*name)(params) — * 已被 parse_ptr_suffix 吃掉, 现在是 (
@@ -3841,7 +3851,25 @@ impl<'a> Parser<'a> {
             return ty;
         }
         // 限定符可在基类型与 * 之间 (C 声明符语法); 也可出现地址空间限定符
+        // `T const *p`: const 在 * 之前, 应属于 pointed-to 类型
+        // `T * const p`: const 在 * 之后, 应属于指针变量
+        // 先保存 decl_quals, 如果没有 * 则恢复
+        let saved_decl_quals = self.decl_quals;
         self.skip_ptr_qualifiers();
+        let has_ptr = self.cur.kind == TokKind::Star;
+        if !has_ptr {
+            // 没冇 *, 限定符属于变量而非 pointed-to 类型, 恢复
+            self.decl_quals = saved_decl_quals;
+        } else {
+            // 有 *: 限定符属于 pointed-to 类型
+            // 将 skip_ptr_qualifiers 收集的限定符应用到内部类型
+            let inner_quals = self.decl_quals;
+            self.decl_quals = QualifierFlags::NONE;
+            let ty = self.parse_ptr_suffix_with_quals(ty, inner_quals);
+            // 抽象函数指针声明符
+            let ty = self.try_parse_abstract_func_ptr(ty);
+            return self.parse_array_suffix(ty);
+        }
         let ty = self.parse_ptr_suffix(ty);
         // 抽象函数指针声明符: `(*)(params)` 形式 (无变量名的函数指针类型)
         // 例如: void (*)(struct pt_regs *) 在 __builtin_types_compatible_p 中
@@ -3970,6 +3998,10 @@ impl<'a> Parser<'a> {
         let mut is_long = 0u8;
         let mut is_short = false;
         let mut base: Option<Type> = None;
+        // unsigned/signed 在第一个 loop 中被跳过时标记,
+        // 传递给第二个 loop 处理. 这样 `unsigned const char`
+        // 和单独的 `unsigned` 都能正确解析.
+        let mut pre_unsigned = false;
         // 重置当前声明说明符的限定符和地址空间 (每次新的类型解析开始时清空)
         self.spec_quals = QualifierFlags::NONE;
         self.decl_quals = QualifierFlags::NONE;
@@ -4057,9 +4089,9 @@ impl<'a> Parser<'a> {
                         return Some(self.finish_type(Type::Int, specifiers_only));
                     }
                 }
-                // C23 bool 关键字 (仅 C23 模式; gnu11 下保持标识符,
-                // 兼容 `typedef _Bool bool;`)
-                TokKind::Ident if self.cur.text == "bool" && self.opts.is_c23 => {
+                // C23 bool 关键字; 非 C23 模式下也识别为 bool,
+                // 因为 C++  lowered 输出和 glibc 头文件中广泛使用.
+                TokKind::Ident if self.cur.text == "bool" => {
                     base = Some(Type::Bool);
                     self.advance();
                 }
@@ -4130,6 +4162,16 @@ impl<'a> Parser<'a> {
                     // 在 parse_ptr_suffix 中也会处理 _Atomic 限定符
                     // 当前简化: 作为 qualifier 跳过, 不生成 Type::Atomic 包装
                     // (详细的类型包装在 _Atomic(type) 语法中已完成)
+                }
+                // unsigned/signed: 在第一个 loop 中跳过并标记,
+                // 不设 is_unsigned 以避免提前返回.
+                // const/volatile 等可在其后出现 (如 `unsigned const char`).
+                TokKind::KwUnsigned => {
+                    pre_unsigned = true;
+                    self.advance();
+                }
+                TokKind::KwSigned => {
+                    self.advance();
                 }
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
                 TokKind::Ident if self.cur.text == "__extension__" => {
@@ -4462,6 +4504,12 @@ impl<'a> Parser<'a> {
         // 注意: 必须放在 struct/union/enum/ident 检查之前
         // _Complex 不在此触发早退: 它可与 _Atomic/限定符任意顺序组合,
         // 且必须配 float/double/long double 基类型, 留到第二个 loop 统一处理.
+        // pre_unsigned: 第一个 loop 中看到了 unsigned, 若后面不是类型关键字
+        // (如 `unsigned x`), 则 unsigned 是完整类型, 立即返回.
+        // 若后面是类型关键字 (如 `unsigned const char`), 不返回, 让第二个 loop 处理.
+        if pre_unsigned && !self.is_peek_type_start_after_unsigned() {
+            is_unsigned = true;
+        }
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
             return Some(self.finish_type(ty, specifiers_only));
@@ -4716,8 +4764,8 @@ impl<'a> Parser<'a> {
                             b = Some(Type::Bool);
                             self.advance();
                         }
-                        // C23 bool 关键字以 Ident 形式进入 (仅 C23 模式; gnu11 下为标识符)
-                        TokKind::Ident if self.cur.text == "bool" && self.opts.is_c23 => {
+                        // bool 关键字: 始终识别 (C23 关键字, 但 gnu11 下也常用)
+                        TokKind::Ident if self.cur.text == "bool" => {
                             b = Some(Type::Bool);
                             self.advance();
                         }
@@ -4870,6 +4918,10 @@ impl<'a> Parser<'a> {
         // 基本类型
         let mut is_complex = false;
         let mut is_imaginary = false;
+        // 携带第一个 loop 中看到的 unsigned 标志
+        if pre_unsigned {
+            is_unsigned = true;
+        }
         loop {
             // 注意: 浮点类 (float / double / long double / decimal) 与 _Complex
             // 复合 (例 `double _Complex z`), 故其 arm 不带 `break`, 让第二 loop
@@ -4971,6 +5023,20 @@ impl<'a> Parser<'a> {
                 }
                 TokKind::KwUnsigned => {
                     is_unsigned = true;
+                    self.advance();
+                }
+                // const/volatile/restrict 可在类型关键字之后出现
+                // (如 `unsigned const char`), 在此消费
+                TokKind::KwConst => {
+                    self.spec_quals |= QualifierFlags::CONST;
+                    self.advance();
+                }
+                TokKind::KwVolatile => {
+                    self.spec_quals |= QualifierFlags::VOLATILE;
+                    self.advance();
+                }
+                TokKind::KwRestrict => {
+                    self.spec_quals |= QualifierFlags::RESTRICT;
                     self.advance();
                 }
                 // _BitInt(N): C23 定宽整数类型 (也在第一个 loop 中处理,但 unsigned 在第二个 loop)
@@ -5166,6 +5232,23 @@ impl<'a> Parser<'a> {
             } else {
                 ty = Type::Ptr(Box::new(ty.into()));
             }
+        }
+        ty
+    }
+
+    /// 类似 parse_ptr_suffix, 但在创建指针时将限定符应用到内部类型.
+    /// 用于处理 `T const *p` 中 const 属于 pointed-to 类型的情况.
+    fn parse_ptr_suffix_with_quals(&mut self, mut ty: Type, inner_quals: QualifierFlags) -> Type {
+        loop {
+            if self.cur.kind != TokKind::Star {
+                break;
+            }
+            self.advance();
+            // 将内部限定符应用到第一次指针创建时的内部类型
+            let inner = QualType { base: ty.clone(), quals: inner_quals, addr_space: AddrSpace::None };
+            ty = Type::Ptr(Box::new(inner));
+            // 后续的限定符 (如 `T const * const *p`) 属于外层指针
+            self.skip_ptr_qualifiers();
         }
         ty
     }
@@ -5820,6 +5903,8 @@ impl<'a> Parser<'a> {
                     }
                     ty = wrapped;
                 }
+                // 函数指针参数后的属性: 如 `int (*cb)(params) ATTRIBUTE_UNUSED`
+                self.skip_attributes();
                 ps.push(Param {
                     ty,
                     name: nm,
@@ -6016,6 +6101,16 @@ impl<'a> Parser<'a> {
                         }
                         self.advance();
                     }
+                }
+            } else if self.cur.kind == TokKind::Ident
+                && self.cur.text == "__attribute__"
+                && self.is_attribute_stmt()
+            {
+                // __attribute__((...)) 作为独立语句 (如 ATTRIBUTE_FALLTHROUGH)
+                // 必须在 is_decl_start() 之前检查
+                match self.parse_stmt() {
+                    Some(s) => items.push(BlockItem::Stmt(s)),
+                    None => { self.advance(); }
                 }
             } else if self.is_decl_start() {
                 // 记录声明前的变量集，用于检测遮蔽
@@ -6255,6 +6350,88 @@ impl<'a> Parser<'a> {
                     | "__seg_es"
                     | "__seg_ss"
             ) || Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23)))
+    }
+
+    /// 检查在 `unsigned` 被消费后, 当前 token 是否是可扩展类型的关键字.
+    /// 用于判断 `unsigned` 是完整类型 (`unsigned x`) 还是类型前缀 (`unsigned char`).
+    fn is_peek_type_start_after_unsigned(&self) -> bool {
+        matches!(
+            self.cur.kind,
+            TokKind::KwChar | TokKind::KwInt | TokKind::KwShort | TokKind::KwLong
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+            | TokKind::KwSigned | TokKind::KwUnsigned
+            | TokKind::KwComplex | TokKind::KwImaginary
+        )
+    }
+
+    /// 检查当前 `__attribute__` 是独立语句还是声明前缀.
+    /// 通过前瞻: 跳过 __attribute__((...)) 后检查后续 token.
+    /// 若后续是 `;` 或语句上下文, 返回 true (独立语句).
+    /// 若后续是 extern/static/typedef/类型关键字等, 返回 false (声明).
+    fn is_attribute_stmt(&self) -> bool {
+        // 保存状态
+        let saved_pos = self.lex.pos;
+        let saved_line = self.lex.line;
+        let saved_col = self.lex.col;
+        let saved_cur = self.cur.clone();
+        let saved_peek = self.peek.clone();
+        // 需要可变副本来前瞻; 使用 unsafe 不可取,
+        // 改为简单启发式: 检查 __attribute__ 后面的 token
+        // 如果是 __attribute__((...)); 则 RParen 深度归零后下一个是 `;`
+        // 简单方法: 扫描 token 流找到属性结束位置
+        let mut p = saved_pos;
+        let src = &self.lex.src;
+        // 跳过 __attribute__
+        while p < src.len() && (src[p] as char).is_ascii_alphanumeric() || (p < src.len() && src[p] == b'_') {
+            p += 1;
+        }
+        // 跳过空白
+        while p < src.len() && (src[p] as char).is_ascii_whitespace() {
+            p += 1;
+        }
+        // 应该看到 ((
+        if p + 1 < src.len() && src[p] == b'(' && src[p + 1] == b'(' {
+            p += 2;
+            let mut depth = 2i32;
+            while p < src.len() && depth > 0 {
+                if src[p] == b'(' { depth += 1; }
+                else if src[p] == b')' { depth -= 1; }
+                p += 1;
+            }
+            // 跳过空白
+            while p < src.len() && (src[p] as char).is_ascii_whitespace() {
+                p += 1;
+            }
+            // 检查后续字符
+            if p < src.len() {
+                let ch = src[p] as char;
+                // `;` 表示独立语句
+                if ch == ';' { return true; }
+                // `{` 表示独立语句 (do-while 宏等)
+                if ch == '{' { return true; }
+                // 字母/下划线: 检查是否是声明关键字
+                if ch.is_ascii_alphabetic() || ch == '_' {
+                    let start = p;
+                    while p < src.len() && (src[p] as char).is_ascii_alphanumeric() || (p < src.len() && src[p] == b'_') {
+                        p += 1;
+                    }
+                    let word = std::str::from_utf8(&src[start..p]).unwrap_or("");
+                    // 声明关键字 => 不是独立语句
+                    return !matches!(
+                        word,
+                        "extern" | "static" | "typedef" | "register"
+                        | "inline" | "void" | "int" | "char" | "float"
+                        | "double" | "struct" | "union" | "enum" | "const"
+                        | "volatile" | "unsigned" | "signed" | "long"
+                        | "short" | "_Bool" | "bool" | "__extension__"
+                    );
+                }
+                // 其他字符 (如 `*`, `(` 等) => 可能是声明
+                return false;
+            }
+        }
+        // 默认: 作为语句处理
+        true
     }
 
     /// 声明上下文允许把 `unknown_type value` 交给 parse_type 产生精确诊断，
@@ -6745,6 +6922,21 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                     self.parse_std_attributes();
                     continue;
+                }
+                // __attribute__((...)) 作为独立语句 (如 ATTRIBUTE_FALLTHROUGH)
+                // 必须在 is_decl_start() 之前检查, 否则 __attribute__
+                // 会被 is_decl_start() 误判为声明起始而进入 parse_decl.
+                if self.cur.kind == TokKind::Ident
+                    && self.cur.text == "__attribute__"
+                {
+                    // 检查后面是否有 extern/static/typedef 等声明关键字
+                    // 如果只是 __attribute__((fallthrough)); 则作为语句处理
+                    if self.is_attribute_stmt() {
+                        if let Some(s) = self.parse_stmt() {
+                            items.push(BlockItem::Stmt(s));
+                            continue;
+                        }
+                    }
                 }
                 if self.is_decl_start() {
                     match self.parse_decl() {
@@ -7643,8 +7835,10 @@ impl<'a> Parser<'a> {
         is_c23: bool,
     ) -> bool {
         typedefs.contains_key(text)
-            // C23 关键字 (仅 C23 模式; gnu11 下为普通标识符, 兼容 `typedef _Bool bool;`)
-            || (is_c23 && matches!(text, "bool" | "typeof_unqual" | "alignas" | "thread_local"))
+            // bool: 始终识别为类型说明符 (C23 关键字, 但 gnu11 下也广泛使用)
+            || matches!(text, "bool")
+            // C23 关键字 (仅 C23 模式)
+            || (is_c23 && matches!(text, "typeof_unqual" | "alignas" | "thread_local"))
             || matches!(
                 text,
                 "typeof" | "__typeof__" | "__typeof" | "__auto_type" | "_Atomic" | "__extension__"

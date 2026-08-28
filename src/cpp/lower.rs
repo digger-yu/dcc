@@ -1329,6 +1329,12 @@ impl Lower {
         // POSIX / glibc 常用类型: 系统头文件中的定义可能被 C++ parser
         // 容错跳过而丢失, 这里无条件补充 (重复 typedef 在 C 中合法,
         // 只要类型相同).
+        self.out.push_str("typedef int wchar_t;\n");
+        self.out.push_str("typedef unsigned long size_t;\n");
+        self.out.push_str("typedef long long intmax_t;\n");
+        self.out.push_str("typedef unsigned long long uintmax_t;\n");
+        self.out.push_str("typedef long long int64_t;\n");
+        self.out.push_str("typedef unsigned long long uint64_t;\n");
         self.out.push_str("typedef long int __off_t;\n");
         self.out.push_str("typedef long int __off64_t;\n");
         self.out.push_str("typedef long int __ssize_t;\n");
