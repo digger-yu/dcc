@@ -220,11 +220,59 @@ impl<'a> Lexer<'a> {
                 text: "".into(),
             };
         };
-        // 标识符 / 关键字
-        if b.is_ascii_alphabetic() || b == b'_' {
+        // 标识符 / 关键字 (C99: support universal character names \uXXXX / \UXXXXXXXX)
+        if b.is_ascii_alphabetic()
+            || b == b'_'
+            || (b == b'\\'
+                && self.pos + 1 < self.src.len()
+                && (self.src[self.pos + 1] == b'u'
+                    || self.src[self.pos + 1] == b'U'))
+        {
             while let Some(c) = self.peek() {
                 if c.is_ascii_alphanumeric() || c == b'_' {
                     self.bump();
+                } else if c == b'\\' {
+                    // C99 universal character name: \uXXXX or \UXXXXXXXX
+                    let saved_pos = self.pos;
+                    let saved_col = self.col;
+                    self.bump(); // consume '\\'
+                    if self.peek() == Some(b'u') {
+                        self.bump();
+                        let mut ok = true;
+                        for _ in 0..4 {
+                            if matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
+                                self.bump();
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            self.pos = saved_pos;
+                            self.col = saved_col;
+                            break;
+                        }
+                    } else if self.peek() == Some(b'U') {
+                        self.bump();
+                        let mut ok = true;
+                        for _ in 0..8 {
+                            if matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
+                                self.bump();
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            self.pos = saved_pos;
+                            self.col = saved_col;
+                            break;
+                        }
+                    } else {
+                        self.pos = saved_pos;
+                        self.col = saved_col;
+                        break;
+                    }
                 } else {
                     break;
                 }

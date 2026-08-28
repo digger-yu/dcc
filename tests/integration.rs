@@ -19531,6 +19531,32 @@ int main(void) {
     );
 }
 
+/// C99 Unicode character names in identifiers: \uXXXX / \UXXXXXXXX
+#[test]
+fn c99_unicode_ident_syntax_ok() {
+    let source = include_str!("fixtures/c/c99_unicode_ident.c");
+    let output = run_syntax_test("c99-unicode-ident", source);
+    assert!(
+        output.status.success(),
+        "C99 Unicode identifiers should parse. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 Unicode identifier runtime value verification
+#[test]
+fn c99_unicode_ident_run_returns_zero() {
+    let source = include_str!("fixtures/c/c99_unicode_ident.c");
+    let (output, exe) = run_compile_and_run("c99-unicode-ident-run", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "c99_unicode_ident should return 0, got {rc}");
+}
+
 /// C99 freestanding signal.h constants
 #[test]
 fn signal_constants_defined() {
