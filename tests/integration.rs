@@ -1558,6 +1558,26 @@ int main(void) { return classify('5'); }\n";
     );
 }
 
+/// Switch/case range comparison correctness:
+/// Bug 1: gen_expr clobbers rcx (switch value register) when evaluating
+///         case expressions containing shifts or other rcx-using ops.
+/// Bug 2: range comparison used signed jl/jg for unsigned switch values,
+///         causing incorrect matching for values above INT_MAX.
+#[test]
+#[cfg(unix)]
+fn switch_range_comparison_correctness() {
+    let src = include_str!("fixtures/c/switch_range_correctness.c");
+    let (out, exe) = run_compile_and_run("switch-range-correctness", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "switch range correctness compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "switch range correctness test failed (rc={rc})");
+}
+
 #[test]
 fn debug_sections_emitted_with_g_flag() {
     let dir = std::env::temp_dir();
