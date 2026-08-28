@@ -308,7 +308,7 @@ pub enum Expr {
         ty: Type,
     },
     Char {
-        v: u8,
+        v: i128,
         span: Span,
         ty: Type,
     },

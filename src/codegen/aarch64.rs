@@ -2399,7 +2399,7 @@ impl Aarch64Codegen {
     fn gen_expr_from_ast(&mut self, expr: &Expr) {
         match expr {
             Expr::Int { v, .. } => self.mov_w0_imm(trunc_i32(*v)),
-            Expr::Char { v, .. } => self.mov_w0_imm(trunc_i32(*v as i128)),
+            Expr::Char { v, .. } => self.mov_w0_imm(trunc_i32(*v)),
             Expr::Float { v, .. } => self.load_float_s0(*v as f32),
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {

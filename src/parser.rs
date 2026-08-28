@@ -7991,8 +7991,7 @@ impl<'a> Parser<'a> {
             }
             // L'x' / L'\u00e9' 宽字符字面量: 编码为 UTF-32LE (wchar_t 在 Linux
             // 为 4 字节 int) 或 UTF-16LE (-fshort-wchar 时为 2 字节).
-            // 注: Expr::Char.v 为 u8, 此处截断低位; 实际工程里 wchar_t 超出
-            // ASCII 范围时, 用户通常用 L"..." 字符串而非单字符字面量.
+            // Expr::Char.v 为 i128, 可完整容纳 wchar_t 值.
             TokKind::WideCharLit => {
                 let short_wchar = self.opts.short_wchar;
                 let wide_text = &self.cur.text;
@@ -8000,14 +7999,14 @@ impl<'a> Parser<'a> {
                 let v = if short_wchar {
                     // UTF-16LE: 2 bytes per char
                     if bytes.len() >= 2 {
-                        u16::from_le_bytes([bytes[0], bytes[1]]) as u8
+                        u16::from_le_bytes([bytes[0], bytes[1]]) as i128
                     } else {
                         0
                     }
                 } else {
                     // UTF-32LE: 4 bytes per char
                     if bytes.len() >= 4 {
-                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i128
                     } else {
                         0
                     }
@@ -8025,7 +8024,7 @@ impl<'a> Parser<'a> {
                 let text = &self.cur.text;
                 let bytes = parse_char16_str(text);
                 let v = if bytes.len() >= 2 {
-                    u16::from_le_bytes([bytes[0], bytes[1]]) as u8
+                    u16::from_le_bytes([bytes[0], bytes[1]]) as i128
                 } else {
                     0
                 };
@@ -8041,7 +8040,7 @@ impl<'a> Parser<'a> {
                 let text = &self.cur.text;
                 let bytes = parse_char32_str(text);
                 let v = if bytes.len() >= 4 {
-                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i128
                 } else {
                     0
                 };
@@ -8737,21 +8736,104 @@ fn parse_char32_str(raw: &str) -> Vec<u8> {
     d
 }
 
-fn parse_chr(raw: &str) -> u8 {
+/// Parse a character constant (single or multi-character).
+/// C89 6.1.3.4: multi-character constants like 'ab' have type int,
+/// value is implementation-defined (GCC: big-endian concatenation).
+/// 'ab' = ('a' << 8) | 'b', 'abc' = ('a' << 16) | ('b' << 8) | 'c'
+fn parse_chr(raw: &str) -> i128 {
     let inner = &raw[1..raw.len() - 1];
-    if inner.starts_with('\\') {
-        match inner.chars().nth(1) {
-            Some('n') => b'\n',
-            Some('t') => b'\t',
-            Some('r') => b'\r',
-            Some('0') => 0,
-            Some('\\') => b'\\',
-            Some('\'') => b'\'',
-            _ => inner.as_bytes().get(1).copied().unwrap_or(0),
-        }
-    } else {
-        inner.as_bytes().first().copied().unwrap_or(0)
+    if inner.is_empty() {
+        return 0;
     }
+    // Parse each character (handling escape sequences) and combine
+    let mut chars_bytes: Vec<i128> = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 1;
+            match bytes[i] {
+                b'n' => b'\n' as i128,
+                b't' => b'\t' as i128,
+                b'r' => b'\r' as i128,
+                b'0' if i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_digit() => 0,
+                b'\\' => b'\\' as i128,
+                b'\'' => b'\'' as i128,
+                b'a' => 0x07,
+                b'b' => 0x08,
+                b'f' => 0x0c,
+                b'v' => 0x0b,
+                b'x' => {
+                    // hex escape: \xNN
+                    let mut val: i128 = 0;
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                        val = val * 16 + (bytes[i] as i128 - if bytes[i] <= b'9' { b'0' } else { (bytes[i] & 0xdf) - b'A' + 10 } as i128);
+                        i += 1;
+                    }
+                    chars_bytes.push(val);
+                    continue;
+                }
+                b'u' => {
+                    // \uNNNN unicode escape
+                    let mut val: i128 = 0;
+                    i += 1;
+                    let count = 4.min(bytes.len() - i);
+                    for _ in 0..count {
+                        if i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                            val = val * 16 + (bytes[i] as i128 - if bytes[i] <= b'9' { b'0' } else { (bytes[i] & 0xdf) - b'A' + 10 } as i128);
+                            i += 1;
+                        }
+                    }
+                    chars_bytes.push(val);
+                    continue;
+                }
+                b'U' => {
+                    // \UNNNNNNNN unicode escape
+                    let mut val: i128 = 0;
+                    i += 1;
+                    let count = 8.min(bytes.len() - i);
+                    for _ in 0..count {
+                        if i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                            val = val * 16 + (bytes[i] as i128 - if bytes[i] <= b'9' { b'0' } else { (bytes[i] & 0xdf) - b'A' + 10 } as i128);
+                            i += 1;
+                        }
+                    }
+                    chars_bytes.push(val);
+                    continue;
+                }
+                c if c >= b'0' && c <= b'7' => {
+                    // octal escape: \NNN
+                    let mut val: i128 = 0;
+                    for _ in 0..3 {
+                        if i < bytes.len() && bytes[i] >= b'0' && bytes[i] <= b'7' {
+                            val = val * 8 + (bytes[i] - b'0') as i128;
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    chars_bytes.push(val);
+                    continue;
+                }
+                _ => bytes[i] as i128,
+            }
+        } else {
+            bytes[i] as i128
+        };
+        chars_bytes.push(ch);
+        i += 1;
+    }
+    if chars_bytes.is_empty() {
+        return 0;
+    }
+    // Multi-character constant: big-endian concatenation
+    // 'ab' = ('a' << 8) | 'b'
+    let mut result: i128 = 0;
+    for &ch in &chars_bytes {
+        result = (result << 8) | (ch & 0xff);
+    }
+    result
 }
 
 #[cfg(test)]

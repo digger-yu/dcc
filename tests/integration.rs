@@ -19267,3 +19267,36 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C89 multi-character character constant: 'ab' form
+/// GCC-compatible big-endian concatenation: 'ab' = ('a' << 8) | 'b'
+#[test]
+fn multichar_const_syntax_ok() {
+    let src = r#"
+int a = 'ab';
+int b = 'abc';
+_Static_assert('ab' == 0x6162, "multi-char value");
+_Static_assert('a' == 0x61, "single char value");
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("multichar-const", src);
+    assert!(
+        output.status.success(),
+        "Multi-character constants should parse. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C89 multi-character constant runtime value verification
+#[test]
+fn multichar_const_run_returns_zero() {
+    let source = include_str!("fixtures/c/multichar_const.c");
+    let (output, exe) = run_compile_and_run("multichar-const-run", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "multichar_const should return 0, got {rc}");
+}

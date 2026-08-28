@@ -68,7 +68,7 @@ pub fn eval(expr: &Expr) -> ConstEvalResult {
 pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
     match expr {
         Expr::Int { v, .. } => Ok(ConstValue::Int(*v)),
-        Expr::Char { v, .. } => Ok(ConstValue::Int(*v as i128)),
+        Expr::Char { v, .. } => Ok(ConstValue::Int(*v)),
         Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
@@ -591,7 +591,17 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             Expr::Int { v, .. } => write!(f, "{}", v),
-            Expr::Char { v, .. } => write!(f, "'{}'", *v as char),
+            Expr::Char { v, .. } => {
+                if *v >= 0 && *v <= 0x10ffff {
+                    if let Some(c) = char::from_u32(*v as u32) {
+                        write!(f, "'{}'", c)
+                    } else {
+                        write!(f, "'\\x{:x}'", *v)
+                    }
+                } else {
+                    write!(f, "'\\x{:x}'", *v)
+                }
+            }
             Expr::Float { v, .. } => write!(f, "{}", v),
             Expr::String { data, .. } => {
                 write!(f, "\"")?;

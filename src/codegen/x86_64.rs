@@ -6502,7 +6502,7 @@ impl Codegen {
         }
         match e {
             Expr::Int { v, .. } => self.mov_imm(dst, *v),
-            Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
+            Expr::Char { v, .. } => self.mov_imm(dst, *v),
             Expr::Ident { name, ty, .. } => {
                 if matches!(ty, Type::Array(_, _)) {
                     // 数组标识符在值上下文中衰减为首元素地址 (C 数组到指针

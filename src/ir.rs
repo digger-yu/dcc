@@ -755,7 +755,7 @@ impl Lowering {
                 (ExprKind::Constant, Vec::new())
             }
             Expr::Char { v, .. } => {
-                literal = Some(ExprLiteral::Int(*v as i128));
+                literal = Some(ExprLiteral::Int(*v));
                 (ExprKind::Constant, Vec::new())
             }
             Expr::Float { v, .. } => {

@@ -485,7 +485,7 @@ impl Builder {
                 Operand::Float(*v)
             }
             Expr::String { data, .. } => Operand::Str(data.clone()),
-            Expr::Char { v, .. } => Operand::Int(*v as i128),
+            Expr::Char { v, .. } => Operand::Int(*v),
             Expr::Ident {
                 name,
                 span: _,
