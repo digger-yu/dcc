@@ -1333,6 +1333,14 @@ fn collect_local_decls_stmt(
         Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
             collect_local_decls_stmt(body, out, quals);
         }
+        Stmt::Switch { cases, .. } => {
+            for c in cases {
+                collect_local_decls(&c.body.items, out, quals);
+            }
+        }
+        Stmt::Label { stmt, .. } => {
+            collect_local_decls_stmt(stmt, out, quals);
+        }
         _ => {}
     }
 }

@@ -11816,6 +11816,21 @@ fn c23_nodiscard_warn_emits_w0401() {
     );
 }
 
+/// IR->SSA qualifier fallback: switch/label decls retain volatile/const
+#[test]
+fn ssa_qualifier_fallback_switch_label() {
+    let src = include_str!("fixtures/c/ssa_qualifier_fallback.c");
+    let (out, exe) = run_compile_and_run("ssa-qualifier-fallback", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "ssa qualifier fallback compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "ssa_qualifier_fallback should return 0, got {rc}");
+}
+
 /// COMDAT: weak functions get STB_WEAK binding and COMDAT group entries
 #[test]
 #[cfg(unix)]
