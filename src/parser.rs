@@ -5347,6 +5347,15 @@ impl<'a> Parser<'a> {
                 let (mut ty, nm) = self.parse_field_declarator(spec.clone());
                 // 字段级属性: 提取 aligned 值
                 let field_aligned = self.skip_attributes_extract_aligned();
+                // C23 alignas(N) 在 parse_decl_specifiers 中已解析并
+                // 存入 self.decl_attrs.alignment. 将其合并到字段对齐值,
+                // 取 alignas 与 __attribute__((aligned)) 的较大值.
+                let field_aligned = match (field_aligned, self.decl_attrs.alignment.take()) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
                 let bw = if self.cur.kind == TokKind::Colon {
                     self.advance();
                     // 位域宽度必须是单个表达式，不能含逗号（同类型多个位域: a:8, b:4）
