@@ -4018,11 +4018,44 @@ impl<'a> Parser<'a> {
                     self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
-                // C23 auto: 类型由初始化表达式推导（同 __auto_type）
+                // auto: C89 存储类 或 C23 类型推导
                 TokKind::KwAuto => {
-                    self.advance();
-                    self.decl_auto_type = true;
-                    return Some(self.finish_type(Type::Int, specifiers_only));
+                    // 检查下一个 token 是否是类型说明符
+                    // 如果是, auto 是 C89 存储类 (等价于跳过)
+                    // 否则是 C23 类型推导 (auto x = expr;)
+                    let next_is_type = matches!(
+                        self.peek.kind,
+                        TokKind::KwChar
+                            | TokKind::KwInt
+                            | TokKind::KwShort
+                            | TokKind::KwLong
+                            | TokKind::KwFloat
+                            | TokKind::KwDouble
+                            | TokKind::KwSigned
+                            | TokKind::KwUnsigned
+                            | TokKind::KwVoid
+                            | TokKind::KwBool
+                            | TokKind::KwStruct
+                            | TokKind::KwUnion
+                            | TokKind::KwEnum
+                            | TokKind::KwConst
+                            | TokKind::KwVolatile
+                            | TokKind::KwStatic
+                            | TokKind::KwExtern
+                            | TokKind::KwRegister
+                            | TokKind::KwComplex
+                            | TokKind::KwAtomic
+                            | TokKind::KwAuto
+                    );
+                    if next_is_type {
+                        // C89 存储类: 跳过 (auto 是默认存储类)
+                        self.advance();
+                    } else {
+                        // C23 类型推导
+                        self.advance();
+                        self.decl_auto_type = true;
+                        return Some(self.finish_type(Type::Int, specifiers_only));
+                    }
                 }
                 // C23 bool 关键字 (仅 C23 模式; gnu11 下保持标识符,
                 // 兼容 `typedef _Bool bool;`)
