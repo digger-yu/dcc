@@ -19530,3 +19530,59 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C99 freestanding signal.h constants
+#[test]
+fn signal_constants_defined() {
+    let src = r#"
+#if __SIGHUP != 1
+#error "SIGHUP"
+#endif
+#if __SIGINT != 2
+#error "SIGINT"
+#endif
+#if __SIGKILL != 9
+#error "SIGKILL"
+#endif
+#if __SIGSEGV != 11
+#error "SIGSEGV"
+#endif
+#if __SIGTERM != 15
+#error "SIGTERM"
+#endif
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("signal-consts", src);
+    assert!(
+        output.status.success(),
+        "signal constants should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// C99 tgmath.h type-generic math macros (with __tg_ prefix)
+#[test]
+fn tgmath_macros_defined() {
+    let src = r#"
+/* tgmath macros should be available as __tg_ prefixed function-like macros */
+#if !defined(__tg_sqrt)
+#error "__tg_sqrt not defined"
+#endif
+#if !defined(__tg_fabs)
+#error "__tg_fabs not defined"
+#endif
+#if !defined(__tg_sin)
+#error "__tg_sin not defined"
+#endif
+#if !defined(__tg_pow)
+#error "__tg_pow not defined"
+#endif
+int main(void) { return 0; }
+"#;
+    let output = run_syntax_test("tgmath-macros", src);
+    assert!(
+        output.status.success(),
+        "tgmath macros should be defined. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

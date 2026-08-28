@@ -1299,14 +1299,14 @@ pub fn preprocess(
     // ===== C99 <tgmath.h> support =====
     // Type-generic math functions use _Generic (C11) to dispatch
     // to the correct float/double/long double variant.
-    // These are defined as function-like macros using _Generic.
-    // Note: _Generic is handled at parse time, so we define the
-    // tgmath macros using the standard C11 pattern.
+    // These are defined with __tg_ prefix to avoid interfering
+    // with function declarations. A <tgmath.h> header would map
+    // the standard names to these prefixed macros.
     let tgmath_fns = [
         "acos", "asin", "atan", "acosh", "asinh", "atanh",
         "cos", "sin", "tan", "cosh", "sinh", "tanh",
         "exp", "log", "log10", "log2", "exp2", "expm1", "log1p",
-        "pow", "sqrt", "cbrt", "hypot",
+        "sqrt", "cbrt", "hypot",
         "fabs", "ceil", "floor", "round", "trunc", "rint", "nearbyint",
         "fmod", "remainder", "remquo", "copysign", "nextafter", "nexttoward",
         "fdim", "fmax", "fmin", "fma",
@@ -1315,13 +1315,12 @@ pub fn preprocess(
     for fn_name in &tgmath_fns {
         // _Generic based type-generic dispatch
         // For 1-arg functions: _Generic(x, float: fn##f, default: fn, long double: fn##l)
-        // For 2-arg functions: similar but with both args
         let macro_body = format!(
             "_Generic((x), float: {fn}f, default: {fn}, long double: {fn}l)(x)",
             fn = fn_name
         );
         pp.macros.insert(
-            fn_name.to_string(),
+            format!("__tg_{}", fn_name),
             MacroDef {
                 params: Some(vec!["x".to_string()]),
                 body: macro_body,
