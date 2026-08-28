@@ -49,11 +49,24 @@ fn collect_global_roots(inputs: &[PathBuf]) -> Vec<String> {
 
 /// 合并多个 ET_REL 目标文件；启用 LTO 时合并 dcc.lto 摘要。
 /// 完全使用内置链接器路径，不再回退 host ld -r。
+/// 支持 -T script.lds 链接器脚本与 -r 模式组合 (内核模块构建需要)。
 pub fn link_relocatable(
     inputs: &[PathBuf],
     output: &Path,
     lto_enabled: bool,
     verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    link_relocatable_with_script(inputs, output, lto_enabled, verbose, None)
+}
+
+/// 合并多个 ET_REL 目标文件，可选指定链接器脚本。
+/// 内核模块构建流程: ld -r -T script.lds -o module.o objects...
+pub fn link_relocatable_with_script(
+    inputs: &[PathBuf],
+    output: &Path,
+    lto_enabled: bool,
+    verbose: bool,
+    linker_script: Option<&Path>,
 ) -> Result<(), Vec<Diagnostic>> {
     if inputs.is_empty() {
         return Err(vec![Diagnostic::err(
@@ -63,15 +76,17 @@ pub fn link_relocatable(
         )]);
     }
     // 始终使用内置 relocatable 路径 (不依赖 host ld / objcopy)
-    link_relocatable_builtin(inputs, output, lto_enabled, verbose)
+    link_relocatable_builtin(inputs, output, lto_enabled, verbose, linker_script)
 }
 
 /// 内置 relocatable 路径: 完全自研，不依赖 host ld / objcopy
+/// 支持可选链接器脚本 (-T script.lds + -r 组合)
 fn link_relocatable_builtin(
     inputs: &[PathBuf],
     output: &Path,
     lto_enabled: bool,
     verbose: bool,
+    linker_script: Option<&Path>,
 ) -> Result<(), Vec<Diagnostic>> {
     let cfg = super::LinkConfig {
         output_kind: super::OutputKind::Relocatable,
@@ -80,6 +95,7 @@ fn link_relocatable_builtin(
         // 内置路径不需要 entry / gc_sections
         gc_sections: false,
         entry: String::new(),
+        linker_script: linker_script.map(PathBuf::from),
         ..Default::default()
     };
     match super::link_multi_tu(inputs, output, &cfg) {
@@ -306,5 +322,53 @@ mod tests {
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// Test: -r + -T script.lds combination works (kernel module build pattern)
+    #[test]
+    fn relocatable_with_linker_script() {
+        use crate::codegen::elf;
+        let dir = std::env::temp_dir();
+        let text = &[0xc3u8]; // ret
+        let sym1 = elf::ElfSym {
+            name: "mod_func".into(),
+            section: 1,
+            value: 0,
+            size: 1,
+            bind: elf::STB_GLOBAL,
+            ty: elf::STT_FUNC,
+            visibility: elf::STV_DEFAULT,
+        };
+        let obj1 = elf::build_elf_rel_x86_64(
+            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
+            &[sym1], &[], &[], &[], &[], &[],
+        );
+        let p1 = dir.join("dcc-r-script-1.o");
+        let out = dir.join("dcc-r-script-out.o");
+        let script_path = dir.join("dcc-r-test.lds");
+        std::fs::write(&p1, &obj1).unwrap();
+        // Simple linker script that defines section layout
+        std::fs::write(
+            &script_path,
+            "SECTIONS { .text : { *(.text) } }\n",
+        )
+        .unwrap();
+        let result = link_relocatable_with_script(
+            &[p1.clone()],
+            &out,
+            false,
+            false,
+            Some(&script_path),
+        );
+        assert!(
+            result.is_ok(),
+            "builtin -r with linker script: {:?}",
+            result.err()
+        );
+        let out_bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&out_bytes[0..4], b"\x7fELF");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&script_path);
     }
 }
