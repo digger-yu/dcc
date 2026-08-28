@@ -348,6 +348,14 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `(*name)[N]` 指针到数组声明符 | `pmd_t (*early_pgts)[512]` 形式；局部变量 + 全局变量 |
 | `__auto_type` / C23 `auto` 类型推导 | 由初始化表达式推导类型；支持多声明符 |
 | 预置 C11 `atomic_*` 宏 | hosted 模式预置 `atomic_int`/`atomic_bool`/`memory_order_*`/`atomic_thread_fence`/`kill_dependency`/`ATOMIC_*_LOCK_FREE` 等；freestanding 模式 `__STDC_HOSTED__=0` + `__STDC_NO_ATOMICS__=1` 且不预置 |
+| C89 多字符字符常量 | `'ab'` / `'abc'` 形式 GCC 兼容大端拼接：`'ab' = ('a' << 8) | 'b'`；`Expr::Char.v` 扩展为 `i128` 支持多字符值；`parse_chr()` 完整转义序列 (`\xNN`/`\uNNNN`/`\UNNNNNNNN`/`\NNN` 八进制/`\a`/`\b`/`\f`/`\v`)。测试：`tests/fixtures/c/multichar_const.c` |
+| C99 十六进制浮点常量 | `0x1.5p3` 形式：词法分析支持十六进制整数/小数部分 + `p/P` 二进制指数；`parse_hex_float()` 计算 `mantissa * 2^exponent`；支持 `f`/`l` 后缀。测试：`tests/fixtures/c/hex_float.c` |
+| C99 Unicode 字符名 | 标识符中支持 `\uXXXX` (4 位) 和 `\UXXXXXXXX` (8 位) 通用字符名；词法分析器在标识符起始和延续位置接受 UCN；无效 UCN 回退到普通标识符终止。测试：`tests/fixtures/c/c99_unicode_ident.c` |
+| C89 const 正确性 | 解析器跟踪变量限定符 (`var_quals` HashMap)；赋值和复合赋值目标为 `const` 限定变量时报 E0030 错误 ("assignment to read-only variable")。测试：`tests/fixtures/c/const_correct.c`, `tests/fixtures/errors/e0030_const_assign.c` |
+| C89 volatile 语义 | `QualifierFlags::VOLATILE` 在 AST→IR→SSA 全流程保留；SSA 变换使用 `local_quals` HashMap 跟踪变量限定符；volatile 变量加载/存储生成独立 SSA 值不被 CSE/GVN 消除；`is_side_effect_free` 对 volatile 返回 false。测试：`tests/fixtures/c/volatile_semantics.c` |
+| C89 void* 隐式转换 | `void*` 与任意对象指针类型隐式转换 (C89 3.3.16, C99 6.3.2.3)；`check_assign` 对 `void*` ↔ `T*` 返回兼容。测试：`tests/fixtures/c/void_ptr_implicit.c` |
+| GNU 范围初始化器 | `[first ... last] = val` 形式数组初始化；解析器 `parse_init_designator` 支持 `...` 范围语法。测试：`tests/fixtures/c/gnu_range_init.c` |
+| C99 标准库内建宏 | `<inttypes.h>`: `__PRId8/16/32/64`/`__PRIu*`/`__PRIx*`/`__SCNd*` 格式宏 (LP64/ILP32 感知)；`<float.h>`: `__FLT_RADIX__`/`__FLT_*`/`__DBL_*`/`__LDBL_*`/`__DECIMAL_DIG__`；`<limits.h>`: `__MB_LEN_MAX__`/`__LLONG_MIN__`/`__ULLONG_MAX__`；`<errno.h>`: `EDOM`/`ERANGE`/`EILSEQ`；`<signal.h>`: `__SIGHUP`..`__SIGTERM`/`__SIG_DFL/IGN/ERR`；`<tgmath.h>`: `__tg_<fn>` 类型通用数学宏 (基于 `_Generic` 分发)。测试：`tests/fixtures/c/c99_std_macros.c` |
 
 ## 链接器
 
