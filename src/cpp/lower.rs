@@ -357,6 +357,33 @@ fn clean_struct_bodies(s: &str) -> String {
         if !struct_name_stack.is_empty() {
             let struct_name = struct_name_stack.last().unwrap().clone();
 
+            // 跳过嵌套的 struct/union 定义: struct { ... } name; 或 union { ... } name;
+            if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "union"))
+                && i + 6 < len
+            {
+                let kw = if match_word_at(bytes, i, "struct") { "struct" } else { "union" };
+                let kw_len = kw.len();
+                let mut j = skip_ws(bytes, i + kw_len);
+                // 检查是否是匿名定义 (后面直接是 '{')
+                if j < len && bytes[j] == b'{' {
+                    // 跳过整个嵌套定义: { ... } name;
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'{' { depth += 1; }
+                        else if bytes[j] == b'}' { depth -= 1; }
+                        j += 1;
+                    }
+                    // 跳过变量名和 ';'
+                    while j < len && bytes[j] != b';' { j += 1; }
+                    if j < len { j += 1; }
+                    // 输出整个嵌套定义
+                    result.push_str(&s[i..j]);
+                    i = j;
+                    continue;
+                }
+            }
+
             // 检测 '}' 结束 struct
             if bytes[i] == b'}' {
                 struct_name_stack.pop();
@@ -1445,10 +1472,16 @@ fn remove_all_default_args(s: &str) -> String {
         if bytes[i] == b')' { paren_depth = (paren_depth - 1).max(0); }
         // 在括号内, 删除 `= value` 默认参数
         if paren_depth > 0 && bytes[i] == b'=' {
-            // 检查不是 == (比较运算符)
+            // 检查不是 ==, !=, <=, >= (比较/赋值运算符)
             if i + 1 < len && bytes[i+1] == b'=' {
                 result.push_str("==");
                 i += 2;
+                continue;
+            }
+            if i > 0 && (bytes[i-1] == b'!' || bytes[i-1] == b'<' || bytes[i-1] == b'>') {
+                // !=, <=, >= 的一部分, 不处理
+                result.push('=');
+                i += 1;
                 continue;
             }
             // 跳过默认值到 ',' 或 ')'
@@ -1553,12 +1586,260 @@ fn convert_functional_casts(s: &str) -> String {
     result
 }
 
+/// 保守版函数式类型转换: Type(number) → (Type)(number)
+/// 只处理类型名后跟括号且括号内是简单整数的情况
+fn convert_simple_functional_casts(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // 收集已知类型名
+    let mut known_types: Vec<String> = Vec::new();
+    {
+        let mut j = 0;
+        while j < len {
+            if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
+            if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "typedef")
+                || match_word_at(bytes, j, "enum")
+            {
+                let kw_len = if match_word_at(bytes, j, "struct") { 6 }
+                    else if match_word_at(bytes, j, "typedef") { 7 } else { 4 };
+                let k = skip_ws(bytes, j + kw_len);
+                if k < len && is_ident_char(bytes[k]) {
+                    let (name, _) = read_ident(bytes, k);
+                    if !name.is_empty() && !known_types.contains(&name) {
+                        known_types.push(name);
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+    let mut i = 0;
+    while i < len {
+        // 跳过字符串和注释
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // 检测类型名后跟 '(' 和简单数字
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let j = skip_ws(bytes, ident_end);
+            if j < len && bytes[j] == b'(' {
+                let is_type = known_types.contains(&ident) || ident.ends_with("_t")
+                    || ident == "int" || ident == "char" || ident == "bool"
+                    || ident == "long" || ident == "short" || ident == "unsigned"
+                    || ident == "size_t";
+                if is_type {
+                    // 检查括号内容是否是简单整数 (十进制或十六进制)
+                    let mut k = j + 1;
+                    let mut is_simple_int = true;
+                    let mut has_content = false;
+                    // 跳过空白
+                    while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                    // 检查是否是数字 (可能带负号)
+                    if k < len && bytes[k] == b'-' { k += 1; }
+                    if k < len && bytes[k].is_ascii_digit() {
+                        has_content = true;
+                        // 检查是否是十六进制 0x...
+                        if bytes[k] == b'0' && k + 1 < len && (bytes[k+1] == b'x' || bytes[k+1] == b'X') {
+                            k += 2; // 跳过 0x
+                            while k < len && bytes[k].is_ascii_hexdigit() { k += 1; }
+                        } else {
+                            while k < len && bytes[k].is_ascii_digit() { k += 1; }
+                        }
+                        // 跳过可能的后缀 (U, L, UL, etc.)
+                        while k < len && (bytes[k] == b'U' || bytes[k] == b'u' || bytes[k] == b'L' || bytes[k] == b'l') { k += 1; }
+                        // 跳过空白
+                        while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                        // 检查后面是否是 ')'
+                        if k < len && bytes[k] == b')' {
+                            k += 1;
+                        } else {
+                            is_simple_int = false;
+                        }
+                    } else {
+                        is_simple_int = false;
+                    }
+                    if is_simple_int && has_content {
+                        // 检查前面是否是表达式上下文 (操作符或开括号)
+                        let prev = result.trim_end().as_bytes().last().copied().unwrap_or(b' ');
+                        let is_expr_ctx = !is_ident_char(prev) && prev != b')'
+                            && prev != b']' && prev != b';' && prev != b'{'
+                            && prev != b'}';
+                        if is_expr_ctx {
+                            // 转换: Type(number) → (Type)(number)
+                            // 但我们已经跳过了括号内容, 需要重新处理
+                            // 输出 (Type) 然后让原始 '(' 和数字正常输出
+                            result.push('(');
+                            result.push_str(&ident);
+                            result.push(')');
+                            i = ident_end; // 停在 '(' 前面, 下次循环输出 '('
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 删除模板定义: template <...> struct/class/func ... { ... }
+/// C 不支持模板, 需要完全删除
+fn remove_template_definitions(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 跳过字符串和注释
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // 检测 template 关键字
+        if match_word_at(bytes, i, "template") {
+            let mut j = skip_ws(bytes, i + 8);
+            // 跳过 <...> 模板参数列表
+            if j < len && bytes[j] == b'<' {
+                let mut depth = 1i32;
+                j += 1;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'<' { depth += 1; }
+                    else if bytes[j] == b'>' { depth -= 1; }
+                    j += 1;
+                }
+                j = skip_ws(bytes, j);
+                // 现在 j 指向 template 声明的主体 (struct/class/函数)
+                // 跳过 struct/class 关键字
+                if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "class") {
+                    let kw_len = if match_word_at(bytes, j, "struct") { 6 } else { 5 };
+                    j = skip_ws(bytes, j + kw_len);
+                    // 跳过模板类名
+                    if j < len && is_ident_char(bytes[j]) {
+                        let (_, name_end) = read_ident(bytes, j);
+                        j = name_end;
+                    }
+                    // 跳过可能的模板特化 <...>
+                    j = skip_ws(bytes, j);
+                    if j < len && bytes[j] == b'<' {
+                        let mut depth = 1i32;
+                        j += 1;
+                        while j < len && depth > 0 {
+                            if bytes[j] == b'<' { depth += 1; }
+                            else if bytes[j] == b'>' { depth -= 1; }
+                            j += 1;
+                        }
+                    }
+                    // 跳过可能的基类列表和 { ... }
+                    // 找到 '{' 并跳过整个类定义
+                    while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                    if j < len && bytes[j] == b'{' {
+                        let mut depth = 1i32;
+                        j += 1;
+                        while j < len && depth > 0 {
+                            if bytes[j] == b'{' { depth += 1; }
+                            else if bytes[j] == b'}' { depth -= 1; }
+                            j += 1;
+                        }
+                        // 跳过结尾的 ';'
+                        if j < len && bytes[j] == b';' { j += 1; }
+                    } else if j < len && bytes[j] == b';' {
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+                // 对于模板函数, 跳过整个函数定义
+                // 找到 '{' 并跳过整个函数体
+                while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                if j < len && bytes[j] == b'{' {
+                    let mut depth = 1i32;
+                    j += 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'{' { depth += 1; }
+                        else if bytes[j] == b'}' { depth -= 1; }
+                        j += 1;
+                    }
+                } else if j < len && bytes[j] == b';' {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 转换 return struct Type(args) 为 return (struct Type){args} (C99 compound literal)
+fn convert_return_struct_ctor(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 跳过字符串和注释
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // 检测 return struct Type(
+        if match_word_at(bytes, i, "return") {
+            let j = skip_ws(bytes, i + 6);
+            if match_word_at(bytes, j, "struct") {
+                let k = skip_ws(bytes, j + 6);
+                if k < len && is_ident_char(bytes[k]) {
+                    let (type_name, type_end) = read_ident(bytes, k);
+                    let m = skip_ws(bytes, type_end);
+                    if m < len && bytes[m] == b'(' {
+                        // 找到匹配的 ')'
+                        let mut depth = 1i32;
+                        let mut n = m + 1;
+                        while n < len && depth > 0 {
+                            if bytes[n] == b'(' { depth += 1; }
+                            else if bytes[n] == b')' { depth -= 1; }
+                            n += 1;
+                        }
+                        if depth == 0 {
+                            // 提取参数
+                            let args = &s[m+1..n-1];
+                            // 输出: return (struct Type){args}
+                            result.push_str("return ");
+                            result.push_str(&format!("(struct {})", type_name));
+                            result.push('{');
+                            result.push_str(args);
+                            result.push('}');
+                            i = n;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // 不是 return struct Type(, 正常输出 return
+            result.push_str("return");
+            i += 6;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 预处理 C++ 源文本, 将复杂 C++ 构造替换为 C 兼容形式.
 /// 在 strip_cpp_keywords 的字符级处理之前调用.
 fn replace_cpp_constructs(s: &str) -> String {
     let mut result = s.to_string();
     // 剥离 GCC 属性宏 (如 GTY(...), __attribute__((...)), 等)
     result = strip_gcc_attributes(&result);
+    // 删除模板定义 (C 不支持模板)
+    result = remove_template_definitions(&result);
     // class → struct (简单替换, 仅独立的 class 关键字)
     result = replace_word(&result, "class", "struct");
     // enum struct/enum class → enum (C++11 作用域枚举)
@@ -1584,6 +1865,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = fix_remaining_cpp_syntax(&result);
     // 删除所有函数声明中的默认参数
     result = remove_all_default_args(&result);
+    // C++ 函数式类型转换 (保守版): Type(number) → (Type)(number)
+    result = convert_simple_functional_casts(&result);
     // Lambda 表达式: [] (...) { ... } → 0
     result = replace_lambdas(&result);
     // 析构函数定义: ClassName::~ClassName(...) → void _dtor_ClassName(...)
@@ -1591,6 +1874,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     // 构造函数定义: ClassName::ClassName(...) : init_list { body }
     // → void _ctor_ClassName(...) { body }
     result = replace_constructors(&result);
+    // 转换 return struct Type(args) → return (struct Type){args}
+    result = convert_return_struct_ctor(&result);
     // 替换花括号初始化: Type var{args} → Type var = {args}
     result = replace_brace_init(&result);
     // 替换函数体中的构造函数调用: Type var(args); → Type var; _ctor_Type(&var, args);
@@ -1868,7 +2153,7 @@ fn replace_constructors(s: &str) -> String {
                     if result.as_bytes().last() == Some(&b'}') {
                         result.push('\n');
                     }
-                    result.push_str(&format!("void _ctor_{}", class_name));
+                    result.push_str(&format!("void _ctor_{}()", class_name));
                     i = k;
                     continue;
                 }
