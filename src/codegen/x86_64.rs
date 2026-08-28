@@ -18212,10 +18212,17 @@ impl Codegen {
                 | ".cfi_startproc"
                 | ".cfi_endproc"
                 | ".cfi_def_cfa_offset"
+                | ".cfi_def_cfa"
                 | ".cfi_offset"
                 | ".cfi_restore"
                 | ".cfi_remember_state"
                 | ".cfi_restore_state"
+                | ".cfi_adjust_cfa_offset"
+                | ".cfi_def_cfa_register"
+                | ".cfi_return_column"
+                | ".cfi_signal_frame"
+                | ".cfi_window_save"
+                | ".cfi_negate_ra_state"
         )
     }
 
@@ -18917,6 +18924,23 @@ impl Codegen {
                             }
                         }
                     }
+                }
+                true
+            }
+            ".cfi_startproc" | ".cfi_endproc" | ".cfi_def_cfa_offset"
+            | ".cfi_def_cfa" | ".cfi_offset" | ".cfi_restore"
+            | ".cfi_remember_state" | ".cfi_restore_state"
+            | ".cfi_adjust_cfa_offset" | ".cfi_def_cfa_register"
+            | ".cfi_return_column" | ".cfi_signal_frame"
+            | ".cfi_window_save" | ".cfi_negate_ra_state" => {
+                // CFI (Call Frame Information) directives for unwind info.
+                // Text mode: preserve as .s output for assembler consumption.
+                // Binary mode: silently accept (eh_frame generation is handled
+                // by the compiler's own unwind table emission, not inline CFI).
+                if self.emit_asm_text {
+                    self.asm_directives_at
+                        .push((self.pos(), t.to_string()));
+                    self.asm_directives.push(t.to_string());
                 }
                 true
             }

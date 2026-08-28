@@ -442,7 +442,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 |------|------|
 | DWARF v4 | x86_64 / AArch64 / RISC-V / MIPS / MIPS64 / ARM 全部架构 |
 | `.BTF` | x86_64 / AArch64 / RISC-V（完整类型转储：int/struct/union/enum/ptr/typedef/array/func 等） |
-| `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
+| `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表；内联汇编中的 `.cfi_*` 指令完整支持（`.cfi_startproc`/`.cfi_endproc`/`.cfi_def_cfa_offset`/`.cfi_def_cfa`/`.cfi_offset`/`.cfi_restore`/`.cfi_remember_state`/`.cfi_restore_state`/`.cfi_adjust_cfa_offset`/`.cfi_def_cfa_register`/`.cfi_return_column`/`.cfi_signal_frame`/`.cfi_window_save`/`.cfi_negate_ra_state`），`-S` 文本模式保留为汇编输出，`-c` 二进制模式静默接受 |
 | `.orc_unwind_ip` / `.orc_unwind` | 由 objtool 统一生成，dcc 不输出（避免 "file already has .orc_unwind section" 冲突） |
 | DWARF line table | `-g1` 下自动去重; `DW_LNE_set_discriminator` 支持同 PC 多行条目 (asm 逐指令调试) |
 | DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset`；完整基类型/指针/数组/聚合体/枚举/函数类型 DIE |
