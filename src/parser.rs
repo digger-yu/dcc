@@ -78,6 +78,8 @@ struct ParsedAttrs {
     tls_model: Option<String>,
     /// __asm__("label"): GNU asm 标签, 覆盖 ELF 符号名
     asm_label: Option<String>,
+    /// C23 constexpr: 变量必须常量初始化, 函数等价 inline + always_inline
+    is_constexpr: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -240,6 +242,9 @@ impl ParsedAttrs {
         }
         if other.asm_label.is_some() {
             self.asm_label = other.asm_label;
+        }
+        if other.is_constexpr {
+            self.is_constexpr = true;
         }
     }
 }
@@ -2357,9 +2362,10 @@ impl<'a> Parser<'a> {
         // C23 [[attributes]]: 静默跳过
         self.parse_std_attributes();
         // constexpr: C23 编译期常量声明.
-        // 变量: 隐含 const + static; 函数: 等价 inline + always_inline.
+        // 变量: 隐含 const + static, 必须常量初始化; 函数: 等价 inline + always_inline.
         while self.cur.kind == TokKind::Ident && self.cur.text == "constexpr" {
             self.decl_attrs.is_always_inline = true;
+            self.decl_attrs.is_constexpr = true;
             self.spec_quals |= QualifierFlags::CONST;
             self.advance();
             self.parse_std_attributes();
@@ -2377,7 +2383,10 @@ impl<'a> Parser<'a> {
         // 解析声明开头的 __attribute__: GCC 扩展, 如 __attribute__((section(".init.text"))) int foo()
         let leading_attrs = self.parse_attributes();
         self.decl_storage = StorageClass::default();
+        // 保留 constexpr 标志: 上面已解析, 重置 decl_attrs 后需恢复
+        let was_constexpr = self.decl_attrs.is_constexpr;
         self.decl_attrs = ParsedAttrs::default();
+        self.decl_attrs.is_constexpr = was_constexpr;
         // 文件级 asm: 必须在 skip_asm_label 之前, 因为 __asm__("...") 与 asm 标签共享相同 token 模式
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "asm")
         {
@@ -3249,6 +3258,19 @@ impl<'a> Parser<'a> {
                     self.var_quals.insert(name_for_decl.name.clone(), var_q);
                 }
                 let init = self.parse_expr_bp(2)?;
+                // C23 constexpr 变量: 初始化器必须是编译期常量
+                if attrs.is_constexpr {
+                    match const_eval::eval_full(&init) {
+                        Ok(_) => {} // 常量表达式, OK
+                        Err(_) => {
+                            self.err_here(
+                                "E0011",
+                                "constexpr variable requires constant initializer",
+                                Some("C23 constexpr variables must be initialized with a constant expression"),
+                            );
+                        }
+                    }
+                }
                 let decl_ty = if auto_owned { init.ty() } else { ty.clone() };
                 // 允许多声明符: T *a = 0, *b = 0;
                 if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") {
@@ -3947,6 +3969,7 @@ impl<'a> Parser<'a> {
                 // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.decl_attrs.is_constexpr = true;
                     self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
@@ -4287,6 +4310,7 @@ impl<'a> Parser<'a> {
                 // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.decl_attrs.is_constexpr = true;
                     self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }
@@ -4911,6 +4935,7 @@ impl<'a> Parser<'a> {
                 // 函数: 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
                     self.decl_attrs.is_always_inline = true;
+                    self.decl_attrs.is_constexpr = true;
                     self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 }

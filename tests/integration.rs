@@ -11679,6 +11679,38 @@ fn builtin_typedefs_size_ptrdiff() {
 
 #[test]
 #[cfg(unix)]
+fn c23_constexpr_var() {
+    // C23 constexpr 变量: 必须常量初始化, 隐含 const
+    let src = include_str!("fixtures/c/c23_constexpr_var.c");
+    let (out, exe) = run_compile_and_run("c23-constexpr-var", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "c23_constexpr_var: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+fn c23_constexpr_var_error() {
+    // C23 constexpr 变量非常量初始化器应报错 E0011
+    let src = include_str!("fixtures/c/c23_constexpr_var_error.c");
+    let out = run_syntax_test("c23-constexpr-var-err", src);
+    assert!(
+        !out.status.success(),
+        "should fail: constexpr requires constant initializer"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("constexpr") || stderr.contains("constant"),
+        "error should mention constexpr/constant: {}",
+        stderr
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn c23_bool() {
     let src = include_str!("fixtures/c/c23_bool.c");
     let (out, exe) = run_compile_and_run("c23-bool", src);
@@ -19910,14 +19942,14 @@ fn c23_char8_t_type() {
     );
 }
 
-/// C23 constexpr variables are implicitly const
+/// C23 constexpr variables are implicitly const with constant initializer check
 #[test]
 fn c23_constexpr_variables() {
     let src = r#"
 constexpr int x = 42;
-constexpr int y = x + 1;
-constexpr int arr[3] = {1, 2, 3};
-int main(void) { return x + y; }
+constexpr int y = 100 + 23;
+constexpr long big = 1LL << 32;
+int main(void) { return x != 42 || y != 123; }
 "#;
     let output = run_syntax_test("c23-constexpr-vars", src);
     assert!(
