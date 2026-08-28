@@ -71,6 +71,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#elifdef` / `#elifndef` (C23) | 已/未定义宏分支选择 |
 | `#embed` (C23) | 字节数组嵌入；`limit(N)` 截断；`prefix`/`suffix` 包裹；`if_empty` 替代 |
 | `#warning` / `#error` | `#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
+| `#line` 指令 (C99) | `#line number ["filename"]` 重映射行号和文件名；影响 `__LINE__` 展开和诊断位置；preproc 单测 `line_directive_*` |
+| `sizeof` / `__alignof__` / `__builtin_offsetof` 在 `#if` 中 | 预处理阶段求值基本类型大小和对齐；`sizeof(int)`→4、`sizeof(char)`→1、`sizeof(void*)`→8、`__alignof__(double)`→8；`__builtin_offsetof` 返回 0 (结构体布局不可用)；preproc 单测 `sizeof_in_if_*` / `alignof_in_if_*` / `offsetof_in_if_*` |
 | `_Static_assert` 字符串化 | C23 单参/双参全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` |
 | 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；缓存 V7；深度上限 128 层；超限发 W0201 警告 (每 TU 一次) |
 | `_Generic` + 三元控制表达式 | `tests/fixtures/c/generic_tern.c` |
@@ -79,7 +81,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解；`, ## __VA_ARGS__` GCC 扩展兼容；非可变参宏中保留为字面 token；测试: preproc 单测 `va_opt_*` |
 | `__COUNTER__` | 单调递增，跨宏嵌套共享 preproc 状态；在 `#if` 中可被求值 |
 | `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量；所有 `#pragma` 类型均可通过 `_Pragma` 生效 (GCC diagnostic/poison/visibility/STDC/pack/weak/once 等)；测试: preproc 单测 `pragma_operator_*` |
-| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `GCC system_header` / `GCC poison` / `GCC visibility push/pop/set(...)` / `once` / `comment` / `locale` |
+| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `GCC system_header` / `GCC poison` / `GCC visibility push/pop/set(...)` / `once` / `comment` / `locale` / `ident` / `sccs` |
 | `#pragma GCC diagnostic` 完整语义 | push/pop 栈式管理诊断状态; `ignored "-Wxxx"` 抑制指定警告; `error "-Wxxx"` 将警告升级为错误; `warning "-Wxxx"` 恢复正常; 内部警告代码映射到 GCC `-W` 名称 (W0200→warning, W0001→pragma-warning 等); 系统头文件中同样生效; 测试: preproc 单测 `gcc_diagnostic_*` |
 | `#pragma GCC system_header` | 标记后续文件内容为系统头文件, 抑制警告 (不影响错误); `_Pragma("GCC system_header")` 等价; `-isystem` 路径及标准系统目录 (`/usr/include` 等) 下的头文件自动标记为 system header; 进入/退出 `#include` 时保存/恢复父文件状态, 防止标记泄漏; 测试: `tests/fixtures/c/system_header.c` + preproc 单测 (gcc_system_header_*) |
 | `#pragma GCC poison` | 标记标识符为禁用, 后续预处理中遇到被 poison 的标识符时发出 E0210 错误; 系统头文件中豁免 (与 GCC 行为一致); 支持多个标识符空格分隔; `_Pragma("GCC poison ...")` 等价; poison 前已出现的不报错; 测试: preproc 单测 `gcc_poison_*` |
@@ -89,13 +91,14 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#pragma STDC CX_LIMITED_RANGE` | ON/OFF/DEFAULT 三态；ON 时 x86_64 complex 乘除法使用内联有限范围公式，OFF/DEFAULT 使用 `__mulsc3` / `__muldc3` / `__divsc3` / `__divdc3` range-safe helper |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |
 | 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`)；时间宏 `__DATE__` / `__TIME__` / `__TIMESTAMP__` (源文件修改时间)；文件宏 `__FILE__` / `__BASE_FILE__` (主源文件名) / `__INCLUDE_LEVEL__` (include 嵌套深度，主文件为 0) |
-| `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径 |
+| `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_cpp_attribute` / `__has_feature` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径；`__has_cpp_attribute(name)` 返回 C++20 属性版本号 (如 nodiscard→201603L)；`__has_feature(name)` 检测 Clang 特性 (c_atomic/tls/builtin_*_overflow 等) |
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
 | 数字分隔符 | `1'000'000` |
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
 | 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告；`-fmacro-backtrace-limit=N` 可配置深度上限 (默认 128) |
 | 依赖文件 -M / -MM / -MD / -MMD / -MF / -MT / -MQ / -MP | GCC 兼容全集合依赖生成: `-M`/`-MM` 仅生成依赖不编译 (stdout 或 `-MF` 指定文件); `-MD`/`-MMD` 编译同时生成 `.d`; `-MF` 指定输出路径; `-MT` 字面目标名; `-MQ` 转义 `$` 等特殊字符; `-MP` 生成 phony 目标; 格式 `\` 续行 + 路径转义 + fixdep 支持 |
 | `-Wp,*` 子选项白名单 | CLI 与 `dcc-host-wrapper.sh` 仅白名单支持预处理器子选项，未知项报 unsupported |
+| `-iquote` / `-idirafter` 搜索路径 | GCC 兼容 include 路径层次: `-iquote` 仅用于 `"..."` 引号包含; `-idirafter` 在所有其他路径之后搜索; 搜索顺序: `-iquote` → `-I` → `-isystem` → 标准路径 → `-idirafter`; 支持 `-Wp,-iquote` / `-Wp,-idirafter` 子选项传递 |
 | x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags；`-mno-sse`/`-mcmodel=kernel`/`-ftrivial-auto-var-init=zero` 已完整实现 |
 | `-x` 输入语言集 | CLI 支持 `c`/`c-header`、`c++`/`cpp`/`cxx` 及 C++ header 别名，并区分 `assembler`（原始汇编）与 `assembler-with-cpp`（预处理汇编） |
 | host wrapper dependency errors | `dcc-host-wrapper.sh` fails the host build when fixdep dependency generation fails instead of writing a stub `.d` file |
