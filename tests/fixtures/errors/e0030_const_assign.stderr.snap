@@ -1,0 +1,5 @@
+error[E0030]: assignment of read-only variable 'x'
+  --> <file>:4:7
+   4 |    x = 20;
+     |       ^
+  hint: variable was declared const

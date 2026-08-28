@@ -263,6 +263,7 @@ pub struct Parser<'a> {
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: HashMap<String, Type>,             // 变量名 → 类型 (函数内会清除)
+    var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const检查用)
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
     in_function: bool,                         // 是否在函数体内
     current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
@@ -302,6 +303,7 @@ impl<'a> Parser<'a> {
             enum_defs: HashMap::new(),
             enum_consts: HashMap::new(),
             locals: HashMap::new(),
+            var_quals: HashMap::new(),
             globals: HashMap::new(),
             in_function: false,
             current_function: None,
@@ -3173,6 +3175,7 @@ impl<'a> Parser<'a> {
                 // 初始化器可引用当前声明符（sizeof(*v)、typeof(v) 等）
                 if !name_for_decl.name.is_empty() {
                     self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                    self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
                 }
                 let init = self.parse_expr_bp(2)?;
                 let decl_ty = if auto_owned { init.ty() } else { ty.clone() };
@@ -3214,6 +3217,7 @@ impl<'a> Parser<'a> {
                 })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -3246,6 +3250,7 @@ impl<'a> Parser<'a> {
                 })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -6526,25 +6531,63 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.cur.kind == TokKind::Assign && min_bp <= 2 {
+                let assign_sp = self.cur.span.clone();
                 self.advance();
                 let r = self.parse_expr_bp(2)?;
                 let ty = lhs.ty();
+                // C89 6.3.16: check const-qualified assignment target
+                if let Some(name) = Self::assign_target_name(&lhs) {
+                    if let Some(q) = self.var_quals.get(&name) {
+                        if q.is_const() {
+                            self.diags.push(
+                                Diagnostic::err(
+                                    "E0030",
+                                    format!(
+                                        "assignment of read-only variable '{}'",
+                                        name
+                                    ),
+                                    assign_sp.clone(),
+                                )
+                                .with_hint("variable was declared const"),
+                            );
+                        }
+                    }
+                }
                 lhs = Expr::Assign {
                     op: BinOp::Add,
                     l: Box::new(lhs),
                     r: Box::new(r),
-                    span: self.cur.span.clone(),
+                    span: assign_sp,
                     ty,
                 };
                 continue;
             }
             if let Some(op) = self.compound_op() {
                 if min_bp <= 2 {
+                    let compound_sp = self.cur.span.clone();
                     self.advance();
                     let r = self.parse_expr_bp(2)?;
                     // 展开 lhs += e → target = lhs + e
                     // 提取赋值目标 (如果 lhs 已是 Assign, 提取其目标)
                     let target = Self::assign_target(&lhs);
+                    // C89 6.3.16: check const-qualified compound assignment target
+                    if let Some(name) = Self::assign_target_name(&target) {
+                        if let Some(q) = self.var_quals.get(&name) {
+                            if q.is_const() {
+                                self.diags.push(
+                                    Diagnostic::err(
+                                        "E0030",
+                                        format!(
+                                            "assignment of read-only variable '{}'",
+                                            name
+                                        ),
+                                        compound_sp.clone(),
+                                    )
+                                    .with_hint("variable was declared const"),
+                                );
+                            }
+                        }
+                    }
                     let read = Box::new(lhs.clone()); // 读取当前值
                     let target_ty = target.ty();
                     let binop_ty = match target_ty {
@@ -6787,6 +6830,18 @@ impl<'a> Parser<'a> {
         match expr {
             Expr::Assign { l, .. } => Self::assign_target(l),
             _ => expr.clone(),
+        }
+    }
+
+    /// Extract the variable name from an assignment target expression.
+    /// Returns Some(name) if the target is a simple identifier (possibly
+    /// through deref/member chains), None otherwise.
+    fn assign_target_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident { name, .. } => Some(name.name.clone()),
+            // For compound assignment targets like *p = x, we can't easily
+            // determine const-ness without full type analysis
+            _ => None,
         }
     }
 

@@ -19387,3 +19387,38 @@ fn gnu_range_init_run_returns_zero() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "gnu_range_init should return 0, got {rc}");
 }
+
+/// C89 const correctness: assignment to const variable should be rejected
+#[test]
+fn const_assign_error() {
+    let src = r#"
+int main(void) {
+    const int x = 10;
+    x = 20;
+    return 0;
+}
+"#;
+    let output = run_syntax_test("const-assign-err", src);
+    assert!(
+        !output.status.success(),
+        "Assignment to const variable should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("read-only variable") || stderr.contains("E0030"),
+        "Should report const assignment error. stderr: {}",
+        stderr
+    );
+}
+
+/// C89 const correctness: valid const usage should compile
+#[test]
+fn const_correct_syntax_ok() {
+    let source = include_str!("fixtures/c/const_correct.c");
+    let output = run_syntax_test("const-correct", source);
+    assert!(
+        output.status.success(),
+        "Valid const usage should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
