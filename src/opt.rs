@@ -1879,6 +1879,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -2024,6 +2025,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -2124,6 +2126,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -2195,6 +2198,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         });
         let prog = Program {
             decls: vec![sq, main_fn],
@@ -2303,6 +2307,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         });
         let prog = Program {
             decls: vec![func],
@@ -2563,6 +2568,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
 
         let mut funcs = HashMap::new();

@@ -465,6 +465,7 @@ mod tests {
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
                             tls_model: None,
+                        asm_label: None,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -492,6 +493,7 @@ mod tests {
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
                             tls_model: None,
+                        asm_label: None,
                         })),
                     ],
                     span: sp.clone(),
@@ -536,6 +538,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,

@@ -1099,6 +1099,7 @@ mod tests {
                 bit_offset: 0,
                 quals: QualifierFlags::NONE,
                 ptr_quals: vec![],
+                field_align: None,
             })
             .collect();
         let align = field_vec.iter().map(|f| f.ty.align()).max().unwrap_or(1);
@@ -1190,6 +1191,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
 
         let analyses = analyze_function(&func);
@@ -1276,6 +1278,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
 
         let analyses = analyze_function(&func);
@@ -1394,6 +1397,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
 
         let analyses = analyze_function(&func);
@@ -1492,6 +1496,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         });
 
         // main(): 调用 f(Point{1, 2})
@@ -1576,6 +1581,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         });
 
         let mut prog = Program {

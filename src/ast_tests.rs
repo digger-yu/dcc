@@ -13,6 +13,7 @@ fn struct_size_rounds_up_to_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
         Field {
             name: "p".into(),
@@ -22,6 +23,7 @@ fn struct_size_rounds_up_to_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
         Field {
             name: "tail".into(),
@@ -31,6 +33,7 @@ fn struct_size_rounds_up_to_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
     ];
     assert_eq!(Type::Struct("s".into(), Arc::new(fields), 8).size(), 24);
@@ -47,6 +50,7 @@ fn union_size_rounds_up_to_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
         Field {
             name: "bytes".into(),
@@ -56,6 +60,7 @@ fn union_size_rounds_up_to_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
     ];
     assert_eq!(Type::Union("u".into(), Arc::new(fields), 8).size(), 16);
@@ -72,6 +77,7 @@ fn packed_struct_size_uses_observed_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
         Field {
             name: "i".into(),
@@ -81,6 +87,7 @@ fn packed_struct_size_uses_observed_alignment() {
             bit_offset: 0,
             quals: QualifierFlags::NONE,
             ptr_quals: vec![],
+            field_align: None,
         },
     ];
     let ty = Type::Struct("packed".into(), Arc::new(fields), 1);

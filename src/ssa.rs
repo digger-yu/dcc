@@ -2335,6 +2335,7 @@ mod tests {
                         quals: crate::ast::QualifierFlags::NONE,
                         addr_space: crate::ast::AddrSpace::None,
                         tls_model: None,
+                    asm_label: None,
                     })),
                     BlockItem::Stmt(Stmt::Return {
                         val: Some(Expr::Ident {
@@ -2390,6 +2391,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("entry"));
@@ -2473,6 +2475,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("if.then"));
@@ -2540,6 +2543,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         };
         assert!(build_from_func(&f).is_none());
     }

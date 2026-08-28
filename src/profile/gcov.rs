@@ -1465,6 +1465,7 @@ mod tests {
                 alignment: None,
                 alias_name: None,
                 visibility: None,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1567,6 +1568,7 @@ mod tests {
                 alignment: None,
                 alias_name: None,
                 visibility: None,
+            asm_label: None,
             })
         };
         let mut prog = Program {

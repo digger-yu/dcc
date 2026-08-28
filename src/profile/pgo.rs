@@ -1180,6 +1180,7 @@ mod tests {
                 alignment: None,
                 alias_name: None,
                 visibility: None,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1282,6 +1283,7 @@ mod tests {
             alignment: None,
             alias_name: None,
             visibility: None,
+        asm_label: None,
         }));
         // 旧 body 顶部是 return 0, 跑 instrument 后应变为
         // call __dcc_pgo_count_fn(0)  +  return 0
@@ -1391,6 +1393,7 @@ mod tests {
             alignment: None,
             alias_name: None,
             visibility: None,
+        asm_label: None,
         }));
         let cfg = PgoConfig {
             generate: false,
@@ -1584,6 +1587,7 @@ mod tests {
                 alignment: None,
                 alias_name: None,
                 visibility: None,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,

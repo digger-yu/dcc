@@ -984,6 +984,9 @@ pub struct Field {
     /// 例如 `int * const * volatile p` → ptr_quals = [CONST, VOLATILE].
     /// BTF 输出时据此在指针链中插入限定符节点.
     pub ptr_quals: Vec<QualifierFlags>,
+    /// 字段级 __attribute__((aligned(N))) 显式指定的对齐值.
+    /// None 表示使用类型的自然对齐.
+    pub field_align: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1166,8 +1169,13 @@ impl Type {
     /// 按对齐限制布局: max_align = None 用自然对齐, Some(n) 把字段对齐限制为 n
     /// (实现 #pragma pack(n): 把结构体内部所有字段对齐不超过 n 字节)
     pub fn layout_struct_with_pack(fields: &mut [Field], is_union: bool, max_align: Option<usize>) {
-        // 实际应用的对齐: None => 自然对齐, Some(n) => min(n, 自然对齐)
-        let eff = |nat: usize| -> usize {
+        // 实际应用的对齐: 考虑字段级 aligned 属性, 然后应用 pack 限制
+        // field_align > natural alignment, 然后 min(max_align, alignment)
+        let eff = |f: &Field| -> usize {
+            let nat = match f.field_align {
+                Some(a) => a, // 字段级 aligned 覆盖自然对齐
+                None => f.ty.align(),
+            };
             match max_align {
                 Some(n) if n < nat => n,
                 _ => nat,
@@ -1193,7 +1201,7 @@ impl Type {
                         if container_bits > 0 {
                             off += (container_bits / 8) as usize;
                         }
-                        let align = eff(f.ty.align());
+                        let align = eff(f);
                         off = (off + align - 1) & !(align - 1);
                         container_bits = 0;
                         bit_pos = 0;
@@ -1205,7 +1213,7 @@ impl Type {
                     // 第一个位域或容器类型变化: 开始新存储单元
                     if container_bits == 0 || container_ty_bits != container_bits {
                         // 对齐到容器类型边界
-                        let align = eff(f.ty.align());
+                        let align = eff(f);
                         off = (off + align - 1) & !(align - 1);
                         container_bits = container_ty_bits;
                         bit_pos = 0;
@@ -1214,7 +1222,7 @@ impl Type {
                     // 当前单元放不下: 推进到下一单元
                     if bit_pos + field_bits > container_bits {
                         off += (container_bits / 8) as usize;
-                        let align = eff(f.ty.align());
+                        let align = eff(f);
                         off = (off + align - 1) & !(align - 1);
                         bit_pos = 0;
                     }
@@ -1231,14 +1239,12 @@ impl Type {
                     }
                     // 柔性数组 (零长数组): 不贡献大小
                     if let Type::Array(_, ArraySize::Const(0)) = &f.ty {
-                        let nat = f.ty.align();
-                        let align = eff(nat);
+                        let align = eff(f);
                         off = (off + align - 1) & !(align - 1);
                         f.offset = off;
                         continue;
                     }
-                    let nat = f.ty.align();
-                    let a = eff(nat);
+                    let a = eff(f);
                     off = (off + a - 1) & !(a - 1);
                     f.offset = off;
                     off += f.ty.size();

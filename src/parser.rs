@@ -626,6 +626,70 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 跳过属性并提取 aligned 值（如果存在）。
+    /// 用于字段级 __attribute__((aligned(N))) 解析。
+    fn skip_attributes_extract_aligned(&mut self) -> Option<usize> {
+        let mut aligned: Option<usize> = None;
+        while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+            self.advance(); // __attribute__
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+            } // (
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+            } // (
+            // 解析内部属性列表
+            let mut depth = 2i32;
+            while depth > 0 && self.cur.kind != TokKind::Eof {
+                // 在 depth==2 时检测 "aligned"
+                if depth == 2
+                    && self.cur.kind == TokKind::Ident
+                    && self.cur.text == "aligned"
+                {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance(); // (
+                        // 解析对齐值
+                        if self.cur.kind == TokKind::Number {
+                            let value = parse_int_lit(&self.cur.text);
+                            if value > 0 {
+                                aligned = Some(value as usize);
+                            }
+                            self.advance();
+                        }
+                        // 跳过到匹配的 )
+                        let mut inner_depth = 1i32;
+                        while inner_depth > 0 && self.cur.kind != TokKind::Eof {
+                            if self.cur.kind == TokKind::LParen {
+                                inner_depth += 1;
+                            } else if self.cur.kind == TokKind::RParen {
+                                inner_depth -= 1;
+                            }
+                            if inner_depth > 0 {
+                                self.advance();
+                            }
+                        }
+                        if self.cur.kind == TokKind::RParen {
+                            self.advance(); // )
+                        }
+                    } else {
+                        // __attribute__((aligned)) 无参数默认为 16
+                        aligned = Some(16);
+                    }
+                } else if self.cur.kind == TokKind::LParen {
+                    depth += 1;
+                    self.advance();
+                } else if self.cur.kind == TokKind::RParen {
+                    depth -= 1;
+                    self.advance(); // 总是前进, 包括最后一个 )
+                } else {
+                    self.advance();
+                }
+            }
+        }
+        aligned
+    }
+
     /// Parse a constant expression inside `__attribute__((aligned(...)))`.
     /// Supports: numeric literals, `sizeof(type)`, `sizeof(expr)`,
     /// and simple binary ops (`*`, `+`, `-`) between them.
@@ -4092,6 +4156,7 @@ impl<'a> Parser<'a> {
                                 bit_offset: 0,
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
+                                field_align: None,
                             },
                             Field {
                                 name: "fp_offset".into(),
@@ -4101,6 +4166,7 @@ impl<'a> Parser<'a> {
                                 bit_offset: 0,
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
+                                field_align: None,
                             },
                             Field {
                                 name: "overflow_arg_area".into(),
@@ -4110,6 +4176,7 @@ impl<'a> Parser<'a> {
                                 bit_offset: 0,
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
+                                field_align: None,
                             },
                             Field {
                                 name: "reg_save_area".into(),
@@ -4119,6 +4186,7 @@ impl<'a> Parser<'a> {
                                 bit_offset: 0,
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
+                                field_align: None,
                             },
                         ]),
                         8, // va_list align: max field = ptr (8)
@@ -4323,6 +4391,7 @@ impl<'a> Parser<'a> {
                             bit_offset: 0,
                             quals: QualifierFlags::NONE,
                             ptr_quals: vec![],
+                            field_align: None,
                         });
                     }
                 } else {
@@ -4339,7 +4408,16 @@ impl<'a> Parser<'a> {
                     1
                 } else {
                     let pragma_pack = self.pack_at_line(struct_line);
-                    let max_field = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+                    // 考虑字段级 aligned 属性: max(field_align 或 natural alignment)
+                    let max_field = fields
+                        .iter()
+                        .map(|f| match f.field_align {
+                            Some(a) => a,
+                            None => f.ty.align(),
+                        })
+                        .max()
+                        .unwrap_or(1)
+                        .max(1);
                     match pragma_pack {
                         Some(n) if n < max_field => n,
                         _ => max_field,
@@ -5129,7 +5207,8 @@ impl<'a> Parser<'a> {
             // 同一声明说明符后可用逗号分隔多个声明符: *next, *prev / a, b
             loop {
                 let (mut ty, nm) = self.parse_field_declarator(spec.clone());
-                self.skip_attributes();
+                // 字段级属性: 提取 aligned 值
+                let field_aligned = self.skip_attributes_extract_aligned();
                 let bw = if self.cur.kind == TokKind::Colon {
                     self.advance();
                     // 位域宽度必须是单个表达式，不能含逗号（同类型多个位域: a:8, b:4）
@@ -5189,7 +5268,11 @@ impl<'a> Parser<'a> {
                     arr_ty
                 };
                 // 数组/名字后的 __attribute__((aligned(...))) 等
-                self.skip_attributes();
+                // 合并之前提取的 aligned 值
+                let field_aligned = match self.skip_attributes_extract_aligned() {
+                    Some(a) => Some(a),
+                    None => field_aligned,
+                };
                 // C11 匿名 struct/union 成员: 无字段名时作为匿名成员,
                 // 贡献大小并展平字段到父结构。包括:
                 //   struct { ... };     — 匿名内联定义 (标签名为空)
@@ -5219,6 +5302,7 @@ impl<'a> Parser<'a> {
                         bit_offset: 0,
                         quals: self.spec_quals.iso_c(),
                         ptr_quals: vec![],
+                        field_align: field_aligned,
                     });
                 }
                 if self.cur.kind == TokKind::Comma {

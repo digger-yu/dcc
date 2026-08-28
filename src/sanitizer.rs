@@ -2769,6 +2769,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         }
     }
 
@@ -3080,6 +3081,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -3172,6 +3174,7 @@ mod tests {
                 is_host: false,
             is_naked: false,
             is_noreturn: false,
+            asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -3463,6 +3466,7 @@ mod tests {
             quals: crate::ast::QualifierFlags::NONE,
             addr_space: crate::ast::AddrSpace::None,
             tls_model: None,
+        asm_label: None,
         };
         f.body = Some(Block {
             items: vec![

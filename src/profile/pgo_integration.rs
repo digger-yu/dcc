@@ -424,6 +424,7 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+        asm_label: None,
         }));
         let names = collect_func_names(&prog);
         assert_eq!(names, vec!["foo"]);
