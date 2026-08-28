@@ -5165,8 +5165,8 @@ impl Codegen {
             }
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
-            let sym_name = self.resolve_asm_label(&f.name.name);
-            self.label(sym_name);
+            let sym_name = self.resolve_asm_label(&f.name.name).to_string();
+            self.label(&sym_name);
             for _ in 0..suffix_len {
                 self.code.push(0x90);
             }
@@ -5174,8 +5174,8 @@ impl Codegen {
         } else {
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
-            let sym_name = self.resolve_asm_label(&f.name.name);
-            self.label(sym_name);
+            let sym_name = self.resolve_asm_label(&f.name.name).to_string();
+            self.label(&sym_name);
             func_start
         };
         // __attribute__((naked)): 不生成 prologue/epilogue，
