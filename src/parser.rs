@@ -273,6 +273,7 @@ pub struct Parser<'a> {
     decl_auto_type: bool,                      // __auto_type：类型由初始化表达式推导
     allow_named_type: bool,                    // typeof 等上下文允许 Type::Named
     spec_quals: QualifierFlags,                // 当前声明说明符中捕获的限定符
+    decl_quals: QualifierFlags,                // 声明符中捕获的限定符 (如 * const 中的 const)
     spec_addr_space: AddrSpace,                // 当前声明说明符中捕获的地址空间
     opts: ParseOptions,
     shadow_counter: i32, // 嵌套块遮蔽重命名计数器
@@ -313,6 +314,7 @@ impl<'a> Parser<'a> {
             decl_auto_type: false,
             allow_named_type: false,
             spec_quals: QualifierFlags::NONE,
+            decl_quals: QualifierFlags::NONE,
             spec_addr_space: AddrSpace::None,
             opts,
             shadow_counter: 0,
@@ -3175,7 +3177,14 @@ impl<'a> Parser<'a> {
                 // 初始化器可引用当前声明符（sizeof(*v)、typeof(v) 等）
                 if !name_for_decl.name.is_empty() {
                     self.locals.insert(name_for_decl.name.clone(), ty.clone());
-                    self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
+                    // For pointer types, spec_quals applies to pointee, not the pointer.
+                    // Use decl_quals (from after *) for pointer types.
+                    let var_q = if matches!(ty, Type::Ptr(_)) {
+                        self.decl_quals
+                    } else {
+                        self.spec_quals | self.decl_quals
+                    };
+                    self.var_quals.insert(name_for_decl.name.clone(), var_q);
                 }
                 let init = self.parse_expr_bp(2)?;
                 let decl_ty = if auto_owned { init.ty() } else { ty.clone() };
@@ -3217,7 +3226,12 @@ impl<'a> Parser<'a> {
                 })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
-                self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
+                let var_q = if matches!(ty, Type::Ptr(_)) {
+                    self.decl_quals
+                } else {
+                    self.spec_quals | self.decl_quals
+                };
+                self.var_quals.insert(name_for_decl.name.clone(), var_q);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -3250,7 +3264,12 @@ impl<'a> Parser<'a> {
                 })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
-                self.var_quals.insert(name_for_decl.name.clone(), self.spec_quals);
+                let var_q = if matches!(ty, Type::Ptr(_)) {
+                    self.decl_quals
+                } else {
+                    self.spec_quals | self.decl_quals
+                };
+                self.var_quals.insert(name_for_decl.name.clone(), var_q);
                 if !self.in_function {
                     self.globals.insert(name_for_decl.name.clone(), ty.clone());
                 }
@@ -3824,6 +3843,7 @@ impl<'a> Parser<'a> {
         let mut base: Option<Type> = None;
         // 重置当前声明说明符的限定符和地址空间 (每次新的类型解析开始时清空)
         self.spec_quals = QualifierFlags::NONE;
+        self.decl_quals = QualifierFlags::NONE;
         self.spec_addr_space = AddrSpace::None;
         // 跳过存储类/const/volatile/_Atomic/__extension__/__attribute__
         loop {
@@ -4920,6 +4940,27 @@ impl<'a> Parser<'a> {
             if self.cur.text == "__attribute__" {
                 self.skip_attributes();
             } else {
+                // Capture const/volatile/atomic/restrict qualifiers
+                // that appear after * in the declarator
+                match self.cur.kind {
+                    TokKind::KwConst => self.decl_quals |= QualifierFlags::CONST,
+                    TokKind::KwVolatile => self.decl_quals |= QualifierFlags::VOLATILE,
+                    TokKind::KwAtomic => self.decl_quals |= QualifierFlags::ATOMIC,
+                    TokKind::KwRestrict => self.decl_quals |= QualifierFlags::RESTRICT,
+                    TokKind::Ident if self.cur.text == "__const__" => {
+                        self.decl_quals |= QualifierFlags::CONST
+                    }
+                    TokKind::Ident if self.cur.text == "__volatile__" => {
+                        self.decl_quals |= QualifierFlags::VOLATILE
+                    }
+                    TokKind::Ident if self.cur.text == "__restrict__"
+                        || self.cur.text == "_ms_restrict"
+                        || self.cur.text == "_restrict" =>
+                    {
+                        self.decl_quals |= QualifierFlags::RESTRICT
+                    }
+                    _ => {}
+                }
                 self.advance();
             }
         }
