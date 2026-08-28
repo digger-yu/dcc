@@ -789,6 +789,9 @@ impl Builder {
             },
             Expr::AlignofTy { ty, .. } => Operand::Int(ty.align() as i128),
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
+            Expr::Offsetof { ty, member, .. } => {
+                Operand::Int(crate::const_eval::eval_offsetof(ty, member) as i128)
+            }
             Expr::AsmExpr {
                 asm_str,
                 outputs,

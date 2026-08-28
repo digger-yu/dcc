@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # kernel-cc.sh - Kernel build compiler wrapper
 #
-# .S files: try dcc first, fall back to gcc on failure
-# .c files: use gcc (dcc const_eval doesn't handle all
-#           kernel offsetof patterns yet)
+# Both .c and .S files: try dcc first, fall back to gcc on failure
+# Exception: VDSO files always use gcc (requires PIC/relocations dcc doesn't support)
 #
-# dcc improvements for assembly support:
+# dcc improvements:
 # - DEFINE() .ascii output in -S mode (asm-offsets.h)
 # - Continuation line handling matches GCC behavior
 # - Char literal in asm comments (# don't) no longer
 #   breaks macro expansion on subsequent lines
+# - offsetof/sizeof/alignof constant folding in SSA passes
 set -euo pipefail
 
 DCC="${DCC:-/root/dcc/target/release/dcc}"
@@ -23,9 +23,14 @@ for arg in "$@"; do
     esac
 done
 
-# .S files: try dcc, fall back to gcc
-if [[ -n "$src" && "$src" == *.S ]]; then
-    if "$DCC" "$@" 2>/tmp/dcc_asm_err; then
+# VDSO files require PIC/relocations that dcc doesn't support yet
+if [[ -n "$src" && "$src" == */vdso/* ]]; then
+    exec "$GCC" "$@"
+fi
+
+# Try dcc for both .c and .S files, fall back to gcc on failure
+if [[ -n "$src" && ("$src" == *.c || "$src" == *.S) ]]; then
+    if "$DCC" "$@" 2>/tmp/dcc_err; then
         exit 0
     fi
     # dcc failed, fall back to gcc

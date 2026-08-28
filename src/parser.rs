@@ -2401,6 +2401,10 @@ impl<'a> Parser<'a> {
                 ty = Type::Array(Box::new(ty.into()), sz);
             }
             let ty = self.try_parse_vector_attr(ty);
+            // typedef 声明符后的非 vector 属性 (如 __mode__): 消费但不处理
+            if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                self.skip_attributes();
+            }
             if !self.expect(TokKind::Semi, "';'") {
                 return None;
             }
@@ -2698,18 +2702,22 @@ impl<'a> Parser<'a> {
             // 不是函数指针, 继续正常声明流程 (限定符已消费)
         }
         // 限定符在基类型与 * 之间 (如 const, __seg_gs 等)
+        // 先捕获基本类型后的属性 (如 void __attribute__((used)) func()),
+        // 再跳过指针限定符 (skip_ptr_qualifiers 会丢弃属性, 故须先捕获),
+        // 最后再捕获限定符后可能残留的属性 (如 void const __attribute__((used)) *p).
+        let mid_attrs = self.parse_attributes();
         self.skip_ptr_qualifiers();
-        // void __attribute__(...) *fn(): 基本类型后的属性在 specifiers_only 路径下会残留
-        self.skip_attributes();
+        let mid_attrs = Self::merge_attrs(mid_attrs, self.parse_attributes());
         let ty = self.parse_ptr_suffix(ty);
         // 函数指针: void * (*name)(params) — * 已被 parse_ptr_suffix 吃掉, 现在是 (
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
             self.advance(); // (
             self.advance(); // *
-            return self.parse_func_ptr_inner(ty, leading_attrs, storage);
+            let merged = Self::merge_attrs(leading_attrs, mid_attrs);
+            return self.parse_func_ptr_inner(ty, merged, storage);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
-        let pre_attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
+        let pre_attrs = Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), self.parse_attributes());
         self.skip_asm_label();
         // 括号包函数名防宏展开: size_t (htab_size) (htab_t h)
         let name = if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
@@ -4793,20 +4801,32 @@ impl<'a> Parser<'a> {
     }
 
     /// 解析 __attribute__((vector_size(N))) 等属性, 返回可能包装为 Vector 的类型
+    /// 仅在确认是 vector_size/vector_size 属性时才消费 token,
+    /// 其他 __attribute__ 保留给后续解析 (如 __attribute__((used))).
     fn try_parse_vector_attr(&mut self, ty: Type) -> Type {
         if self.cur.kind != TokKind::Ident || self.cur.text != "__attribute__" {
             return ty;
         }
+        // 保存状态: 仅在确认是 vector_size 时才消费
+        let saved_cur = self.cur.clone();
+        let saved_peek = self.peek.clone();
+        let saved_pos = self.lex.pos;
+        let saved_line = self.lex.line;
+        let saved_col = self.lex.col;
         self.advance(); // __attribute__
         if self.cur.kind != TokKind::LParen {
+            self.cur = saved_cur; self.peek = saved_peek;
+            self.lex.pos = saved_pos; self.lex.line = saved_line; self.lex.col = saved_col;
             return ty;
         }
         self.advance(); // (
         if self.cur.kind != TokKind::LParen {
+            self.cur = saved_cur; self.peek = saved_peek;
+            self.lex.pos = saved_pos; self.lex.line = saved_line; self.lex.col = saved_col;
             return ty;
         }
         self.advance(); // (
-                        // 解析 vector_size(N) (含 __vector_size__ 别名)
+        // 解析 vector_size(N) (含 __vector_size__ 别名)
         if self.cur.kind == TokKind::Ident
             && (self.cur.text == "vector_size" || self.cur.text == "__vector_size__")
         {
@@ -4835,17 +4855,9 @@ impl<'a> Parser<'a> {
                 return Type::Vector(Box::new(ty.into()), count);
             }
         }
-        // 其他属性: 跳过直到 ))
-        let mut depth = 2i32; // 已在两层括号内
-        while depth > 0 && self.cur.kind != TokKind::Eof {
-            if self.cur.kind == TokKind::LParen {
-                depth += 1;
-            }
-            if self.cur.kind == TokKind::RParen {
-                depth -= 1;
-            }
-            self.advance();
-        }
+        // 非 vector_size 属性: 恢复状态, 保留给后续解析
+        self.cur = saved_cur; self.peek = saved_peek;
+        self.lex.pos = saved_pos; self.lex.line = saved_line; self.lex.col = saved_col;
         ty
     }
 

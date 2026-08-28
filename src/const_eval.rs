@@ -314,7 +314,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             }
         }
         Expr::Offsetof { ty, member, .. } => {
-            Ok(ConstValue::Int(offsetof_member(ty, member) as i128))
+            Ok(ConstValue::Int(eval_offsetof(ty, member) as i128))
         }
         Expr::StmtExpr { block, .. } => eval_stmt_expr_block(block),
         // 编译期可求值的 GCC/LLVM 内建函数: 参数是常量时返回常量结果。
@@ -549,7 +549,7 @@ pub fn eval_int_lit(s: &str) -> Option<i128> {
 }
 
 /// __builtin_offsetof(type, member) 编译期偏移
-fn offsetof_member(ty: &Type, member: &str) -> usize {
+pub fn eval_offsetof(ty: &Type, member: &str) -> usize {
     match ty {
         Type::Union(_, _, _) => 0,
         Type::Struct(_, fields, _) => {

@@ -910,7 +910,17 @@ impl Lowering {
                 };
                 (ExprKind::VaArg { ap: ap_name }, Vec::new())
             }
-            Expr::SizeofTy { .. } | Expr::AlignofTy { .. } | Expr::Offsetof { .. } => {
+            Expr::SizeofTy { ty: ref sty, .. } => {
+                literal = Some(ExprLiteral::Int(sty.size() as i128));
+                (ExprKind::SizeAlignOffset, Vec::new())
+            }
+            Expr::AlignofTy { ty: ref aty, .. } => {
+                literal = Some(ExprLiteral::Int(aty.align() as i128));
+                (ExprKind::SizeAlignOffset, Vec::new())
+            }
+            Expr::Offsetof { ty: ref oty, ref member, .. } => {
+                let off = crate::const_eval::eval_offsetof(oty, member);
+                literal = Some(ExprLiteral::Int(off as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())
             }
             Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
