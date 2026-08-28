@@ -6,8 +6,8 @@ use crate::codegen::asm_constraints::{
 };
 use crate::codegen::elf::{
     self, ComdatGroup, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21,
-    R_AARCH64_CALL26, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STT_FUNC,
-    STT_GNU_IFUNC, STT_OBJECT, STT_TLS,
+    R_AARCH64_CALL26, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STB_WEAK,
+    STT_FUNC, STT_GNU_IFUNC, STT_OBJECT, STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -463,12 +463,25 @@ impl Aarch64Codegen {
             self.gen_function(func, find_func(prog, &func.name));
             let size = self.pos() - start;
             self.func_sizes.insert(func.name.clone(), size);
+            let func_bind = if find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false)
+            {
+                STB_WEAK
+            } else if find_func(prog, &func.name)
+                .map(|f| f.is_static)
+                .unwrap_or(false)
+            {
+                STB_LOCAL
+            } else {
+                STB_GLOBAL
+            };
             self.symbols.push(ElfSym {
                 name: func.name.clone(),
                 section: 1,
                 value: text_off,
                 size,
-                bind: STB_GLOBAL,
+                bind: func_bind,
                 ty: if find_func(prog, &func.name)
                     .and_then(|f| f.ifunc_resolver.as_ref())
                     .is_some()
@@ -481,6 +494,17 @@ impl Aarch64Codegen {
             });
             self.sym_index
                 .insert(func.name.clone(), self.symbols.len() as u32);
+
+            // COMDAT group for weak/inline functions: linker deduplicates
+            if find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false)
+            {
+                self.comdat_groups.push(ComdatGroup {
+                    signature: func.name.clone(),
+                    member_sec_indices: vec![],
+                });
+            }
 
             // attribute((used)): 发射 .used.<name> 节并标记 SHF_GNU_RETAIN
             if find_func(prog, &func.name)
@@ -627,6 +651,7 @@ impl Aarch64Codegen {
     }
 
     pub fn build_asm_output(&self, module: &Module) -> String {
+        let prog = module.source();
         let mut out = String::new();
         let name = if self.source_name.is_empty() {
             "input.c".to_string()
@@ -652,7 +677,14 @@ impl Aarch64Codegen {
             out.push_str(&format!("\t{line}\n"));
         }
         for func in &module.functions {
-            out.push_str(&format!("\t.globl {}\n", func.name));
+            let is_weak = find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false);
+            if is_weak {
+                out.push_str(&format!("\t.weak {}\n", func.name));
+            } else {
+                out.push_str(&format!("\t.globl {}\n", func.name));
+            }
             out.push_str(&format!("\t.type {}, %function\n", func.name));
             // -fpatchable-function-entry: emit NOPs in asm output
             if let Some((n, m)) = self._target.patchable_function_entry {

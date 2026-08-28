@@ -451,7 +451,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
 | 链接器脚本 VERSION 块 | `VERSION { version_id [(@parent)] { global: sym; local: sym; }; }` 完整解析符号版本控制块；支持多版本节点、父版本继承、global/local 符号列表、通配符 `*`；解析结果导入 VersionTable 与 `.symver` 指令统一生成 `.gnu.version` / `.gnu.version_d` 节 |
 | 链接器脚本 REGION_ALIAS | `REGION_ALIAS(alias, region)` 内存区域别名；架构特定脚本中使用 |
-| COMDAT 组 (SHF_GROUP/SHT_GROUP) | 完整解析 ELF COMDAT 组：识别 `SHT_GROUP` 节，读取 flag word (`GRP_COMDAT`) 和成员节索引列表，通过关联符号表解析组签名；链接时按签名去重，相同签名的多个 COMDAT 组只保留第一份，丢弃其余组的成员节；保留的 COMDAT 组在输出 ELF 中正确发射 `SHT_GROUP` 节头（含 flag word + 成员节索引），成员节设置 `SHF_GROUP` 标志；支持 C++ 模板实例化、内联函数、`-flto` 等场景产生的重复定义 |
+| COMDAT 组 (SHF_GROUP/SHT_GROUP) | 完整解析 ELF COMDAT 组：识别 `SHT_GROUP` 节，读取 flag word (`GRP_COMDAT`) 和成员节索引列表，通过关联符号表解析组签名；链接时按签名去重，相同签名的多个 COMDAT 组只保留第一份，丢弃其余组的成员节；保留的 COMDAT 组在输出 ELF 中正确发射 `SHT_GROUP` 节头（含 flag word + 成员节索引），成员节设置 `SHF_GROUP` 标志；x86_64/AArch64/RISC-V 后端在代码生成时为 `__attribute__((weak))` 函数创建 COMDAT 组并发射 `STB_WEAK` 符号绑定；汇编输出中 weak 函数使用 `.weak` 指令；支持 C++ 模板实例化、内联函数、`-flto` 等场景产生的重复定义 |
 
 ## IR 优化
 

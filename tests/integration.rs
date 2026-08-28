@@ -11709,6 +11709,26 @@ fn c23_constexpr_var_error() {
     );
 }
 
+/// COMDAT: weak functions get STB_WEAK binding and COMDAT group entries
+#[test]
+#[cfg(unix)]
+fn comdat_weak_functions() {
+    let src = include_str!("fixtures/c/comdat_weak.c");
+    let (out, exe) = run_compile_and_run("comdat-weak", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        run_exe(&exe),
+        0,
+        "comdat_weak: {}",
+        run_exe(&exe)
+    );
+    let _ = std::fs::remove_file(&exe);
+}
+
 #[test]
 #[cfg(unix)]
 fn c23_bool() {

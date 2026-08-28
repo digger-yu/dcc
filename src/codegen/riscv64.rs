@@ -5,8 +5,8 @@ use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
 use crate::codegen::elf::{
-    self, ComdatGroup, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC,
-    STT_OBJECT, STT_TLS,
+    self, ComdatGroup, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STB_WEAK,
+    STT_FUNC, STT_OBJECT, STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -455,17 +455,41 @@ impl Riscv64Codegen {
             self.gen_function(func, find_func(prog, &func.name));
             let size = self.pos() - start;
             self.func_sizes.insert(func.name.clone(), size);
+            let func_bind = if find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false)
+            {
+                STB_WEAK
+            } else if find_func(prog, &func.name)
+                .map(|f| f.is_static)
+                .unwrap_or(false)
+            {
+                STB_LOCAL
+            } else {
+                STB_GLOBAL
+            };
             self.symbols.push(ElfSym {
                 name: func.name.clone(),
                 section: 1,
                 value: text_off,
                 size,
-                bind: STB_GLOBAL,
+                bind: func_bind,
                 ty: STT_FUNC,
                 visibility: elf::STV_DEFAULT,
             });
             self.sym_index
                 .insert(func.name.clone(), self.symbols.len() as u32);
+
+            // COMDAT group for weak/inline functions: linker deduplicates
+            if find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false)
+            {
+                self.comdat_groups.push(ComdatGroup {
+                    signature: func.name.clone(),
+                    member_sec_indices: vec![],
+                });
+            }
             text_off += size;
         }
 
@@ -544,6 +568,7 @@ impl Riscv64Codegen {
     }
 
     pub fn build_asm_output(&self, module: &Module) -> String {
+        let prog = module.source();
         let mut out = String::new();
         let name = if self.source_name.is_empty() {
             "input.c".to_string()
@@ -566,7 +591,14 @@ impl Riscv64Codegen {
             out.push_str(&format!("\t{line}\n"));
         }
         for func in &module.functions {
-            out.push_str(&format!("\t.globl {}\n", func.name));
+            let is_weak = find_func(prog, &func.name)
+                .map(|f| f.is_weak)
+                .unwrap_or(false);
+            if is_weak {
+                out.push_str(&format!("\t.weak {}\n", func.name));
+            } else {
+                out.push_str(&format!("\t.globl {}\n", func.name));
+            }
             out.push_str(&format!("{}:\n", func.name));
             // 发射函数级内联 asm 原始文本
             for (fname, lines) in &self.raw_func_asm_lines {
