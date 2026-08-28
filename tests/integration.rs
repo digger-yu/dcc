@@ -19902,3 +19902,25 @@ int main(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 enum with explicit underlying type
+#[test]
+fn c23_enum_underlying_type() {
+    let src = r#"
+enum color : unsigned char { RED, GREEN, BLUE };
+enum big : long { X = 100 };
+enum small : signed char { A = -1, B = 127 };
+int main(void) {
+    enum color c = RED;
+    enum big b = X;
+    enum small s = A;
+    return c + b + s;
+}
+"#;
+    let output = run_syntax_test("c23-enum-under", src);
+    assert!(
+        output.status.success(),
+        "enum with base type should compile. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
