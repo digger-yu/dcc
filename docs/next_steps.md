@@ -27,7 +27,7 @@
 
 - [x] **3. libiberty / fixincludes 回归锁定基线**
   - 验证：本地 cargo test `libiberty_combined_*` → libiberty **125/0/4**，fixincludes **6/0/1**
-  - 附加：`bash scripts/archive/test_tr2.sh`、`bash scripts/archive/test_v3_cache.sh`
+  - 附加：`bash test_tr2.sh`、`bash test_v3_cache.sh`
 
 - [ ] **4. 内核全树首次 `make CC=dcc` 编译至首个失败点**
   - 验证：Linux 7.1 + `.config`；`make CC=dcc -k V=1 2>&1 | tee build.log`
@@ -125,7 +125,7 @@
   - 路径：**M7**（内核+速度优先）；M5 自举维持 backlog
   - 实现：`aarch64.rs` / `riscv64.rs` typed IR lowering；`.rodata`；`build_elf_*`
   - 验证：`aarch64_*` / `riscv64_*` cross_compile（23 项）
-  - 脚本：活跃脚本 `scripts/README.md`；历史探针归档 `scripts/archive/`
+  - 脚本：活跃脚本 `scripts/README.md`；历史探针归档 ``
 
 ---
 

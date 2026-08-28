@@ -654,7 +654,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
 ## 测试脚本布局
 
-活跃验收脚本见 `scripts/README.md`；历史调试脚本归档于 `scripts/archive/`。
+活跃验收脚本见 `scripts/README.md`；历史调试脚本归档于 ``。
 
 预处理 `#` 字符串化遵循 C 规则：实参内换行与连续空白折叠为单空格
 （`NOFAIL(ptr)` → `"malloc(...)"` 单行字面量）。

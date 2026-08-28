@@ -31,6 +31,17 @@ GCC libiberty 探测由本地 `cargo test --test integration` 驱动，详见
 |------|------|
 | `update_error_snapshots.sh` | 刷新 E1xxx snapshot |
 
-## 归档
+## GCC 构建验证
 
-历史调试与一次性探针脚本见 [`archive/README.md`](archive/README.md)。
+| 脚本 | 用途 |
+|------|------|
+| `test_tr2.sh` + `t_tr2.c` | TRANSLATE 宏展开回归测试 |
+| `test_v3_cache.sh` | V3 缓存键正确性验证 |
+| `rootcause_sim.py` | TRANSLATE(*d) 根因模拟 |
+
+## 内核构建验证
+
+| 脚本 | 用途 |
+|------|------|
+| `test_asm_offsets.py` | 用 dcc 编译 asm-offsets.c 验证 parser |
+| `summarize_err.py` | 解析/语义错误分类汇总 |

@@ -74,9 +74,9 @@ fixincludes 与 libdecnumber（include-only 模块 SKIP）。
 ### 宏展开回归
 
 ```bash
-bash scripts/archive/test_tr2.sh            # 最小例
-bash scripts/archive/test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
-python3 scripts/archive/rootcause_sim.py
+bash test_tr2.sh            # 最小例
+bash test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
+python3 rootcause_sim.py
 ```
 
 ## 与内核路径的关系
