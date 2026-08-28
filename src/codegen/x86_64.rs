@@ -238,6 +238,9 @@ pub struct Codegen {
     pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
     /// -mrecord-mcount: call site addresses for __mcount_loc section
     mcount_loc_entries: Vec<u64>,
+    /// GNU asm label 映射: C 名 → asm("label") 覆盖名
+    /// 用于将 ELF 符号名从 C 标识符重映射为用户指定的 asm 标签
+    asm_label_map: HashMap<String, String>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1402,7 +1405,14 @@ impl Codegen {
             rodata_string_slots: vec![],
             pending_data_rodata_rels: vec![],
             mcount_loc_entries: vec![],
+            asm_label_map: HashMap::new(),
         }
+    }
+
+    /// 解析 GNU asm label: 如果 C 名有对应的 asm 标签则返回 asm 标签名，
+    /// 否则返回原始 C 名。用于 ELF 符号名、重定位目标和汇编标签发射。
+    fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
+        self.asm_label_map.get(c_name).map(|s| s.as_str()).unwrap_or(c_name)
     }
 
     /// -mno-red-zone 时禁止使用红区，帧上额外保留 128 字节。
@@ -2649,6 +2659,22 @@ impl Codegen {
                 }
             }
         }
+        // 预扫描: 收集 GNU asm label 映射 (C 名 → asm("label"))
+        for decl in &prog.decls {
+            match decl {
+                Decl::Func(f) => {
+                    if let Some(ref label) = f.asm_label {
+                        self.asm_label_map.insert(f.name.name.clone(), label.clone());
+                    }
+                }
+                Decl::Var(v) => {
+                    if let Some(ref label) = v.asm_label {
+                        self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.relocatable {
             self.compile_rel(prog);
         } else {
@@ -2906,7 +2932,7 @@ impl Codegen {
                 };
                 let ty = if g.is_tls { STT_TLS } else { STT_OBJECT };
                 self.symbols.push(ElfSym {
-                    name: v.name.name.clone(),
+                    name: self.resolve_asm_label(&v.name.name).to_string(),
                     section: g.section,
                     value: g.offset,
                     size: g.size as u64,
@@ -2930,7 +2956,7 @@ impl Codegen {
                         STT_FUNC
                     };
                     self.symbols.push(ElfSym {
-                        name: f.name.name.clone(),
+                        name: self.resolve_asm_label(&f.name.name).to_string(),
                         section: 1,
                         value: off,
                         size: sz,
@@ -3656,7 +3682,7 @@ impl Codegen {
                     )
                 };
                 let sym = ElfSym {
-                    name: v.name.name.clone(),
+                    name: self.resolve_asm_label(&v.name.name).to_string(),
                     section,
                     value: g.offset,
                     size: g.size as u64,
@@ -3673,26 +3699,32 @@ impl Codegen {
         }
 
         // extern 函数声明 (无函数体 = 外部引用, 排除 alias 声明)
-        // 若本 TU 内有同名函数定义, 则跳过后者的 UND 符号 (与 gcc/clang 行为一致)
+        // 若本 TU 内有同名函数定义 (含 asm label 匹配), 则跳过 UND 符号
         let func_has_definition = |name: &str| -> bool {
-            prog.decls
-                .iter()
-                .any(|d| matches!(d, Decl::Func(f) if f.name.name == name && f.body.is_some()))
+            prog.decls.iter().any(|d| {
+                matches!(d, Decl::Func(f) if f.body.is_some() && (
+                    f.name.name == name ||
+                    f.asm_label.as_deref() == Some(name)
+                ))
+            })
         };
         let mut emitted_func_syms: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() && f.alias_name.is_none() {
-                    // 本 TU 内有同名函数定义, 前向声明不生成单独的 UND 符号
-                    if func_has_definition(&f.name.name) {
+                    // 检查 C 名和 asm label 解析后的名字
+                    let resolved = self.resolve_asm_label(&f.name.name).to_string();
+                    let has_c = func_has_definition(&f.name.name);
+                    let has_resolved = func_has_definition(&resolved);
+                    if has_c || has_resolved {
                         continue;
                     }
                     if !emitted_func_syms.insert(f.name.name.clone()) {
                         continue;
                     }
                     global_syms.push(ElfSym {
-                        name: f.name.name.clone(),
+                        name: self.resolve_asm_label(&f.name.name).to_string(),
                         section: SHN_UNDEF,
                         value: 0,
                         size: 0,
@@ -3854,7 +3886,7 @@ impl Codegen {
                                 (1u16, func_start)
                             };
                         let sym = ElfSym {
-                            name: f.name.name.clone(),
+                            name: self.resolve_asm_label(&f.name.name).to_string(),
                             section: sec_idx,
                             value: sym_value,
                             size: func_size,
@@ -3899,7 +3931,7 @@ impl Codegen {
                                 (1u16, func_start)
                             };
                             let sym = ElfSym {
-                                name: func.name.name.clone(),
+                                name: self.resolve_asm_label(&func.name.name).to_string(),
                                 section: sec_idx,
                                 value: sym_value,
                                 size: func_size,
@@ -4053,9 +4085,11 @@ impl Codegen {
             if name == "__dcc_tls_base" {
                 continue;
             }
-            if !known_syms.contains(name) && implicit_und.insert(name.clone()) {
+            // 解析 asm label: 用解析后的名字查找/创建符号
+            let resolved = self.asm_label_map.get(name).cloned().unwrap_or_else(|| name.clone());
+            if !known_syms.contains(&resolved) && implicit_und.insert(resolved.clone()) {
                 global_syms.push(ElfSym {
-                    name: name.clone(),
+                    name: resolved,
                     section: SHN_UNDEF,
                     value: 0,
                     size: 0,
@@ -4306,7 +4340,8 @@ impl Codegen {
         // 解析函数调用重定位 (本 TU 内的 static/本地函数用 PC32,
         // 跨 TU 外部调用用 PLT32 以兼容 PIE/动态链接).
         for (code_off, func_name) in self.pending_func_rels.drain(..) {
-            let sym_idx = self.sym_index.get(&func_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&func_name).cloned().unwrap_or(func_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             // 检查符号绑定: LOCAL 表示本 TU 定义 (含 static), 用 PC32
             // 产生位置无关重定位, 避免 PLT 跳转
             let is_local = self
@@ -4334,7 +4369,8 @@ impl Codegen {
 
         // 解析函数地址重定位 (GOT 间接寻址: MOV + GOTPCREL)
         for (code_off, func_name) in self.pending_func_addr_rels.drain(..) {
-            let sym_idx = self.sym_index.get(&func_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&func_name).cloned().unwrap_or(func_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             self.relocations.push(ElfRela {
                 offset: code_off,
                 sym_index: sym_idx,
@@ -4348,7 +4384,8 @@ impl Codegen {
         // 内核代码模型 (-mcmodel=kernel) 下同样: 全局变量 load/store/取地址
         // 均走 RIP-relative 路径, 与函数符号行为一致, 无需额外分支.
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
-            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
@@ -4361,7 +4398,8 @@ impl Codegen {
         // 注: 当前使用 R_X86_64_TPOFF32 (Local Exec), 适用于主可执行文件.
         // 共享库需要 R_X86_64_GOTTPOFF (Initial Exec) + 双指令序列.
         for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
-            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
@@ -4372,7 +4410,8 @@ impl Codegen {
 
         // 解析 SIB base=101 全局访问 (disp32 绝对寻址) - 需要 R_X86_64_32S
         for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
-            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             self.relocations.push(ElfRela {
                 offset: disp32_pos,
                 sym_index: sym_idx,
@@ -4406,7 +4445,8 @@ impl Codegen {
         // P1-6: 解析 data 节 64 位符号引用重定位
         for (data_off, var_name, custom_sec, rel_type, addend) in self.pending_data64_rels.drain(..)
         {
-            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            let resolved = self.asm_label_map.get(&var_name).cloned().unwrap_or(var_name);
+            let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
             let relocation = ElfRela {
                 offset: data_off,
                 sym_index: sym_idx,

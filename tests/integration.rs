@@ -11379,6 +11379,21 @@ fn asm_volatile_semantics() {
     assert_eq!(code, 0, "asm volatile checks failed (exit={code})");
 }
 
+/// GNU asm label symbol naming: __asm__("label") overrides ELF symbol name.
+/// Critical for Linux kernel builds where asm labels control exported symbols.
+#[test]
+#[cfg(unix)]
+fn asm_label_symbol_naming() {
+    let src = include_str!("fixtures/c/asm_label_symbol.c");
+    let (out, code) = run_host_link_and_run("asm-label-symbol", src);
+    assert!(
+        out.status.success(),
+        "asm label symbol compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "asm label symbol checks failed (exit={code})");
+}
+
 /// Extended asm constraint coverage: I/J/K/L/M/N/O/P integer ranges,
 /// early-clobber, commutative, multi-letter constraints.
 #[test]

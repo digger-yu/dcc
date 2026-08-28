@@ -1589,7 +1589,8 @@ impl<'a> Parser<'a> {
     fn skip_post_decl_modifiers(&mut self) -> ParsedAttrs {
         let mut attrs = ParsedAttrs::default();
         loop {
-            if self.skip_asm_label().is_some() {
+            if let Some(label) = self.skip_asm_label() {
+                attrs.asm_label = Some(label);
                 continue;
             }
             if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
