@@ -3189,6 +3189,17 @@ pub fn flatten_all_scope_operators(s: &str) -> String {
     s.replace("::", "_")
 }
 
+/// Apply additional C++ to C conversions after AST lowering or fallback processing
+/// This handles constructs that might have been missed by the main lowering passes
+pub fn apply_post_lowering_conversions(s: &str) -> String {
+    let mut result = s.to_string();
+    // Convert C++ functional casts: Type(expr) -> (Type)(expr)
+    result = convert_simple_functional_casts(&result);
+    // Replace 'auto' with '__auto_type' for type deduction
+    result = replace_word(&result, "auto", "__auto_type");
+    result
+}
+
 ///   - `constexpr` (函数声明中)
 ///   - `__extension__` (GCC 扩展, 某些 C 模式不接受)
 pub fn strip_cpp_keywords(s: &str) -> String {
