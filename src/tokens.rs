@@ -635,6 +635,10 @@ impl<'a> Lexer<'a> {
                     }
                 }
             } else {
+                // If the number starts with '.', consume it first
+                if b == b'.' {
+                    self.bump();
+                }
                 while let Some(c) = self.peek() {
                     if c == b'\'' && self.peek_at(1).is_some_and(|n| n.is_ascii_digit()) {
                         self.bump();
