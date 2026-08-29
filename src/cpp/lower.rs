@@ -3135,6 +3135,22 @@ impl Lower {
         }
     }
 
+    /// 检查是否是 C/C++ 标准 typedef (不是真正的 class 类型).
+    /// 用于跳过构造函数调用生成.
+    fn is_known_typedef(name: &str) -> bool {
+        matches!(name,
+            "size_t" | "ptrdiff_t" | "wchar_t" | "char8_t"
+            | "char16_t" | "char32_t" | "int8_t" | "int16_t"
+            | "int32_t" | "int64_t" | "uint8_t" | "uint16_t"
+            | "uint32_t" | "uint64_t" | "intptr_t" | "uintptr_t"
+            | "ssize_t" | "off_t" | "time_t" | "pid_t" | "uid_t"
+            | "gid_t" | "mode_t" | "off64_t" | "ino_t" | "nlink_t"
+            | "blksize_t" | "blkcnt_t" | "fsblkcnt_t" | "fsfilcnt_t"
+            | "id_t" | "key_t" | "clock_t" | "suseconds_t"
+            | "useconds_t" | "dev_t"
+        )
+    }
+
     /// 解析类名: 尝试原名, 然后 namespace 限定名
     fn resolve_class_name(&self, c: &str) -> String {
         // 1) 原名直接命中 class_methods (e.g. 全局类)
@@ -3249,6 +3265,15 @@ impl Lower {
         self.out.push_str("typedef unsigned short int __uint16_t;\n");
         self.out.push_str("typedef unsigned int __uint32_t;\n");
         self.out.push_str("typedef unsigned long int __uint64_t;\n");
+        // C99 standard integer types (without leading underscores)
+        self.out.push_str("typedef __uint8_t uint8_t;\n");
+        self.out.push_str("typedef __uint16_t uint16_t;\n");
+        self.out.push_str("typedef __uint32_t uint32_t;\n");
+        self.out.push_str("typedef __uint64_t uint64_t;\n");
+        self.out.push_str("typedef __int8_t int8_t;\n");
+        self.out.push_str("typedef __int16_t int16_t;\n");
+        self.out.push_str("typedef __int32_t int32_t;\n");
+        self.out.push_str("typedef __int64_t int64_t;\n");
         self.out.push_str("typedef long int __clock_t;\n");
         self.out.push_str("typedef long int __suseconds_t;\n");
         self.out.push_str("typedef int __pid_t;\n");
@@ -3266,7 +3291,7 @@ impl Lower {
         self.out.push_str("typedef unsigned long int __fsfilcnt64_t;\n");
         self.out.push_str("typedef long int __ssize_t;\n");
         self.out.push_str("typedef void* __locale_t;\n");
-        self.out.push_str("typedef struct __dcc_fsid { int __val[2]; } __fsid_t;\n");
+        // __fsid_t is provided by system headers (<bits/types.h>)
         // BSD 兼容类型 (<sys/types.h>)
         self.out.push_str("typedef unsigned char __u_char;\n");
         self.out.push_str("typedef unsigned short int __u_short;\n");
@@ -5452,11 +5477,18 @@ impl Lower {
                         MangleType::Template { name: tn, args: ta } => {
                             instantiated_class_name(tn, ta)
                         }
-                        _ => class.clone(),
+                        _ => self.qualify_name(class),
                     };
                     let n = NestedName::from_dotted(vec![inst_class]);
                     let param_tys: Vec<MangleType> =
-                        class_ctor_args.iter().map(|_| MangleType::Int).collect();
+                        class_ctor_args.iter().map(|a| {
+                            let ty = self.infer_type(a, false);
+                            // Unwrap reference: constructor args are passed by value
+                            match ty {
+                                MangleType::Reference(inner) => *inner,
+                                _ => ty,
+                            }
+                        }).collect();
                     let m = mangle_ctor(&n, &param_tys, 1);
                     self.out.push_str(&format!("    {}(&{}", m, name));
                     for a in &class_ctor_args {
@@ -5466,9 +5498,14 @@ impl Lower {
                     self.out.push_str(");\n");
                 } else if let Some(inst_class) = Self::inst_class_of(&resolved_ty) {
                     // 平凡无参 ctor (含模板类实例化)
-                    let n = NestedName::from_dotted(vec![inst_class]);
-                    let m = mangle_ctor(&n, &[], 1);
-                    self.out.push_str(&format!("    {}(&{});\n", m, name));
+                    // 跳过已知 typedef 类型 (size_t 等), 它们没有构造函数
+                    if !Self::is_known_typedef(&inst_class) {
+                        // 限定类名: string → std_string (在 namespace 内)
+                        let qualified = self.qualify_name(&inst_class);
+                        let n = NestedName::from_dotted(vec![qualified]);
+                        let m = mangle_ctor(&n, &[], 1);
+                        self.out.push_str(&format!("    {}(&{});\n", m, name));
+                    }
                 }
             }
             CppStmt::StaticLocal { ty, name, init } => {
