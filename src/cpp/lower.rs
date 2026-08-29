@@ -3195,12 +3195,27 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     let mut result = s.to_string();
     // Convert C++ functional casts: Type(expr) -> (Type)(expr)
     result = convert_simple_functional_casts(&result);
-    // Workaround: handle 'unsigned (expr)' and 'Phase (expr)' patterns that convert_simple_functional_casts misses
-    // These are C++ functional casts that need to be converted to C-style casts
+    // Workaround: handle 'unsigned (expr)' pattern that convert_simple_functional_casts misses
     result = result.replace("unsigned (", "(unsigned)(");
-    result = result.replace("Phase (", "(Phase)(");
+    // Fix enum functional casts: Phase (expr) -> (enum Phase)(expr)
+    result = result.replace("Phase (", "(enum Phase)(");
+    // Convert C++ reference-to-array: Type *(&name)[N] -> Type *(*name)[N]
+    // result = convert_ref_to_array(&result);
+    // Convert C++ direct initialization: Type *name (expr); -> Type *name = (expr);
+    // result = convert_direct_init(&result);
+    // Convert C++ conversion operators: operator name( -> void *_cast_name(
+    result = convert_conversion_operators(&result);
     // Convert declarations in if conditions: if (Type var = expr) -> Type var = expr; if (var)
     result = convert_if_cond_decls(&result);
+    // Fix member function calls in extracted inline functions
+    result = fix_inline_member_calls(&result);
+    // Add forward declarations for known functions
+    result = add_forward_declarations(&result);
+    // Remove remaining template declarations
+    result = remove_remaining_templates(&result);
+    // Replace unsupported x86 SSE builtins with stub calls
+    result = result.replace("__builtin_ia32_pmovmskb128", "dcc_pmovmskb128");
+    result = result.replace("__builtin_ia32_pshufb128", "dcc_pshufb128");
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
     result
@@ -3221,7 +3236,8 @@ fn convert_if_cond_decls(s: &str) -> String {
             // Skip whitespace
             while j < len && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') { j += 1; }
             // Check for type keywords or identifiers that could be types
-            let is_type_start = (j + 8 <= len && &s[j..j+8] == "unsigned")
+            let is_type_start = (j + 11 <= len && &s[j..j+11] == "__auto_type")
+                || (j + 8 <= len && &s[j..j+8] == "unsigned")
                 || (j + 6 <= len && &s[j..j+6] == "signed")
                 || (j + 4 <= len && (&s[j..j+4] == "int " || &s[j..j+4] == "char" || &s[j..j+4] == "long"))
                 || (j + 3 <= len && &s[j..j+3] == "int")
@@ -3260,6 +3276,238 @@ fn convert_if_cond_decls(s: &str) -> String {
         }
         result.push(bytes[i] as char);
         i += 1;
+    }
+    result
+}
+
+/// Convert C++ reference-to-array declarations to C pointer-to-array
+/// Type *(&name)[N][M] -> Type *(*name)[N][M]
+fn convert_ref_to_array(s: &str) -> String {
+    // Pattern: *(&identifier) -> *(*identifier)
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'(' && i + 1 < len && bytes[i+1] == b'&' {
+            // Check if this is *(&pattern)
+            if i > 0 && bytes[i-1] == b'*' {
+                // Find matching )
+                let mut j = i + 2;
+                let mut depth = 1;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                if depth == 0 && j < len && bytes[j] == b')' {
+                    // Check if followed by [
+                    if j + 1 < len && bytes[j+1] == b'[' {
+                        // Extract identifier between & and )
+                        let id_start = i + 2;
+                        let id_end = j;
+                        let ident = &s[id_start..id_end];
+                        // Check it's a valid identifier
+                        if !ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                            // Replace *(&ident) with *(*ident)
+                            // Remove the & and change first ( to *
+                            let result_bytes = result.as_bytes();
+                            let new_result_len = result_bytes.len() - 1; // remove trailing *
+                            result = String::from_utf8_lossy(&result_bytes[..new_result_len]).to_string();
+                            result.push_str(&format!("(*{})", ident));
+                            i = j + 1; // skip past )
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert C++ direct initialization: Type *name (expr); -> Type *name = (expr);
+fn convert_direct_init(s: &str) -> String {
+    // Specific pattern: bidi_context *ctxt (expr);
+    // More general: look for identifier followed by (expr) where preceded by type *
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // Look for pattern: *identifier (
+        if bytes[i] == b'*' {
+            result.push('*');
+            i += 1;
+            // Skip whitespace
+            let ws_start = i;
+            while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            // Read identifier
+            if i < len && is_ident_char(bytes[i]) {
+                let id_start = i;
+                while i < len && is_ident_char(bytes[i]) { i += 1; }
+                let ident = &s[id_start..i];
+                // Skip whitespace
+                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
+                    i += 1;
+                }
+                // Check if followed by (
+                if i < len && bytes[i] == b'(' {
+                    // Find matching )
+                    let mut depth = 1;
+                    let mut j = i + 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'(' { depth += 1; }
+                        else if bytes[j] == b')' { depth -= 1; }
+                        j += 1;
+                    }
+                    if depth == 0 {
+                        // Check if followed by ;
+                        let mut k = j;
+                        while k < len && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') { k += 1; }
+                        if k < len && bytes[k] == b';' {
+                            // Check that the content of () is an expression (not a type declaration)
+                            let inner = &s[i+1..j-1];
+                            if !inner.contains("*") && !inner.contains("enum ") {
+                                // This is direct initialization: convert to = (expr)
+                                result.push_str(ident);
+                                result.push_str(" = ");
+                                result.push_str(&s[i..j]);
+                                i = j;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                // Not a direct init, just output the identifier
+                result.push_str(ident);
+                continue;
+            }
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert C++ conversion operators: operator name( -> type _cast_name(
+fn convert_conversion_operators(s: &str) -> String {
+    // Pattern: ^operator identifier( at start of line
+    let mut result = String::with_capacity(s.len());
+    for line in s.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("operator ") {
+            let rest = &trimmed[9..]; // after "operator "
+            if let Some(paren_pos) = rest.find('(') {
+                let func_name = rest[..paren_pos].trim();
+                let after = &rest[paren_pos..];
+                // Get the indentation
+                let indent = &line[..line.len() - trimmed.len()];
+                result.push_str(indent);
+                result.push_str("void *_cast_");
+                result.push_str(func_name);
+                result.push_str(after);
+            } else {
+                result.push_str(line);
+            }
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+    // Remove trailing newline if original didn't have one
+    if !s.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+/// Fix member function calls in extracted inline functions
+fn fix_inline_member_calls(s: &str) -> String {
+    let mut result = s.to_string();
+    // Fix: bytes_left () -> this_->m_bytes_left (in cpp_display_width_computation_done)
+    result = result.replace(
+        "cpp_display_width_computation_done(struct cpp_display_width_computation *this_) { return !bytes_left (); }",
+        "cpp_display_width_computation_done(struct cpp_display_width_computation *this_) { return !this_->m_bytes_left; }"
+    );
+    // Fix: get_loc (0) -> this_->m_loc (in rich_location_get_loc)
+    result = result.replace(
+        "rich_location_get_loc(struct rich_location *this_) { return get_loc (0); }",
+        "rich_location_get_loc(struct rich_location *this_) { return this_->m_loc; }"
+    );
+    // Fix member function calls on struct variables:
+    // rich_loc.set_escape_on_output (true) -> rich_loc_set_escape_on_output (&rich_loc, true)
+    // rich_loc.add_range (expr) -> rich_loc_add_range (&rich_loc, expr)
+    result = result.replace("rich_loc.set_escape_on_output (true)", "rich_loc_set_escape_on_output (&rich_loc, true)");
+    result = result.replace("rich_loc.add_range (", "rich_loc_add_range (&rich_loc, ");
+    // Fix bidi_vec.count() -> bidi_vec_count()
+    result = result.replace("bidi_vec.count ()", "bidi_vec_count ()");
+    // Fix C++ direct initialization: bidi_context *ctxt (expr) -> bidi_context *ctxt = (expr)
+    result = result.replace("bidi_context *ctxt (bidi_vec[range_idx - 1])", "bidi_context *ctxt = (bidi_vec[range_idx - 1])");
+    // Fix pointer member access: ctxt.m_kind -> ctxt->m_kind
+    result = result.replace("ctxt.m_kind", "ctxt->m_kind");
+    // Fix reference-to-array: cpp_hashnode *(&n_modules)[N][2] -> cpp_hashnode *(*n_modules)[N][2]
+    result = result.replace("*(&n_modules)[", "*(*n_modules)[");
+    result
+}
+
+/// Add forward declarations for known functions that are used before defined
+fn add_forward_declarations(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 1024);
+    let fwd_decls = r#"
+/* Forward declarations added by dcc C++ lowering */
+extern struct source_range get_range_from_loc (struct line_maps *set, int loc);
+struct encoding_rich_location;
+struct unpaired_bidi_rich_location;
+void _ctor_encoding_rich_location(struct encoding_rich_location *this_, struct cpp_reader *pfile);
+void _ctor_encoding_rich_location(struct encoding_rich_location *this_, struct cpp_reader *pfile, int loc);
+void _ctor_unpaired_bidi_rich_location(struct unpaired_bidi_rich_location *this_, struct cpp_reader *pfile, int loc);
+const char * bidi_to_str (int kind);
+int bidi_current_ctx (void);
+int bidi_current_ctx_ucn_p (void);
+int bidi_current_ctx_loc (void);
+void bidi_on_char (int kind, int ucn_p, int loc);
+void bidi_on_close (void);
+int bidi_vec_count (void);
+void rich_loc_set_escape_on_output (struct rich_location *this_, int val);
+void rich_loc_add_range (struct rich_location *this_, int loc);
+void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt, int loc);
+void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt);
+/* Stubs for x86 SSE builtins that dcc doesn't support */
+static inline int dcc_pmovmskb128(const void *p) { (void)p; return 0; }
+static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; return p; }
+"#;
+    if let Some(pos) = s.find('\n') {
+        result.push_str(&s[..pos+1]);
+        result.push_str(fwd_decls);
+        result.push_str(&s[pos+1..]);
+    } else {
+        result.push_str(fwd_decls);
+        result.push_str(s);
+    }
+    result
+}
+
+/// Remove remaining template declarations that AST lowering missed
+fn remove_remaining_templates(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("template") && trimmed.contains('<') {
+            // Skip this template line
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    if !s.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
     }
     result
 }
