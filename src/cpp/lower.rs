@@ -2224,6 +2224,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     // 构造函数定义: ClassName::ClassName(...) : init_list { body }
     // → void _ctor_ClassName(...) { body }
     result = replace_constructors(&result);
+    // Handle flattened constructor/destructor patterns (after :: was replaced with _)
+    result = replace_flattened_ctor_dtor(&result);
     // 转换 return struct Type(args) → return (struct Type){args}
     result = convert_return_struct_ctor(&result);
     // 替换花括号初始化: Type var{args} → Type var = {args}
@@ -2514,6 +2516,150 @@ fn replace_constructors(s: &str) -> String {
         result.push(bytes[i] as char);
         i += 1;
     }
+    result
+}
+
+/// Handle flattened constructor/destructor patterns after :: was replaced with _
+/// Pattern: ClassName_ClassName(params) → void _ctor_ClassName(params)
+/// Pattern: ClassName_~ClassName(params) → void _dtor_ClassName(params)
+fn replace_flattened_ctor_dtor(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    
+    while i < len {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        // Skip comments
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        
+        // Look for identifier_identifier pattern (potential flattened constructor)
+        if is_ident_char(bytes[i]) {
+            let ident_start = i;
+            while i < len && is_ident_char(bytes[i]) {
+                i += 1;
+            }
+            let first_ident = &s[ident_start..i];
+            
+            // Check if followed by _
+            if i < len && bytes[i] == b'_' {
+                let underscore_pos = i;
+                i += 1;
+                
+                // Check if followed by ~ (destructor) or another identifier (constructor)
+                if i < len && bytes[i] == b'~' {
+                    // Destructor pattern: ClassName_~ClassName
+                    i += 1; // skip ~
+                    let second_ident_start = i;
+                    while i < len && is_ident_char(bytes[i]) {
+                        i += 1;
+                    }
+                    let second_ident = &s[second_ident_start..i];
+                    
+                    if first_ident == second_ident {
+                        // Check if followed by (
+                        let mut j = i;
+                        while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j < len && bytes[j] == b'(' {
+                            // It's a destructor!
+                            result.push_str(&format!("void _dtor_{}", first_ident));
+                            // Skip whitespace to (
+                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
+                                i += 1;
+                            }
+                            continue;
+                        }
+                    }
+                    // Not a destructor, output as-is
+                    result.push_str(first_ident);
+                    result.push('_');
+                    result.push('~');
+                    result.push_str(second_ident);
+                    continue;
+                } else if i < len && is_ident_char(bytes[i]) {
+                    // Constructor pattern: ClassName_ClassName
+                    let second_ident_start = i;
+                    while i < len && is_ident_char(bytes[i]) {
+                        i += 1;
+                    }
+                    let second_ident = &s[second_ident_start..i];
+                    
+                    if first_ident == second_ident {
+                        // Check if followed by (
+                        let mut j = i;
+                        while j < len && (bytes[j] as char).is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j < len && bytes[j] == b'(' {
+                            // It's a constructor!
+                            result.push_str(&format!("void _ctor_{}", first_ident));
+                            // Skip whitespace to (
+                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
+                                i += 1;
+                            }
+                            // Skip constructor initializer list : member(init), ...
+                            // Find the opening (
+                            let mut depth = 1i32;
+                            i += 1; // skip (
+                            while i < len && depth > 0 {
+                                if bytes[i] == b'(' { depth += 1; }
+                                else if bytes[i] == b')' { depth -= 1; }
+                                i += 1;
+                            }
+                            // Skip whitespace
+                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
+                                i += 1;
+                            }
+                            // Skip initializer list if present
+                            if i < len && bytes[i] == b':' && (i+1 >= len || bytes[i+1] != b':') {
+                                i += 1; // skip :
+                                // Skip to {
+                                let mut brace_depth = 0i32;
+                                while i < len {
+                                    if bytes[i] == b'(' { brace_depth += 1; }
+                                    else if bytes[i] == b')' { brace_depth -= 1; }
+                                    else if bytes[i] == b'{' && brace_depth == 0 { break; }
+                                    i += 1;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    // Not a constructor, output as-is
+                    result.push_str(first_ident);
+                    result.push('_');
+                    result.push_str(second_ident);
+                    continue;
+                } else {
+                    // Not a constructor/destructor
+                    result.push_str(first_ident);
+                    result.push('_');
+                    continue;
+                }
+            } else {
+                // No underscore, just output the identifier
+                result.push_str(first_ident);
+                continue;
+            }
+        }
+        
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    
     result
 }
 
