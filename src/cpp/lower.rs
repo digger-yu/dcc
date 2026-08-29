@@ -323,6 +323,8 @@ fn clean_struct_bodies(s: &str) -> String {
     let mut struct_name_stack: Vec<String> = Vec::new();
     // 收集内联成员函数, 在 struct 体结束后输出
     let mut pending_functions: Vec<String> = Vec::new();
+    // 跟踪括号深度 (用于区分 struct 定义和 struct 类型参数)
+    let mut paren_depth = 0i32;
 
     while i < len {
         // 跳过字符串
@@ -332,9 +334,24 @@ fn clean_struct_bodies(s: &str) -> String {
             let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
         }
 
-        // 检测 struct/struct NAME 开始
+        // 跟踪括号深度
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+            result.push('(');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            paren_depth -= 1;
+            result.push(')');
+            i += 1;
+            continue;
+        }
+
+        // 检测 struct/struct NAME 开始 (只在不在括号内时检测)
         if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class"))
             && struct_name_stack.is_empty()
+            && paren_depth == 0
         {
             let kw = if match_word_at(bytes, i, "struct") { "struct" } else { "class" };
             let kw_len = kw.len();
