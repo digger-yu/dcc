@@ -353,8 +353,8 @@ fn clean_struct_bodies(s: &str) -> String {
         }
 
         // 检测 struct/struct NAME 开始 (只在不在括号内时检测)
+        // 允许嵌套的 struct 定义: 即使 struct_name_stack 不为空也要检测
         if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class"))
-            && struct_name_stack.is_empty()
             && paren_depth == 0
         {
             let kw = if match_word_at(bytes, i, "struct") { "struct" } else { "class" };
@@ -490,11 +490,14 @@ fn clean_struct_bodies(s: &str) -> String {
                     // 需要添加分号
                     result.push(';');
                 }
-                // 输出收集到的内联成员函数
-                for func in &pending_functions {
-                    result.push_str(func);
+                // 只有在最外层 struct 结束时才输出收集到的内联成员函数
+                // 嵌套 struct 结束时不输出, 等外层 struct 结束时一起输出
+                if struct_name_stack.is_empty() {
+                    for func in &pending_functions {
+                        result.push_str(func);
+                    }
+                    pending_functions.clear();
                 }
-                pending_functions.clear();
                 continue;
             }
 
@@ -2237,46 +2240,25 @@ fn convert_simple_functional_casts(s: &str) -> String {
                     || ident == "long" || ident == "short" || ident == "unsigned"
                     || ident == "size_t";
                 if is_type {
-                    // 检查括号内容是否是简单整数 (十进制或十六进制)
+                    // 找到匹配的 ')'
                     let mut k = j + 1;
-                    let mut is_simple_int = true;
-                    let mut has_content = false;
-                    // 跳过空白
-                    while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
-                    // 检查是否是数字 (可能带负号)
-                    if k < len && bytes[k] == b'-' { k += 1; }
-                    if k < len && bytes[k].is_ascii_digit() {
-                        has_content = true;
-                        // 检查是否是十六进制 0x...
-                        if bytes[k] == b'0' && k + 1 < len && (bytes[k+1] == b'x' || bytes[k+1] == b'X') {
-                            k += 2; // 跳过 0x
-                            while k < len && bytes[k].is_ascii_hexdigit() { k += 1; }
-                        } else {
-                            while k < len && bytes[k].is_ascii_digit() { k += 1; }
-                        }
-                        // 跳过可能的后缀 (U, L, UL, etc.)
-                        while k < len && (bytes[k] == b'U' || bytes[k] == b'u' || bytes[k] == b'L' || bytes[k] == b'l') { k += 1; }
-                        // 跳过空白
-                        while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
-                        // 检查后面是否是 ')'
-                        if k < len && bytes[k] == b')' {
-                            k += 1;
-                        } else {
-                            is_simple_int = false;
-                        }
-                    } else {
-                        is_simple_int = false;
+                    let mut depth = 1i32;
+                    let mut has_star = false;
+                    while k < len && depth > 0 {
+                        if bytes[k] == b'(' { depth += 1; }
+                        else if bytes[k] == b')' { depth -= 1; }
+                        else if bytes[k] == b'*' { has_star = true; }
+                        k += 1;
                     }
-                    if is_simple_int && has_content {
-                        // 检查前面是否是表达式上下文 (操作符或开括号)
+                    // 如果括号内容包含 '*', 可能是函数指针声明, 不转换
+                    if depth == 0 && !has_star {
+                        // 检查前面是否是表达式上下文
                         let prev = result.trim_end().as_bytes().last().copied().unwrap_or(b' ');
                         let is_expr_ctx = !is_ident_char(prev) && prev != b')'
                             && prev != b']' && prev != b';' && prev != b'{'
                             && prev != b'}';
                         if is_expr_ctx {
-                            // 转换: Type(number) → (Type)(number)
-                            // 但我们已经跳过了括号内容, 需要重新处理
-                            // 输出 (Type) 然后让原始 '(' 和数字正常输出
+                            // 转换: type(expr) → (type)(expr)
                             result.push('(');
                             result.push_str(&ident);
                             result.push(')');
