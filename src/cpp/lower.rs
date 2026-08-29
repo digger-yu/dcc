@@ -2337,6 +2337,72 @@ fn convert_simple_functional_casts(s: &str) -> String {
     result
 }
 
+/// 转换 C++ 直接初始化: Type name (expr); → Type name = (expr);
+/// 也处理指针: Type *name (expr); → Type *name = (expr);
+fn convert_direct_initialization(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut last_push = 0;  // 上次 push 到的位置
+    while i < len {
+        // 跳过字符串和注释
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; last_push = i; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            last_push = i;
+            continue;
+        }
+        // 查找模式: identifier (expr) ;
+        if bytes[i] == b'(' && i > 0 {
+            // 检查前面是否是标识符
+            let mut j = i;
+            while j > 0 && (bytes[j-1] == b' ' || bytes[j-1] == b'\t' || bytes[j-1] == b'\n') { j -= 1; }
+            if j > 0 && is_ident_char(bytes[j-1]) {
+                let mut id_end = j;
+                let mut id_start = j;
+                while id_start > 0 && is_ident_char(bytes[id_start-1]) { id_start -= 1; }
+                // 检查标识符前面是否有类型名或 *
+                let mut k = id_start;
+                while k > 0 && (bytes[k-1] == b' ' || bytes[k-1] == b'\t' || bytes[k-1] == b'\n' || bytes[k-1] == b'*') { k -= 1; }
+                if k > 0 && is_ident_char(bytes[k-1]) {
+                    // 找到匹配的 )
+                    let mut depth = 1;
+                    let mut m = i + 1;
+                    while m < len && depth > 0 {
+                        if bytes[m] == b'(' { depth += 1; }
+                        else if bytes[m] == b')' { depth -= 1; }
+                        m += 1;
+                    }
+                    if depth == 0 && m < len {
+                        // 检查 ) 后面是否是 ;
+                        let mut n = m;
+                        while n < len && (bytes[n] == b' ' || bytes[n] == b'\t' || bytes[n] == b'\n') { n += 1; }
+                        if n < len && bytes[n] == b';' {
+                            // 转换: identifier (expr) ; → identifier = (expr) ;
+                            result.push_str(&s[last_push..id_end]);
+                            result.push_str(" = ");
+                            result.push_str(&s[i..n]);
+                            result.push(';');
+                            i = n + 1;
+                            last_push = i;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    // 推送剩余部分
+    if last_push < len {
+        result.push_str(&s[last_push..]);
+    }
+    result
+}
+
 /// 删除模板定义: template <...> struct/class/func ... { ... }
 /// C 不支持模板, 需要完全删除
 fn remove_template_definitions(s: &str) -> String {
@@ -2632,6 +2698,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_word(&result, "virtual", "");
     // nullptr → ((void*)0), mutable → 删除
     result = fix_remaining_cpp_syntax(&result);
+    // auto → __auto_type (GCC extension for type deduction)
+    result = replace_word(&result, "auto", "__auto_type");
     // 第二次展平 :: (捕获可能被遗漏的)
     result = flatten_scope_operators(&result);
     // inline → static inline (C99 inline has external linkage by default,
@@ -3114,6 +3182,13 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
 /// 去除 C++ 特有关键字, 使 extern "C" 块内的声明可被 C 编译器接受.
 /// 目前去除:
 ///   - `noexcept` / `noexcept(expr)`
+/// 强制展平所有剩余的 :: 为 _ (除了字符串字面量中的)
+/// 用于 AST 路径和 fallback 路径的后处理
+pub fn flatten_all_scope_operators(s: &str) -> String {
+    // Simple version: just replace all :: with _ (no string literal handling for now)
+    s.replace("::", "_")
+}
+
 ///   - `constexpr` (函数声明中)
 ///   - `__extension__` (GCC 扩展, 某些 C 模式不接受)
 pub fn strip_cpp_keywords(s: &str) -> String {

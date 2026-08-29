@@ -1757,6 +1757,9 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         }
     };
 
+    // Post-process: flatten any remaining :: scope operators (both AST and fallback paths)
+    let c_src = crate::cpp::lower::flatten_all_scope_operators(&c_src);
+
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {
         if let Some(ref d) = decls {
@@ -1843,6 +1846,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     };
 
     let mut cmd = Command::new(&dcc_bin);
+    // Remove DCC_CPP_KEEP_TMP so the second invocation (C compilation) doesn't overwrite the file
+    cmd.env_remove("DCC_CPP_KEEP_TMP");
     cmd.arg("-c");
     cmd.arg("-fpermissive");
     cmd.arg(format!("-O{}", cfg.opt));
