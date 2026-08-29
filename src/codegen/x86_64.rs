@@ -10911,12 +10911,22 @@ impl Codegen {
             BinOp::Xor => self.emit(&[0x31, 0xC0 | r | m]),
             BinOp::Mul => self.emit(&[0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)]),
             BinOp::Div | BinOp::Mod => {
-                self.emit(&[0x48, 0x99]);
-                let mut rex = 0x48u8;
-                if src >= 8 {
-                    rex |= 0x41;
+                // idiv uses rdx:rax as dividend and rdx for remainder.
+                // cqto/cqo sign-extends rax into rdx, destroying any value in rdx.
+                // If the divisor is in rdx (src==2), save it to stack first.
+                if src == 2 {
+                    self.emit(&[0x52]); // push rdx (save divisor)
+                    self.emit(&[0x48, 0x99]); // cqto (sign-extend rax into rdx:rax)
+                    self.emit(&[0x59]); // pop rcx (restore divisor to rcx)
+                    self.emit(&[0x48, 0xF7, 0xF9]); // idiv rcx
+                } else {
+                    self.emit(&[0x48, 0x99]); // cqto
+                    let mut rex = 0x48u8;
+                    if src >= 8 {
+                        rex |= 0x41;
+                    }
+                    self.emit(&[rex, 0xF7, 0xF8 | (src & 7)]);
                 }
-                self.emit(&[rex, 0xF7, 0xF8 | (src & 7)]);
                 if matches!(op, BinOp::Mod) {
                     self.mov(dst, 2);
                 }
