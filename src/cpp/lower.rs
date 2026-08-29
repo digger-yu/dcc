@@ -695,6 +695,30 @@ fn clean_struct_bodies(s: &str) -> String {
                         fn_name_base.to_string()
                     };
 
+                    // Skip C++ control flow keywords that look like function calls
+                    // but are not member functions (if, while, for, switch, etc.)
+                    if fn_name == "if" || fn_name == "while" || fn_name == "for"
+                        || fn_name == "switch" || fn_name == "catch" || fn_name == "return"
+                    {
+                        // Not a member function, skip to next statement
+                        i = if found_open_brace {
+                            // Skip the body
+                            let mut brace_depth = 1i32;
+                            let mut skip_i = j + 1;
+                            while skip_i < len && brace_depth > 0 {
+                                if bytes[skip_i] == b'{' { brace_depth += 1; }
+                                else if bytes[skip_i] == b'}' { brace_depth -= 1; }
+                                skip_i += 1;
+                            }
+                            skip_i
+                        } else if found_semi {
+                            j + 1
+                        } else {
+                            j
+                        };
+                        continue;
+                    }
+
                     // 如果是构造函数（函数名等于 struct 名），跳过整个定义
                     if fn_name == struct_name {
                         // 跳过到 ';' 或 '{'
@@ -1143,6 +1167,91 @@ fn add_struct_prefix_to_types(s: &str) -> String {
 
 /// 替换函数体中的构造函数调用:
 /// `Type var(args)` → `Type var; _ctor_Type(&var, args);`
+/// Convert if-condition variable declarations to C style
+/// Pattern: if (Type var = expr) { ... } → Type var = expr; if (var) { ... }
+fn convert_if_condition_decls(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    
+    while i < len {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        // Skip comments
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        
+        // Look for "if ("
+        if match_word_at(bytes, i, "if") {
+            let if_start = i;
+            let after_if = skip_ws(bytes, i + 2);
+            if after_if < len && bytes[after_if] == b'(' {
+                // Find the matching ')'
+                let mut paren_depth = 1i32;
+                let mut j = after_if + 1;
+                while j < len && paren_depth > 0 {
+                    if bytes[j] == b'(' { paren_depth += 1; }
+                    else if bytes[j] == b')' { paren_depth -= 1; }
+                    j += 1;
+                }
+                let paren_end = j - 1; // position of ')'
+                let cond_content = &s[after_if+1..paren_end];
+                
+                // Check if condition contains a variable declaration: Type var = expr
+                // Look for pattern: identifier identifier = 
+                // But skip comparison operators: !=, ==, <=, >=
+                if let Some(eq_pos) = cond_content.find('=') {
+                    // Check if this is part of a comparison operator
+                    // Look back to skip whitespace and check for !, =, <, >
+                    let is_comparison = {
+                        let before_eq = cond_content[..eq_pos].trim_end();
+                        if !before_eq.is_empty() {
+                            let last_char = before_eq.as_bytes()[before_eq.len() - 1];
+                            last_char == b'!' || last_char == b'=' || last_char == b'<' || last_char == b'>'
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if !is_comparison {
+                        let before_eq = cond_content[..eq_pos].trim();
+                        let after_eq = cond_content[eq_pos+1..].trim();
+                        
+                        // Check if before_eq looks like "Type varname"
+                        let parts: Vec<&str> = before_eq.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            // Likely a declaration: Type varname = expr
+                            let var_type = parts[..parts.len()-1].join(" ");
+                            let var_name = parts[parts.len()-1];
+                            
+                            // Output: Type varname = expr; if (varname)
+                            result.push_str(&format!("{} {} = {}; if ({})", 
+                                var_type, var_name, after_eq, var_name));
+                            i = paren_end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    
+    result
+}
+
 fn replace_ctor_calls_in_bodies(s: &str) -> String {
     let mut known_types: Vec<String> = Vec::new();
     {
@@ -2060,6 +2169,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_brace_init(&result);
     // 替换函数体中的构造函数调用: Type var(args); → Type var; _ctor_Type(&var, args);
     result = replace_ctor_calls_in_bodies(&result);
+    // 转换 if 条件中的变量声明: if (Type var = expr) → Type var = expr; if (var)
+    result = convert_if_condition_decls(&result);
     // 注意: 不自动替换成员函数调用, 因为需要类型信息.
     result
 }
