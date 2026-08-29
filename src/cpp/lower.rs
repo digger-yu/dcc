@@ -2043,12 +2043,15 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                     // 指针或模板类型后面也可以是引用
                     true
                 } else {
-                    // 前面是空格, 检查更前面的标识符
+                    // 前面是空格, 检查更前面的字符
                     let rbytes = result.as_bytes();
                     let mut k = rbytes.len();
                     // 跳过空格
                     while k > 0 && (rbytes[k-1] == b' ' || rbytes[k-1] == b'\t') { k -= 1; }
-                    if k > 0 && is_ident_char(rbytes[k-1]) {
+                    if k > 0 && (rbytes[k-1] == b'*' || rbytes[k-1] == b'>') {
+                        // After pointer (*) or template (>), & is a reference
+                        true
+                    } else if k > 0 && is_ident_char(rbytes[k-1]) {
                         let id_end = k;
                         let mut id_start = k;
                         while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
@@ -3576,8 +3579,6 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = fix_inline_member_calls(&result);
     // Add forward declarations for known functions
     result = add_forward_declarations(&result);
-    // Remove remaining template declarations
-    result = remove_remaining_templates(&result);
     // Replace unsupported x86 SSE builtins with stub calls
     result = result.replace("__builtin_ia32_pmovmskb128", "dcc_pmovmskb128");
     result = result.replace("__builtin_ia32_pshufb128", "dcc_pshufb128");
@@ -3951,24 +3952,6 @@ static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; re
     } else {
         result.push_str(fwd_decls);
         result.push_str(s);
-    }
-    result
-}
-
-/// Remove remaining template declarations that AST lowering missed
-fn remove_remaining_templates(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for line in s.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("template") && trimmed.contains('<') {
-            // Skip this template line
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-    if !s.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
     }
     result
 }
