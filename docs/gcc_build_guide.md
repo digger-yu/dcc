@@ -93,9 +93,30 @@ python3 rootcause_sim.py
 |------|------|------|
 | libiberty | ✅ 完成 | 纯 C，125 文件全部编译 |
 | fixincludes | ✅ 完成 | 纯 C，6 文件全部编译 |
-| libcpp (host) | 4/16 | charset, directives, files, identifiers 完成 |
+| libcpp | ✅ **14/14 完成** | 所有库文件编译成功，libcpp.a 已创建 |
 | libcody | ✅ **8/8 完成** | GCC 15 新增的 C++ 模块支持库 |
-| GCC 主体 | 未开始 | 受阻于 libcpp 完成 |
+| GCC 主体 | 进行中 | 生成器程序编译中 |
+
+### libcpp 编译详情
+
+libcpp 是 GCC 的预处理器库，包含 14 个 C++ 源文件。所有文件
+均已成功编译并归档为 libcpp.a：
+
+- charset.cc, directives.cc, errors.cc, expr.cc
+- files.cc, identifiers.cc, init.cc, lex.cc
+- line-map.cc, macro.cc, mkdeps.cc, pch.cc
+- symtab.cc, traditional.cc
+
+### 解析器错误跟踪修复
+
+C++ 解析器的 parse_top_level() 之前会静默跳过无法解析的构造，
+总是返回 Ok 和部分结果。这导致 fallback 路径（strip_cpp_keywords）
+从未被使用，即使解析器只解析了文件的一小部分。
+
+现在 parse_top_level() 在 parse_decl() 失败时记录错误诊断信息。
+驱动模块检查错误诊断信息并在有错误时使用 fallback 路径，确保
+整个文件都被处理。这修复了 genmodes.cc 等复杂 C++ 文件的不完整
+编译问题。
 
 ### libcody 编译详情
 
@@ -111,13 +132,19 @@ libcody 是 GCC 15 新增的 C++ 库，用于模块支持。dcc 的 C++ 前端
 3. 构造函数参数类型推断：不再全部用 `int` 占位
 4. 重复 typedef 移除：`__fsid_t` 由系统头文件提供
 
-### libcpp 剩余问题
+### GCC 主编译器当前状态
 
-errors.cc 受阻于以下 C++ 特性：
-- 构造函数初始化列表降级
-- 析构函数 `~` 语法转换
-- `decltype` 在成员变量类型中
-- `enum` 类型在 C++ 中可不带关键字
+GCC 主编译器构建需要先生成器程序（genmodes, genemit 等），
+这些程序在主机上运行以生成头文件和源代码。
+
+已完成：
+- auto-host.h 类型宏冲突修复（ssize_t, pid_t 等）
+- gcc/Makefile 编译器路径修正（CC/CXX 指向 dcc）
+- errors.cc 生成器文件编译成功
+
+当前受阻：
+- genmodes.cc 等复杂生成器程序的 C++ 降级仍有问题
+- 需要生成的头文件（insn-modes.h 等）尚未生成
 
 ### 构建命令
 
