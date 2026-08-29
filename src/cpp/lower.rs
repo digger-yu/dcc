@@ -2872,6 +2872,12 @@ fn replace_template_usages(s: &str) -> String {
             let (ident, ident_end) = read_ident(bytes, i);
             let j = skip_ws(bytes, ident_end);
             if j < len && bytes[j] == b'<' {
+                // Skip if this is '<<' (bit-shift operator, not template)
+                if j + 1 < len && bytes[j+1] == b'<' {
+                    result.push_str(&ident);
+                    i = ident_end;
+                    continue;
+                }
                 // Check if this looks like a template usage
                 // Try to find matching '>'
                 let mut depth = 1i32;
@@ -2879,6 +2885,18 @@ fn replace_template_usages(s: &str) -> String {
                 let mut has_comma = false;
                 let mut has_struct = false;
                 while k < len && depth > 0 {
+                    // Skip '>>' (bit-shift, not two template closes)
+                    if bytes[k] == b'>' && k + 1 < len && bytes[k+1] == b'>' {
+                        depth -= 1;
+                        k += 2;
+                        continue;
+                    }
+                    // Skip '<<' (bit-shift, not two template opens)
+                    if bytes[k] == b'<' && k + 1 < len && bytes[k+1] == b'<' {
+                        depth += 1;
+                        k += 2;
+                        continue;
+                    }
                     if bytes[k] == b'<' { depth += 1; }
                     else if bytes[k] == b'>' { depth -= 1; }
                     else if bytes[k] == b',' && depth == 1 { has_comma = true; }
