@@ -72,9 +72,10 @@ pub fn type_key(ty: &MangleType) -> String {
         MangleType::LongDouble => "ldouble".into(),
         MangleType::Pointer(t) => format!("p_{}", type_key(t)),
         MangleType::Reference(t) => format!("r_{}", type_key(t)),
-        MangleType::Class(n) => n.clone(),
+        MangleType::Class(n) => n.replace("::", "_"),
         MangleType::Template { name, args } => {
-            let mut s = format!("t_{}", name);
+            let flat_name = name.replace("::", "_");
+            let mut s = format!("t_{}", flat_name);
             for a in args {
                 s.push('_');
                 s.push_str(&type_key(a));
@@ -90,7 +91,9 @@ pub fn type_key(ty: &MangleType) -> String {
 /// 实例化后的类名: `Box<int>` → `__dcc_template_Box_int`
 /// 必须与 lower.rs `mangle_to_c` 的 Template 分支一致.
 pub fn instantiated_class_name(name: &str, args: &[MangleType]) -> String {
-    let mut s = format!("__dcc_template_{}", name);
+    // Flatten namespace qualifiers: std::vector -> std_vector
+    let flat_name = name.replace("::", "_");
+    let mut s = format!("__dcc_template_{}", flat_name);
     for a in args {
         s.push('_');
         s.push_str(&type_key(a));

@@ -2630,7 +2630,9 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         // M18: T<U1, U2, ...> 模板实例化 — C 端没有等价表达, 用占位 typedef.
         // 真实单态化由 dcc 模板子系统按需生成; 这里降级为 T_<U1>_<U2> 形态.
         MangleType::Template { name, args } => {
-            let mut s = format!("__dcc_template_{}", name);
+            // Flatten namespace qualifiers: std::vector -> std_vector
+            let flat_name = name.replace("::", "_");
+            let mut s = format!("__dcc_template_{}", flat_name);
             for a in args {
                 s.push('_');
                 s.push_str(&template_arg_to_c(a));
@@ -2656,9 +2658,10 @@ fn template_arg_to_c(ty: &MangleType) -> String {
         MangleType::Double => "double".into(),
         MangleType::Pointer(t) => format!("p_{}", template_arg_to_c(t)),
         MangleType::Reference(t) => format!("r_{}", template_arg_to_c(t)),
-        MangleType::Class(n) => n.clone(),
+        MangleType::Class(n) => n.replace("::", "_"),
         MangleType::Template { name, args } => {
-            let mut s = format!("T_{}", name);
+            let flat_name = name.replace("::", "_");
+            let mut s = format!("T_{}", flat_name);
             for a in args {
                 s.push('_');
                 s.push_str(&template_arg_to_c(a));
