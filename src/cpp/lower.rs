@@ -1709,6 +1709,19 @@ fn remove_all_default_args(s: &str) -> String {
                 k += 1;
             }
             paren_has_semi.push(has_semi);
+            // Check if this paren belongs to if/while/switch - 
+            // these may have variable declarations, not default args
+            let is_ctrl_flow = {
+                let before = result.trim_end();
+                before.ends_with("if") || before.ends_with("while") 
+                    || before.ends_with("switch")
+            };
+            if is_ctrl_flow {
+                // Mark this level as control flow (treat like for loop)
+                if let Some(last) = paren_has_semi.last_mut() {
+                    *last = true; // pretend it has semi to skip = removal
+                }
+            }
         }
         if bytes[i] == b')' { 
             paren_depth = (paren_depth - 1).max(0); 
@@ -2472,6 +2485,8 @@ pub fn strip_cpp_keywords(s: &str) -> String {
     result.push_str("#ifndef __cplusplus\n");
     result.push_str("typedef int bool;\n");
     result.push_str("#endif\n");
+    // Helper for std::swap → std_swap (used by GCC source)
+    result.push_str("#define std_swap(a, b) do { __typeof__(a) _tmp = (a); (a) = (b); (b) = _tmp; } while(0)\n");
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
