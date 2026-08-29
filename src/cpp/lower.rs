@@ -3699,6 +3699,16 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // Fix nested type references: ClassName_NestedType -> NestedType
     result = result.replace("mkdeps_velt", "velt");
     result = result.replace("mkdeps_vec", "vec");
+    // Targeted template replacements for patterns that slip through
+    // These handle common GCC template patterns
+    result = result.replace("vec< char *>", "void*");
+    result = result.replace("vec<char *>", "void*");
+    result = result.replace("vec< char*>", "void*");
+    result = result.replace("vec<char*>", "void*");
+    // Fix references to void* that result from template replacement
+    // void* &name -> void** name (reference to pointer becomes pointer to pointer)
+    result = result.replace("void* &", "void**");
+    result = result.replace("void *&", "void**");
     // Re-run template replacement after namespace prefix stripping
     // This handles cases like mkdeps::vec<T> which became vec<T> after :: flattening
     result = replace_template_usages(&result);
