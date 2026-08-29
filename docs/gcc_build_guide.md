@@ -82,5 +82,47 @@ python3 rootcause_sim.py
 ## 与内核路径的关系
 
 - 内核路径：`docs/kernel_build_guide.md`、`docs/missing_features.md`
-- GCC 路径：用更“脏”的用户态头（glibc `_Generic` / `include_next`）补洞
-- 二者互补；**全树 GCC 仍受阻于无 C++**
+- GCC 路径：用更"脏"的用户态头（glibc `_Generic` / `include_next`）补洞
+- 二者互补；**全树 GCC 仍受阻于 C++ 前端收敛度**
+
+## 2026-08-29 GCC 15.3.0 编译进度
+
+> 目标：用 dcc 编译完整 GCC 15.3.0（源码在 /root/gcc-15.3.0）
+
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| libiberty | ✅ 完成 | 纯 C，125 文件全部编译 |
+| fixincludes | ✅ 完成 | 纯 C，6 文件全部编译 |
+| libcpp (host) | 4/16 | charset, directives, files, identifiers 完成 |
+| libcody | ✅ **8/8 完成** | GCC 15 新增的 C++ 模块支持库 |
+| GCC 主体 | 未开始 | 受阻于 libcpp 完成 |
+
+### libcody 编译详情
+
+libcody 是 GCC 15 新增的 C++ 库，用于模块支持。dcc 的 C++ 前端
+成功降级了所有 8 个源文件：
+
+- buffer.cc, client.cc, fatal.cc, netclient.cc
+- netserver.cc, resolver.cc, packet.cc, server.cc
+
+关键修复：
+1. configure 脚本 C++11 检测：改为接受 C++14/17/20
+2. 模板类型名 `::` 展平：`std::string` → `std_string`
+3. 构造函数参数类型推断：不再全部用 `int` 占位
+4. 重复 typedef 移除：`__fsid_t` 由系统头文件提供
+
+### libcpp 剩余问题
+
+errors.cc 受阻于以下 C++ 特性：
+- 构造函数初始化列表降级
+- 析构函数 `~` 语法转换
+- `decltype` 在成员变量类型中
+- `enum` 类型在 C++ 中可不带关键字
+
+### 构建命令
+
+```bash
+cd /root/gcc-15.3.0/build
+make all-libcody    # ✅ 成功
+make all-gcc        # 受阻于 libcpp
+```
