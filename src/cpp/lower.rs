@@ -1858,6 +1858,116 @@ fn generate_struct_typedefs(s: &str) -> String {
     result
 }
 
+/// Fix namespace-flattened enums: when `namespace N { enum class E { ... }; }`
+/// is flattened, `N::E::VALUE` becomes `N_E_VALUE` but the enum is defined as
+/// `enum E { VALUE, ... }`. This function adds typedefs and defines to bridge
+/// the gap.
+fn fix_flattened_enum_refs(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Step 1: Collect all enum definitions and their values
+    // Pattern: enum NAME { VAL1, VAL2, ... };
+    let mut enum_defs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut i = 0;
+    while i < len {
+        if match_word_at(bytes, i, "enum") {
+            let j = skip_ws(bytes, i + 4);
+            if j < len && is_ident_char(bytes[j]) {
+                let (name, name_end) = read_ident(bytes, j);
+                let k = skip_ws(bytes, name_end);
+                if k < len && bytes[k] == b'{' {
+                    // Collect enum values
+                    let mut vals = Vec::new();
+                    let mut m = k + 1;
+                    let mut depth = 1i32;
+                    while m < len && depth > 0 {
+                        if bytes[m] == b'{' { depth += 1; }
+                        else if bytes[m] == b'}' { depth -= 1; }
+                        else if depth == 1 && is_ident_char(bytes[m]) 
+                            && (m == 0 || !is_ident_char(bytes[m-1])) 
+                        {
+                            let (val, _) = read_ident(bytes, m);
+                            if val != "enum" && val != "struct" {
+                                vals.push(val);
+                            }
+                        }
+                        m += 1;
+                    }
+                    if !vals.is_empty() {
+                        enum_defs.push((name, vals));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    if enum_defs.is_empty() {
+        return s.to_string();
+    }
+    
+    // Step 2: Find references like PREFIX_ENUM_NAME that don't match any enum name
+    // These are namespace-flattened references
+    let mut prefix_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Map from flattened type name (e.g., "bidi_kind") to original enum name (e.g., "kind")
+    
+    for (enum_name, _) in &enum_defs {
+        // Look for patterns like `IDENT_<enum_name>` used as a type
+        // e.g., `bidi_kind` when enum is `kind`
+        let search = format!("_{}", enum_name);
+        let mut pos = 0;
+        while let Some(found) = s[pos..].find(&search) {
+            let abs_pos = pos + found;
+            // Check what's before the `_`
+            if abs_pos > 0 {
+                let before = &s[..abs_pos];
+                // Read the identifier before `_`
+                let before_bytes = before.as_bytes();
+                let mut start = before_bytes.len();
+                while start > 0 && is_ident_char(before_bytes[start-1]) {
+                    start -= 1;
+                }
+                if start < before_bytes.len() {
+                    let prefix = &s[start..abs_pos];
+                    let flattened_type = format!("{}_{}", prefix, enum_name);
+                    // Check if this flattened type is used in the code
+                    if s.contains(&format!(" {} ", flattened_type)) 
+                        || s.contains(&format!(" {}\n", flattened_type))
+                        || s.contains(&format!("\t{} ", flattened_type))
+                        || s.contains(&format!("static {}", flattened_type))
+                    {
+                        prefix_map.insert(flattened_type, enum_name.clone());
+                    }
+                }
+            }
+            pos = abs_pos + search.len();
+        }
+    }
+    
+    if prefix_map.is_empty() {
+        return s.to_string();
+    }
+    
+    // Step 3: Generate typedefs and defines
+    let mut preamble = String::new();
+    for (flattened_type, enum_name) in &prefix_map {
+        preamble.push_str(&format!("typedef enum {} {};\n", enum_name, flattened_type));
+        // Find the enum definition to get its values
+        if let Some((_, vals)) = enum_defs.iter().find(|(n, _)| n == enum_name) {
+            // Extract the prefix (e.g., "bidi" from "bidi_kind")
+            let prefix = &flattened_type[..flattened_type.len() - enum_name.len() - 1];
+            for val in vals {
+                let flattened_val = format!("{}_{}_{}", prefix, enum_name, val);
+                preamble.push_str(&format!("#define {} {}\n", flattened_val, val));
+            }
+        }
+    }
+    
+    let mut result = preamble;
+    result.push_str(s);
+    result
+}
+
 /// 删除所有函数声明中的默认参数: `func(int x = 5)` → `func(int x)`
 /// 处理全局函数声明和 struct 体内的函数声明
 fn remove_all_default_args(s: &str) -> String {
@@ -2464,6 +2574,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = clean_struct_bodies(&result);
     // 为所有 struct 生成 typedef, 使得 NAME 和 struct NAME 都有效
     result = generate_struct_typedefs(&result);
+    // Fix namespace-flattened enum references (bidi_kind -> typedef + defines)
+    result = fix_flattened_enum_refs(&result);
     // 为所有 struct 类型名称添加 struct 前缀 (在函数参数/返回类型/局部变量中)
     result = add_struct_prefix_to_types(&result);
     // 删除访问说明符 public: / private: / protected:
