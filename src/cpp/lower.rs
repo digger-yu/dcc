@@ -1886,6 +1886,17 @@ fn remove_all_default_args(s: &str) -> String {
         // Check if this looks like a function name (identifier followed by '(')
         if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
             let (ident, ident_end) = read_ident(bytes, i);
+            // Skip keywords that look like function calls but aren't
+            if ident == "__asm__" || ident == "__volatile__" || ident == "asm" || ident == "volatile"
+                || ident == "__attribute__" || ident == "typeof" || ident == "__typeof__"
+                || ident == "sizeof" || ident == "alignof" || ident == "__alignof__"
+                || ident == "if" || ident == "while" || ident == "for" || ident == "switch"
+                || ident == "return" || ident == "case" || ident == "do" || ident == "else"
+            {
+                result.push_str(&ident);
+                i = ident_end;
+                continue;
+            }
             let j = skip_ws(bytes, ident_end);
             if j < len && bytes[j] == b'(' {
                 // This might be a function declaration or call
@@ -1894,22 +1905,11 @@ fn remove_all_default_args(s: &str) -> String {
                 let mut paren_depth = 1i32;
                 let mut k = j + 1;
                 let mut has_default_arg = false;
-                let mut has_type_keyword = false;
                 
                 while k < len && paren_depth > 0 {
                     if bytes[k] == b'(' { paren_depth += 1; }
                     else if bytes[k] == b')' { paren_depth -= 1; }
                     else if paren_depth == 1 {
-                        // Check for type keywords
-                        if match_word_at(bytes, k, "int") || match_word_at(bytes, k, "char")
-                            || match_word_at(bytes, k, "void") || match_word_at(bytes, k, "struct")
-                            || match_word_at(bytes, k, "unsigned") || match_word_at(bytes, k, "long")
-                            || match_word_at(bytes, k, "short") || match_word_at(bytes, k, "float")
-                            || match_word_at(bytes, k, "double") || match_word_at(bytes, k, "bool")
-                            || match_word_at(bytes, k, "const") || match_word_at(bytes, k, "FILE")
-                        {
-                            has_type_keyword = true;
-                        }
                         // Check for '=' that's not '=='
                         if bytes[k] == b'=' && (k+1 >= len || bytes[k+1] != b'=') {
                             // Check it's not '!=', '<=', '>='
@@ -1921,8 +1921,20 @@ fn remove_all_default_args(s: &str) -> String {
                     k += 1;
                 }
                 
+                // Check what follows the closing ')'
+                // Function declarations are followed by '{' (definition) or ';' (declaration)
+                let is_func_decl = if k < len && has_default_arg {
+                    let after_paren = skip_ws(bytes, k);
+                    after_paren < len && (
+                        bytes[after_paren] == b'{' || 
+                        bytes[after_paren] == b';'
+                    )
+                } else {
+                    false
+                };
+                
                 // If this looks like a function declaration with default args, process it
-                if has_type_keyword && has_default_arg {
+                if is_func_decl {
                     // Output the identifier and '('
                     result.push_str(&ident);
                     result.push('(');
