@@ -3,7 +3,13 @@
 
 extern "C" {
     struct dccpp_unique_ptr;
-    struct dccpp_shared_ptr;
+
+    /* Full definition needed because shared_ptr stores dccpp_shared_ptr by value */
+    struct dccpp_shared_ptr {
+        void* ptr;
+        void (*dtor)(void*);
+        size_t* refcnt;
+    };
 
     dccpp_unique_ptr dccpp_make_unique(void* p, void* dtor);
     void dccpp_unique_ptr_reset(dccpp_unique_ptr* u, void* p, void* dtor);

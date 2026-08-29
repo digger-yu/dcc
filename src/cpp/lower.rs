@@ -74,6 +74,8 @@ pub struct Lower {
     pub emitted_typedefs: std::collections::HashSet<String>,
     /// 当前所在类 (用于 this 隐式注入)
     pub current_class: Option<String>,
+    /// 当前函数是否返回 void (用于 `return *this;` → `return;` 转换)
+    pub current_fn_void: bool,
     /// 待降级的 lambda 闭包
     pub lambdas: Vec<LambdaExpr>,
     /// 临时计数器 (lambda 编号)
@@ -323,6 +325,8 @@ fn clean_struct_bodies(s: &str) -> String {
     let mut struct_name_stack: Vec<String> = Vec::new();
     // 收集内联成员函数, 在 struct 体结束后输出
     let mut pending_functions: Vec<String> = Vec::new();
+    // 收集当前 struct 的字段名, 用于在 inline 函数体中添加 this_-> 前缀
+    let mut field_names: Vec<String> = Vec::new();
     // 跟踪括号深度 (用于区分 struct 定义和 struct 类型参数)
     let mut paren_depth = 0i32;
 
@@ -362,9 +366,58 @@ fn clean_struct_bodies(s: &str) -> String {
                 // 跳过可能的继承 (应该已被 remove_struct_inheritance 处理)
                 while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
                 if j < len && bytes[j] == b'{' {
-                    struct_name_stack.push(name);
+                    struct_name_stack.push(name.clone());
                     result.push_str(&s[i..j+1]);
                     i = j + 1;
+                    // Pre-scan struct body to collect field names
+                    // for adding this_-> prefix in inline member functions
+                    field_names.clear();
+                    {
+                        let mut scan = i;
+                        let mut scan_depth = 1i32;
+                        while scan < len && scan_depth > 0 {
+                            if bytes[scan] == b'"' { scan = skip_string_literal(bytes, scan); continue; }
+                            if bytes[scan] == b'{' { scan_depth += 1; scan += 1; continue; }
+                            if bytes[scan] == b'}' { scan_depth -= 1; scan += 1; continue; }
+                            if bytes[scan] == b';' && scan_depth == 1 {
+                                // Look backward for field name: last identifier before ';'
+                                let mut fe = scan;
+                                while fe > i && !is_ident_char(bytes[fe-1]) { fe -= 1; }
+                                let mut fs = fe;
+                                while fs > i && is_ident_char(bytes[fs-1]) { fs -= 1; }
+                                if fs < fe {
+                                    let fname = &s[fs..fe];
+                                    // Skip keywords and type names
+                                    if fname != "const" && fname != "volatile"
+                                        && fname != "static" && fname != "inline"
+                                        && fname != "virtual" && fname != "explicit"
+                                        && fname != "struct" && fname != "class"
+                                        && fname != "enum" && fname != "union"
+                                        && fname != "void" && fname != "int"
+                                        && fname != "char" && fname != "float"
+                                        && fname != "double" && fname != "long"
+                                        && fname != "short" && fname != "unsigned"
+                                        && fname != "signed" && fname != "bool"
+                                        && fname != "auto" && fname != "return"
+                                        && fname != "delete" && fname != "default"
+                                        && fname != "public" && fname != "private"
+                                        && fname != "protected" && fname != "friend"
+                                        && fname != "typedef" && fname != "namespace"
+                                        && fname != "template" && fname != "typename"
+                                        && fname != "using" && fname != "new"
+                                        && fname != "delete" && fname != "this"
+                                        && !fname.starts_with('~')
+                                        && fname != &name
+                                    {
+                                        if !field_names.contains(&fname.to_string()) {
+                                            field_names.push(fname.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            scan += 1;
+                        }
+                    }
                     continue;
                 }
             }
@@ -773,6 +826,15 @@ fn clean_struct_bodies(s: &str) -> String {
                                     j += 6;
                                     continue;
                                 }
+                                // 替换 *this 为 this_ (C++ 引用返回 → C 指针返回)
+                                if bytes[j] == b'*' {
+                                    let k = skip_ws(bytes, j + 1);
+                                    if match_word_at(bytes, k, "this") {
+                                        func_body.push_str("this_");
+                                        j = k + 4;
+                                        continue;
+                                    }
+                                }
                                 // 替换 struct_name 为 struct struct_name (用于返回类型和局部变量)
                                 if match_word_at(bytes, j, &struct_name) {
                                     let name_len = struct_name.len();
@@ -801,6 +863,23 @@ fn clean_struct_bodies(s: &str) -> String {
                                     }
                                 }
                                 if replaced { continue; }
+                                // 替换裸字段名为 this_->field
+                                if is_ident_char(bytes[j]) && (j == 0 || !is_ident_char(bytes[j-1])) {
+                                    let (ident, ident_end) = read_ident(bytes, j);
+                                    let is_field = field_names.iter().any(|f| f == &ident);
+                                    if is_field {
+                                        // 检查前面是否是 . 或 -> (已经是成员访问)
+                                        let fb = func_body.as_bytes();
+                                        let fl = fb.len();
+                                        let after_dot = fl > 0 && (fb[fl-1] == b'.' || (fl >= 2 && fb[fl-1] == b'>' && fb[fl-2] == b'-'));
+                                        if !after_dot {
+                                            func_body.push_str("this_->");
+                                        }
+                                        func_body.push_str(&ident);
+                                        j = ident_end;
+                                        continue;
+                                    }
+                                }
                                 func_body.push(bytes[j] as char);
                             }
                             j += 1;
@@ -1889,12 +1968,56 @@ fn convert_return_struct_ctor(s: &str) -> String {
     result
 }
 
+/// 展平 C++ scope 操作符 `::` 为下划线: `std::string` → `std_string`.
+/// 只处理 `ident::ident` 形式; 前导 `::` (全局限定) 只去掉 `::`.
+fn flatten_scope_operators(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // 跳过字符串字面量
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        // 跳过注释
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        // 检测 `::`
+        if bytes[i] == b':' && i+1 < len && bytes[i+1] == b':' {
+            // 检查前面是否是标识符 (形成 ident:: 模式)
+            if result.len() > 0 && {
+                let rb = result.as_bytes();
+                let rl = rb.len();
+                rl > 0 && is_ident_char(rb[rl-1])
+            } {
+                // 检查后面是否是标识符 (形成 ::ident 模式)
+                let k = i + 2;
+                if k < len && is_ident_char(bytes[k]) {
+                    result.push('_');
+                    i += 2;
+                    continue;
+                }
+                // 前导 :: 或 :: 后不是标识符 → 只去掉 ::
+                result.push('_');
+                i += 2;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 预处理 C++ 源文本, 将复杂 C++ 构造替换为 C 兼容形式.
 /// 在 strip_cpp_keywords 的字符级处理之前调用.
 fn replace_cpp_constructs(s: &str) -> String {
     let mut result = s.to_string();
     // 剥离 GCC 属性宏 (如 GTY(...), __attribute__((...)), 等)
     result = strip_gcc_attributes(&result);
+    // 展平 namespace 限定符: std::string → std_string
+    // 必须在 clean_struct_bodies 之前运行, 否则 struct 体内
+    // 的类型名仍含 :: 导致后续处理出错
+    result = flatten_scope_operators(&result);
     // 删除模板定义 (C 不支持模板)
     result = remove_template_definitions(&result);
     // class → struct (简单替换, 仅独立的 class 关键字)
@@ -2559,10 +2682,26 @@ impl Lower {
     fn mangle_to_c_ns(&self, ty: &MangleType) -> String {
         match ty {
             MangleType::Class(n) => {
+                // Normalize: flatten `::` to `_` so `std::string` → `std_string`
+                let n = if n.contains("::") { n.replace("::", "_") } else { n.clone() };
+                // Known typedef names: these are NOT struct types,
+                // output the name directly without `struct` prefix.
+                match n.as_str() {
+                    "size_t" | "ptrdiff_t" | "wchar_t" | "char8_t"
+                    | "char16_t" | "char32_t" | "int8_t" | "int16_t"
+                    | "int32_t" | "int64_t" | "uint8_t" | "uint16_t"
+                    | "uint32_t" | "uint64_t" | "intptr_t" | "uintptr_t"
+                    | "ssize_t" | "off_t" | "time_t" | "pid_t" | "uid_t"
+                    | "gid_t" | "mode_t" | "off64_t" | "ino_t" | "nlink_t"
+                    | "blksize_t" | "blkcnt_t" | "fsblkcnt_t" | "fsfilcnt_t"
+                    | "id_t" | "key_t" | "clock_t" | "suseconds_t"
+                    | "useconds_t" | "dev_t" => return n,
+                    _ => {}
+                }
                 // M26: enum 类型已降级为 `typedef enum {...} ns_E;`, 类型引用
                 // 直接使用 typedef 名, 不再前缀 `struct `.
-                if self.enum_types.contains(n) {
-                    return self.qualify_name(n);
+                if self.enum_types.contains(&n) {
+                    return self.qualify_name(&n);
                 }
                 // enum/union/struct 前缀: 保留原始关键字而非加 struct
                 if n.starts_with("enum ") || n.starts_with("union ")
@@ -2614,6 +2753,7 @@ impl Lower {
             param_var_types: std::collections::HashMap::new(),
             emitted_typedefs: std::collections::HashSet::new(),
             current_class: None,
+            current_fn_void: false,
             lambdas: vec![],
             lambda_counter: 0,
             const_local_i128: std::collections::HashMap::new(),
@@ -4407,12 +4547,14 @@ impl Lower {
                     let param_tys: Vec<MangleType> =
                         params.iter().map(|(_, t)| t.clone()).collect();
                     let m = mangle_operator_member(&class_q, op.clone(), &param_tys);
-                    let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q)));
+                    let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
                     let mut all_params: Vec<(String, MangleType)> =
                         vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
                     // 类体内定义的运算符隐式 inline (weak linkage)
                     self.out.push_str("__attribute__((weak)) ");
+                    // 设置 current_class, 让 body 内裸字段名 -> this->field
+                    self.current_class = Some(class_q);
                     self.emit_fn(&m, ret, &all_params, body);
                 } else {
                     let param_tys: Vec<MangleType> =
@@ -5112,6 +5254,8 @@ impl Lower {
         for (n, t) in params {
             self.param_var_types.insert(n.clone(), t.clone());
         }
+        // 记录当前函数是否返回 void (用于 return *this → return 转换)
+        self.current_fn_void = matches!(ret, MangleType::Void);
         // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
         // 时包裹 switch(<fn>_coro_state) { case 0: ... }, 每个挂起点生成恢复标签
         let is_coro = body_has_coro(body);
@@ -5194,9 +5338,19 @@ impl Lower {
         match s {
             CppStmt::Return(None) => self.out.push_str("return;\n"),
             CppStmt::Return(Some(e)) => {
-                self.out.push_str("return ");
-                self.emit_expr(e);
-                self.out.push_str(";\n");
+                // `return *this;` in a void member function → `return;`
+                // (C++ operator overloads return `*this` for chaining,
+                // but the lowered C function returns void)
+                let is_return_this = matches!(e, CppExpr::UnaryOp(
+                    crate::cpp::parser::UnaryOpKind::Deref, inner
+                ) if matches!(inner.as_ref(), CppExpr::This));
+                if is_return_this && self.current_fn_void {
+                    self.out.push_str("return;\n");
+                } else {
+                    self.out.push_str("return ");
+                    self.emit_expr(e);
+                    self.out.push_str(";\n");
+                }
             }
             CppStmt::Expr(e) => {
                 self.emit_expr(e);
