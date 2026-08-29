@@ -1861,9 +1861,131 @@ fn generate_struct_typedefs(s: &str) -> String {
 /// 删除所有函数声明中的默认参数: `func(int x = 5)` → `func(int x)`
 /// 处理全局函数声明和 struct 体内的函数声明
 fn remove_all_default_args(s: &str) -> String {
-    // DISABLED: Heuristic-based removal causes massive content loss.
-    // Default arguments must be handled manually or with more sophisticated detection.
-    return s.to_string();
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    
+    while i < len {
+        // Skip string literals
+        if bytes[i] == b'"' { 
+            let j = skip_string_literal(bytes, i); 
+            result.push_str(&s[i..j]); 
+            i = j; 
+            continue; 
+        }
+        // Skip comments
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); 
+            result.push_str(&s[i..j]); 
+            i = j; 
+            continue;
+        }
+        
+        // Look for function declarations: identifier followed by '('
+        // Check if this looks like a function name (identifier followed by '(')
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let j = skip_ws(bytes, ident_end);
+            if j < len && bytes[j] == b'(' {
+                // This might be a function declaration or call
+                // Check if it's followed by a parameter list with default args
+                // Look ahead to find the matching ')'
+                let mut paren_depth = 1i32;
+                let mut k = j + 1;
+                let mut has_default_arg = false;
+                let mut has_type_keyword = false;
+                
+                while k < len && paren_depth > 0 {
+                    if bytes[k] == b'(' { paren_depth += 1; }
+                    else if bytes[k] == b')' { paren_depth -= 1; }
+                    else if paren_depth == 1 {
+                        // Check for type keywords
+                        if match_word_at(bytes, k, "int") || match_word_at(bytes, k, "char")
+                            || match_word_at(bytes, k, "void") || match_word_at(bytes, k, "struct")
+                            || match_word_at(bytes, k, "unsigned") || match_word_at(bytes, k, "long")
+                            || match_word_at(bytes, k, "short") || match_word_at(bytes, k, "float")
+                            || match_word_at(bytes, k, "double") || match_word_at(bytes, k, "bool")
+                            || match_word_at(bytes, k, "const") || match_word_at(bytes, k, "FILE")
+                        {
+                            has_type_keyword = true;
+                        }
+                        // Check for '=' that's not '=='
+                        if bytes[k] == b'=' && (k+1 >= len || bytes[k+1] != b'=') {
+                            // Check it's not '!=', '<=', '>='
+                            if k == 0 || (bytes[k-1] != b'!' && bytes[k-1] != b'<' && bytes[k-1] != b'>') {
+                                has_default_arg = true;
+                            }
+                        }
+                    }
+                    k += 1;
+                }
+                
+                // If this looks like a function declaration with default args, process it
+                if has_type_keyword && has_default_arg {
+                    // Output the identifier and '('
+                    result.push_str(&ident);
+                    result.push('(');
+                    i = j + 1;
+                    
+                    // Process parameters, removing default args
+                    paren_depth = 1;
+                    while i < len && paren_depth > 0 {
+                        if bytes[i] == b'(' { 
+                            paren_depth += 1;
+                            result.push('(');
+                            i += 1;
+                        }
+                        else if bytes[i] == b')' { 
+                            paren_depth -= 1;
+                            if paren_depth == 0 {
+                                result.push(')');
+                                i += 1;
+                                break;
+                            }
+                            result.push(')');
+                            i += 1;
+                        }
+                        else if bytes[i] == b'=' && paren_depth == 1 {
+                            // Check it's not '=='
+                            if i+1 < len && bytes[i+1] == b'=' {
+                                result.push_str("==");
+                                i += 2;
+                            }
+                            // Check it's not '!=', '<=', '>='
+                            else if i > 0 && (bytes[i-1] == b'!' || bytes[i-1] == b'<' || bytes[i-1] == b'>') {
+                                result.push('=');
+                                i += 1;
+                            }
+                            else {
+                                // Skip the default value until ',' or ')'
+                                i += 1;
+                                let mut d = 0i32;
+                                while i < len {
+                                    if bytes[i] == b'(' { d += 1; }
+                                    else if bytes[i] == b')' {
+                                        if d == 0 { break; }
+                                        d -= 1;
+                                    }
+                                    else if bytes[i] == b',' && d == 0 { break; }
+                                    i += 1;
+                                }
+                            }
+                        }
+                        else {
+                            result.push(bytes[i] as char);
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
 }
 
 /// C++ 函数式类型转换: Type(value) → (Type)(value)
