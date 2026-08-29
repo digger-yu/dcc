@@ -4015,6 +4015,9 @@ void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, 
 void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt);
 struct mkdeps;
 struct mkdeps *_new_mkdeps(void);
+struct cpp_substring_ranges;
+void cpp_substring_ranges_add_range(struct cpp_substring_ranges *this_, struct source_range range);
+void cpp_substring_ranges_add_n_ranges(struct cpp_substring_ranges *this_, int num, struct cpp_string_location_reader *loc_reader);
 /* Stubs for x86 SSE builtins that dcc doesn't support */
 static inline int dcc_pmovmskb128(const void *p) { (void)p; return 0; }
 static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; return p; }
