@@ -2373,8 +2373,9 @@ fn fix_flattened_enum_refs(s: &str) -> String {
     // Map from flattened type name (e.g., "bidi_kind") to original enum name (e.g., "kind")
     
     for (enum_name, _) in &enum_defs {
-        // Look for patterns like `IDENT_<enum_name>` used as a type
+        // Look for patterns like `PREFIX_<enum_name>` used as a TYPE
         // e.g., `bidi_kind` when enum is `kind`
+        // IMPORTANT: Only match complete identifiers, not substrings
         let search = format!("_{}", enum_name);
         let mut pos = 0;
         while let Some(found) = s[pos..].find(&search) {
@@ -2391,12 +2392,46 @@ fn fix_flattened_enum_refs(s: &str) -> String {
                 if start < before_bytes.len() {
                     let prefix = &s[start..abs_pos];
                     let flattened_type = format!("{}_{}", prefix, enum_name);
-                    // Check if this flattened type is used in the code
-                    if s.contains(&format!(" {} ", flattened_type)) 
-                        || s.contains(&format!(" {}\n", flattened_type))
-                        || s.contains(&format!("\t{} ", flattened_type))
-                        || s.contains(&format!("static {}", flattened_type))
-                    {
+                    // CRITICAL: Check that the character after the enum name
+                    // is NOT an identifier character (to avoid matching function
+                    // names like get_mode_class when enum is mode_class)
+                    let after_pos = abs_pos + search.len();
+                    if after_pos < len && is_ident_char(s.as_bytes()[after_pos]) {
+                        // This is part of a longer identifier, skip it
+                        pos = after_pos;
+                        continue;
+                    }
+                    // Check if this flattened type is used in the code as a TYPE
+                    // (in declaration context, not as a function name)
+                    // Exclude cases where the identifier is followed by '(' (function)
+                    let is_type_usage = {
+                        let search_type = format!("{}", flattened_type);
+                        let mut found_type = false;
+                        let mut search_pos = 0;
+                        while let Some(pos) = s[search_pos..].find(&search_type) {
+                            let abs_pos = search_pos + pos;
+                            let before_ok = abs_pos == 0 
+                                || !is_ident_char(s.as_bytes()[abs_pos - 1]);
+                            let after_pos = abs_pos + search_type.len();
+                            let after_ok = after_pos >= len 
+                                || !is_ident_char(s.as_bytes()[after_pos]);
+                            if before_ok && after_ok {
+                                // Check what comes after - if it's '(' this is a
+                                // function definition/call, not a type usage
+                                let next_non_ws = s[after_pos..].find(|c: char| !c.is_whitespace())
+                                    .map(|p| after_pos + p);
+                                if let Some(next_pos) = next_non_ws {
+                                    if s.as_bytes()[next_pos] != b'(' {
+                                        found_type = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            search_pos = abs_pos + search_type.len();
+                        }
+                        found_type
+                    };
+                    if is_type_usage {
                         prefix_map.insert(flattened_type, enum_name.clone());
                     }
                 }
