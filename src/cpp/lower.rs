@@ -1580,6 +1580,51 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
     result
 }
 
+/// Convert standalone `inline` to `static inline` to avoid C99 inline semantics.
+/// In C99, `inline` without `static` has external linkage, causing multiple
+/// definition errors when the same inline function appears in multiple TUs.
+fn convert_inline_to_static_inline(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        // Skip comments
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        // Look for `inline` keyword
+        if match_word_at(bytes, i, "inline") {
+            // Check if preceded by `static` or `extern`
+            let before = result.trim_end();
+            let needs_static = !before.ends_with("static") 
+                && !before.ends_with("extern")
+                && !before.ends_with("__inline")
+                && !before.ends_with("__inline__");
+            if needs_static {
+                result.push_str("static inline");
+            } else {
+                result.push_str("inline");
+            }
+            i += 6;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 剥离 GCC 属性宏: GTY(...), __attribute__((...)), __declspec(...), 等
 /// 这些属性在 C 降级中不需要, 且会干扰解析
 fn strip_gcc_attributes(s: &str) -> String {
@@ -2165,6 +2210,9 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_word(&result, "virtual", "");
     // nullptr → ((void*)0), mutable → 删除
     result = fix_remaining_cpp_syntax(&result);
+    // inline → static inline (C99 inline has external linkage by default,
+    // causing multiple definition errors; static inline fixes this)
+    result = convert_inline_to_static_inline(&result);
     // 删除所有函数声明中的默认参数
     result = remove_all_default_args(&result);
     // C++ 函数式类型转换 (保守版): Type(number) → (Type)(number)
