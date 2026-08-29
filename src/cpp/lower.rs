@@ -3222,6 +3222,9 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = convert_new_delete_expressions(&result);
     // Convert vector member calls: .push(), .count(), .truncate()
     result = convert_vector_member_calls(&result);
+    // Fix nested type references: ClassName_NestedType -> NestedType
+    result = result.replace("mkdeps_velt", "velt");
+    result = result.replace("mkdeps_vec", "vec");
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
     result
@@ -3485,6 +3488,8 @@ void rich_loc_set_escape_on_output (struct rich_location *this_, int val);
 void rich_loc_add_range (struct rich_location *this_, int loc);
 void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt, int loc);
 void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt);
+struct mkdeps;
+struct mkdeps *_new_mkdeps(void);
 /* Stubs for x86 SSE builtins that dcc doesn't support */
 static inline int dcc_pmovmskb128(const void *p) { (void)p; return 0; }
 static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; return p; }
