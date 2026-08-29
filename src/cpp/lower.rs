@@ -2942,8 +2942,8 @@ fn replace_template_usages(s: &str) -> String {
                     k += 1;
                 }
                 // Only replace if identifier contains template keywords
-                // AND content doesn't look like an expression (no comparisons, limited parens)
-                // AND the match is reasonably short (not spanning across functions)
+                // OR if the content looks like template type arguments
+                // (identifiers, types, pointers, references, const, etc.)
                 let content_len = k - start_k;
                 let looks_like_template = ident.contains("vec")
                     || ident.contains("map") || ident.contains("hash")
@@ -2953,14 +2953,32 @@ fn replace_template_usages(s: &str) -> String {
                     || ident.contains("vector") || ident.contains("list")
                     || ident.contains("deque") || ident.contains("array")
                     || ident.contains("tuple") || ident.contains("optional")
-                    || ident.contains("function") || ident.contains("allocator");
+                    || ident.contains("function") || ident.contains("allocator")
+                    || ident.contains("node"); // alloc_node, hash_node, etc.
+                // Check if content looks like template type arguments
+                // (no operators except *, &, ::, no keywords like if/while/for/return)
+                let content = &s[start_k..k];
+                let content_looks_like_types = !content.contains("if ")
+                    && !content.contains("while ")
+                    && !content.contains("for ")
+                    && !content.contains("return ")
+                    && !content.contains("=")
+                    && !content.contains("+")
+                    && !content.contains("-")
+                    && !content.contains("/")
+                    && !content.contains("%")
+                    && !content.contains("^")
+                    && !content.contains("|")
+                    && !content.contains("~")
+                    && !content.contains("?")
+                    && !content.contains(":");
                 // Don't replace if:
                 // - Content has comparison operators (likely not a template)
                 // - Content is too long (spanning across code)
                 // - Content has semicolons (spanning statements)
                 // - Content has too many newlines (spanning multiple lines incorrectly)
                 let is_valid_template = depth == 0 
-                    && looks_like_template
+                    && (looks_like_template || content_looks_like_types)
                     && !has_comparison
                     && !has_semicolon
                     && content_len < 200 // Max 200 chars between < and >
@@ -3665,6 +3683,9 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // Fix nested type references: ClassName_NestedType -> NestedType
     result = result.replace("mkdeps_velt", "velt");
     result = result.replace("mkdeps_vec", "vec");
+    // Re-run template replacement after namespace prefix stripping
+    // This handles cases like mkdeps::vec<T> which became vec<T> after :: flattening
+    result = replace_template_usages(&result);
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
     result
