@@ -1861,84 +1861,9 @@ fn generate_struct_typedefs(s: &str) -> String {
 /// 删除所有函数声明中的默认参数: `func(int x = 5)` → `func(int x)`
 /// 处理全局函数声明和 struct 体内的函数声明
 fn remove_all_default_args(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut paren_depth = 0i32;
-    // 跟踪每个括号层级是否包含 ';' (for 循环的特征)
-    let mut paren_has_semi: Vec<bool> = Vec::new();
-    while i < len {
-        // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
-        }
-        // 跟踪括号深度
-        if bytes[i] == b'(' { 
-            paren_depth += 1; 
-            // 预扫描检查括号内是否有 ';' (for 循环的特征)
-            let mut has_semi = false;
-            let mut d = 1i32;
-            let mut k = i + 1;
-            while k < len && d > 0 {
-                if bytes[k] == b'(' { d += 1; }
-                else if bytes[k] == b')' { d -= 1; }
-                else if bytes[k] == b';' && d == 1 { has_semi = true; break; }
-                k += 1;
-            }
-            paren_has_semi.push(has_semi);
-            // Check if this paren belongs to if/while/switch - 
-            // these may have variable declarations, not default args
-            let is_ctrl_flow = {
-                let before = result.trim_end();
-                before.ends_with("if") || before.ends_with("while") 
-                    || before.ends_with("switch")
-            };
-            if is_ctrl_flow {
-                // Mark this level as control flow (treat like for loop)
-                if let Some(last) = paren_has_semi.last_mut() {
-                    *last = true; // pretend it has semi to skip = removal
-                }
-            }
-        }
-        if bytes[i] == b')' { 
-            paren_depth = (paren_depth - 1).max(0); 
-            paren_has_semi.pop();
-        }
-        // 在括号内, 删除 `= value` 默认参数 (但不在 for 循环中)
-        let in_for_loop = paren_has_semi.last().copied().unwrap_or(false);
-        if paren_depth > 0 && bytes[i] == b'=' && !in_for_loop {
-            // 检查不是 ==, !=, <=, >= (比较/赋值运算符)
-            if i + 1 < len && bytes[i+1] == b'=' {
-                result.push_str("==");
-                i += 2;
-                continue;
-            }
-            if i > 0 && (bytes[i-1] == b'!' || bytes[i-1] == b'<' || bytes[i-1] == b'>') {
-                // !=, <=, >= 的一部分, 不处理
-                result.push('=');
-                i += 1;
-                continue;
-            }
-            // 跳过默认值到 ',' 或 ')'
-            i += 1;
-            let mut d = 0i32;
-            while i < len {
-                if bytes[i] == b'(' { d += 1; }
-                else if bytes[i] == b')' {
-                    if d == 0 { break; }
-                    d -= 1;
-                }
-                else if bytes[i] == b',' && d == 0 { break; }
-                i += 1;
-            }
-            continue;
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-    result
+    // DISABLED: Heuristic-based removal causes massive content loss.
+    // Default arguments must be handled manually or with more sophisticated detection.
+    return s.to_string();
 }
 
 /// C++ 函数式类型转换: Type(value) → (Type)(value)
@@ -2214,6 +2139,77 @@ fn remove_template_definitions(s: &str) -> String {
     result
 }
 
+/// Replace template usage patterns: template_name<args> → void*
+/// Matches: ident<...> where content looks like template args
+/// (contains types, commas, numbers) and is followed by a variable
+/// name or is in a type position.
+fn replace_template_usages(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip strings and comments
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // Check for identifier followed by '<'
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let j = skip_ws(bytes, ident_end);
+            if j < len && bytes[j] == b'<' {
+                // Check if this looks like a template usage
+                // Try to find matching '>'
+                let mut depth = 1i32;
+                let mut k = j + 1;
+                let mut has_comma = false;
+                let mut has_struct = false;
+                while k < len && depth > 0 {
+                    if bytes[k] == b'<' { depth += 1; }
+                    else if bytes[k] == b'>' { depth -= 1; }
+                    else if bytes[k] == b',' && depth == 1 { has_comma = true; }
+                    else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
+                        break; // Not a template
+                    }
+                    k += 1;
+                }
+                if depth == 0 && (has_comma || ident.contains("vec")
+                    || ident.contains("map") || ident.contains("hash")
+                    || ident.contains("set") || ident.contains("pair")
+                    || ident.contains("auto_suppress"))
+                {
+                    // Looks like template usage
+                    // Check what follows '>' - should be identifier (var name)
+                    // or ';' or ',' or ')'
+                    let after_gt = skip_ws(bytes, k);
+                    let is_type_pos = after_gt < len && (
+                        is_ident_char(bytes[after_gt])
+                        || bytes[after_gt] == b'*'
+                        || bytes[after_gt] == b'&'
+                        || bytes[after_gt] == b';'
+                        || bytes[after_gt] == b','
+                        || bytes[after_gt] == b')'
+                        || bytes[after_gt] == b'>'
+                    );
+                    if is_type_pos {
+                        result.push_str("void*");
+                        i = k;
+                        continue;
+                    }
+                }
+            }
+            // Not a template usage, output the identifier normally
+            result.push_str(&ident);
+            i = ident_end;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// 转换 return struct Type(args) 为 return (struct Type){args} (C99 compound literal)
 fn convert_return_struct_ctor(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -2321,6 +2317,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = flatten_scope_operators(&result);
     // 删除模板定义 (C 不支持模板)
     result = remove_template_definitions(&result);
+    // 替换模板使用: template_name<args> → void*
+    result = replace_template_usages(&result);
     // class → struct (简单替换, 仅独立的 class 关键字)
     result = replace_word(&result, "class", "struct");
     // enum struct/enum class → enum (C++11 作用域枚举)
