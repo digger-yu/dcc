@@ -1087,7 +1087,35 @@ fn clean_struct_bodies(s: &str) -> String {
                             "=" => "operator_assign".to_string(),
                             "[]" => "operator_index".to_string(),
                             "()" => "operator_call".to_string(),
-                            _ => format!("operator_{}", op.replace(' ', "_")),
+                            "->" => "operator_arrow".to_string(),
+                            "," => "operator_comma".to_string(),
+                            "->*" => "operator_arrow_star".to_string(),
+                            "<<" => "operator_lshift".to_string(),
+                            ">>" => "operator_rshift".to_string(),
+                            "&" => "operator_and".to_string(),
+                            "|" => "operator_or".to_string(),
+                            "^" => "operator_xor".to_string(),
+                            "~" => "operator_not".to_string(),
+                            "!" => "operator_lnot".to_string(),
+                            "+=" => "operator_plus_assign".to_string(),
+                            "-=" => "operator_minus_assign".to_string(),
+                            "*=" => "operator_star_assign".to_string(),
+                            "/=" => "operator_slash_assign".to_string(),
+                            "%=" => "operator_mod_assign".to_string(),
+                            "&=" => "operator_and_assign".to_string(),
+                            "|=" => "operator_or_assign".to_string(),
+                            "^=" => "operator_xor_assign".to_string(),
+                            "<<=" => "operator_lshift_assign".to_string(),
+                            ">>=" => "operator_rshift_assign".to_string(),
+                            "&&" => "operator_land".to_string(),
+                            "||" => "operator_lor".to_string(),
+                            _ => {
+                                // Sanitize: replace any remaining non-ident chars
+                                let sanitized: String = op.chars().map(|c| {
+                                    if c.is_alphanumeric() || c == '_' { c } else { '_' }
+                                }).collect();
+                                format!("operator_{}", sanitized)
+                            }
                         }
                     } else {
                         fn_name.to_string()

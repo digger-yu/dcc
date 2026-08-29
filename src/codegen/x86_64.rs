@@ -3670,6 +3670,10 @@ impl Codegen {
                 if v.alias_name.is_some() {
                     continue;
                 }
+                // Skip variables with empty names
+                if v.name.name.is_empty() {
+                    continue;
+                }
                 if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
                     continue;
                 }
@@ -3725,6 +3729,10 @@ impl Codegen {
                 if f.body.is_none() && f.alias_name.is_none() {
                     // 检查 C 名和 asm label 解析后的名字
                     let resolved = self.resolve_asm_label(&f.name.name).to_string();
+                    // Skip functions with empty names
+                    if resolved.is_empty() {
+                        continue;
+                    }
                     let has_c = func_has_definition(&f.name.name);
                     let has_resolved = func_has_definition(&resolved);
                     if has_c || has_resolved {
@@ -3874,6 +3882,11 @@ impl Codegen {
                 if f.alias_name.is_some() {
                     continue;
                 }
+                // Skip functions with empty names (can happen from C++ lowering)
+                let sym_name = self.resolve_asm_label(&f.name.name).to_string();
+                if sym_name.is_empty() {
+                    continue;
+                }
                 if f.body.is_some() {
                     // 收集此函数的嵌套函数 (递归, 不含自身)
                     let mut nested = vec![];
@@ -3896,7 +3909,7 @@ impl Codegen {
                                 (1u16, func_start)
                             };
                         let sym = ElfSym {
-                            name: self.resolve_asm_label(&f.name.name).to_string(),
+                            name: sym_name.clone(),
                             section: sec_idx,
                             value: sym_value,
                             size: func_size,
@@ -3925,6 +3938,10 @@ impl Codegen {
                     }
                     // 再处理嵌套函数
                     for func in &nested {
+                        let nested_sym_name = self.resolve_asm_label(&func.name.name).to_string();
+                        if nested_sym_name.is_empty() {
+                            continue;
+                        }
                         if let Some(&func_start) = self.labels.get(&func.name.name) {
                             let func_size = self
                                 .func_sizes
@@ -5214,7 +5231,7 @@ impl Codegen {
         self.temp_slots = temp_slots;
         // KASAN 红区: 每个局部变量后追加 32 字节 (4 个 8 字节槽位)
         let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
-        if f.name.name != "main" || !self.relocatable {
+        if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
             if let Some(body) = &f.body {
                 Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots);
