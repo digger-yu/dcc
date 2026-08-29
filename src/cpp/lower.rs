@@ -3195,8 +3195,72 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     let mut result = s.to_string();
     // Convert C++ functional casts: Type(expr) -> (Type)(expr)
     result = convert_simple_functional_casts(&result);
+    // Workaround: handle 'unsigned (expr)' and 'Phase (expr)' patterns that convert_simple_functional_casts misses
+    // These are C++ functional casts that need to be converted to C-style casts
+    result = result.replace("unsigned (", "(unsigned)(");
+    result = result.replace("Phase (", "(Phase)(");
+    // Convert declarations in if conditions: if (Type var = expr) -> Type var = expr; if (var)
+    result = convert_if_cond_decls(&result);
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
+    result
+}
+
+/// Convert declarations in if conditions to separate declaration and check
+/// if (Type var = expr) { ... } -> Type var = expr; if (var) { ... }
+fn convert_if_cond_decls(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for 'if ('
+        if i + 4 < len && &s[i..i+3] == "if " && bytes[i+3] == b'(' {
+            // Check if there's a type declaration inside
+            let mut j = i + 4;
+            // Skip whitespace
+            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') { j += 1; }
+            // Check for type keywords or identifiers that could be types
+            let is_type_start = (j + 8 <= len && &s[j..j+8] == "unsigned")
+                || (j + 6 <= len && &s[j..j+6] == "signed")
+                || (j + 4 <= len && (&s[j..j+4] == "int " || &s[j..j+4] == "char" || &s[j..j+4] == "long"))
+                || (j + 3 <= len && &s[j..j+3] == "int")
+                || (bytes[j] == b's' && j + 7 <= len && &s[j..j+7] == "struct ");
+            
+            if is_type_start {
+                // Find the matching )
+                let mut depth = 1;
+                let mut k = j;
+                while k < len && depth > 0 {
+                    if bytes[k] == b'(' { depth += 1; }
+                    else if bytes[k] == b')' { depth -= 1; }
+                    k += 1;
+                }
+                if depth == 0 {
+                    // Extract the declaration: Type var = expr
+                    let decl = &s[j..k-1];
+                    // Find the variable name (last identifier before =)
+                    if let Some(eq_pos) = decl.find('=') {
+                        let before_eq = &decl[..eq_pos].trim_end();
+                        // Find the last word (variable name)
+                        let var_name = before_eq.split_whitespace().last().unwrap_or("");
+                        if !var_name.is_empty() {
+                            // Convert: if (Type var = expr) { ... }
+                            // To: Type var = expr; if (var) { ... }
+                            result.push_str(decl);
+                            result.push_str("; if (");
+                            result.push_str(var_name);
+                            result.push(')');
+                            i = k;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
     result
 }
 
