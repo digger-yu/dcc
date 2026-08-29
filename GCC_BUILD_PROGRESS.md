@@ -1,128 +1,139 @@
-# GCC 15.3.0 Compilation Progress Report
+# GCC 编译进展报告
 
-## Overview
-This document tracks the progress of compiling GCC 15.3.0 using only the dcc compiler (no gcc allowed).
+## 已完成的改进
 
-## Completed Work
+### 1. C++ 类定义转换 (已完成)
+- **构造函数转换**: `ClassName(params) : member(init) { body }` → `void _ctor_ClassName(struct ClassName *this_, params) { this_->member = init; ... body ... }`
+- **成员函数提取**: `ret_type func(params) { body }` → `ret_type ClassName_func(struct ClassName *this_, params) { body }`
+- **嵌套类型提升**: 类内定义的 `enum` 等类型提升到命名空间级别
+- **嵌套大括号跟踪**: 修复了 enum/union 的 `}` 被误认为 struct 结束的问题
 
-### Critical Bug Fixes (Committed)
+### 2. 全局成员函数调用转换 (已完成)
+- **问题**: 基类成员函数在派生类构造函数中的调用未被转换
+- **根因**: `fix_inline_member_calls` 中的模式匹配查找 ` *this` 但 `skip_ws()` 后指针指向 `*this`（无前导空格）
+- **修复**: 
+  - 同时检查 `*this` 和 ` *this` 模式
+  - 使用字节数组比较而非字符串切片
+  - 收集所有带 `struct S *this_` 参数的成员函数
+  - 全局替换裸成员函数调用
+- **效果**: 修复了 `set_escape_on_output` 在 `encoding_rich_location` 构造函数中的隐式声明问题
+- **统计**: 在 macro.cc 中找到 43 个需要全局替换的成员函数
 
-1. **Float Literal Infinite Loop** (commit 7af8c01)
-   - **Issue**: Tokenizer entered infinite loop when parsing `.0001` style float literals
-   - **Root Cause**: Number parsing branch didn't consume leading `.` before entering digit loop
-   - **Fix**: Added check to consume `.` when number starts with decimal point
-   - **Impact**: Fixed symtab.o compilation timeout in libcpp
+### 3. 提交的 Commit
+```
+cpp/lower: fix global member function call conversion
+```
 
-2. **C++ Dependency File Generation** (commit 4ad9c83)
-   - **Issue**: Dependency files referenced temporary C files instead of original C++ sources
-   - **Root Cause**: C subprocess generated deps based on temp file path
-   - **Fix**: Generate dependency files in C++ driver using original source path
-   - **Impact**: Enabled incremental builds for C++ code
+## 当前阻塞问题
 
-3. **unsigned __int128 Type Parsing** (commit ef0e7b9)
-   - **Issue**: Parser failed to recognize `unsigned __int128` as valid type
-   - **Root Cause**: `is_peek_type_start_after_unsigned()` didn't include KwInt128/KwUInt128
-   - **Fix**: Added KwInt128 and KwUInt128 to type keyword list
-   - **Impact**: Fixed linux/types.h compilation (used in system headers)
+### 1. uchar 类型未定义
+**现象**: 
+```
+warning[W0002]: unknown type 'uchar' treated as 'int' (-fpermissive)
+```
 
-4. **C++ Standard Library Headers** (commit 6a09cbb)
-   - **Issue**: Missing C++ standard library headers prevented libcody compilation
-   - **Fix**: Added stub implementations for cerrno, csignal, cstdint, tuple, source_location
-   - **Impact**: libcody can now find required headers
+**根因**:
+- `libcpp/internal.h` 第 692 行: `typedef unsigned char uchar;`
+- 该 typedef 被 `#if !defined (HAVE_UCHAR) && !defined (IN_GCC)` 保护
+- 编译时定义了 `-DIN_GCC`，导致 typedef 被跳过
+- GCC 期望通过 `coretypes.h` 提供 `uchar`，但该头文件未被包含
 
-### Compilation Progress
+**解决方案选项**:
+1. 在预处理阶段添加 `uchar` typedef
+2. 修复 preprocessor 的 include 缓存机制
+3. 在 C++ 降级阶段注入 typedef
 
-#### ✅ libcpp (14/14 files) - COMPLETE
-All files successfully compiled:
-- charset.o, directives.o, errors.o, expr.o, files.o
-- identifiers.o, init.o, lex.o, line-map.o, macro.o
-- mkdeps.o, pch.o, symtab.o, traditional.o
-- libcpp.a created successfully
+### 2. 文本降级逻辑严重错误
+**现象**: 某些函数体被完全破坏
+```c
+// 错误的降级输出:
+pfile->state.angled_headers , bracket;
+char *fname , (((&(op)->ident))->str));
 
-#### ✅ libiberty - COMPLETE
-All object files compiled and libiberty.a created successfully
+// 原始 C++ 代码:
+pfile->state.angled_headers = false;
+char *fname = NULL;
+```
 
-#### ✅ gcc configure - COMPLETE
-Configure script completed successfully using config.cache with pre-populated type sizes
+**根因**: 文本-based C++ 降级逻辑在某些情况下严重破坏代码结构
 
-#### ⚠️ libcody - IN PROGRESS
-Headers found but C++ frontend has issues with std::string and standard library type handling in the lowering phase
+**影响**: 
+- `builtin_has_include_1` 函数体被破坏
+- 多处出现类似的语法错误
+- 这是系统性问题，需要深入调试降级逻辑
 
-### Configuration Files
+### 3. __auto_type 未转换
+**现象**:
+```c
+__auto_type sav_padding = pfile->state.directive_wants_padding;
+```
 
-Created `/root/gcc-build/gcc/config.cache` with pre-populated values for:
-- Type sizes (char=1, int=4, long=8, long long=8, __int128=16, etc.)
-- Pointer sizes (void*=8)
-- Endianness (little-endian)
-- Compiler capabilities
+**根因**: GCC 扩展 `__auto_type` 未被转换为具体类型
 
-## Current Challenges
+**解决方案**: 需要类型推导或转换为 `auto` 的 C 等价物
 
-### 1. C++ Standard Library Type Handling
-The dcc C++ frontend's lowering phase has issues with:
-- std::string method calls
-- Complex template instantiation
-- Standard library type conversions
+### 4. C++ 函数式转换语法
+**现象**: C++ functional cast `Type(expr)` 未被正确转换
 
-**Status**: Requires deeper work on C++ to C lowering logic
+**示例**: 
+```cpp
+char *fname = char *((&(op)->ident))->str;  // C++
+```
+应转换为:
+```c
+char *fname = (char *)((&(op)->ident))->str;  // C
+```
 
-### 2. Missing GCC-Specific Compiler Flags
-dcc doesn't support some GCC-specific flags:
-- `-print-prog-name=ld`
-- `-print-multi-os-directory`
+## 下一步建议
 
-**Status**: These are warnings, not blockers
+### 优先级 1: 修复文本降级逻辑
+当前的文本-based 降级存在严重 bug，导致代码被破坏。需要：
+1. 添加详细的调试输出，定位代码破坏的位置
+2. 检查 `clean_struct_bodies` 函数的逻辑
+3. 考虑切换到 AST-based 降级路径（如果可能）
 
-### 3. Linker Integration
-Some test programs fail to link during configure checks, requiring config.cache workarounds
+### 优先级 2: 解决 uchar typedef 问题
+最简单的方案是在预处理输出中注入：
+```c
+#ifndef HAVE_UCHAR
+typedef unsigned char uchar;
+#endif
+```
 
-**Status**: Managed via config.cache pre-population
+### 优先级 3: 添加 __auto_type 支持
+在 `strip_cpp_keywords` 或 `apply_post_lowering_conversions` 中添加转换
 
-## Technical Details
+### 优先级 4: 完善 C++ 转换
+- 函数式转换语法
+- 其他 C++ 特有语法
 
-### C++ Frontend Architecture
-- C++ source → Preprocessor → C++ Parser → Lower to C → C Compiler → Object file
-- Lowering transforms C++ constructs to C equivalents
-- Struct/class definitions cleaned and converted to C structs
-- Member functions converted to standalone functions with mangled names
-- Constructors/destructors handled specially
+## 技术细节
 
-### Key Files Modified
-- `/root/dcc/src/tokens.rs` - Float literal parsing
-- `/root/dcc/src/driver.rs` - C++ dependency generation
-- `/root/dcc/src/parser.rs` - Type parsing for __int128
-- `/root/dcc/src/cpp/stdlib/headers/*` - C++ standard library stubs
+### 修改的文件
+- `/root/dcc/src/cpp/lower.rs`: 
+  - 添加 `nested_brace_depth` 跟踪
+  - 添加 `member_fn_names` 收集
+  - 修复构造函数转换
+  - 修复全局成员函数调用转换
 
-## Next Steps
+### 测试文件
+- `/root/gcc-15.3.0/libcpp/macro.cc`: 目标编译文件
+- 包含 `vaopt_state` 类（构造函数、成员函数、嵌套枚举）
+- 包含 `encoding_rich_location` 类（继承自 `rich_location`）
 
-To complete GCC compilation:
+### 编译命令
+```bash
+cd /root/gcc-15.3.0/build/build-x86_64-pc-linux-gnu/libcpp
+/root/dcc/target/release/dcc -c -std=gnu++14 -O0 \
+  -I. -I../../../libcpp -I../../../libcpp/include \
+  -I../../../include -I../../../gcc -I.. \
+  -DIN_GCC -DHAVE_CONFIG_H \
+  ../../../libcpp/macro.cc -o macro.o
+```
 
-1. **Fix std::string handling in C++ lowering**
-   - Improve method call translation
-   - Handle string operations correctly
-   - Support string constructors and conversions
-
-2. **Complete libcody compilation**
-   - Fix remaining C++ lowering issues
-   - Ensure all C++ features used by libcody work
-
-3. **Continue GCC build**
-   - Compile gcc/ directory
-   - Build language frontends (C, C++, etc.)
-   - Link final executables
-
-4. **Test and validate**
-   - Run GCC test suite
-   - Verify compiled GCC works correctly
-   - Test with real C/C++ code
-
-## Conclusion
-
-Significant progress has been made toward compiling GCC 15.3.0 with dcc:
-- ✅ Core C++ frontend bugs fixed
-- ✅ libcpp fully compiled (14/14 files)
-- ✅ libiberty fully compiled
-- ✅ Configure system working
-- ⚠️ libcody partially working (headers found, lowering issues remain)
-
-The remaining work focuses on improving C++ standard library type handling in the lowering phase. This is complex but achievable with continued effort.
+## 统计信息
+- macro.cc 总行数: 4246
+- 降级后 C 文件行数: 23429
+- 发现的成员函数: 43 个
+- 当前编译错误: ~20 个（主要是语法错误）
+- 当前编译警告: ~60 个（主要是 uchar 类型）
