@@ -6364,6 +6364,7 @@ impl<'a> Parser<'a> {
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
             | TokKind::KwSigned | TokKind::KwUnsigned
             | TokKind::KwComplex | TokKind::KwImaginary
+            | TokKind::KwInt128 | TokKind::KwUInt128
         )
     }
 
