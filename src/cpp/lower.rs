@@ -1633,6 +1633,48 @@ fn convert_if_condition_decls(s: &str) -> String {
     result
 }
 
+/// Check if args look like parameter declarations (type name, ...)
+/// vs constructor arguments (expressions, possibly containing casts).
+/// Returns true only if a type keyword appears at a word boundary that is
+/// NOT inside a parenthesized sub-expression (i.e. not inside a cast).
+fn looks_like_param_decls(args: &str) -> bool {
+    let type_kws = ["void", "int", "char", "unsigned", "long",
+                    "float", "double", "struct", "const"];
+    let bytes = args.as_bytes();
+    let len = bytes.len();
+    let mut paren = 0i32;
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'(' { paren += 1; i += 1; continue; }
+        if bytes[i] == b')' { paren = (paren - 1).max(0); i += 1; continue; }
+        if paren > 0 { i += 1; continue; }
+        for kw in &type_kws {
+            let kw_len = kw.len();
+            if i + kw_len <= len && &args[i..i+kw_len] == *kw {
+                let before_ok = i == 0
+                    || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_';
+                let after_pos = i + kw_len;
+                if before_ok && after_pos < len
+                    && !bytes[after_pos].is_ascii_alphanumeric()
+                    && bytes[after_pos] != b'_'
+                {
+                    let rest = args[after_pos..].trim_start();
+                    if rest.is_empty() || rest.starts_with('*')
+                        || rest.starts_with('&') || rest.starts_with(',')
+                    {
+                        return true;
+                    }
+                    if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == b'_' as char) {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn replace_ctor_calls_in_bodies(s: &str) -> String {
     let mut known_types: Vec<String> = Vec::new();
     {
@@ -1668,10 +1710,18 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
 
         if brace_depth > 0 {
             let mut matched = false;
+            // Check for optional 'struct' prefix before type name
+            let (struct_prefix_len, has_struct_prefix) = if match_word_at(bytes, i, "struct") {
+                let after_struct = skip_ws(bytes, i + 6);
+                if after_struct < len && is_ident_char(bytes[after_struct]) {
+                    (after_struct - i, true)
+                } else { (0, false) }
+            } else { (0, false) };
             for ty in known_types.iter() {
-                if match_word_at(bytes, i, ty) {
+                let type_start = if has_struct_prefix { struct_prefix_len } else { 0 };
+                if match_word_at(bytes, i + type_start, ty) {
                     let ty_len = ty.len();
-                    let j = skip_ws(bytes, i + ty_len);
+                    let j = skip_ws(bytes, i + type_start + ty_len);
                     if j < len && is_ident_char(bytes[j]) {
                         let (var_name, var_end) = read_ident(bytes, j);
                         let k = skip_ws(bytes, var_end);
@@ -1685,25 +1735,53 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                             }
                             let args = s[k+1..m-1].trim().to_string();
                             let after = skip_ws(bytes, m);
-                            // 检查 args 是否看起来像参数声明 (包含类型关键字)
-                            // 如果是, 这可能是函数定义而不是构造函数调用
-                            let looks_like_params = args.contains("void") || args.contains("int ")
-                                || args.contains("char") || args.contains("unsigned")
-                                || args.contains("long") || args.contains("float")
-                                || args.contains("double") || args.contains("struct ");
+                            // args should not look like parameter declarations
+                            let looks_like_params = looks_like_param_decls(&args);
                             if after < len && bytes[after] == b';' && !looks_like_params {
-                                if args.is_empty() {
-                                    result.push_str(&format!(
-                                        "{} {}; _ctor_{}(&{});",
-                                        ty, var_name, ty, var_name
-                                    ));
+                                // Check if we're inside a for-loop init
+                                let in_for_init = {
+                                    let mut bk = i;
+                                    while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
+                                    if has_struct_prefix && bk >= 6 && &bytes[bk-6..bk] == b"struct" {
+                                        bk -= 6;
+                                        while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
+                                    }
+                                    if bk > 0 && bytes[bk-1] == b'(' {
+                                        bk -= 1;
+                                        while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
+                                        if bk >= 3 && &bytes[bk-3..bk] == b"for" {
+                                            bk < 3 || !is_ident_char(bytes[bk-4])
+                                        } else { false }
+                                    } else { false }
+                                };
+                                let type_prefix = if has_struct_prefix { "struct " } else { "" };
+                                if in_for_init {
+                                    if args.is_empty() {
+                                        result.push_str(&format!(
+                                            "{}{} {}; _ctor_{}(&{})",
+                                            type_prefix, ty, var_name, ty, var_name
+                                        ));
+                                    } else {
+                                        result.push_str(&format!(
+                                            "{}{} {}; _ctor_{}(&{}, {})",
+                                            type_prefix, ty, var_name, ty, var_name, args
+                                        ));
+                                    }
+                                    i = after + 1;
                                 } else {
-                                    result.push_str(&format!(
-                                        "{} {}; _ctor_{}(&{}, {});",
-                                        ty, var_name, ty, var_name, args
-                                    ));
+                                    if args.is_empty() {
+                                        result.push_str(&format!(
+                                            "{}{} {}; _ctor_{}(&{});",
+                                            type_prefix, ty, var_name, ty, var_name
+                                        ));
+                                    } else {
+                                        result.push_str(&format!(
+                                            "{}{} {}; _ctor_{}(&{}, {});",
+                                            type_prefix, ty, var_name, ty, var_name, args
+                                        ));
+                                    }
+                                    i = after + 1;
                                 }
-                                i = after + 1;
                                 matched = true;
                                 break;
                             }
@@ -2344,11 +2422,19 @@ fn remove_all_default_args(s: &str) -> String {
                 // This might be a function declaration or call
                 // Check if it's followed by a parameter list with default args
                 // Look ahead to find the matching ')'
+                // IMPORTANT: Only scan the parameter list, not the function body.
+                // Stop if we encounter '{' or ';' at depth 0 (end of declaration).
                 let mut paren_depth = 1i32;
                 let mut k = j + 1;
                 let mut has_default_arg = false;
                 
                 while k < len && paren_depth > 0 {
+                    // Stop scanning if we hit '{' or ';' at depth 0
+                    // (this means we've gone past the parameter list)
+                    if paren_depth == 1 && (bytes[k] == b'{' || bytes[k] == b';') {
+                        break;
+                    }
+                    if bytes[k] == b'"' { k = skip_string_literal(bytes, k); continue; }
                     if bytes[k] == b'(' { paren_depth += 1; }
                     else if bytes[k] == b')' { paren_depth -= 1; }
                     else if paren_depth == 1 {
@@ -2413,9 +2499,12 @@ fn remove_all_default_args(s: &str) -> String {
                             }
                             else {
                                 // Skip the default value until ',' or ')'
+                                // at the same parenthesis depth.
+                                // Handle string literals and nested parens.
                                 i += 1;
                                 let mut d = 0i32;
                                 while i < len {
+                                    if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
                                     if bytes[i] == b'(' { d += 1; }
                                     else if bytes[i] == b')' {
                                         if d == 0 { break; }
