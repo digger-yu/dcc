@@ -2897,6 +2897,22 @@ fn replace_template_usages(s: &str) -> String {
                     i = ident_end;
                     continue;
                 }
+                // Skip if preceded by '->' or '.' (member access, not template)
+                let before_ident = if i > 0 { i - 1 } else { 0 };
+                let mut k = before_ident;
+                while k > 0 && (bytes[k] == b' ' || bytes[k] == b'\t') { k -= 1; }
+                if k > 0 && bytes[k] == b'>' && k > 0 && bytes[k-1] == b'-' {
+                    // After ->, this is member access, not template
+                    result.push_str(&ident);
+                    i = ident_end;
+                    continue;
+                }
+                if k > 0 && bytes[k] == b'.' {
+                    // After ., this is member access, not template
+                    result.push_str(&ident);
+                    i = ident_end;
+                    continue;
+                }
                 // Check if this looks like a template usage
                 // Try to find matching '>'
                 let mut depth = 1i32;
