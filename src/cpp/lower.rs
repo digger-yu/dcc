@@ -3216,6 +3216,12 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // Replace unsupported x86 SSE builtins with stub calls
     result = result.replace("__builtin_ia32_pmovmskb128", "dcc_pmovmskb128");
     result = result.replace("__builtin_ia32_pshufb128", "dcc_pshufb128");
+    // Convert C++ destructs: ClassName_~(ClassName) () -> void _dtor_ClassName ()
+    result = convert_destructors(&result);
+    // Convert C++ new and delete expressions
+    result = convert_new_delete_expressions(&result);
+    // Convert vector member calls: .push(), .count(), .truncate()
+    result = convert_vector_member_calls(&result);
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
     result
@@ -3508,6 +3514,284 @@ fn remove_remaining_templates(s: &str) -> String {
     }
     if !s.ends_with('\n') && result.ends_with('\n') {
         result.pop();
+    }
+    result
+}
+
+/// Convert C++ destructs to C function definitions
+/// ClassName_~ClassName (ClassName) () -> void _dtor_ClassName ()
+fn convert_destructors(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for pattern: identifier_~identifier
+        if bytes[i] == b'~' && i > 0 && i + 1 < len {
+            // Check if there's _ before ~
+            if bytes[i-1] == b'_' {
+                // Find the start of the class name before _
+                let mut start = i - 2;
+                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                    start -= 1;
+                }
+                // Extract class name
+                let class_name = &s[start..i-1];
+                // Find the end of the destructor name (after ~)
+                let mut j = i + 1;
+                while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                // Skip whitespace
+                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+                // Skip (ClassName) if present
+                if j < len && bytes[j] == b'(' {
+                    let mut k = j + 1;
+                    let mut depth = 1;
+                    while k < len && depth > 0 {
+                        if bytes[k] == b'(' { depth += 1; }
+                        else if bytes[k] == b')' { depth -= 1; }
+                        k += 1;
+                    }
+                    j = k;
+                }
+                // Remove the class_name_ prefix from result
+                let prefix_to_remove = class_name.len() + 1; // +1 for _
+                let new_len = result.len().saturating_sub(prefix_to_remove);
+                result.truncate(new_len);
+                // Write void _dtor_ClassName
+                result.push_str("void _dtor_");
+                result.push_str(class_name);
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert C++ new and delete expressions to C
+/// new (ptr) ClassName() -> placement_new_ClassName(ptr)
+/// new ClassName(args) -> allocate_and_init_ClassName(args)
+/// delete expr; -> free(expr);
+fn convert_new_delete_expressions(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for 'delete ' (standalone keyword, not part of identifier)
+        if i + 7 <= len && &s[i..i+7] == "delete " {
+            // Check word boundary: must not be preceded by alphanumeric or _
+            let prev_ok = i == 0 || !(bytes[i-1].is_ascii_alphanumeric() || bytes[i-1] == b'_');
+            if prev_ok {
+                // Find the end of the expression (until ;)
+                let mut j = i + 7;
+                let mut depth = 0;
+                while j < len {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    else if bytes[j] == b';' && depth == 0 { break; }
+                    j += 1;
+                }
+                let expr = s[i+7..j].trim();
+                result.push_str("free (");
+                result.push_str(expr);
+                result.push_str(")");
+                i = j;
+                continue;
+            }
+        }
+        // Look for 'new '
+        if i + 4 <= len && &s[i..i+4] == "new " {
+            // Check if this is placement new: new (ptr) ClassName
+            let mut j = i + 4;
+            // Skip whitespace
+            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            if j < len && bytes[j] == b'(' {
+                // This is placement new: new (ptr) ClassName
+                // Find matching )
+                let mut k = j + 1;
+                let mut depth = 1;
+                while k < len && depth > 0 {
+                    if bytes[k] == b'(' { depth += 1; }
+                    else if bytes[k] == b')' { depth -= 1; }
+                    k += 1;
+                }
+                // Extract pointer expression
+                let ptr_expr = &s[j+1..k-1];
+                // Skip whitespace
+                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                // Find class name
+                let mut m = k;
+                while m < len && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') { m += 1; }
+                let class_name = &s[k..m];
+                // Skip whitespace and find (
+                while m < len && (bytes[m] == b' ' || bytes[m] == b'\t') { m += 1; }
+                if m < len && bytes[m] == b'(' {
+                    // Find matching )
+                    let mut n = m + 1;
+                    let mut depth = 1;
+                    while n < len && depth > 0 {
+                        if bytes[n] == b'(' { depth += 1; }
+                        else if bytes[n] == b')' { depth -= 1; }
+                        n += 1;
+                    }
+                    let args = &s[m+1..n-1];
+                    result.push_str("_ctor_");
+                    result.push_str(class_name);
+                    result.push_str(" (");
+                    result.push_str(ptr_expr);
+                    if !args.is_empty() {
+                        result.push_str(", ");
+                        result.push_str(args);
+                    }
+                    result.push_str(")");
+                    i = n;
+                    continue;
+                }
+            } else {
+                // Regular new: new ClassName(args)
+                // Find class name
+                let mut k = j;
+                while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') { k += 1; }
+                let class_name = &s[j..k];
+                // Skip whitespace
+                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                if k < len && bytes[k] == b'(' {
+                    // Find matching )
+                    let mut m = k + 1;
+                    let mut depth = 1;
+                    while m < len && depth > 0 {
+                        if bytes[m] == b'(' { depth += 1; }
+                        else if bytes[m] == b')' { depth -= 1; }
+                        m += 1;
+                    }
+                    let args = &s[k+1..m-1];
+                    result.push_str("_new_");
+                    result.push_str(class_name);
+                    result.push_str(" (");
+                    result.push_str(args);
+                    result.push_str(")");
+                    i = m;
+                    continue;
+                } else if k < len && bytes[k] == b'*' {
+                    // new ClassName *something - just keep as is for now
+                    result.push_str("new ");
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert vector member calls to C function calls
+/// vec.push(x) -> vec_push(&vec, x)
+/// vec.count() -> vec_count(&vec)
+/// vec.truncate(n) -> vec_truncate(&vec, n)
+fn convert_vector_member_calls(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for .push (, .count (, .truncate (
+        if bytes[i] == b'.' && i + 1 < len {
+            let rest = &s[i+1..];
+            if rest.starts_with("push (") || rest.starts_with("push(") {
+                // Find the variable name before .
+                let mut start = i;
+                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                    start -= 1;
+                }
+                let var_name = &s[start..i];
+                // Find matching )
+                let paren_start = i + 1 + if rest.starts_with("push (") { 6 } else { 5 };
+                let mut j = paren_start;
+                let mut depth = 1;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                let args = &s[paren_start..j-1];
+                // Remove what we added for var_name and write vec_push(&vec, args)
+                let prefix_len = var_name.len();
+                let new_len = result.len();
+                result.truncate(new_len - prefix_len);
+                result.push_str(var_name);
+                result.push_str("_push (&");
+                result.push_str(var_name);
+                result.push_str(", ");
+                result.push_str(args);
+                result.push_str(")");
+                i = j;
+                continue;
+            } else if rest.starts_with("count (") || rest.starts_with("count(") {
+                // Find the variable name before .
+                let mut start = i;
+                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                    start -= 1;
+                }
+                let var_name = &s[start..i];
+                // Find matching )
+                let paren_start = i + 1 + if rest.starts_with("count (") { 7 } else { 6 };
+                let mut j = paren_start;
+                let mut depth = 1;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                // Remove what we added for var_name and write vec_count(&vec)
+                let prefix_len = var_name.len();
+                let new_len = result.len();
+                result.truncate(new_len - prefix_len);
+                result.push_str(var_name);
+                result.push_str("_count (&");
+                result.push_str(var_name);
+                result.push_str(")");
+                i = j;
+                continue;
+            } else if rest.starts_with("truncate (") || rest.starts_with("truncate(") {
+                // Find the variable name before .
+                let mut start = i;
+                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                    start -= 1;
+                }
+                let var_name = &s[start..i];
+                // Find matching )
+                let paren_start = i + 1 + if rest.starts_with("truncate (") { 10 } else { 9 };
+                let mut j = paren_start;
+                let mut depth = 1;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' { depth += 1; }
+                    else if bytes[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                let args = &s[paren_start..j-1];
+                // Remove what we added for var_name and write vec_truncate(&vec, args)
+                let prefix_len = var_name.len();
+                let new_len = result.len();
+                result.truncate(new_len - prefix_len);
+                result.push_str(var_name);
+                result.push_str("_truncate (&");
+                result.push_str(var_name);
+                result.push_str(", ");
+                result.push_str(args);
+                result.push_str(")");
+                i = j;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
     }
     result
 }
