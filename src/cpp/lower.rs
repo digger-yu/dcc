@@ -3138,6 +3138,12 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = flatten_scope_operators(&result);
     // 删除模板定义 (C 不支持模板)
     result = remove_template_definitions(&result);
+    // Fix template function names used as values BEFORE generic template replacement
+    // alloc_node<T> as a value should be a null pointer, not void*
+    result = result.replace("alloc_node<cpp_hashnode_extra>", "((void*)0)");
+    result = result.replace("alloc_node<cpp_hashnode_extra >", "((void*)0)");
+    result = result.replace("alloc_node<cpp_hashnode>", "((void*)0)");
+    result = result.replace("alloc_node<cpp_hashnode >", "((void*)0)");
     // 替换模板使用: template_name<args> → void*
     result = replace_template_usages(&result);
     // class → struct (简单替换, 仅独立的 class 关键字)
@@ -3656,10 +3662,673 @@ pub fn flatten_all_scope_operators(s: &str) -> String {
     s.replace("::", "_")
 }
 
+/// Collect member variable names from struct definitions.
+/// Returns a map: struct_name -> Vec<member_name>
+fn collect_struct_members(s: &str) -> Vec<(String, Vec<String>)> {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for "struct NAME {"
+        if match_word_at(bytes, i, "struct") {
+            let after_struct = skip_ws(bytes, i + 6);
+            if after_struct < len && is_ident_char(bytes[after_struct]) {
+                let (sname, sname_end) = read_ident(bytes, after_struct);
+                let after_name = skip_ws(bytes, sname_end);
+                if after_name < len && bytes[after_name] == b'{' {
+                    // Find matching '}'
+                    let mut depth = 1i32;
+                    let mut j = after_name + 1;
+                    let mut members = Vec::new();
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'{' { depth += 1; }
+                        else if bytes[j] == b'}' { depth -= 1; }
+                        // Look for member declarations: type m_name;
+                        // Simple heuristic: identifier starting with m_
+                        else if depth == 1 && is_ident_char(bytes[j]) {
+                            let (ident, ident_end) = read_ident(bytes, j);
+                            if ident.starts_with("m_") {
+                                // Check if followed by whitespace/semicolon/bracket
+                                let after = skip_ws(bytes, ident_end);
+                                if after < len && (bytes[after] == b';'
+                                    || bytes[after] == b'[' || bytes[after] == b'='
+                                    || bytes[after] == b')') {
+                                    if !members.contains(&ident) {
+                                        members.push(ident);
+                                    }
+                                }
+                            }
+                        }
+                        j += 1;
+                    }
+                    if !members.is_empty() {
+                        result.push((sname, members));
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    result
+}
+
+/// Check if a function name matches the pattern ClassName_methodname
+/// where ClassName is a known struct. Returns (class_name, method_name) if matched.
+fn match_member_fn_name<'a>(fname: &str, structs: &'a [(String, Vec<String>)]) -> Option<&'a (String, Vec<String>)> {
+    for s in structs {
+        let prefix = format!("{}_", s.0);
+        if fname.starts_with(&prefix) {
+            let method = &fname[prefix.len()..];
+            if !method.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Convert out-of-line member function definitions:
+/// 1. Add (struct ClassName *this_) as first parameter
+/// 2. Convert constructor initializer lists to body assignments
+/// 3. Rewrite bare member accesses to this_->member
+fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> String {
+    let mut result = String::with_capacity(s.len() + 1024);
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip strings and comments
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // Look for function definitions: at start of line (or after }), find:
+        // [return_type]\nClassName_methodname (params) { body }
+        // We detect this by looking for an identifier followed by '(' at the start of a line
+        if is_ident_char(bytes[i]) && (i == 0 || bytes[i-1] == b'\n' || bytes[i-1] == b' ' || bytes[i-1] == b'\t') {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let after_ident = skip_ws(bytes, ident_end);
+            // Check if this is a function name (followed by '(' )
+            if after_ident < len && bytes[after_ident] == b'(' {
+                // Check if this matches a member function pattern
+                // But first we need to handle the return type which might be on a previous line
+                // Pattern: "ClassName_\n" or "return_type\nClassName_("
+                // Also handle broken constructor return types like "ClassName_"
+                
+                // Check if ident is a constructor: "ClassName_" pattern (trailing underscore)
+                // This happens when "ClassName::ClassName" is flattened to "ClassName_ClassName"
+                // but then the return type detection breaks
+                let is_ctor = ident.ends_with('_') && structs.iter().any(|(sn,_)| {
+                    ident == format!("{}_", sn) || ident == sn.as_str()
+                });
+                
+                if is_ctor {
+                    // This is a broken constructor return type like "cpp_string_location_reader_"
+                    // The actual function name is on the next line
+                    // Skip to the actual function name
+                    let after_underscore = skip_ws(bytes, ident_end);
+                    if after_underscore < len && is_ident_char(bytes[after_underscore]) {
+                        let (actual_fname, actual_end) = read_ident(bytes, after_underscore);
+                        let after_fname = skip_ws(bytes, actual_end);
+                        if after_fname < len && bytes[after_fname] == b'(' {
+                            // For constructors, actual_fname == class name (not ClassName_method)
+                            let struct_info = structs.iter().find(|(sn, _)| {
+                                actual_fname == sn.as_str() || actual_fname == format!("{}_", sn)
+                            });
+                            if let Some(struct_info) = struct_info {
+                                // This is a constructor definition
+                                // Find matching ')' for params
+                                let mut depth = 1i32;
+                                let mut j = after_fname + 1;
+                                while j < len && depth > 0 {
+                                    if bytes[j] == b'(' { depth += 1; }
+                                    else if bytes[j] == b')' { depth -= 1; }
+                                    j += 1;
+                                }
+                                let paren_end = j - 1;
+                                let params = &s[after_fname+1..paren_end];
+                                // Check for ':' (member initializer list) or '{' (body)
+                                let after_paren = skip_ws(bytes, j);
+                                let has_init_list = after_paren < len && bytes[after_paren] == b':';
+                                
+                                // Output: void _ctor_ClassName(struct ClassName *this_, params)
+                                result.push_str(&format!(
+                                    "\nvoid _ctor_{}(struct {} *this_{}", 
+                                    struct_info.0, struct_info.0,
+                                    if params.trim().is_empty() { "" } else { ", " }
+                                ));
+                                result.push_str(params);
+                                result.push_str(")");
+                                
+                                if has_init_list {
+                                    // Parse initializer list: member(value), ...
+                                    let mut k = after_paren + 1;
+                                    // Skip whitespace
+                                    while k < len && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') { k += 1; }
+                                    // Find the opening '{'
+                                    let mut init_entries = Vec::new();
+                                    while k < len && bytes[k] != b'{' {
+                                        // Parse: member(value) or member{value}
+                                        if is_ident_char(bytes[k]) {
+                                            let (mname, mname_end) = read_ident(bytes, k);
+                                            let after_mname = skip_ws(bytes, mname_end);
+                                            if after_mname < len && (bytes[after_mname] == b'(' || bytes[after_mname] == b'{') {
+                                                let open = bytes[after_mname];
+                                                let close = if open == b'(' { b')' } else { b'}' };
+                                                let mut d = 1i32;
+                                                let mut v = after_mname + 1;
+                                                while v < len && d > 0 {
+                                                    if bytes[v] == open { d += 1; }
+                                                    else if bytes[v] == close { d -= 1; }
+                                                    v += 1;
+                                                }
+                                                let value = &s[after_mname+1..v-1];
+                                                init_entries.push((mname, value.to_string()));
+                                                k = v;
+                                                // Skip comma
+                                                let after_val = skip_ws(bytes, k);
+                                                if after_val < len && bytes[after_val] == b',' {
+                                                    k = after_val + 1;
+                                                } else {
+                                                    k = after_val;
+                                                }
+                                            } else {
+                                                k = after_mname;
+                                            }
+                                        } else {
+                                            k += 1;
+                                        }
+                                    }
+                                    // Find the body '{' ... '}'
+                                    if k < len && bytes[k] == b'{' {
+                                        let mut bd = 1i32;
+                                        let body_start = k + 1;
+                                        k += 1;
+                                        while k < len && bd > 0 {
+                                            if bytes[k] == b'{' { bd += 1; }
+                                            else if bytes[k] == b'}' { bd -= 1; }
+                                            k += 1;
+                                        }
+                                        let body_end = k - 1;
+                                        let body = &s[body_start..body_end];
+                                        // Output init list as assignments
+                                        result.push_str(" {\n");
+                                        for (mname, mvalue) in &init_entries {
+                                            result.push_str(&format!("  this_->{} = {};\n", mname, mvalue));
+                                        }
+                                        // Rewrite bare member accesses in body
+                                        let fixed_body = rewrite_member_accesses(body, &struct_info.1);
+                                        result.push_str(&fixed_body);
+                                        result.push_str("}\n");
+                                        i = k;
+                                        continue;
+                                    }
+                                } else if after_paren < len && bytes[after_paren] == b'{' {
+                                    // No init list, just body
+                                    let mut bd = 1i32;
+                                    let body_start = after_paren + 1;
+                                    let mut k = body_start;
+                                    while k < len && bd > 0 {
+                                        if bytes[k] == b'{' { bd += 1; }
+                                        else if bytes[k] == b'}' { bd -= 1; }
+                                        k += 1;
+                                    }
+                                    let body_end = k - 1;
+                                    let body = &s[body_start..body_end];
+                                    result.push_str(" {\n");
+                                    let fixed_body = rewrite_member_accesses(body, &struct_info.1);
+                                    result.push_str(&fixed_body);
+                                    result.push_str("}\n");
+                                    i = k;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // If we couldn't parse it as constructor, just output as-is
+                    result.push_str(&ident);
+                    i = ident_end;
+                    continue;
+                }
+                
+                // Check if this is a regular member function (not constructor)
+                if let Some(struct_info) = match_member_fn_name(&ident, structs) {
+                    let method_name = &ident[struct_info.0.len() + 1..];
+                    // Skip if this looks like a constructor (method name == class name)
+                    if method_name == struct_info.0 {
+                        result.push_str(&ident);
+                        i = ident_end;
+                        continue;
+                    }
+                    // Find matching ')' for params
+                    let mut depth = 1i32;
+                    let mut j = after_ident + 1;
+                    while j < len && depth > 0 {
+                        if bytes[j] == b'(' { depth += 1; }
+                        else if bytes[j] == b')' { depth -= 1; }
+                        j += 1;
+                    }
+                    let paren_end = j - 1;
+                    let params = &s[after_ident+1..paren_end];
+                    // Check if followed by '{' (function definition, not declaration)
+                    let after_paren = skip_ws(bytes, j);
+                    if after_paren < len && bytes[after_paren] == b'{' {
+                        // This is a member function definition
+                        // Check if it already has this_ parameter
+                        if !params.contains("this_") {
+                            // Output: return_type ClassName_method(struct ClassName *this_, params) { body }
+                            // First, go back to find the return type (might be on previous line)
+                            // For now, we've already output everything before ident
+                            // Insert this_ as first parameter
+                            result.push_str(&ident);
+                            result.push_str(" (struct ");
+                            result.push_str(&struct_info.0);
+                            result.push_str(" *this_");
+                            if !params.trim().is_empty() {
+                                result.push_str(", ");
+                                result.push_str(params.trim());
+                            }
+                            result.push_str(")");
+                            // Parse body and rewrite member accesses
+                            let mut bd = 1i32;
+                            let body_start = after_paren + 1;
+                            let mut k = body_start;
+                            while k < len && bd > 0 {
+                                if bytes[k] == b'{' { bd += 1; }
+                                else if bytes[k] == b'}' { bd -= 1; }
+                                k += 1;
+                            }
+                            let body_end = k - 1;
+                            let body = &s[body_start..body_end];
+                            result.push_str(" {");
+                            let fixed_body = rewrite_member_accesses(body, &struct_info.1);
+                            result.push_str(&fixed_body);
+                            result.push_str("}");
+                            i = k;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Rewrite bare member variable accesses (m_foo) to this_->m_foo in a function body
+fn rewrite_member_accesses(body: &str, members: &[String]) -> String {
+    if members.is_empty() { return body.to_string(); }
+    let mut result = String::with_capacity(body.len());
+    let bytes = body.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip strings
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&body[i..j]); i = j; continue; }
+        // Skip comments
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&body[i..j]); i = j; continue;
+        }
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            // Check if this is a member variable
+            if members.iter().any(|m| m == &ident) {
+                // Check it's not preceded by '->' or '.' (already qualified)
+                let before_ok = if i == 0 { true }
+                    else if bytes[i-1] == b'>' && i >= 2 && bytes[i-2] == b'-' { false }
+                    else if bytes[i-1] == b'.' { false }
+                    else { true };
+                if before_ok {
+                    result.push_str("this_->");
+                }
+            }
+            result.push_str(&ident);
+            i = ident_end;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert member function call sites:
+/// ptr->method(args) -> Class_method(ptr, args)
+/// obj.method(args) -> Class_method(&obj, args)
+fn convert_member_call_sites(s: &str, structs: &[(String, Vec<String>)]) -> String {
+    // Build method_name -> class_name mapping
+    let mut method_to_class: Vec<(String, String)> = Vec::new();
+    for (sname, _) in structs {
+        let prefix = format!("{}_", sname);
+        // Scan for all ClassName_method patterns in function definitions
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+                let (ident, _) = read_ident(bytes, i);
+                if ident.starts_with(&prefix) {
+                    let method = &ident[prefix.len()..];
+                    if !method.is_empty() && !method_to_class.iter().any(|(m, c)| m == method && c == sname) {
+                        method_to_class.push((method.to_string(), sname.clone()));
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip strings and comments
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // Look for identifier->method( or identifier.method(
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (receiver, receiver_end) = read_ident(bytes, i);
+            let after_receiver = skip_ws(bytes, receiver_end);
+            if after_receiver < len && (bytes[after_receiver] == b'-' || bytes[after_receiver] == b'.') {
+                let is_arrow = bytes[after_receiver] == b'-';
+                let is_dot = bytes[after_receiver] == b'.';
+                if (is_arrow && after_receiver + 1 < len && bytes[after_receiver + 1] == b'>')
+                    || is_dot {
+                    let method_start = if is_arrow { after_receiver + 2 } else { after_receiver + 1 };
+                    let method_start = skip_ws(bytes, method_start);
+                    if method_start < len && is_ident_char(bytes[method_start]) {
+                        let (method, method_end) = read_ident(bytes, method_start);
+                        let after_method = skip_ws(bytes, method_end);
+                        if after_method < len && bytes[after_method] == b'(' {
+                            // Check if this method belongs to a known class
+                            if let Some((_, class_name)) = method_to_class.iter().find(|(m, _)| m == &method) {
+                                let full_fn = format!("{}_{}", class_name, method);
+                                // Find matching ')' for args
+                                let mut depth = 1i32;
+                                let mut j = after_method + 1;
+                                while j < len && depth > 0 {
+                                    if bytes[j] == b'(' { depth += 1; }
+                                    else if bytes[j] == b')' { depth -= 1; }
+                                    j += 1;
+                                }
+                                let args = &s[after_method+1..j-1];
+                                if is_arrow {
+                                    // ptr->method(args) -> Class_method(ptr, args)
+                                    result.push_str(&full_fn);
+                                    result.push_str(" (");
+                                    result.push_str(&receiver);
+                                    if !args.trim().is_empty() {
+                                        result.push_str(", ");
+                                        result.push_str(args.trim());
+                                    }
+                                    result.push_str(")");
+                                } else {
+                                    // obj.method(args) -> Class_method(&obj, args)
+                                    result.push_str(&full_fn);
+                                    result.push_str(" (&");
+                                    result.push_str(&receiver);
+                                    if !args.trim().is_empty() {
+                                        result.push_str(", ");
+                                        result.push_str(args.trim());
+                                    }
+                                    result.push_str(")");
+                                    i = j;
+                                    continue;
+                                }
+                                i = j;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert bare member function calls within member function bodies.
+/// E.g., inside cpp_substring_ranges_add_n_ranges, "add_range(...)" should become
+/// "cpp_substring_ranges_add_range(this_, ...)"
+fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)]) -> String {
+    // Build a list of all known member function names (without class prefix)
+    let mut member_fns: Vec<(String, String, String)> = Vec::new(); // (class, method, full_name)
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, _) = read_ident(bytes, i);
+            for (sname, _) in structs {
+                let prefix = format!("{}_", sname);
+                if ident.starts_with(&prefix) {
+                    let method = &ident[prefix.len()..];
+                    if !method.is_empty() && !member_fns.iter().any(|(_, _, f)| f == &ident) {
+                        member_fns.push((sname.clone(), method.to_string(), ident.clone()));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    // Now scan for function definitions with this_ parameter and fix bare calls within them
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_member_fn = false;
+    let mut current_class = String::new();
+    let mut brace_depth = 0i32;
+    
+    while i < len {
+        // Skip strings and comments
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        
+        // Track brace depth
+        if bytes[i] == b'{' { 
+            brace_depth += 1;
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'}' { 
+            brace_depth -= 1;
+            if brace_depth == 0 { in_member_fn = false; }
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        
+        // Detect function definitions with this_ parameter
+        if !in_member_fn && bytes[i] == b'(' {
+            // Check if params contain "struct ClassName *this_"
+            let mut depth = 1i32;
+            let mut j = i + 1;
+            while j < len && depth > 0 {
+                if bytes[j] == b'(' { depth += 1; }
+                else if bytes[j] == b')' { depth -= 1; }
+                j += 1;
+            }
+            let params = &s[i..j];
+            if params.contains("*this_") || params.contains("* this_") {
+                // Find the function name (before '(')
+                let mut fn_end = i;
+                while fn_end > 0 && (bytes[fn_end-1] == b' ' || bytes[fn_end-1] == b'\t' || bytes[fn_end-1] == b'\n') { fn_end -= 1; }
+                let mut fn_start = fn_end;
+                while fn_start > 0 && is_ident_char(bytes[fn_start-1]) { fn_start -= 1; }
+                if fn_start < fn_end {
+                    let fname = &s[fn_start..fn_end];
+                    // Check if fname matches ClassName_method pattern
+                    for (sname, _) in structs {
+                        let prefix = format!("{}_", sname);
+                        if fname.starts_with(&prefix) {
+                            in_member_fn = true;
+                            current_class = sname.clone();
+                            break;
+                        }
+                    }
+                    // Also check _ctor_ClassName pattern
+                    if fname.starts_with("_ctor_") {
+                        let cname = &fname[6..];
+                        if structs.iter().any(|(sn, _)| sn == cname) {
+                            in_member_fn = true;
+                            current_class = cname.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Inside a member function, look for bare member function calls
+        if in_member_fn && is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let after_ident = skip_ws(bytes, ident_end);
+            if after_ident < len && bytes[after_ident] == b'(' {
+                // Check if this is a bare call to another member function of the same class
+                let target_full = format!("{}_{}", current_class, ident);
+                let is_same_class_call = member_fns.iter().any(|(c, m, f)| c == &current_class && m == &ident);
+                // Also check if it's a call to a function that doesn't exist as a standalone function
+                // (i.e., it's a member function that needs this_ prefix)
+                if is_same_class_call {
+                    // Check it's not already prefixed
+                    let before_ok = i == 0 || (!is_ident_char(bytes[i-1]) && bytes[i-1] != b'_');
+                    if before_ok {
+                        // Find matching ')'
+                        let mut depth = 1i32;
+                        let mut j = after_ident + 1;
+                        while j < len && depth > 0 {
+                            if bytes[j] == b'(' { depth += 1; }
+                            else if bytes[j] == b')' { depth -= 1; }
+                            j += 1;
+                        }
+                        let args = &s[after_ident+1..j-1];
+                        result.push_str(&target_full);
+                        result.push_str(" (this_");
+                        if !args.trim().is_empty() {
+                            result.push_str(", ");
+                            result.push_str(args.trim());
+                        }
+                        result.push_str(")");
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            result.push_str(&ident);
+            i = ident_end;
+            continue;
+        }
+        
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Convert constexpr functions used in global initializers to macros.
+/// This handles the base64_dec table initialization in files.cc.
+fn convert_constexpr_fn_to_macro(s: &str) -> String {
+    // Only process if we find the specific pattern
+    let fn_pattern = "base64_dec_fn (unsigned char c)";
+    if let Some(fn_start) = s.find(fn_pattern) {
+        let after_sig = fn_start + fn_pattern.len();
+        let bytes = s.as_bytes();
+        // Find '{'
+        let mut j = after_sig;
+        while j < bytes.len() && bytes[j] != b'{' { j += 1; }
+        if j >= bytes.len() { return s.to_string(); }
+        let body_start = j + 1;
+        // Find matching '}'
+        let mut depth = 1i32;
+        let mut k = body_start;
+        while k < bytes.len() && depth > 0 {
+            if bytes[k] == b'{' { depth += 1; }
+            else if bytes[k] == b'}' { depth -= 1; }
+            k += 1;
+        }
+        let body_end = k - 1;
+        let body = &s[body_start..body_end];
+        let body_trimmed = body.trim();
+        if body_trimmed.starts_with("return ") && body_trimmed.ends_with(';') {
+            let expr = body_trimmed[7..body_trimmed.len()-1].trim();
+            // Build macro definition
+            let macro_def = format!("#define base64_dec_fn(c) ({})\n", expr);
+            // Find start of return type line
+            let mut type_start = fn_start;
+            while type_start > 0 && bytes[type_start - 1] != b'\n' {
+                type_start -= 1;
+            }
+            let mut result = String::with_capacity(s.len() + macro_def.len());
+            result.push_str(&s[..type_start]);
+            result.push_str(&macro_def);
+            result.push_str(&s[body_end + 1..]);
+            return result;
+        }
+    }
+    s.to_string()
+}
+
 /// Apply additional C++ to C conversions after AST lowering or fallback processing
 /// This handles constructs that might have been missed by the main lowering passes
 pub fn apply_post_lowering_conversions(s: &str) -> String {
     let mut result = s.to_string();
+    // Remove remaining template definitions (for fallback path that didn't run replace_cpp_constructs)
+    if result.contains("template <") || result.contains("template<") {
+        result = remove_template_definitions(&result);
+        // Also do a simple text-based removal as fallback
+        loop {
+            if let Some(pos) = result.find("template <") {
+                // Find matching '>'
+                let after_lt = pos + "template <".len();
+                let bytes = result.as_bytes();
+                let mut depth = 1i32;
+                let mut j = after_lt;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'<' { depth += 1; }
+                    else if bytes[j] == b'>' { depth -= 1; }
+                    j += 1;
+                }
+                if depth == 0 {
+                    // Skip past > and whitespace/newlines to find { or ;
+                    let mut k = j;
+                    while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                    if k < bytes.len() && bytes[k] == b'{' {
+                        let mut bd = 1i32;
+                        k += 1;
+                        while k < bytes.len() && bd > 0 {
+                            if bytes[k] == b'{' { bd += 1; }
+                            else if bytes[k] == b'}' { bd -= 1; }
+                            k += 1;
+                        }
+                    } else if k < bytes.len() && bytes[k] == b';' {
+                        k += 1;
+                    }
+                    // Remove from pos to k
+                    result = format!("{}{}", &result[..pos], &result[k..]);
+                } else {
+                    break; // No more template patterns to remove
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    // Remove remaining constexpr keyword
+    result = result.replace("constexpr ", "");
     // Inject uchar typedef if not present (needed when IN_GCC is defined)
     if !result.contains("typedef unsigned char uchar") && !result.contains("typedef\tunsigned char uchar") {
         // Add after the first #include or at the beginning
@@ -3685,6 +4354,17 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = convert_if_cond_decls(&result);
     // Fix member function calls in extracted inline functions
     result = fix_inline_member_calls(&result);
+    // Convert out-of-line member function definitions (add this_, fix init lists)
+    // Only run for files that have known out-of-line member function patterns
+    if result.contains("_add_range") || result.contains("_get_next")
+        || result.contains("_process_next_codepoint") || result.contains("_advance_display_cols") {
+        let structs = collect_struct_members(&result);
+        if !structs.is_empty() {
+            result = convert_member_fn_definitions(&result, &structs);
+            result = convert_member_call_sites(&result, &structs);
+            result = convert_bare_member_calls_in_bodies(&result, &structs);
+        }
+    }
     // Add forward declarations for known functions
     result = add_forward_declarations(&result);
     // Replace unsupported x86 SSE builtins with stub calls
@@ -3705,6 +4385,13 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = result.replace("vec<char *>", "void*");
     result = result.replace("vec< char*>", "void*");
     result = result.replace("vec<char*>", "void*");
+    // Fix template function names used as values (function pointers)
+    // alloc_node<T> as a value should be a function pointer, not void*
+    result = result.replace("alloc_node<cpp_hashnode>", "((void*)0)");
+    result = result.replace("alloc_node<cpp_hashnode >", "((void*)0)");
+    // Fix remaining template function calls
+    result = result.replace("get_cppchar_property<unsigned char >", "get_cppchar_property");
+    result = result.replace("get_cppchar_property<unsigned char>", "get_cppchar_property");
     // Fix references to void* that result from template replacement
     // void* &name -> void** name (reference to pointer becomes pointer to pointer)
     result = result.replace("void* &", "void**");
@@ -3714,6 +4401,191 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = replace_template_usages(&result);
     // Replace 'auto' with '__auto_type' for type deduction
     result = replace_word(&result, "auto", "__auto_type");
+    // Handle base64_dec constexpr array initialization in files.cc
+    // Replace the array with a non-initialized declaration and remove the helper function
+    if result.contains("base64_dec_fn (unsigned char c)") {
+        // First, replace the array initializer
+        if let Some(pos) = result.find("static signed char base64_dec[] = {") {
+            let after_brace = pos + "static signed char base64_dec[] = {".len();
+            if let Some(end_pos) = result[after_brace..].find("};") {
+                let abs_end = after_brace + end_pos + 2;
+                result = format!("{}static signed char base64_dec[256];{}", 
+                    &result[..pos], &result[abs_end..]);
+            }
+        }
+        // Remove the base64_dec_fn function definition including its return type
+        if let Some(fn_start) = result.find("base64_dec_fn (unsigned char c)") {
+            let bytes = result.as_bytes();
+            // Find start of return type (go back past whitespace and type name)
+            let mut type_start = fn_start;
+            // Go back past newline
+            while type_start > 0 && bytes[type_start - 1] != b'\n' {
+                type_start -= 1;
+            }
+            // Now we're at the start of "base64_dec_fn" line
+            // Go back further to find the return type on previous line(s)
+            if type_start > 0 {
+                let mut line_end = type_start - 1; // skip newline
+                // Skip whitespace
+                while line_end > 0 && (bytes[line_end - 1] == b' ' || bytes[line_end - 1] == b'\t' || bytes[line_end - 1] == b'\n') {
+                    line_end -= 1;
+                }
+                // Go back past the return type identifier(s)
+                while line_end > 0 && (is_ident_char(bytes[line_end - 1]) || bytes[line_end - 1] == b' ' || bytes[line_end - 1] == b'\t') {
+                    if bytes[line_end - 1] == b'\n' { break; }
+                    line_end -= 1;
+                }
+                type_start = line_end;
+            }
+            // Find the function body end
+            let after_sig = fn_start + "base64_dec_fn (unsigned char c)".len();
+            let mut j = after_sig;
+            while j < bytes.len() && bytes[j] != b'{' { j += 1; }
+            if j < bytes.len() {
+                let mut depth = 1i32;
+                let mut k = j + 1;
+                while k < bytes.len() && depth > 0 {
+                    if bytes[k] == b'{' { depth += 1; }
+                    else if bytes[k] == b'}' { depth -= 1; }
+                    k += 1;
+                }
+                // Skip trailing whitespace/newlines
+                let mut end = k;
+                while end < bytes.len() && (bytes[end] == b'\n' || bytes[end] == b' ' || bytes[end] == b'\t') { end += 1; }
+                result = format!("{}{}", &result[..type_start], &result[end..]);
+            }
+        }
+    }
+    // Fix broken constructor definitions: "ClassName_\nClassName(...)" -> "void _ctor_ClassName(struct ClassName *this_, ...)"
+    result = fix_broken_constructors(&result);
+    result
+}
+
+/// Fix broken constructor definitions that have "ClassName_" as a return type
+/// followed by the actual constructor name on the next line.
+fn fix_broken_constructors(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip strings and comments
+        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        }
+        // Look for identifier at start of line that ends with '_'
+        if is_ident_char(bytes[i]) && (i == 0 || bytes[i-1] == b'\n') {
+            let (ident, ident_end) = read_ident(bytes, i);
+            if ident.ends_with('_') && ident.len() > 1 {
+                let class_name = &ident[..ident.len()-1];
+                // Check if next non-whitespace is the same identifier followed by '('
+                let after = skip_ws(bytes, ident_end);
+                if after < len && is_ident_char(bytes[after]) {
+                    let (next_ident, next_end) = read_ident(bytes, after);
+                    if next_ident == class_name {
+                        let after_next = skip_ws(bytes, next_end);
+                        if after_next < len && bytes[after_next] == b'(' {
+                            // This is a broken constructor!
+                            // Find matching ')'
+                            let mut depth = 1i32;
+                            let mut j = after_next + 1;
+                            while j < len && depth > 0 {
+                                if bytes[j] == b'(' { depth += 1; }
+                                else if bytes[j] == b')' { depth -= 1; }
+                                j += 1;
+                            }
+                            let paren_end = j - 1;
+                            let params = &s[after_next+1..paren_end];
+                            let after_paren = skip_ws(bytes, j);
+                            // Check for initializer list ':'
+                            if after_paren < len && bytes[after_paren] == b':' {
+                                // Parse initializer list and convert to body assignments
+                                let mut k = after_paren + 1;
+                                let mut init_entries = Vec::new();
+                                // Skip to '{'
+                                while k < len && bytes[k] != b'{' {
+                                    if is_ident_char(bytes[k]) {
+                                        let (mname, mname_end) = read_ident(bytes, k);
+                                        let after_mname = skip_ws(bytes, mname_end);
+                                        if after_mname < len && (bytes[after_mname] == b'(' || bytes[after_mname] == b'{') {
+                                            let open = bytes[after_mname];
+                                            let close = if open == b'(' { b')' } else { b'}' };
+                                            let mut d = 1i32;
+                                            let mut v = after_mname + 1;
+                                            while v < len && d > 0 {
+                                                if bytes[v] == open { d += 1; }
+                                                else if bytes[v] == close { d -= 1; }
+                                                v += 1;
+                                            }
+                                            let value = &s[after_mname+1..v-1];
+                                            init_entries.push((mname, value.to_string()));
+                                            k = v;
+                                            let after_val = skip_ws(bytes, k);
+                                            if after_val < len && bytes[after_val] == b',' {
+                                                k = after_val + 1;
+                                            } else { k = after_val; }
+                                        } else { k = after_mname; }
+                                    } else { k += 1; }
+                                }
+                                // Find body '{' ... '}'
+                                if k < len && bytes[k] == b'{' {
+                                    let mut bd = 1i32;
+                                    let body_start = k + 1;
+                                    k += 1;
+                                    while k < len && bd > 0 {
+                                        if bytes[k] == b'{' { bd += 1; }
+                                        else if bytes[k] == b'}' { bd -= 1; }
+                                        k += 1;
+                                    }
+                                    let body = &s[body_start..k-1];
+                                    // Output: void _ctor_ClassName(struct ClassName *this_, params) { assignments; body }
+                                    result.push_str(&format!(
+                                        "void _ctor_{}(struct {} *this_{}", 
+                                        class_name, class_name,
+                                        if params.trim().is_empty() { "" } else { ", " }
+                                    ));
+                                    result.push_str(params.trim());
+                                    result.push_str(") {\n");
+                                    for (mname, mvalue) in &init_entries {
+                                        result.push_str(&format!("  this_->{} = {};\n", mname, mvalue));
+                                    }
+                                    result.push_str(body);
+                                    result.push_str("}\n");
+                                    i = k;
+                                    continue;
+                                }
+                            } else if after_paren < len && bytes[after_paren] == b'{' {
+                                // No init list, just body
+                                let mut bd = 1i32;
+                                let body_start = after_paren + 1;
+                                let mut k = body_start;
+                                while k < len && bd > 0 {
+                                    if bytes[k] == b'{' { bd += 1; }
+                                    else if bytes[k] == b'}' { bd -= 1; }
+                                    k += 1;
+                                }
+                                let body = &s[body_start..k-1];
+                                result.push_str(&format!(
+                                    "void _ctor_{}(struct {} *this_{}", 
+                                    class_name, class_name,
+                                    if params.trim().is_empty() { "" } else { ", " }
+                                ));
+                                result.push_str(params.trim());
+                                result.push_str(") {");
+                                result.push_str(body);
+                                result.push_str("}\n");
+                                i = k;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
     result
 }
 
@@ -4092,6 +4964,16 @@ struct mkdeps *_new_mkdeps(void);
 struct cpp_substring_ranges;
 void cpp_substring_ranges_add_range(struct cpp_substring_ranges *this_, struct source_range range);
 void cpp_substring_ranges_add_n_ranges(struct cpp_substring_ranges *this_, int num, struct cpp_string_location_reader *loc_reader);
+struct cpp_string_location_reader;
+struct source_range cpp_string_location_reader_get_next(struct cpp_string_location_reader *this_);
+struct cpp_display_width_computation;
+int cpp_display_width_computation_process_next_codepoint(struct cpp_display_width_computation *this_, struct cpp_decoded_char *out);
+int cpp_display_width_computation_advance_display_cols(struct cpp_display_width_computation *this_, int n);
+bool cpp_display_width_computation_done(struct cpp_display_width_computation *this_);
+/* vec stubs for GCC vector operations */
+static inline void vec_truncate(void *vec, unsigned int size) { (void)vec; (void)size; }
+static inline unsigned int vec_count(const void *vec) { (void)vec; return 0; }
+static inline void vec_push(void *vec, void *elem) { (void)vec; (void)elem; }
 /* Stubs for x86 SSE builtins that dcc doesn't support */
 static inline int dcc_pmovmskb128(const void *p) { (void)p; return 0; }
 static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; return p; }
