@@ -140,11 +140,18 @@ GCC 主编译器构建需要先生成器程序（genmodes, genemit 等），
 已完成：
 - auto-host.h 类型宏冲突修复（ssize_t, pid_t 等）
 - gcc/Makefile 编译器路径修正（CC/CXX 指向 dcc）
-- errors.cc 生成器文件编译成功
+- errors.cc 生成器文件编译成功 ✅
+- **genmodes.cc 编译成功** ✅ （关键生成器，包含 main 函数）
+- strip_cpp_keywords 重大修复：
+  - 控制流关键字（if/while/for/switch）不再被误识别为成员函数
+  - if 条件变量声明正确转换为 C 风格
+  - remove_all_default_args 不再破坏 if 条件中的初始化
+  - 添加 std_swap 宏辅助函数
 
 当前受阻：
-- genmodes.cc 等复杂生成器程序的 C++ 降级仍有问题
-- 需要生成的头文件（insn-modes.h 等）尚未生成
+- 链接生成器程序时出现 inline 函数多重定义错误
+- 需要修复 C++ 前端对 inline 函数的处理
+- 其他生成器程序（genemit, genrecog 等）待编译
 
 ### 构建命令
 
