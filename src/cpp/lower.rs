@@ -2438,6 +2438,16 @@ fn remove_all_default_args(s: &str) -> String {
                         break;
                     }
                     if bytes[k] == b'"' { k = skip_string_literal(bytes, k); continue; }
+                    // Skip character literals like '=' or '\n'
+                    if bytes[k] == b'\'' {
+                        k += 1;
+                        while k < len && bytes[k] != b'\'' {
+                            if bytes[k] == b'\\' { k += 1; } // skip escape
+                            k += 1;
+                        }
+                        if k < len { k += 1; } // skip closing '
+                        continue;
+                    }
                     if bytes[k] == b'(' { paren_depth += 1; }
                     else if bytes[k] == b')' { paren_depth -= 1; }
                     else if paren_depth == 1 {
