@@ -1,0 +1,23 @@
+// <tuple> - Minimal stub for std::tuple
+#ifndef _DCC_TUPLE
+#define _DCC_TUPLE
+
+namespace std {
+
+// Minimal tuple implementation for GCC compilation
+template<typename... Types>
+class tuple {
+public:
+  tuple() = default;
+  // Add more as needed
+};
+
+template<size_t I, typename... Types>
+auto get(const tuple<Types...>& t) {
+  // Stub implementation
+  return 0;
+}
+
+} // namespace std
+
+#endif // _DCC_TUPLE

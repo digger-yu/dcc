@@ -1,0 +1,12 @@
+// <csignal> - C++ wrapper for signal.h
+#ifndef _DCC_CSIGNAL
+#define _DCC_CSIGNAL
+
+#include <signal.h>
+
+namespace std {
+  using ::sig_atomic_t;
+  using ::sig_t;
+}
+
+#endif // _DCC_CSIGNAL

@@ -1,0 +1,11 @@
+// <cerrno> - C++ wrapper for errno.h
+#ifndef _DCC_CERRNO
+#define _DCC_CERRNO
+
+#include <errno.h>
+
+namespace std {
+  using ::errno_t;
+}
+
+#endif // _DCC_CERRNO
