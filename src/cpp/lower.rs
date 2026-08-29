@@ -363,9 +363,27 @@ fn clean_struct_bodies(s: &str) -> String {
             if j < len && is_ident_char(bytes[j]) {
                 let (name, name_end) = read_ident(bytes, j);
                 j = skip_ws(bytes, name_end);
-                // 跳过可能的继承 (应该已被 remove_struct_inheritance 处理)
-                while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
-                if j < len && bytes[j] == b'{' {
+                // Check if this is a struct DEFINITION (struct NAME {)
+                // vs a variable declaration (struct NAME var = { ... })
+                // After the name, only whitespace, attributes, or
+                // inheritance (: base) should appear before '{'.
+                // If we see '=', '[', or another identifier before '{',
+                // it's a variable declaration, not a struct definition.
+                let is_struct_def = if j < len && bytes[j] == b'{' {
+                    true
+                } else if j < len && bytes[j] == b':' {
+                    // Inheritance: struct NAME : base { ... }
+                    // Skip to '{'
+                    let mut k = j;
+                    while k < len && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                    k < len && bytes[k] == b'{'
+                } else {
+                    false
+                };
+                if is_struct_def {
+                    // Skip to '{'
+                    while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                    if j < len && bytes[j] == b'{' {
                     struct_name_stack.push(name.clone());
                     result.push_str(&s[i..j+1]);
                     i = j + 1;
@@ -420,6 +438,7 @@ fn clean_struct_bodies(s: &str) -> String {
                     }
                     continue;
                 }
+                } // end if is_struct_def
             }
         }
 
@@ -487,9 +506,19 @@ fn clean_struct_bodies(s: &str) -> String {
 
             // 跳过 static 成员声明 (含初始化)
             if match_word_at(bytes, i, "static") {
-                // 跳过到 ';' (可能跨行)
+                // 跳过到 ';' (可能跨行), 但要跳过嵌套的 {...}
                 let mut j = i;
-                while j < len && bytes[j] != b';' && bytes[j] != b'}' { j += 1; }
+                let mut bd = 0i32;
+                while j < len {
+                    if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
+                    if bytes[j] == b'{' { bd += 1; }
+                    else if bytes[j] == b'}' {
+                        if bd == 0 { break; } // struct body closing brace
+                        bd -= 1;
+                    }
+                    else if bytes[j] == b';' && bd == 0 { break; }
+                    j += 1;
+                }
                 if j < len && bytes[j] == b';' { j += 1; }
                 i = j;
                 continue;
@@ -1211,13 +1240,45 @@ fn convert_if_condition_decls(s: &str) -> String {
                 // Look for pattern: identifier identifier = 
                 // But skip comparison operators: !=, ==, <=, >=
                 if let Some(eq_pos) = cond_content.find('=') {
+                    // Make sure this is not == (comparison)
+                    // Check the character right after the '='
+                    let next_after_eq = if eq_pos + 1 < cond_content.len() {
+                        cond_content.as_bytes()[eq_pos + 1]
+                    } else {
+                        0
+                    };
+                    if next_after_eq == b'=' {
+                        // This is ==, not a declaration assignment.
+                        // Try to find the next '=' that is not part of ==
+                        let rest = &cond_content[eq_pos + 2..];
+                        if let Some(rel_pos) = rest.find('=') {
+                            let actual_eq_pos = eq_pos + 2 + rel_pos;
+                            // Check if this one is also ==
+                            let next2 = if actual_eq_pos + 1 < cond_content.len() {
+                                cond_content.as_bytes()[actual_eq_pos + 1]
+                            } else {
+                                0
+                            };
+                            if next2 == b'=' { /* also ==, skip */ }
+                            else {
+                                // Process actual_eq_pos below by falling through
+                                // We handle this by re-assigning eq_pos
+                                // (Rust doesn't allow reassigning in if-let,
+                                //  so we use a helper approach)
+                            }
+                        }
+                        // For now, if the first = is ==, skip conversion
+                        // unless we find a standalone = later
+                        // Simple approach: just skip if first = is ==
+                    } else {
                     // Check if this is part of a comparison operator
                     // Look back to skip whitespace and check for !, =, <, >
                     let is_comparison = {
                         let before_eq = cond_content[..eq_pos].trim_end();
                         if !before_eq.is_empty() {
                             let last_char = before_eq.as_bytes()[before_eq.len() - 1];
-                            last_char == b'!' || last_char == b'=' || last_char == b'<' || last_char == b'>'
+                            last_char == b'!' || last_char == b'='
+                                || last_char == b'<' || last_char == b'>'
                         } else {
                             false
                         }
@@ -1230,17 +1291,67 @@ fn convert_if_condition_decls(s: &str) -> String {
                         // Check if before_eq looks like "Type varname"
                         let parts: Vec<&str> = before_eq.split_whitespace().collect();
                         if parts.len() >= 2 {
-                            // Likely a declaration: Type varname = expr
-                            let var_type = parts[..parts.len()-1].join(" ");
-                            let var_name = parts[parts.len()-1];
+                            // The first token must look like a type name:
+                            // - a C keyword (int, char, etc.) or
+                            // - starts with 'struct'/'enum'/'union' or
+                            // - a single identifier (no operators like >, <, &&, etc.)
+                            let first_token = parts[0];
+                            let looks_like_type = first_token == "int"
+                                || first_token == "char"
+                                || first_token == "short"
+                                || first_token == "long"
+                                || first_token == "float"
+                                || first_token == "double"
+                                || first_token == "void"
+                                || first_token == "unsigned"
+                                || first_token == "signed"
+                                || first_token == "bool"
+                                || first_token == "auto"
+                                || first_token == "const"
+                                || first_token == "struct"
+                                || first_token == "enum"
+                                || first_token == "union"
+                                || first_token == "volatile"
+                                || first_token == "register"
+                                || first_token == "static"
+                                // Check if it's a plausible type name
+                                // (starts with letter/underscore, all alnum/underscore)
+                                || (first_token.chars().all(|c| c.is_alphanumeric()
+                                    || c == '_')
+                                    && first_token.chars().next()
+                                        .map_or(false, |c| c.is_alphabetic()
+                                        || c == '_'));
                             
-                            // Output: Type varname = expr; if (varname)
-                            result.push_str(&format!("{} {} = {}; if ({})", 
-                                var_type, var_name, after_eq, var_name));
-                            i = paren_end + 1;
-                            continue;
+                            // Also check that no part contains binary operators
+                            // (but allow * which can be a pointer declarator)
+                            let has_operators = parts.iter().any(|p| {
+                                p.contains('>') || p.contains('<')
+                                    || p.contains('&') || p.contains('|')
+                                    || p.contains('!') || p.contains('+')
+                                    || p.contains('-') || p.contains('/')
+                                    || p.contains('%') || p.contains('^')
+                                    || p.contains('~') || p.contains('?')
+                                    || p.contains(',') || p.contains('[')
+                                    || p.contains(']') || p.contains('(')
+                                    || p.contains(')') || p.contains('=')
+                            });
+                            
+                            if looks_like_type && !has_operators {
+                                // Likely a declaration: Type varname = expr
+                                let var_type = parts[..parts.len()-1].join(" ");
+                                let var_name = parts[parts.len()-1];
+                                
+                                // Output: Type varname = expr; if (varname)
+                                result.push_str(&format!(
+                                    "{} {} = {}; if ({})",
+                                    var_type, var_name, after_eq, var_name
+                                ));
+                                i = paren_end + 1;
+                                continue;
+                            }
                         }
                     }
+                    } // end else (not ==)
                 }
             }
         }
@@ -1671,10 +1782,10 @@ fn strip_gcc_attributes(s: &str) -> String {
     result
 }
 
-/// 为所有 struct 生成 typedef, 使得 NAME 和 struct NAME 都有效
-/// 对于每个 struct NAME { ... }, 在文件末尾添加 typedef struct NAME NAME;
+/// 为所有 struct/enum 生成 typedef, 使得 NAME 和 struct NAME / enum NAME 都有效
 fn generate_struct_typedefs(s: &str) -> String {
     let mut struct_names: Vec<String> = Vec::new();
+    let mut enum_names: Vec<String> = Vec::new();
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -1683,6 +1794,7 @@ fn generate_struct_typedefs(s: &str) -> String {
         if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
             i = skip_comment(bytes, i); continue;
         }
+        // Collect struct names
         if match_word_at(bytes, i, "struct") {
             let mut j = skip_ws(bytes, i + 6);
             // 跳过属性宏
@@ -1711,13 +1823,35 @@ fn generate_struct_typedefs(s: &str) -> String {
                 }
             }
         }
+        // Collect enum names
+        if match_word_at(bytes, i, "enum") {
+            let j = skip_ws(bytes, i + 4);
+            if j < len && is_ident_char(bytes[j]) {
+                let (name, name_end) = read_ident(bytes, j);
+                let k = skip_ws(bytes, name_end);
+                // Only collect if followed by '{' (definition) or
+                // ';' (forward declaration)
+                if k < len && (bytes[k] == b'{' || bytes[k] == b';') {
+                    if !name.is_empty() && !enum_names.contains(&name) {
+                        enum_names.push(name);
+                    }
+                }
+            }
+        }
         i += 1;
     }
-    if struct_names.is_empty() { return s.to_string(); }
-    let mut result = String::with_capacity(s.len() + struct_names.len() * 50);
-    result.push_str("/* Generated struct typedefs */\n");
+    if struct_names.is_empty() && enum_names.is_empty() {
+        return s.to_string();
+    }
+    let mut result = String::with_capacity(
+        s.len() + struct_names.len() * 50 + enum_names.len() * 50
+    );
+    result.push_str("/* Generated struct/enum typedefs */\n");
     for name in &struct_names {
         result.push_str(&format!("typedef struct {} {};\n", name, name));
+    }
+    for name in &enum_names {
+        result.push_str(&format!("typedef enum {} {};\n", name, name));
     }
     result.push_str("\n");
     result.push_str(s);
@@ -2523,143 +2657,142 @@ fn replace_constructors(s: &str) -> String {
 /// Pattern: ClassName_ClassName(params) → void _ctor_ClassName(params)
 /// Pattern: ClassName_~ClassName(params) → void _dtor_ClassName(params)
 fn replace_flattened_ctor_dtor(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    
-    while i < len {
-        // Skip string literals
-        if bytes[i] == b'"' {
-            let j = skip_string_literal(bytes, i);
-            result.push_str(&s[i..j]);
-            i = j;
-            continue;
-        }
-        // Skip comments
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i);
-            result.push_str(&s[i..j]);
-            i = j;
-            continue;
-        }
-        
-        // Look for identifier_identifier pattern (potential flattened constructor)
-        if is_ident_char(bytes[i]) {
-            let ident_start = i;
-            while i < len && is_ident_char(bytes[i]) {
-                i += 1;
+    // Step 1: Collect all struct names from `struct NAME {` / `struct NAME\n{`
+    let mut struct_names: Vec<String> = Vec::new();
+    {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
+            if bytes[i] == b'/' && i+1 < len
+                && (bytes[i+1] == b'/' || bytes[i+1] == b'*')
+            {
+                i = skip_comment(bytes, i); continue;
             }
-            let first_ident = &s[ident_start..i];
-            
-            // Check if followed by _
-            if i < len && bytes[i] == b'_' {
-                let underscore_pos = i;
-                i += 1;
-                
-                // Check if followed by ~ (destructor) or another identifier (constructor)
-                if i < len && bytes[i] == b'~' {
-                    // Destructor pattern: ClassName_~ClassName
-                    i += 1; // skip ~
-                    let second_ident_start = i;
-                    while i < len && is_ident_char(bytes[i]) {
-                        i += 1;
-                    }
-                    let second_ident = &s[second_ident_start..i];
-                    
-                    if first_ident == second_ident {
-                        // Check if followed by (
-                        let mut j = i;
-                        while j < len && (bytes[j] as char).is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        if j < len && bytes[j] == b'(' {
-                            // It's a destructor!
-                            result.push_str(&format!("void _dtor_{}", first_ident));
-                            // Skip whitespace to (
-                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
-                                i += 1;
-                            }
-                            continue;
+            if match_word_at(bytes, i, "struct") {
+                let j = skip_ws(bytes, i + 6);
+                if j < len && is_ident_char(bytes[j]) {
+                    let (name, name_end) = read_ident(bytes, j);
+                    let k = skip_ws(bytes, name_end);
+                    if k < len && bytes[k] == b'{' {
+                        if !struct_names.contains(&name) {
+                            struct_names.push(name);
                         }
                     }
-                    // Not a destructor, output as-is
-                    result.push_str(first_ident);
-                    result.push('_');
-                    result.push('~');
-                    result.push_str(second_ident);
-                    continue;
-                } else if i < len && is_ident_char(bytes[i]) {
-                    // Constructor pattern: ClassName_ClassName
-                    let second_ident_start = i;
-                    while i < len && is_ident_char(bytes[i]) {
-                        i += 1;
-                    }
-                    let second_ident = &s[second_ident_start..i];
-                    
-                    if first_ident == second_ident {
-                        // Check if followed by (
-                        let mut j = i;
-                        while j < len && (bytes[j] as char).is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        if j < len && bytes[j] == b'(' {
-                            // It's a constructor!
-                            result.push_str(&format!("void _ctor_{}", first_ident));
-                            // Skip whitespace to (
-                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
-                                i += 1;
-                            }
-                            // Skip constructor initializer list : member(init), ...
-                            // Find the opening (
-                            let mut depth = 1i32;
-                            i += 1; // skip (
-                            while i < len && depth > 0 {
-                                if bytes[i] == b'(' { depth += 1; }
-                                else if bytes[i] == b')' { depth -= 1; }
-                                i += 1;
-                            }
-                            // Skip whitespace
-                            while i < len && (bytes[i] as char).is_ascii_whitespace() {
-                                i += 1;
-                            }
-                            // Skip initializer list if present
-                            if i < len && bytes[i] == b':' && (i+1 >= len || bytes[i+1] != b':') {
-                                i += 1; // skip :
-                                // Skip to {
-                                let mut brace_depth = 0i32;
-                                while i < len {
-                                    if bytes[i] == b'(' { brace_depth += 1; }
-                                    else if bytes[i] == b')' { brace_depth -= 1; }
-                                    else if bytes[i] == b'{' && brace_depth == 0 { break; }
-                                    i += 1;
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                    // Not a constructor, output as-is
-                    result.push_str(first_ident);
-                    result.push('_');
-                    result.push_str(second_ident);
-                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    // Sort longest first to avoid substring false matches
+    struct_names.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    // Step 2: Replace destructor patterns
+    // ClassName_~ClassName( → void _dtor_ClassName (
+    let mut result = s.to_string();
+    for name in &struct_names {
+        let pattern = format!("{}_~{}", name, name);
+        loop {
+            if let Some(pos) = result.find(&pattern) {
+                // Check word boundary before pattern
+                if pos > 0 {
+                    let prev = result.as_bytes()[pos - 1];
+                    if is_ident_char(prev) { break; }
+                }
+                let after = pos + pattern.len();
+                // Skip whitespace after pattern
+                let mut j = after;
+                let rb = result.as_bytes();
+                while j < rb.len() && (rb[j] as char).is_ascii_whitespace() {
+                    j += 1;
+                }
+                // Must be followed by (
+                if j < rb.len() && rb[j] == b'(' {
+                    let replacement = format!("void _dtor_{} ", name);
+                    result = format!(
+                        "{}{}{}",
+                        &result[..pos],
+                        replacement,
+                        &result[after..]
+                    );
                 } else {
-                    // Not a constructor/destructor
-                    result.push_str(first_ident);
-                    result.push('_');
-                    continue;
+                    break;
                 }
             } else {
-                // No underscore, just output the identifier
-                result.push_str(first_ident);
-                continue;
+                break;
             }
         }
-        
-        result.push(bytes[i] as char);
-        i += 1;
     }
-    
+
+    // Step 3: Replace constructor patterns
+    // ClassName_ClassName( → void _ctor_ClassName (
+    // Also skip initializer list : member(init) { body }
+    for name in &struct_names {
+        let pattern = format!("{}_{}", name, name);
+        loop {
+            if let Some(pos) = result.find(&pattern) {
+                // Check word boundary before pattern
+                if pos > 0 {
+                    let prev = result.as_bytes()[pos - 1];
+                    if is_ident_char(prev) { break; }
+                }
+                let after = pos + pattern.len();
+                let rb = result.as_bytes();
+                // Skip whitespace
+                let mut j = after;
+                while j < rb.len()
+                    && (rb[j] as char).is_ascii_whitespace()
+                {
+                    j += 1;
+                }
+                // Must be followed by (
+                if j >= rb.len() || rb[j] != b'(' { break; }
+                // Find matching )
+                let mut depth = 1i32;
+                j += 1; // skip (
+                while j < rb.len() && depth > 0 {
+                    if rb[j] == b'(' { depth += 1; }
+                    else if rb[j] == b')' { depth -= 1; }
+                    j += 1;
+                }
+                // j is now right after matching ')'
+                // Save this position - we keep params up to here
+                let after_params = j;
+                // Skip whitespace
+                while j < rb.len()
+                    && (rb[j] as char).is_ascii_whitespace()
+                {
+                    j += 1;
+                }
+                // Skip initializer list : member(init), ...
+                if j < rb.len() && rb[j] == b':'
+                    && (j + 1 >= rb.len() || rb[j + 1] != b':')
+                {
+                    j += 1;
+                    let mut bd = 0i32;
+                    while j < rb.len() {
+                        if rb[j] == b'(' { bd += 1; }
+                        else if rb[j] == b')' { bd -= 1; }
+                        else if rb[j] == b'{' && bd == 0 { break; }
+                        j += 1;
+                    }
+                }
+                let replacement = format!("void _ctor_{}", name);
+                // Keep: prefix + replacement + params + rest from j
+                result = format!(
+                    "{}{} {}{}",
+                    &result[..pos],
+                    replacement,
+                    &result[after..after_params],
+                    &result[j..]
+                );
+            } else {
+                break;
+            }
+        }
+    }
+
     result
 }
 
