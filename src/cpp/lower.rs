@@ -3460,6 +3460,15 @@ pub fn flatten_all_scope_operators(s: &str) -> String {
 /// This handles constructs that might have been missed by the main lowering passes
 pub fn apply_post_lowering_conversions(s: &str) -> String {
     let mut result = s.to_string();
+    // Inject uchar typedef if not present (needed when IN_GCC is defined)
+    if !result.contains("typedef unsigned char uchar") && !result.contains("typedef\tunsigned char uchar") {
+        // Add after the first #include or at the beginning
+        if let Some(pos) = result.find("\n") {
+            result.insert_str(pos, "\n#ifndef HAVE_UCHAR\ntypedef unsigned char uchar;\n#endif\n");
+        } else {
+            result.insert_str(0, "#ifndef HAVE_UCHAR\ntypedef unsigned char uchar;\n#endif\n");
+        }
+    }
     // Convert C++ functional casts: Type(expr) -> (Type)(expr)
     result = convert_simple_functional_casts(&result);
     // Workaround: handle 'unsigned (expr)' pattern that convert_simple_functional_casts misses
