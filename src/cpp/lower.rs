@@ -1637,8 +1637,19 @@ fn convert_if_condition_decls(s: &str) -> String {
                             
                             if looks_like_type && !has_operators {
                                 // Likely a declaration: Type varname = expr
-                                let var_type = parts[..parts.len()-1].join(" ");
-                                let var_name = parts[parts.len()-1];
+                                // Handle pointer declarations: Type *varname = expr
+                                // The '*' should be part of the type, not the variable name
+                                let mut var_type_parts = parts[..parts.len()-1].to_vec();
+                                let mut var_name = parts[parts.len()-1].to_string();
+                                
+                                // Check if var_name starts with '*' (pointer declarator)
+                                if var_name.starts_with('*') {
+                                    // Move the '*' to the type
+                                    var_name = var_name[1..].to_string();
+                                    var_type_parts.push("*");
+                                }
+                                
+                                let var_type = var_type_parts.join(" ");
                                 
                                 // Output: Type varname = expr; if (varname)
                                 result.push_str(&format!(
