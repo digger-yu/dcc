@@ -137,20 +137,29 @@ libcody 是 GCC 15 新增的 C++ 库，用于模块支持。dcc 的 C++ 前端
 GCC 主编译器构建需要先生成器程序（genmodes, genemit 等），
 这些程序在主机上运行以生成头文件和源代码。
 
-已完成：
+**重大突破**：
+- ✅ **genmodes 编译并链接成功** - 第一个完全用 dcc 编译的 GCC 生成器！
+  - 804KB 可执行文件
+  - 可以运行（但有运行时 segfault，需进一步调试）
+- ✅ errors.cc 生成器文件编译成功
+- ✅ inline 函数多重定义问题修复
+  - 添加 convert_inline_to_static_inline 转换
+  - 解决 C99 inline 语义与 C++ 的差异
+
+已完成的基础设施：
 - auto-host.h 类型宏冲突修复（ssize_t, pid_t 等）
 - gcc/Makefile 编译器路径修正（CC/CXX 指向 dcc）
-- errors.cc 生成器文件编译成功 ✅
-- **genmodes.cc 编译成功** ✅ （关键生成器，包含 main 函数）
 - strip_cpp_keywords 重大修复：
   - 控制流关键字（if/while/for/switch）不再被误识别为成员函数
   - if 条件变量声明正确转换为 C 风格
   - remove_all_default_args 不再破坏 if 条件中的初始化
   - 添加 std_swap 宏辅助函数
+  - inline → static inline 转换
 
 当前受阻：
-- 链接生成器程序时出现 inline 函数多重定义错误
-- 需要修复 C++ 前端对 inline 函数的处理
+- build-libcpp（构建机器用的 libcpp）编译问题
+  - cpp_auto_suppress_diagnostics 构造/析构函数降级
+- genmodes 运行时 segfault（需调试）
 - 其他生成器程序（genemit, genrecog 等）待编译
 
 ### 构建命令
