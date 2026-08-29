@@ -771,7 +771,9 @@ impl<'a> CppParser<'a> {
             }
             match self.parse_decl() {
                 Ok(d) => decls.push(d),
-                Err(_) => {
+                Err(e) => {
+                    // Record error diagnostic for fallback detection
+                    self.diags.push(e.to_diag(&self.file));
                     // 容错: 跳过无法解析的顶层构造, 到下一个 ';' 或 '}'
                     // 使 C++ 前端能处理包含复杂系统头文件的 GCC 构建
                     self.skip_to_next_toplevel();
