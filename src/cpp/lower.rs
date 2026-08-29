@@ -1590,6 +1590,35 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
+    // 收集所有已知类型名 (struct/typedef/enum)
+    let mut known_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut j = 0;
+        while j < len {
+            if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
+            if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "typedef")
+                || match_word_at(bytes, j, "enum") || match_word_at(bytes, j, "class")
+            {
+                let kw_len = if match_word_at(bytes, j, "struct") { 6 }
+                    else if match_word_at(bytes, j, "typedef") { 7 }
+                    else if match_word_at(bytes, j, "enum") { 4 } else { 5 };
+                let k = skip_ws(bytes, j + kw_len);
+                if k < len && is_ident_char(bytes[k]) {
+                    let (name, _) = read_ident(bytes, k);
+                    if !name.is_empty() {
+                        known_types.insert(name);
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+    // 添加基本类型关键字
+    for kw in &["int", "char", "bool", "long", "short", "float", "double",
+                "unsigned", "signed", "void", "auto", "size_t", "ssize_t",
+                "ptrdiff_t", "intptr_t", "uintptr_t"] {
+        known_types.insert(kw.to_string());
+    }
     let mut i = 0;
     // 跟踪是否在函数参数列表中
     let mut paren_depth = 0i32;
@@ -1641,6 +1670,8 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
         }
         // 在函数参数列表中, 将 Type &name 转换为 Type *name
         // 检测: 在括号内, '&' 前面是类型/空白, 后面是标识符
+        // 注意: 必须区分引用声明 (int &x) 和位运算 (x & y)
+        // 策略: 只有当 '&' 前面的标识符是已知类型名或类型关键字时才转换
         if paren_depth > 0 && bytes[i] == b'&' {
             // 检查不是 && (移动语义或逻辑与)
             if i + 1 < len && bytes[i+1] == b'&' {
@@ -1650,16 +1681,47 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 i += 2;
                 continue;
             }
-            // 检查前面是标识符字符或 '*' (类型结束)
+            // 检查前面是标识符字符 (可能是类型名)
             let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
             if is_ident_char(prev_char) || prev_char == b'*' || prev_char == b'>' || prev_char == b' ' {
-                // 检查后面是标识符开始或空白+标识符
-                let mut j = skip_ws(bytes, i + 1);
-                if j < len && (is_ident_char(bytes[j]) || bytes[j] == b'*') {
-                    // 这是引用参数, 替换 & 为 *
-                    result.push('*');
-                    i += 1;
-                    continue;
+                // 提取前面的标识符, 检查是否是类型名
+                let is_ref_decl = if is_ident_char(prev_char) {
+                    // 向前找到标识符起始位置
+                    let rbytes = result.as_bytes();
+                    let mut id_end = rbytes.len();
+                    let mut id_start = id_end;
+                    while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                    let prev_ident = &result[id_start..id_end];
+                    // 检查是否是已知类型名或以 _t 结尾
+                    known_types.contains(prev_ident) || prev_ident.ends_with("_t")
+                } else if prev_char == b'*' || prev_char == b'>' {
+                    // 指针或模板类型后面也可以是引用
+                    true
+                } else {
+                    // 前面是空格, 检查更前面的标识符
+                    let rbytes = result.as_bytes();
+                    let mut k = rbytes.len();
+                    // 跳过空格
+                    while k > 0 && (rbytes[k-1] == b' ' || rbytes[k-1] == b'\t') { k -= 1; }
+                    if k > 0 && is_ident_char(rbytes[k-1]) {
+                        let id_end = k;
+                        let mut id_start = k;
+                        while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                        let prev_ident = &result[id_start..id_end];
+                        known_types.contains(prev_ident) || prev_ident.ends_with("_t")
+                    } else {
+                        false
+                    }
+                };
+                if is_ref_decl {
+                    // 检查后面是标识符开始或空白+标识符
+                    let mut j = skip_ws(bytes, i + 1);
+                    if j < len && (is_ident_char(bytes[j]) || bytes[j] == b'*') {
+                        // 这是引用参数, 替换 & 为 *
+                        result.push('*');
+                        i += 1;
+                        continue;
+                    }
                 }
             }
         }
@@ -2570,6 +2632,8 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_word(&result, "virtual", "");
     // nullptr → ((void*)0), mutable → 删除
     result = fix_remaining_cpp_syntax(&result);
+    // 第二次展平 :: (捕获可能被遗漏的)
+    result = flatten_scope_operators(&result);
     // inline → static inline (C99 inline has external linkage by default,
     // causing multiple definition errors; static inline fixes this)
     result = convert_inline_to_static_inline(&result);
@@ -2594,6 +2658,31 @@ fn replace_cpp_constructs(s: &str) -> String {
     result = replace_ctor_calls_in_bodies(&result);
     // 转换 if 条件中的变量声明: if (Type var = expr) → Type var = expr; if (var)
     result = convert_if_condition_decls(&result);
+    // 最后一次展平 :: (捕获所有遗漏的)
+    result = flatten_scope_operators(&result);
+    // 强制替换所有剩余的 :: 为 _ (除了字符串字面量中的)
+    {
+        let mut forced = String::with_capacity(result.len());
+        let bytes = result.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'"' {
+                let j = skip_string_literal(bytes, i);
+                forced.push_str(&result[i..j]);
+                i = j;
+                continue;
+            }
+            if bytes[i] == b':' && i + 1 < len && bytes[i+1] == b':' {
+                forced.push('_');
+                i += 2;
+                continue;
+            }
+            forced.push(bytes[i] as char);
+            i += 1;
+        }
+        result = forced;
+    }
     // 注意: 不自动替换成员函数调用, 因为需要类型信息.
     result
 }
@@ -3268,7 +3357,27 @@ pub fn strip_cpp_keywords(s: &str) -> String {
         result.push(bytes[i] as char);
         i += 1;
     }
-    result
+    // 最后强制替换所有剩余的 :: 为 _ (除了字符串字面量中的)
+    let mut final_result = String::with_capacity(result.len());
+    let rbytes = result.as_bytes();
+    let rlen = rbytes.len();
+    let mut ri = 0;
+    while ri < rlen {
+        if rbytes[ri] == b'"' {
+            let rj = skip_string_literal(rbytes, ri);
+            final_result.push_str(&result[ri..rj]);
+            ri = rj;
+            continue;
+        }
+        if rbytes[ri] == b':' && ri + 1 < rlen && rbytes[ri+1] == b':' {
+            final_result.push('_');
+            ri += 2;
+            continue;
+        }
+        final_result.push(rbytes[ri] as char);
+        ri += 1;
+    }
+    final_result
 }
 
 /// 类型到 C 字符串 (模块级, Lower 内外共用)
