@@ -3705,7 +3705,34 @@ fn convert_if_cond_decls(s: &str) -> String {
                     // Extract the declaration: Type var = expr
                     let decl = &s[j..k-1];
                     // Find the variable name (last identifier before =)
-                    if let Some(eq_pos) = decl.find('=') {
+                    // But skip comparison operators: !=, ==, <=, >=
+                    let mut found_eq_pos = None;
+                    let mut search_start = 0;
+                    while let Some(rel_pos) = decl[search_start..].find('=') {
+                        let eq_pos = search_start + rel_pos;
+                        // Check if this is part of a comparison operator
+                        let prev_char = if eq_pos > 0 {
+                            decl.as_bytes()[eq_pos - 1]
+                        } else {
+                            0
+                        };
+                        let next_char = if eq_pos + 1 < decl.len() {
+                            decl.as_bytes()[eq_pos + 1]
+                        } else {
+                            0
+                        };
+                        // Skip if part of !=, ==, <=, >=
+                        if prev_char == b'!' || prev_char == b'='
+                            || prev_char == b'<' || prev_char == b'>'
+                            || next_char == b'=' {
+                            search_start = eq_pos + 1;
+                            continue;
+                        }
+                        // Found a standalone =
+                        found_eq_pos = Some(eq_pos);
+                        break;
+                    }
+                    if let Some(eq_pos) = found_eq_pos {
                         let before_eq = &decl[..eq_pos].trim_end();
                         // Find the last word (variable name)
                         let var_name = before_eq.split_whitespace().last().unwrap_or("");
