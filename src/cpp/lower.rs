@@ -1509,6 +1509,7 @@ fn convert_if_condition_decls(s: &str) -> String {
                 // Check if condition contains a variable declaration: Type var = expr
                 // Look for pattern: identifier identifier = 
                 // But skip comparison operators: !=, ==, <=, >=
+                let mut converted = false;
                 if let Some(eq_pos) = cond_content.find('=') {
                     // Make sure this is not == (comparison)
                     // Check the character right after the '='
@@ -1617,11 +1618,19 @@ fn convert_if_condition_decls(s: &str) -> String {
                                     var_type, var_name, after_eq, var_name
                                 ));
                                 i = paren_end + 1;
+                                converted = true;
                                 continue;
                             }
                         }
                     }
                     } // end else (not ==)
+                }
+                // If we didn't convert it, output the if statement normally
+                if !converted {
+                    // Output "if (" and the condition content, then let the main loop continue
+                    result.push_str("if (");
+                    i = after_if + 1; // Skip past "if ("
+                    continue;
                 }
             }
         }
@@ -2894,6 +2903,11 @@ fn replace_template_usages(s: &str) -> String {
                 let mut k = j + 1;
                 let mut has_comma = false;
                 let mut has_struct = false;
+                let mut has_comparison = false; // Track if content has ==, !=, <=, >=
+                let mut has_parens = false; // Track if content has ( )
+                let mut has_semicolon = false;
+                let mut has_newline = false;
+                let start_k = k;
                 while k < len && depth > 0 {
                     // Skip '>>' (bit-shift, not two template closes)
                     if bytes[k] == b'>' && k + 1 < len && bytes[k+1] == b'>' {
@@ -2910,16 +2924,48 @@ fn replace_template_usages(s: &str) -> String {
                     if bytes[k] == b'<' { depth += 1; }
                     else if bytes[k] == b'>' { depth -= 1; }
                     else if bytes[k] == b',' && depth == 1 { has_comma = true; }
+                    else if bytes[k] == b'(' || bytes[k] == b')' { has_parens = true; }
+                    else if bytes[k] == b';' { has_semicolon = true; }
+                    else if bytes[k] == b'\n' { has_newline = true; }
                     else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
                         break; // Not a template
                     }
+                    // Check for comparison operators (==, !=, <=, >=)
+                    if k + 1 < len {
+                        if (bytes[k] == b'=' && bytes[k+1] == b'=')
+                            || (bytes[k] == b'!' && bytes[k+1] == b'=')
+                            || (bytes[k] == b'<' && bytes[k+1] == b'=')
+                            || (bytes[k] == b'>' && bytes[k+1] == b'=') {
+                            has_comparison = true;
+                        }
+                    }
                     k += 1;
                 }
-                if depth == 0 && (has_comma || ident.contains("vec")
+                // Only replace if identifier contains template keywords
+                // AND content doesn't look like an expression (no comparisons, limited parens)
+                // AND the match is reasonably short (not spanning across functions)
+                let content_len = k - start_k;
+                let looks_like_template = ident.contains("vec")
                     || ident.contains("map") || ident.contains("hash")
                     || ident.contains("set") || ident.contains("pair")
-                    || ident.contains("auto_suppress"))
-                {
+                    || ident.contains("auto_suppress")
+                    || ident.contains("unique_ptr") || ident.contains("shared_ptr")
+                    || ident.contains("vector") || ident.contains("list")
+                    || ident.contains("deque") || ident.contains("array")
+                    || ident.contains("tuple") || ident.contains("optional")
+                    || ident.contains("function") || ident.contains("allocator");
+                // Don't replace if:
+                // - Content has comparison operators (likely not a template)
+                // - Content is too long (spanning across code)
+                // - Content has semicolons (spanning statements)
+                // - Content has too many newlines (spanning multiple lines incorrectly)
+                let is_valid_template = depth == 0 
+                    && looks_like_template
+                    && !has_comparison
+                    && !has_semicolon
+                    && content_len < 200 // Max 200 chars between < and >
+                    && !(has_newline && content_len > 100); // If newlines, keep it short
+                if is_valid_template {
                     // Looks like template usage
                     // Check what follows '>' - should be identifier (var name)
                     // or ';' or ',' or ')'
