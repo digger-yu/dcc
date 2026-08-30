@@ -8213,6 +8213,14 @@ impl Codegen {
                     }
                 }
                 // 3. 加载成员值 (位域 vs 普通)
+                // 数组字段 (如 decNumber 的 Unit lsu[1]): 值上下文中衰减为
+                // 首元素地址 — dst 已持有该地址, 不得再按元素大小加载值,
+                // 否则 `p = s->arr` 会把 arr[0] 的值当作地址.
+                let field_is_array = match &field_info {
+                    Some(f) => matches!(f.ty, Type::Array(_, _)),
+                    None => matches!(ty, Type::Array(_, _)),
+                };
+                if !field_is_array {
                 if let Some(ref f) = field_info {
                     if let Some(bw) = f.bit_width {
                         // 位域读取: 加载容器 → 右移 → 掩码
@@ -8297,6 +8305,7 @@ impl Codegen {
                         8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
                         _ => {}
                     }
+                }
                 }
             }
             Expr::CompoundLit { ty, inits, .. } => {
