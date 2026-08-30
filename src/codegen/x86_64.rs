@@ -5816,7 +5816,15 @@ impl Codegen {
                 .and_then(|name| self.func_param_types.get(name))
                 .and_then(|ps| ps.get(arg_idx))
                 .cloned();
-            let effective_ty = param_ty.unwrap_or_else(|| arg.ty());
+            // C 语义: 数组实参传参时衰减为指向首元素的指针
+            // (int a[8]; f(a) 即 f(&a[0])). 若按数组类型分类, 聚合
+            // 路径会把整个数组按值拷贝到参数暂存区, 导致
+            // printf("%s", buf) 这类调用读到垃圾. 衰减为指针后
+            // 走标量路径 gen_expr_decay 传地址.
+            let effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
+                Type::Array(elem, _) => Type::Ptr(elem),
+                t => t,
+            };
             let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
             let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
@@ -5883,7 +5891,11 @@ impl Codegen {
                 .and_then(|name| self.func_param_types.get(name))
                 .and_then(|ps| ps.get(arg_idx))
                 .cloned();
-            let effective_ty = param_ty.unwrap_or_else(|| arg.ty());
+            // 与上方分类循环一致: 数组实参衰减为指针
+            let effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
+                Type::Array(elem, _) => Type::Ptr(elem),
+                t => t,
+            };
             let aggregate = matches!(
                 effective_ty,
                 Type::Int128 | Type::UInt128 | Type::Complex(_)
