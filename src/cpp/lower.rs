@@ -78,6 +78,10 @@ pub struct Lower {
     /// 类内 enum 常量发射时以此为前缀, 避免不同实例的同名常量
     /// (如 is_same<int,int>::value / is_same<int,long>::value) 在 C 中重名.
     pub tpl_inst_prefix: Option<String>,
+    /// M30: 模板实例类内的 typedef 成员映射 (实例 key -> [(别名, 目标类型)]).
+    /// 目标类型已由 instantiate_decl 替换形参; TplMember 类型引用
+    /// (`Tpl<Args>::member`) 展开时查此表得到真实 C 类型.
+    pub inst_typedefs: std::collections::HashMap<String, Vec<(String, MangleType)>>,
     /// 当前函数是否返回 void (用于 `return *this;` → `return;` 转换)
     pub current_fn_void: bool,
     /// 当前函数返回引用时的被引用类型 (用于 `return *p;` → `return p;` 降级:
@@ -5753,6 +5757,10 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
             }
             format!("struct {}", s)
         }
+        // M30: TplMember 应在 Lower::mangle_to_c_ns 中展开为实例类
+        // typedef 成员的真实类型; 到达此模块级函数说明展开未发生,
+        // 输出占位并注释 (同 Auto 处理).
+        MangleType::TplMember { .. } => "int /*M30 unresolved tpl-member*/".into(),
     }
 }
 
@@ -5790,6 +5798,17 @@ fn template_arg_to_c(ty: &MangleType) -> String {
         MangleType::Ellipsis => "ellipsis".into(),
         MangleType::Auto => "auto".into(),
         MangleType::DecltypeAuto => "decltype_auto".into(),
+        MangleType::TplMember { name, args, member } => {
+            let flat_name = name.replace("::", "_");
+            let mut s = format!("tm_{}", flat_name);
+            for a in args {
+                s.push('_');
+                s.push_str(&template_arg_to_c(a));
+            }
+            s.push('_');
+            s.push_str(member);
+            s
+        }
     }
 }
 
@@ -5849,6 +5868,18 @@ impl Lower {
             MangleType::Template { name, args } => {
                 format!("struct {}", instantiated_class_name(name, args))
             }
+            // M30: TplMember 展开为实例类内 typedef 成员的形参替换后类型.
+            // 实例化由 scan_decl_types 的 TplMember 分支提前触发; 若映射
+            // 不存在 (模板未注册 / 引用先于扫描), 输出占位.
+            MangleType::TplMember { name, args, member } => {
+                let key = TemplateRegistry::key_for(name, args);
+                if let Some(tds) = self.inst_typedefs.get(&key) {
+                    if let Some((_, target)) = tds.iter().find(|(n, _)| n == member) {
+                        return self.mangle_to_c_ns(target);
+                    }
+                }
+                "int /*M30 unresolved tpl-member*/".into()
+            }
             _ => mangle_to_c(ty),
         }
     }
@@ -5871,6 +5902,7 @@ impl Lower {
             emitted_typedefs: std::collections::HashSet::new(),
             current_class: None,
             tpl_inst_prefix: None,
+            inst_typedefs: std::collections::HashMap::new(),
             current_fn_void: false,
             current_fn_ref_ret: None,
             lambdas: vec![],
@@ -7066,6 +7098,13 @@ impl Lower {
             CppDecl::MemberVar { ty, .. } => {
                 self.scan_ty(ty);
             }
+            // M30: 顶层全局变量 (含 TplMember 类型触发实例化)
+            CppDecl::GlobalVar { ty, init, .. } => {
+                self.scan_ty(ty);
+                if let Some(e) = init {
+                    self.scan_expr_types(e);
+                }
+            }
             CppDecl::OperatorFn {
                 params, body, ret, ..
             } => {
@@ -7087,6 +7126,13 @@ impl Lower {
     fn scan_ty(&mut self, ty: &MangleType) {
         match ty {
             MangleType::Template { name, args } => {
+                for a in args {
+                    self.scan_ty(a);
+                }
+                self.emit_inst_class(name, args);
+            }
+            // M30: TplMember 同样触发实例化 (收集 inst_typedefs 供展开)
+            MangleType::TplMember { name, args, .. } => {
                 for a in args {
                     self.scan_ty(a);
                 }
@@ -7273,11 +7319,27 @@ impl Lower {
         let Some(inst) = self.resolve_class_inst(name, args) else {
             return;
         };
-        self.inst_emitted.insert(key);
+        self.inst_emitted.insert(key.clone());
         // 先递归输出嵌套模板类 (字段/成员引用需要完整定义)
         self.scan_decl_types(&inst);
         // 注册类信息: 方法改写 / ctor 查找 / typeid
         self.register_inst_class(&inst);
+        // M30: 收集实例类内的 typedef 成员 (形参已替换为实参类型),
+        // 供 `Tpl<Args>::member` 类型引用展开. typedef 成员本身
+        // 不产生 C 输出, 无需实例类完整定义先行.
+        if let CppDecl::Class(c) = &inst {
+            let tds: Vec<(String, MangleType)> = c
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    CppDecl::Typedef { target, name } => Some((name.clone(), target.clone())),
+                    _ => None,
+                })
+                .collect();
+            if !tds.is_empty() {
+                self.inst_typedefs.insert(key, tds);
+            }
+        }
         // 实例化类名是全局唯一名, 与命名空间限定无关
         let saved_ns = self.ns.stack.clone();
         self.ns.stack.clear();
@@ -7481,6 +7543,26 @@ impl Lower {
 
     fn lower_decl(&mut self, d: &CppDecl) {
         match d {
+            // M30: 顶层全局变量 (`int g = 5;` / `static unsigned long h;`)
+            CppDecl::GlobalVar {
+                ty,
+                name,
+                init,
+                is_static,
+            } => {
+                let ty_c = self.mangle_to_c_ns(ty);
+                let st = if *is_static { "static " } else { "" };
+                match init {
+                    Some(e) => {
+                        self.out.push_str(&format!("{}{} {} = ", st, ty_c, name));
+                        self.emit_expr(e);
+                        self.out.push_str(";\n");
+                    }
+                    None => {
+                        self.out.push_str(&format!("{}{} {};\n", st, ty_c, name));
+                    }
+                }
+            }
             CppDecl::Class(c) => {
                 // M26: BMF - export module 后的类记为导出 (含成员布局)
                 if self.module_collect {
@@ -8054,9 +8136,10 @@ impl Lower {
                 }
                 self.out.push('\n');
             }
-            CppDecl::Typedef => {
+            CppDecl::Typedef { .. } => {
                 /* M11 stdlib: typedef 不产生 C 输出 (lower 后的 C
-                 * 代码会引入 stddef.h 等系统头处理 size_t). */
+                 * 代码会引入 stddef.h 等系统头处理 size_t). M30:
+                 * 目标类型随声明保留, 由 TplMember 引用展开使用. */
             }
             CppDecl::Empty => {
                 /* M18.0: enum / 修饰后无实际声明时使用, 不产生 C 输出. */
@@ -8634,7 +8717,11 @@ impl Lower {
                 };
                 // 把 C++ 类型名映射到 C 类型 (`Counter` -> `struct Counter`)
                 // M18.0: 在命名空间内, 用 namespace-aware mangle 让 qualified 类被正确解析
-                let c_type = if matches!(&resolved_ty, MangleType::Class(_)) {
+                // M30: TplMember 需查 inst_typedefs 展开, 同样走 ns 版本
+                let c_type = if matches!(
+                    &resolved_ty,
+                    MangleType::Class(_) | MangleType::TplMember { .. }
+                ) {
                     self.mangle_to_c_ns(&resolved_ty)
                 } else {
                     mangle_to_c(&resolved_ty)

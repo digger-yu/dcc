@@ -281,8 +281,21 @@ pub enum CppDecl {
     /// M11: extern "C" { ... } 块 (M18: 透传原文到 lower 输出)
     /// 原始文本作为字符串保存, lower 时整体 re-emit 为 extern "C" 块
     RawExternC(String),
-    /// M11: typedef 声明 (解析为 no-op, lower 时不产生 C 输出)
-    Typedef,
+    /// M30: 顶层全局变量声明 (`int g = 5;` / `Tpl<Args>::member g;`).
+    /// 之前 Ident 起始的变量声明误入 parse_free_fn (要求 `(`), 失败后
+    /// 整个文件降级 strip-keywords 模式; 现在显式解析并输出 C 全局变量.
+    GlobalVar {
+        ty: MangleType,
+        name: String,
+        init: Option<CppExpr>,
+        /// `static` 修饰 (C 同义: 内部链接)
+        is_static: bool,
+    },
+    /// M30: typedef 声明. M30: 带目标类型与别名, 使模板实例别名
+    /// (`typedef Name<Args> alias`) 和模板类内 typedef
+    /// (`typedef T type;`) 可被记录与实例化替换; lower 对普通
+    /// typedef 仍不产生 C 输出 (类型由后续引用处展开).
+    Typedef { target: MangleType, name: String },
     /// M18.0: 空占位声明 (enum / 修饰后无实际声明时使用)
     Empty,
     /// C++ enum declaration with scoped members and optional underlying type.
@@ -1097,6 +1110,20 @@ impl<'a> CppParser<'a> {
             }
             if self.is_operator_fn_start() {
                 return self.parse_operator_fn();
+            }
+        }
+        // M30: 类型关键字起始的全局变量声明 `int g = 5;` /
+        // `static unsigned long h = 7;`. 之前直接 Unsupported → 整个
+        // 文件降级 strip-keywords 模式; 现在显式解析 (失败仍报原错).
+        {
+            let saved_lex = self.lex.clone();
+            let saved_peek = self.peek.clone();
+            match self.parse_global_var_decl() {
+                Ok(v) => return Ok(v),
+                Err(_) => {
+                    self.lex = saved_lex;
+                    self.peek = saved_peek;
+                }
             }
         }
         Err(CppParseError::Unsupported("declaration form", self.span()))
@@ -2164,6 +2191,18 @@ impl<'a> CppParser<'a> {
         if self.is_operator_fn_start() {
             return self.parse_operator_fn();
         }
+        // M30: 类内 typedef 成员 (`typedef T type;`) — 解析并记录
+        // 目标类型 (实例化时形参替换), 供 TplMember 引用展开;
+        // 本身不产生 C 输出.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwTypedef,
+                ..
+            }))
+        ) {
+            return self.parse_typedef_decl();
+        }
         // 跳过 `typedef` 简单形式
         if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
@@ -2611,109 +2650,66 @@ impl<'a> CppParser<'a> {
 
     /// 解析 typedef <type> <name>; (M11 stdlib: 简化, 作为占位)
     fn parse_typedef_decl(&mut self) -> Result<CppDecl, CppParseError> {
-        self.bump(); // 跳过 `typedef`
-                     // 跳过 <type> 部分 (这里简化: 只跳过 ident / 关键字 + 可能的 * / [N])
-                     // 注意: 最后一个 ident 是 typedef 名称, 要留给 expect_ident.
-                     // 所以 loop 中遇到 ident 时不能直接 bump, 需要 break.
-                     // 简化策略: 跳过所有 * / 关键字, ident 留给 expect_ident
-        loop {
-            match &self.peek {
-                Some(CppTok::C(Tok {
-                    kind: TokKind::Star,
-                    ..
-                })) => {
-                    self.bump();
+        // 跳过 `typedef`
+        self.bump();
+        // M30: 解析目标类型 (parse_mangle_type 覆盖 builtin/类名/
+        // 模板实例/限定名/指针). 失败时回退 lex 状态并退化为旧跳过
+        // 逻辑: 匿名 enum/struct 定义等无法简单解析的 typedef 仍走
+        // no-op 路径 (target 置 Int, 不被引用).
+        let saved_lex = self.lex.clone();
+        let saved_peek = self.peek.clone();
+        let target = match self.parse_mangle_type() {
+            Ok(t) => t,
+            Err(_) => {
+                self.lex = saved_lex;
+                self.peek = saved_peek;
+                // 简化策略: 跳过所有 * / 关键字, ident 留给 expect_ident.
+                loop {
+                    match &self.peek {
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Star,
+                            ..
+                        })) => {
+                            self.bump();
+                        }
+                        Some(CppTok::C(Tok {
+                            kind:
+                                TokKind::KwChar
+                                | TokKind::KwInt
+                                | TokKind::KwShort
+                                | TokKind::KwLong
+                                | TokKind::KwFloat
+                                | TokKind::KwDouble
+                                | TokKind::KwVoid
+                                | TokKind::KwBool
+                                | TokKind::KwSigned
+                                | TokKind::KwUnsigned
+                                | TokKind::KwStruct
+                                | TokKind::KwUnion
+                                | TokKind::KwEnum
+                                | TokKind::KwConst
+                                | TokKind::KwVolatile
+                                | TokKind::KwStatic
+                                | TokKind::KwAtomic
+                                | TokKind::KwRestrict,
+                            ..
+                        })) => {
+                            self.bump();
+                        }
+                        _ => break,
+                    }
                 }
-                Some(CppTok::C(Tok {
-                    kind:
-                        TokKind::KwChar
-                        | TokKind::KwInt
-                        | TokKind::KwShort
-                        | TokKind::KwLong
-                        | TokKind::KwFloat
-                        | TokKind::KwDouble
-                        | TokKind::KwVoid
-                        | TokKind::KwBool
-                        | TokKind::KwSigned
-                        | TokKind::KwUnsigned
-                        | TokKind::KwStruct
-                        | TokKind::KwUnion
-                        | TokKind::KwEnum
-                        | TokKind::KwConst
-                        | TokKind::KwVolatile
-                        | TokKind::KwStatic
-                        | TokKind::KwAtomic
-                        | TokKind::KwRestrict,
-                    ..
-                })) => {
-                    self.bump();
-                }
-                _ => break,
+                MangleType::Int
             }
-        }
-        // 期望 ident (typedef 名). 支持模板实例类型 `Name<Args> alias`:
-        // 解析实参并记录别名映射, 表达式 `alias::member` 可展开为
-        // TplStaticAccess (触发实例化并引用带实例前缀的常量).
-        if matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::Ident,
-                ..
-            }))
-        ) && matches!(
-            self.peek_token_at(1),
-            Some(CppTok::C(Tok {
-                kind: TokKind::Lt,
-                ..
-            }))
-        ) {
-            let tname = self.expect_ident()?;
-            self.bump(); // <
-            let mut targs: Vec<MangleType> = Vec::new();
-            loop {
-                let arg = self.parse_mangle_type_depth(1)?;
-                targs.push(arg);
-                if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::Comma,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                    continue;
-                }
-                if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::Gt,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                    break;
-                }
-                if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::Shr,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                    self.deferred_gt += 1;
-                    break;
-                }
-                return Err(CppParseError::Unexpected(
-                    ">",
-                    format!("{:?}", self.peek),
-                    self.span(),
-                ));
-            }
-            let alias = self.expect_ident()?;
-            self.typedef_alias.insert(alias, (tname, targs));
-        } else {
-            let _name = self.expect_ident()?;
+        };
+        // 期望 ident (typedef 名). 模板实例类型 `Name<Args> alias`
+        // 已由 parse_mangle_type 解析为 Template; 记录别名映射,
+        // 表达式 `alias::member` 可展开为 TplStaticAccess (触发实例化
+        // 并引用带实例前缀的常量).
+        let name = self.expect_ident()?;
+        if let MangleType::Template { name: tname, args } = &target {
+            self.typedef_alias
+                .insert(name.clone(), (tname.clone(), args.clone()));
         }
         // 跳过 `;`
         if matches!(
@@ -2725,9 +2721,10 @@ impl<'a> CppParser<'a> {
         ) {
             self.bump();
         }
-        // M11 stdlib: typedef 不在 lower 阶段产生任何输出 (lower 后的 C
-        // 代码会用 stddef.h 等系统头处理 size_t, NULL 等).
-        Ok(CppDecl::Typedef)
+        // M30: typedef 仍不在 lower 阶段产生 C 输出; 目标类型随声明
+        // 保留, 模板类内的 typedef 成员经 instantiate_decl 替换形参后
+        // 由 TplMember 类型引用展开 (见 Lower::inst_typedefs).
+        Ok(CppDecl::Typedef { target, name })
     }
 
     /// Parse `enum [class] Name [: underlying] { ... };` and retain
@@ -3917,41 +3914,67 @@ impl<'a> CppParser<'a> {
                 }
             }
         }
-        let mut ty = match full_name.as_str() {
-            "void" => MangleType::Void,
-            "bool" => MangleType::Bool,
-            "char" => MangleType::Char,
-            "short" => MangleType::Short,
-            "int" => MangleType::Int,
-            "long" => MangleType::Long,
-            "float" => MangleType::Float,
-            "double" => MangleType::Double,
-            "unsigned" => MangleType::Uint,
-            "signed" => MangleType::Int,
-            // M17.0: `auto` 改为 Auto 占位, 由 lower 阶段基于 init 推导
-            "auto" => MangleType::Auto,
-            other => MangleType::Class(other.to_string()),
-        };
         // 跳过 const 限定后缀 (`int const*` 等)
         if self.at(CppKw::Const) {
             self.bump();
         }
-        // 吞 unsigned long long / long long / unsigned char / signed int 等组合
-        // M11 stdlib: signed/unsigned 后可跟 char/short/int/long/long long
-        while matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::KwLong
-                    | TokKind::KwShort
-                    | TokKind::KwChar
-                    | TokKind::KwInt
-                    | TokKind::KwSigned
-                    | TokKind::KwUnsigned,
-                ..
-            }))
-        ) {
-            self.bump();
+        // M30: 吞组合关键字类型并保留宽度 (`unsigned long` → Ulong,
+        // `long long` → LongLong). 之前仅跳过丢弃, `unsigned long` 被
+        // 降级为 32 位 Uint, 导致形参/展开类型宽度错误.
+        // 仅当首个类型词是内建基类型时才组合 (避免吞类名后的类型词).
+        let is_builtin_base = matches!(
+            full_name.as_str(),
+            "void"
+                | "bool"
+                | "char"
+                | "short"
+                | "int"
+                | "long"
+                | "float"
+                | "double"
+                | "signed"
+                | "unsigned"
+        );
+        if is_builtin_base {
+            while let Some(CppTok::C(Tok { kind, .. })) = &self.peek {
+                let txt = match kind {
+                    TokKind::KwLong => " long",
+                    TokKind::KwShort => " short",
+                    TokKind::KwChar => " char",
+                    TokKind::KwInt => " int",
+                    TokKind::KwSigned => " signed",
+                    TokKind::KwUnsigned => " unsigned",
+                    _ => break,
+                };
+                full_name.push_str(txt);
+                self.bump();
+            }
         }
+        let mut ty = match full_name.as_str() {
+            "void" => MangleType::Void,
+            "bool" => MangleType::Bool,
+            "char" => MangleType::Char,
+            "signed char" | "char signed" => MangleType::Schar,
+            "unsigned char" | "char unsigned" => MangleType::Uchar,
+            "short" | "short int" | "int short" => MangleType::Short,
+            "unsigned short" | "short unsigned" | "unsigned short int" => MangleType::Ushort,
+            "int" | "signed" | "signed int" => MangleType::Int,
+            "unsigned" | "unsigned int" => MangleType::Uint,
+            "long" | "long int" | "int long" => MangleType::Long,
+            "unsigned long" | "long unsigned" | "unsigned long int" | "long unsigned int" => {
+                MangleType::Ulong
+            }
+            "long long" | "long long int" => MangleType::LongLong,
+            "unsigned long long" | "long unsigned long" | "unsigned long long int" => {
+                MangleType::UlongLong
+            }
+            "float" => MangleType::Float,
+            "double" => MangleType::Double,
+            "long double" | "double long" => MangleType::LongDouble,
+            // M17.0: `auto` 改为 Auto 占位, 由 lower 阶段基于 init 推导
+            "auto" => MangleType::Auto,
+            other => MangleType::Class(other.to_string()),
+        };
         // M18: `T<U1, U2, ...>` 模板实例化语法
         // 判别: ident/类名 后紧跟 `<` 且形参合法 (递归到匹配 `>`)
         if matches!(
@@ -4022,10 +4045,31 @@ impl<'a> CppParser<'a> {
                 ));
             }
             // 升级为 Template
+            // M30: 限定名 `std::vector<...>` 用最后一段作模板名,
+            // 与 register (namespace 内声明的裸名) 和
+            // parse_local_var_decl (last segment) 对齐; 否则
+            // 参数/成员位置的 `std::vector<int>` 实例名错误.
+            let tpl_name = full_name.rsplit("::").next().unwrap_or(&name).to_string();
             ty = MangleType::Template {
-                name: name.clone(),
+                name: tpl_name.clone(),
                 args,
             };
+            // M30: 类型语境的 `Tpl<Args>::member` (模板类内 typedef 成员,
+            // 如 std::underlying_type<E>::type). lower 阶段展开为形参
+            // 替换后的真实类型.
+            if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                self.bump(); // ::
+                let member = self.expect_ident()?;
+                let args = match ty {
+                    MangleType::Template { args, .. } => args,
+                    _ => Vec::new(),
+                };
+                ty = MangleType::TplMember {
+                    name: tpl_name,
+                    args,
+                    member,
+                };
+            }
         }
         while matches!(
             &self.peek,
@@ -4291,6 +4335,8 @@ impl<'a> CppParser<'a> {
 
     fn parse_free_fn(&mut self) -> Result<CppDecl, CppParseError> {
         // 跳过函数说明符 (inline, static, virtual, explicit, ...)
+        // M30: 记录 static (Ident 起始的顶层变量声明需要内部链接信息)
+        let mut is_static = false;
         loop {
             let is_spec = matches!(
                 &self.peek,
@@ -4300,6 +4346,9 @@ impl<'a> CppParser<'a> {
                 ))
             );
             if is_spec {
+                if matches!(&self.peek, Some(CppTok::Kw(CppKw::Static, _))) {
+                    is_static = true;
+                }
                 self.bump();
             } else {
                 break;
@@ -4349,6 +4398,18 @@ impl<'a> CppParser<'a> {
             self.parse_mangle_type()?
         };
         let name = self.expect_ident()?;
+        // M30: 名字后不是 `(` → 全局变量声明 (`Tpl<Args>::member g = 5;`
+        // / `MyType g;`). 变量与函数共用 Ident 起始的声明入口, 变量
+        // 尾部 (init / `;`) 由 finish_global_var 完成.
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            return self.finish_global_var(ret, name, is_static);
+        }
         let params = self.parse_param_list()?;
         self.skip_cv_qual();
         // M26.1: 自由函数 noexcept 修饰 (noexcept / noexcept(expr))
@@ -4377,6 +4438,79 @@ impl<'a> CppParser<'a> {
             params,
             body,
             is_noexcept: spec.is_noexcept,
+        })
+    }
+
+    /// M30: 解析顶层全局变量声明 `<type> name (= expr)? ;`
+    /// 由 parse_free_fn (Ident 起始类型) 与 parse_decl (类型关键字起始)
+    /// 共用. 仅支持单个声明符 (`,` 多声明符仍走降级路径).
+    fn parse_global_var_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        let mut is_static = false;
+        loop {
+            if self.at(CppKw::Static) {
+                is_static = true;
+                self.bump();
+            } else if self.at(CppKw::Const) || self.at(CppKw::Volatile) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        let mut ty = self.parse_mangle_type()?;
+        // `&` 后缀兜底 (`*` 已由 parse_mangle_type 处理)
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Amp,
+                ..
+            }))
+        ) {
+            self.bump();
+            ty = MangleType::Reference(Box::new(ty));
+        }
+        let name = self.expect_ident()?;
+        self.finish_global_var(ty, name, is_static)
+    }
+
+    /// M30: 完成全局变量声明尾部 (`= init` / `;`)
+    fn finish_global_var(
+        &mut self,
+        ty: MangleType,
+        name: String,
+        is_static: bool,
+    ) -> Result<CppDecl, CppParseError> {
+        let init = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Assign,
+                ..
+            }))
+        ) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+        } else {
+            // `,` 多声明符等尾部不支持, 保持旧降级行为 (报 Unsupported)
+            return Err(CppParseError::Unsupported(
+                "global variable declarator",
+                self.span(),
+            ));
+        }
+        Ok(CppDecl::GlobalVar {
+            ty,
+            name,
+            init,
+            is_static,
         })
     }
 
@@ -7068,10 +7202,25 @@ impl<'a> CppParser<'a> {
                     }
                 }
             }
-        } // end else (M18.0 qualified-name branch)
-          // 允许 multi-token 类型: long long, short int, unsigned char, signed int 等
-          // 只要下一个 token 是另一个类型说明符 (char/short/long/int/float/double/signed/unsigned)
-          // 或后置限定 (const/volatile) 或指针/引用, 就继续
+        }
+        // M30: `Tpl<Args>::member` 类型 (模板类内 typedef 成员):
+        // 模板实参后可拖 `::member`, 同样属于类型部分
+        // (两个分支共享: qualified 与裸 Ident + 模板实参)
+        while matches!(self.peek_token_at(i), Some(CppTok::ColonColon(_))) {
+            if !matches!(
+                self.peek_token_at(i + 1),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                }))
+            ) {
+                break;
+            }
+            i += 2;
+        }
+        // 允许 multi-token 类型: long long, short int, unsigned char, signed int 等
+        // 只要下一个 token 是另一个类型说明符 (char/short/long/int/float/double/signed/unsigned)
+        // 或后置限定 (const/volatile) 或指针/引用, 就继续
         loop {
             if self.is_qualifier_at(i) {
                 i += 1;
@@ -7302,7 +7451,20 @@ impl<'a> CppParser<'a> {
                         self.span(),
                     ));
                 }
-                ty = MangleType::Template { name: last, args };
+                ty = MangleType::Template {
+                    name: last.clone(),
+                    args: args.clone(),
+                };
+                // M30: `Tpl<Args>::member` 拖尾 (模板类内 typedef 成员)
+                if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                    self.bump(); // ::
+                    let member = self.expect_ident()?;
+                    ty = MangleType::TplMember {
+                        name: last,
+                        args,
+                        member,
+                    };
+                }
             }
             // 跳过 const/volatile 后缀
             if self.at(CppKw::Const) {

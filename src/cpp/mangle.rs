@@ -60,6 +60,15 @@ pub enum MangleType {
         name: String,
         args: Vec<MangleType>,
     },
+    /// 类型语境的模板类 typedef 成员引用 `Tpl<Args>::member`
+    /// (如 std::underlying_type<E>::type / std::conditional<C,T,F>::type).
+    /// 成员必须是模板类内的 typedef; lower 阶段展开为实例类中该
+    /// typedef 形参替换后的真实类型 (见 Lower::inst_typedefs).
+    TplMember {
+        name: String,
+        args: Vec<MangleType>,
+        member: String,
+    },
 }
 
 impl MangleType {
@@ -106,6 +115,14 @@ impl MangleType {
                     a.encode(out);
                 }
                 out.push('E');
+            }
+            Self::TplMember { name, args, member } => {
+                out.push_str(&format!("N{}{}I", name.len(), name));
+                for a in args {
+                    a.encode(out);
+                }
+                out.push('E');
+                out.push_str(&format!("{}{}", member.len(), member));
             }
         }
     }

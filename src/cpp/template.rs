@@ -82,6 +82,17 @@ pub fn type_key(ty: &MangleType) -> String {
             }
             s
         }
+        MangleType::TplMember { name, args, member } => {
+            let flat_name = name.replace("::", "_");
+            let mut s = format!("tm_{}", flat_name);
+            for a in args {
+                s.push('_');
+                s.push_str(&type_key(a));
+            }
+            s.push('_');
+            s.push_str(member);
+            s
+        }
         MangleType::Ellipsis => "ellipsis".into(),
         MangleType::Auto => "auto".into(),
         MangleType::DecltypeAuto => "decltype_auto".into(),
@@ -402,6 +413,23 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
             MangleType::Template {
                 name: name.clone(),
                 args: new_args,
+            }
+        }
+        // M30: `Tpl<Args>::member` 的实参递归替换; name/member 保留
+        // (typedef 展开由 lower 在查 inst_typedefs 时完成)
+        MangleType::TplMember {
+            name,
+            args: tas,
+            member,
+        } => {
+            let new_args: Vec<MangleType> = tas
+                .iter()
+                .map(|a| substitute_type(a, params, args))
+                .collect();
+            MangleType::TplMember {
+                name: name.clone(),
+                args: new_args,
+                member: member.clone(),
             }
         }
         other => other.clone(),
@@ -801,6 +829,12 @@ pub fn substitute_decl(
             decl: Box::new(substitute_decl(inner, params, args, class_rename)),
             requires: requires.clone(),
             is_export: *is_export,
+        },
+        // M30: typedef 目标类型形参替换 (`typedef T type;` 在实例
+        // 类中变为 `typedef <Arg> type;`, 供 TplMember 引用展开)
+        CppDecl::Typedef { target, name } => CppDecl::Typedef {
+            target: substitute_type(target, params, args),
+            name: name.clone(),
         },
         other => other.clone(),
     }

@@ -1752,6 +1752,13 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                     "dcc: C++ parser had errors, falling back to strip-keywords mode"
                 );
             }
+            // M30: 诊断转储 (DCC_CPP_DUMP_DIAGS 开启时打印 C++ parser
+            // 降级原因, 定位为何未走 AST lower 路径)
+            if std::env::var("DCC_CPP_DUMP_DIAGS").is_ok() {
+                for d in &parser.diags {
+                    eprintln!("dcc-cpp-diag: {:?} {} @ {:?}", d.sev, d.msg, d.span);
+                }
+            }
             let stripped = crate::cpp::lower::strip_cpp_keywords(&pp_out.text);
             (None, stripped, None)
         }
