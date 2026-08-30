@@ -74,6 +74,10 @@ pub struct Lower {
     pub emitted_typedefs: std::collections::HashSet<String>,
     /// 当前所在类 (用于 this 隐式注入)
     pub current_class: Option<String>,
+    /// M29: 当前正在降级的模板实例类名 (如 __dcc_template_is_same_int_int).
+    /// 类内 enum 常量发射时以此为前缀, 避免不同实例的同名常量
+    /// (如 is_same<int,int>::value / is_same<int,long>::value) 在 C 中重名.
+    pub tpl_inst_prefix: Option<String>,
     /// 当前函数是否返回 void (用于 `return *this;` → `return;` 转换)
     pub current_fn_void: bool,
     /// 当前函数返回引用时的被引用类型 (用于 `return *p;` → `return p;` 降级:
@@ -4417,14 +4421,50 @@ fn convert_constexpr_fn_to_macro(s: &str) -> String {
 
 /// Apply additional C++ to C conversions after AST lowering or fallback processing
 /// This handles constructs that might have been missed by the main lowering passes
+/// 在 `s` 中查找不在块注释内的下一个 `template <` 出现位置.
+/// 返回 None 表示没有 (或只剩注释内的) 匹配.
+fn find_template_lt_outside_comments(s: &str) -> Option<usize> {
+    let mut search_from = 0usize;
+    while let Some(rel) = s[search_from..].find("template <") {
+        let pos = search_from + rel;
+        if !is_inside_block_comment(s, pos) {
+            return Some(pos);
+        }
+        search_from = pos + "template <".len();
+    }
+    None
+}
+
+/// 判断 `pos` 是否落在 `s` 的一个未闭合块注释 `/* ... */` 内部.
+fn is_inside_block_comment(s: &str, pos: usize) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut in_comment = false;
+    while i < bytes.len() && i < pos {
+        if !in_comment && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_comment = true;
+            i += 2;
+        } else if in_comment && i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            in_comment = false;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    in_comment
+}
+
 pub fn apply_post_lowering_conversions(s: &str) -> String {
     let mut result = s.to_string();
     // Remove remaining template definitions (for fallback path that didn't run replace_cpp_constructs)
     if result.contains("template <") || result.contains("template<") {
         result = remove_template_definitions(&result);
-        // Also do a simple text-based removal as fallback
+        // Also do a simple text-based removal as fallback.
+        // 注意: 必须跳过出现在块注释内的 "template <" (如 lower 的注册注释
+        // `/* template <T, U> (registered ...) */`), 否则会从注释中间一路
+        // 删到后面的 '{'/EOF, 截断输出并留下未闭合的 `/* `.
         loop {
-            if let Some(pos) = result.find("template <") {
+            if let Some(pos) = find_template_lt_outside_comments(&result) {
                 // Find matching '>'
                 let after_lt = pos + "template <".len();
                 let bytes = result.as_bytes();
@@ -5830,6 +5870,7 @@ impl Lower {
             param_var_types: std::collections::HashMap::new(),
             emitted_typedefs: std::collections::HashSet::new(),
             current_class: None,
+            tpl_inst_prefix: None,
             current_fn_void: false,
             current_fn_ref_ret: None,
             lambdas: vec![],
@@ -6025,6 +6066,7 @@ impl Lower {
             | CppExpr::ThisMember(_)
             | CppExpr::MemberPtr { .. }
             | CppExpr::TemplateIdent { .. }
+            | CppExpr::TplStaticAccess { .. }
             | CppExpr::Sizeof(_)
             | CppExpr::TypeidType(_)
             | CppExpr::StrConcat(_)
@@ -7211,6 +7253,12 @@ impl Lower {
                     self.scan_expr_types(x);
                 }
             }
+            CppExpr::TplStaticAccess { name, args, .. } => {
+                // M29: 扫描阶段触发模板类实例化 (此时输出位置在函数定义
+                // 之前, 保证类内 enum 常量定义先于引用); 表达式发射阶段
+                // 的 emit_inst_class 依赖 inst_emitted 幂等跳过.
+                self.emit_inst_class(name, args);
+            }
             _ => {}
         }
     }
@@ -7233,7 +7281,11 @@ impl Lower {
         // 实例化类名是全局唯一名, 与命名空间限定无关
         let saved_ns = self.ns.stack.clone();
         self.ns.stack.clear();
+        // M29: 实例名作类内 enum 常量前缀 (避免不同实例同名常量冲突)
+        let saved_prefix = self.tpl_inst_prefix.take();
+        self.tpl_inst_prefix = Some(instantiated_class_name(name, args));
         self.lower_decl(&inst);
+        self.tpl_inst_prefix = saved_prefix;
         self.ns.stack = saved_ns;
     }
 
@@ -8015,39 +8067,59 @@ impl Lower {
                 underlying,
                 variants,
             } => {
-                // M18.0+: 保留枚举类型语义: 枚举名 + 枚举值 + 可选的底层类型.
-                // 降级为真实 C enum, 枚举常量名不加重名 (C++ 端 `E::A` 在
-                // lower 时只取末段, 见 QualifiedAccess 分支).
-                if name != "_anon" {
-                    // 先登记类型名, 让后续类型引用 (`sizeof(E)` / `E var`) 不前缀 struct.
-                    self.enum_types.insert(name.clone());
-                }
-                let prefixed = self.qualify_name(name);
-                let mut body = String::new();
-                for (i, (vname, vinit)) in variants.iter().enumerate() {
-                    if i > 0 {
-                        body.push_str(", ");
-                    }
-                    body.push_str(vname);
-                    if let Some(init) = vinit {
-                        body.push_str(&format!(" = {}", init));
-                    }
-                }
-                let _ = scoped; // scoped 只影响名字可见性; 降级后枚举常量统一可见
-                if name == "_anon" {
-                    // 匿名枚举: 只需要常量, 不需要类型名.
-                    self.out.push_str(&format!("enum {{ {} }};\n", body));
-                } else if let Some(ut) = underlying {
-                    // C23 enum 底层类型: 尽可能保留 sizeof / 值域语义.
-                    self.out.push_str(&format!(
-                        "typedef enum : {} {{ {} }} {};\n",
-                        ut, body, prefixed
-                    ));
-                } else {
-                    self.out
-                        .push_str(&format!("typedef enum {{ {} }} {};\n", body, prefixed));
-                }
+                self.emit_enum_decl(name, *scoped, underlying, variants);
             }
+        }
+    }
+
+    /// 发射 enum 为降级 C 代码. 顶层与类内成员共用: 类内 enum 的枚举常量
+    /// 在 C 中是全局作用域, 与 dcc 的 scoped 降级策略一致 (引用处直接用
+    /// 短名, 见 QualifiedAccess 处理).
+    fn emit_enum_decl(
+        &mut self,
+        name: &str,
+        scoped: bool,
+        underlying: &Option<String>,
+        variants: &[(String, Option<String>)],
+    ) {
+        // M18.0+: 保留枚举类型语义: 枚举名 + 枚举值 + 可选的底层类型.
+        // 降级为真实 C enum, 枚举常量名不加重名 (C++ 端 `E::A` 在
+        // lower 时只取末段, 见 QualifiedAccess 分支).
+        if name != "_anon" {
+            // 先登记类型名, 让后续类型引用 (`sizeof(E)` / `E var`) 不前缀 struct.
+            self.enum_types.insert(name.to_string());
+        }
+        let prefixed = self.qualify_name(name);
+        let mut body = String::new();
+        for (i, (vname, vinit)) in variants.iter().enumerate() {
+            if i > 0 {
+                body.push_str(", ");
+            }
+            // M29: 模板实例类内的 enum 常量加实例名前缀,
+            // 避免不同实例的同名常量在 C 中重名 (引用处由
+            // TplStaticAccess 同步前缀).
+            if let Some(pfx) = &self.tpl_inst_prefix {
+                body.push_str(&format!("{}_{}", pfx, vname));
+            } else {
+                body.push_str(vname);
+            }
+            if let Some(init) = vinit {
+                body.push_str(&format!(" = {}", init));
+            }
+        }
+        let _ = scoped; // scoped 只影响名字可见性; 降级后枚举常量统一可见
+        if name == "_anon" {
+            // 匿名枚举: 只需要常量, 不需要类型名.
+            self.out.push_str(&format!("enum {{ {} }};\n", body));
+        } else if let Some(ut) = underlying {
+            // C23 enum 底层类型: 尽可能保留 sizeof / 值域语义.
+            self.out.push_str(&format!(
+                "typedef enum : {} {{ {} }} {};\n",
+                ut, body, prefixed
+            ));
+        } else {
+            self.out
+                .push_str(&format!("typedef enum {{ {} }} {};\n", body, prefixed));
         }
     }
 
@@ -8078,6 +8150,19 @@ impl Lower {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        // 类内 enum 成员: 枚举常量降级后在 C 中全局可见, 提前到 struct
+        // 定义之前发射, 保证成员函数体/静态初始化能引用这些常量.
+        for m in &c.members {
+            if let CppDecl::Enum {
+                name,
+                scoped,
+                underlying,
+                variants,
+            } = m
+            {
+                self.emit_enum_decl(name, *scoped, underlying, variants);
+            }
         }
         // 阶段 1: 仅 struct 定义 (成员字段 + vptr + vbptr + 虚基子对象)
         self.out.push_str(&format!("struct {} {{\n", qname));
@@ -8257,6 +8342,9 @@ impl Lower {
                 self.out
                     .push_str(&format!("/* nested class {} */\n", c.name));
                 self.lower_class(c);
+            }
+            CppDecl::Enum { .. } => {
+                // 已在 lower_class 开头提前发射 (保证常量定义先于使用)
             }
             _ => {
                 self.out.push_str("/* unsupported class member */\n");
@@ -8874,6 +8962,20 @@ impl Lower {
                 self.out.push_str(&format!("this->{}", s));
             }
             CppExpr::QualifiedAccess(_, s) => self.out.push_str(s),
+            CppExpr::TplStaticAccess { name, args, member } => {
+                // M29: `Tpl<Args>::member` - 先触发模板类实例化 (保证类内
+                // enum 常量已发射), 实例类内常量以实例名为前缀, 引用处同步.
+                let inst_name = instantiated_class_name(name, args);
+                self.emit_inst_class(name, args);
+                if self
+                    .inst_emitted
+                    .contains(&TemplateRegistry::key_for(name, args))
+                {
+                    self.out.push_str(&format!("{}_{}", inst_name, member));
+                } else {
+                    self.out.push_str(member);
+                }
+            }
             CppExpr::Member(b, s) => {
                 // M18.0: 若 b 是指针/引用类型 (e.g. const path& 参数, 或 dccpp_* 指针),
                 // 输出 `b->s` 而不是 `b.s`.

@@ -388,6 +388,13 @@ pub enum CppExpr {
         name: String,
         args: Vec<MangleType>,
     },
+    /// M29: 模板实例静态成员/枚举常量访问 `Tpl<Args>::member`.
+    /// 类内 enum 常量降级为全局名, 引用处按短名输出; 访问前需触发实例化.
+    TplStaticAccess {
+        name: String,
+        args: Vec<MangleType>,
+        member: String,
+    },
     /// M10+: 大括号初始化列表 `{1, 2, 3}` (initializer_list)
     InitList(Vec<CppExpr>),
     /// M10+: 类型化的大括号初始化列表 `T{1, 2, 3}` (initializer_list<T>)
@@ -544,6 +551,10 @@ pub struct CppParser<'a> {
     pub lambdas: Vec<LambdaExpr>,
     /// 嵌套模板 `>>` 拆出的待闭合 `>` 计数 (M18.x, 见 parse_mangle_type_depth)
     deferred_gt: u32,
+    /// M29: 模板实例 typedef 别名 `typedef Tpl<Args> Alias;`
+    /// (Alias -> 模板名 + 实参). 表达式 `Alias::member` 展开为
+    /// TplStaticAccess, 以触发实例化并引用带前缀的常量.
+    pub typedef_alias: std::collections::HashMap<String, (String, Vec<MangleType>)>,
 }
 
 impl<'a> CppParser<'a> {
@@ -557,6 +568,7 @@ impl<'a> CppParser<'a> {
             diags: vec![],
             lambdas: vec![],
             deferred_gt: 0,
+            typedef_alias: std::collections::HashMap::new(),
         }
     }
 
@@ -580,6 +592,24 @@ impl<'a> CppParser<'a> {
 
     fn at(&self, kw: CppKw) -> bool {
         matches!(&self.peek, Some(CppTok::Kw(k, _)) if *k == kw)
+    }
+
+    /// class/struct 聚合关键字嗅探 (C++ 中 class 与 struct 等价;
+    /// struct 可能来自 C lexer 的 KwStruct 或裸 Ident)
+    fn at_aggr_kw(&self) -> bool {
+        match &self.peek {
+            Some(CppTok::Kw(CppKw::Class, _)) => true,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwStruct,
+                ..
+            })) => true,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                text,
+                ..
+            })) => text == "struct",
+            _ => false,
+        }
     }
 
     #[allow(dead_code)]
@@ -1175,11 +1205,13 @@ impl<'a> CppParser<'a> {
         let requires = self.parse_requires_clause();
         // M10+: 检测 partial specialization 模式
         // `class Foo<T*>` 或 `class Foo<int>` (区别于普通 `class Foo`)
-        if self.at(CppKw::Class) {
-            // 窥探: class Name <
+        // class 与 struct 等价, 两者都要支持偏特化
+        if self.at_aggr_kw() {
+            // 窥探: class Name <   (偏特化候选)
             let saved_lex = self.lex.clone();
             let saved_peek = self.peek.clone();
-            self.bump(); // class
+            let is_struct = !self.at(CppKw::Class);
+            self.bump(); // class/struct
             let _name = self.expect_ident()?;
             if matches!(
                 &self.peek,
@@ -1223,6 +1255,12 @@ impl<'a> CppParser<'a> {
                             ..
                         })) => {
                             pattern_text.push(':');
+                        }
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Comma,
+                            ..
+                        })) => {
+                            pattern_text.push(',');
                         }
                         Some(CppTok::C(Tok {
                             kind: TokKind::Star,
@@ -1274,7 +1312,7 @@ impl<'a> CppParser<'a> {
                         self.span(),
                     ));
                 }
-                self.bump();
+                self.bump(); // {
                 let mut members = vec![];
                 while let Some(t) = &self.peek {
                     if matches!(
@@ -1288,7 +1326,7 @@ impl<'a> CppParser<'a> {
                     }
                     members.push(self.parse_member_decl_with_class(&_name)?);
                 }
-                self.bump();
+                self.bump(); // }
                 if matches!(
                     &self.peek,
                     Some(CppTok::C(Tok {
@@ -1300,7 +1338,7 @@ impl<'a> CppParser<'a> {
                 }
                 let decl = CppDecl::Class(ClassDecl {
                     name: _name,
-                    is_struct: false,
+                    is_struct,
                     bases,
                     members,
                 });
@@ -2099,6 +2137,20 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Template) {
             return self.parse_template_decl(false);
         }
+        // 类内 enum 成员: `enum { v = 0 };` / `enum Name { ... };` /
+        // `enum class E : T { ... };`. type_traits 等 trait 惯用法
+        // (`struct X { enum { value = N }; }`) 依赖它; 之前此分支缺失,
+        // enum 落入 parse_member_var 后 expect_ident 失败, 导致整个
+        // 类/模板声明被顶层容错逻辑静默丢弃.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwEnum,
+                ..
+            }))
+        ) {
+            return self.parse_enum_decl();
+        }
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -2599,8 +2651,70 @@ impl<'a> CppParser<'a> {
                 _ => break,
             }
         }
-        // 期望 ident (typedef 名)
-        let _name = self.expect_ident()?;
+        // 期望 ident (typedef 名). 支持模板实例类型 `Name<Args> alias`:
+        // 解析实参并记录别名映射, 表达式 `alias::member` 可展开为
+        // TplStaticAccess (触发实例化并引用带实例前缀的常量).
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }))
+        ) && matches!(
+            self.peek_token_at(1),
+            Some(CppTok::C(Tok {
+                kind: TokKind::Lt,
+                ..
+            }))
+        ) {
+            let tname = self.expect_ident()?;
+            self.bump(); // <
+            let mut targs: Vec<MangleType> = Vec::new();
+            loop {
+                let arg = self.parse_mangle_type_depth(1)?;
+                targs.push(arg);
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Comma,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    continue;
+                }
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Gt,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    break;
+                }
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Shr,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    self.deferred_gt += 1;
+                    break;
+                }
+                return Err(CppParseError::Unexpected(
+                    ">",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
+            }
+            let alias = self.expect_ident()?;
+            self.typedef_alias.insert(alias, (tname, targs));
+        } else {
+            let _name = self.expect_ident()?;
+        }
         // 跳过 `;`
         if matches!(
             &self.peek,
@@ -6113,6 +6227,19 @@ impl<'a> CppParser<'a> {
         {
             // qualified name?
             if matches!(&self.peek_token_at(1), Some(CppTok::ColonColon(_))) {
+                // M29: 模板实例 typedef 别名 `alias::member` -> TplStaticAccess
+                if let Some(CppTok::C(Tok { text, .. })) = &self.peek {
+                    if let Some((tname, targs)) = self.typedef_alias.get(text).cloned() {
+                        self.bump(); // alias
+                        self.bump(); // ::
+                        let member = self.expect_ident()?;
+                        return Ok(CppExpr::TplStaticAccess {
+                            name: tname,
+                            args: targs,
+                            member,
+                        });
+                    }
+                }
                 let parts = self.parse_qualified_name()?;
                 if let Some(last) = parts.last().cloned() {
                     let path = parts[..parts.len() - 1].to_vec();
@@ -6172,6 +6299,17 @@ impl<'a> CppParser<'a> {
                         format!("{:?}", self.peek),
                         self.span(),
                     ));
+                }
+                // 模板实例名后跟 `::`: 静态成员 / 枚举常量访问
+                // (`S1<int,int>::v`). 保留实参以便 lower 触发实例化.
+                if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                    self.bump(); // ::
+                    let member = self.expect_ident()?;
+                    return Ok(CppExpr::TplStaticAccess {
+                        name,
+                        args: targs,
+                        member,
+                    });
                 }
                 return Ok(CppExpr::TemplateIdent { name, args: targs });
             }

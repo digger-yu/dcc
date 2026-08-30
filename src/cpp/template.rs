@@ -285,13 +285,32 @@ impl TemplateRegistry {
             // 计算匹配度和特化度分数
             let mut specificity: usize = 0;
             let mut all_match = true;
+            // M29: 同一形参名在 pattern 中多次出现时, 绑定必须一致
+            // (如 `is_same<T, T>` 对 [int, long] 不匹配, 对 [int, int] 匹配)
+            let mut bindings: Vec<(String, String)> = Vec::new();
             for (pat, arg) in patterns.iter().zip(arg_keys.iter()) {
                 let pat = pat.trim();
                 let pat_key = pat.replace('*', "").trim().to_string();
+                // 检查/记录形参绑定; 同名二次出现时实参必须一致
+                let mut bind_check = |bindings: &mut Vec<(String, String)>,
+                                      name: &str,
+                                      arg: &str,
+                                      all_match: &mut bool| {
+                    if let Some((_, prev)) = bindings.iter().find(|(n, _)| n == name) {
+                        if prev != arg {
+                            *all_match = false;
+                        }
+                    } else {
+                        bindings.push((name.to_string(), arg.to_string()));
+                    }
+                };
                 if pat.ends_with('*') && arg.starts_with("p_") {
                     // 指针模式: `T*` 匹配 `p_<T>` 编码
                     if pat_key == "T" || arg.contains(&pat_key) {
                         specificity += 2; // 指针模式比通配符更特化
+                        if Self::is_param_name(pat, &p.param_names) {
+                            bind_check(&mut bindings, &pat_key, arg, &mut all_match);
+                        }
                     } else {
                         all_match = false;
                         break;
@@ -303,10 +322,14 @@ impl TemplateRegistry {
                     // 精确匹配: 最特化
                     specificity += 3;
                 } else if Self::is_param_name(pat, &p.param_names) {
-                    // 通配符: 匹配任意类型, 最不特化
+                    // 通配符: 匹配任意类型, 最不特化; 需绑定一致
+                    bind_check(&mut bindings, &pat_key, arg, &mut all_match);
                     specificity += 1;
                 } else {
                     all_match = false;
+                    break;
+                }
+                if !all_match {
                     break;
                 }
             }
