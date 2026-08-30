@@ -76,6 +76,9 @@ pub struct Lower {
     pub current_class: Option<String>,
     /// 当前函数是否返回 void (用于 `return *this;` → `return;` 转换)
     pub current_fn_void: bool,
+    /// 当前函数返回引用时的被引用类型 (用于 `return *p;` → `return p;` 降级:
+    /// C++ 引用返回降级为 C 指针返回, 解引用需剥离)
+    pub current_fn_ref_ret: Option<Box<MangleType>>,
     /// 待降级的 lambda 闭包
     pub lambdas: Vec<LambdaExpr>,
     /// 临时计数器 (lambda 编号)
@@ -1053,12 +1056,28 @@ fn clean_struct_bodies(s: &str) -> String {
 
                     // 生成独立函数: ret_type struct_name_fnname(struct struct_name *this, params)
                     let ret_type = s[sig_start..fn_start].trim();
-                    let ret = if ret_type.is_empty() { "void" } else { ret_type };
-                    // 为返回类型添加 struct 前缀
-                    let ret = if ret == struct_name {
-                        format!("struct {}", struct_name)
+                    // C++ 引用返回 → C 指针返回: `T&` / `T&&` → `T*`
+                    // (与形参 convert_ref_params 的引用降级规则一致)
+                    let ret_trimmed = ret_type.trim();
+                    let (ret_base, ret_is_ref) = if let Some(b) = ret_trimmed.strip_suffix("&&") {
+                        (b.trim_end(), true)
+                    } else if let Some(b) = ret_trimmed.strip_suffix('&') {
+                        (b.trim_end(), true)
                     } else {
-                        ret.to_string()
+                        (ret_trimmed, false)
+                    };
+                    // 为返回类型添加 struct 前缀
+                    let ret_base = if ret_base == struct_name {
+                        format!("struct {}", struct_name)
+                    } else if ret_base.is_empty() {
+                        "void".to_string()
+                    } else {
+                        ret_base.to_string()
+                    };
+                    let ret = if ret_is_ref {
+                        format!("{}*", ret_base)
+                    } else {
+                        ret_base
                     };
 
                     // 构建参数
@@ -5772,6 +5791,7 @@ impl Lower {
             emitted_typedefs: std::collections::HashSet::new(),
             current_class: None,
             current_fn_void: false,
+            current_fn_ref_ret: None,
             lambdas: vec![],
             lambda_counter: 0,
             const_local_i128: std::collections::HashMap::new(),
@@ -8299,6 +8319,11 @@ impl Lower {
         }
         // 记录当前函数是否返回 void (用于 return *this → return 转换)
         self.current_fn_void = matches!(ret, MangleType::Void);
+        // 记录引用返回的被引用类型 (用于 return *e → return e 降级)
+        self.current_fn_ref_ret = match ret {
+            MangleType::Reference(inner) => Some(inner.clone()),
+            _ => None,
+        };
         // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
         // 时包裹 switch(<fn>_coro_state) { case 0: ... }, 每个挂起点生成恢复标签
         let is_coro = body_has_coro(body);
@@ -8353,6 +8378,7 @@ impl Lower {
             self.param_var_types.insert(n.clone(), t.clone());
         }
         self.current_class = Some(class.to_string());
+        self.current_fn_ref_ret = None;
         self.out.push_str(&format!("void {} (", mangled));
         for (i, (n, t)) in params.iter().enumerate() {
             if i > 0 {
@@ -8389,6 +8415,18 @@ impl Lower {
                 ) if matches!(inner.as_ref(), CppExpr::This));
                 if is_return_this && self.current_fn_void {
                     self.out.push_str("return;\n");
+                } else if let CppExpr::UnaryOp(crate::cpp::parser::UnaryOpKind::Deref, inner) = e {
+                    if self.current_fn_ref_ret.is_some() {
+                        // 引用返回函数内的 `return *e;` → `return e;`
+                        // (引用返回已降级为指针返回, 解引用剥离后语义等价)
+                        self.out.push_str("return ");
+                        self.emit_expr(inner);
+                        self.out.push_str(";\n");
+                    } else {
+                        self.out.push_str("return ");
+                        self.emit_expr(e);
+                        self.out.push_str(";\n");
+                    }
                 } else {
                     self.out.push_str("return ");
                     self.emit_expr(e);
