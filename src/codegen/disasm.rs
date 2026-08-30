@@ -6,6 +6,10 @@ const REG8: [&str; 16] = [
     "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b", "%r11b",
     "%r12b", "%r13b", "%r14b", "%r15b",
 ];
+const REG16: [&str; 16] = [
+    "%ax", "%cx", "%dx", "%bx", "%sp", "%bp", "%si", "%di", "%r8w", "%r9w", "%r10w", "%r11w",
+    "%r12w", "%r13w", "%r14w", "%r15w",
+];
 const REG32: [&str; 16] = [
     "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi", "%r8d", "%r9d", "%r10d",
     "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
@@ -34,6 +38,11 @@ struct Prefixes {
     repne: bool,
     o16: bool,
 }
+
+/// 条件码后缀, 索引 = 0x0F 后操作码低 4 位 (setcc/jcc 共用).
+const CC_NAMES: [&str; 16] = [
+    "o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g",
+];
 
 struct Dec<'a> {
     code: &'a [u8],
@@ -81,6 +90,7 @@ impl<'a> Dec<'a> {
         let i = (idx & 15) as usize;
         match width {
             1 => REG8[i],
+            2 => REG16[i],
             4 => REG32[i],
             _ => REG64[i],
         }
@@ -127,11 +137,34 @@ impl<'a> Dec<'a> {
         Some((reg_name, mem))
     }
 
+    /// modrm，其中 reg 字段是宽目标 (dst_width), r/m 是窄源:
+    /// mod=3 时用 sub_width (8/16 位) 寄存器名, 否则显示内存操作数.
+    /// 用于 movzx/movsx (0F B6/B7/BE/BF) 的 reg=宽, r/m=窄 非对称编码.
+    fn modrm_ext(&mut self, rex: &Rex, sub_width: u8, dst_width: u8) -> Option<(String, String)> {
+        let modrm = self.take()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 7;
+        let rm = modrm & 7;
+        let dst = self
+            .reg(rex, reg | if rex.r { 8 } else { 0 }, dst_width)
+            .to_string();
+        let src = if mod_ == 3 {
+            self.reg(rex, rm | if rex.b { 8 } else { 0 }, sub_width)
+                .to_string()
+        } else {
+            self.decode_mem(rex, mod_, rm, sub_width)?
+        };
+        Some((src, dst))
+    }
+
     fn decode_mem(&mut self, rex: &Rex, mod_: u8, rm: u8, width: u8) -> Option<String> {
         let rm_ext = rm | if rex.b { 8 } else { 0 };
         if mod_ == 3 {
             return Some(self.reg(rex, rm_ext, width).to_string());
         }
+        // 64 位长模式下 base/index 恒为 64 位寻址寄存器,
+        // 不继承操作数宽度 (否则 movzx/movsx 的窄源显示成 %al 而非 (%rax))
+        const ADDR_W: u8 = 8;
         let mut disp = 0i32;
         let base: String;
         let mut index = String::new();
@@ -144,7 +177,7 @@ impl<'a> Dec<'a> {
             scale = 1u32 << scale_bits;
             if index_reg != 4 {
                 index = self
-                    .reg(rex, index_reg | if rex.x { 8 } else { 0 }, width)
+                    .reg(rex, index_reg | if rex.x { 8 } else { 0 }, ADDR_W)
                     .to_string();
             }
             if mod_ == 0 && base_reg == 5 {
@@ -152,14 +185,14 @@ impl<'a> Dec<'a> {
                 base = "rip".to_string();
             } else {
                 base = self
-                    .reg(rex, base_reg | if rex.b { 8 } else { 0 }, width)
+                    .reg(rex, base_reg | if rex.b { 8 } else { 0 }, ADDR_W)
                     .to_string();
             }
         } else if mod_ == 0 && rm == 5 {
             disp = self.take_i32()?;
             base = "rip".to_string();
         } else {
-            base = self.reg(rex, rm_ext, width).to_string();
+            base = self.reg(rex, rm_ext, ADDR_W).to_string();
         }
         match mod_ {
             0 => {}
@@ -174,17 +207,14 @@ impl<'a> Dec<'a> {
         } else if disp != 0 {
             inner.push_str(&format!("{disp}"));
         }
+        // 统一 AT&T 内存操作数格式: inner(base[,index,scale])
+        // 之前的实现在 disp=0 时返回裸寄存器名 (丢掉括号), 把
+        // movzbq (%rax),%rax 变成 movzbq %rax,%rax (语义损坏);
+        // 带 index 时又写成 "idx,scale(base)" 缺左括号.
         if !index.is_empty() {
-            if !inner.is_empty() {
-                inner.push(',');
-            }
-            inner.push_str(&format!("{index},{scale}"));
+            inner.push_str(&format!(",{index},{scale}"));
         }
-        if inner.is_empty() {
-            Some(base)
-        } else {
-            Some(format!("{inner}({base})"))
-        }
+        Some(format!("{inner}({base})"))
     }
 
     fn rel_target(&self, rel: i32, insn_end: u64) -> String {
@@ -431,13 +461,42 @@ impl<'a> Dec<'a> {
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
             }
+            // setcc r/m8 (无 REX 版本, dcc emit 0F 9x C0)
+            0x90..=0x9F => {
+                let rex = self.parse_rex();
+                let modrm = self.take()?;
+                if modrm >> 6 != 3 {
+                    self.pos = start + 1;
+                    return None;
+                }
+                let rm = modrm & 7;
+                let r = self.reg(&rex, rm | if rex.b { 8 } else { 0 }, 1);
+                Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
+            }
             0x10 | 0x11 | 0x2A | 0x2C | 0x5A => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
             }
-            0xB6 | 0xB7 | 0xBE | 0xBF | 0xAF | 0xB8 => {
-                self.pos = start;
-                self.decode_rex(start, pfx)
+            0xB6 | 0xB7 | 0xBE | 0xBF => {
+                // movzx/movsx (无 REX): reg 字段是宽目标 (32 位), r/m 是窄源
+                let rex = self.parse_rex();
+                let (src, dst) = self.modrm_ext(&rex, if op == 0xB6 || op == 0xBE { 1 } else { 2 }, 4)?;
+                let mn = match (op, rex.w) {
+                    (0xB6, true) => "movzbq",
+                    (0xB6, false) => "movzbl",
+                    (0xB7, true) => "movzwq",
+                    (0xB7, false) => "movzwl",
+                    (0xBE, true) => "movsbq",
+                    (0xBE, false) => "movsbl",
+                    (0xBF, true) => "movswq",
+                    _ => "movswl",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            0xAF => {
+                let rex = self.parse_rex();
+                let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
             }
             _ => {
                 self.pos = start + 1;
@@ -624,6 +683,42 @@ impl<'a> Dec<'a> {
             0xC1 => {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
+            }
+            // movzx/movsx r64, r/m8|r16 (48 0F B6/B7/BE/BF)
+            // dcc 用于窄类型加载/提升: *p (char/uchar), (u)short 提升
+            0xB6 | 0xB7 | 0xBE | 0xBF => {
+                let (src, dst) = self.modrm_ext(
+                    rex,
+                    if op == 0xB6 || op == 0xBE { 1 } else { 2 },
+                    if rex.w { 8 } else { 4 },
+                )?;
+                let mn = match (op, rex.w) {
+                    (0xB6, true) => "movzbq",
+                    (0xB6, false) => "movzbl",
+                    (0xB7, true) => "movzwq",
+                    (0xB7, false) => "movzwl",
+                    (0xBE, true) => "movsbq",
+                    (0xBE, false) => "movsbl",
+                    (0xBF, true) => "movswq",
+                    _ => "movswl",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // imul r64, r/m64 (48 0F AF)
+            0xAF => {
+                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
+            }
+            // setcc r/m8 带 REX (41 0F 9x C7 → dil 等)
+            0x90..=0x9F => {
+                let modrm = self.take()?;
+                if modrm >> 6 != 3 {
+                    self.pos = start + 1;
+                    return None;
+                }
+                let rm = modrm & 7;
+                let r = self.reg(rex, rm | if rex.b { 8 } else { 0 }, 1);
+                Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
             }
             _ => {
                 self.pos = start + 1;
