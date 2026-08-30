@@ -42,6 +42,18 @@ fn header_cstdio_parses() {
 }
 
 #[test]
+fn header_type_traits_parses() {
+    // M30.1: type_traits 头 (conditional/enable_if 非类型模板实参,
+    // is_same 偏特化, enum value 成员) 应完整解析
+    let src =
+        std::fs::read_to_string("src/cpp/stdlib/headers/type_traits").expect("read type_traits");
+    assert!(
+        parse_header("type_traits", &src),
+        "type_traits should parse"
+    );
+}
+
+#[test]
 fn parse_relational_lt_not_template() {
     // 回归: `av < bv` 曾被误判为模板实参而无限循环
     let src = b"namespace std { class string { int operator<(const string& o) const {

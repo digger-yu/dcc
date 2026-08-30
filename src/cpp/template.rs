@@ -93,6 +93,9 @@ pub fn type_key(ty: &MangleType) -> String {
             s.push_str(member);
             s
         }
+        // M30.1: 非类型实参 key `n<值>` (n0/n1/n42); 偏特化 pattern
+        // 字面量 (true/false/整数) 由 pick_partial 解析后与之比较
+        MangleType::NonType(v) => format!("n{}", v),
         MangleType::Ellipsis => "ellipsis".into(),
         MangleType::Auto => "auto".into(),
         MangleType::DecltypeAuto => "decltype_auto".into(),
@@ -285,6 +288,11 @@ impl TemplateRegistry {
     ) -> Option<(CppDecl, Vec<String>, Vec<MangleType>)> {
         let arg_keys: Vec<String> = args.iter().map(type_key).collect();
         let mut candidates: Vec<(usize, &PartialSpecEntry)> = Vec::new();
+        // M30.1: 每个候选记录其形参绑定 (形参名 → 实参类型),
+        // 偏特化形参表与主模板不同 (如 `conditional<false, T, F>` 声明
+        // <typename T, typename F> 但 pattern 占 3 个主实参位),
+        // 返回时按偏特化形参名对齐, 不能直接用主实参列表
+        let mut candidate_binds: Vec<Vec<(String, MangleType)>> = Vec::new();
         for p in &self.partials {
             if p.name != name {
                 continue;
@@ -298,21 +306,21 @@ impl TemplateRegistry {
             let mut all_match = true;
             // M29: 同一形参名在 pattern 中多次出现时, 绑定必须一致
             // (如 `is_same<T, T>` 对 [int, long] 不匹配, 对 [int, int] 匹配)
-            let mut bindings: Vec<(String, String)> = Vec::new();
-            for (pat, arg) in patterns.iter().zip(arg_keys.iter()) {
+            let mut bindings: Vec<(String, MangleType)> = Vec::new();
+            for (pat, (arg, arg_ty)) in patterns.iter().zip(arg_keys.iter().zip(args.iter())) {
                 let pat = pat.trim();
                 let pat_key = pat.replace('*', "").trim().to_string();
                 // 检查/记录形参绑定; 同名二次出现时实参必须一致
-                let mut bind_check = |bindings: &mut Vec<(String, String)>,
+                let mut bind_check = |bindings: &mut Vec<(String, MangleType)>,
                                       name: &str,
-                                      arg: &str,
+                                      arg_ty: &MangleType,
                                       all_match: &mut bool| {
                     if let Some((_, prev)) = bindings.iter().find(|(n, _)| n == name) {
-                        if prev != arg {
+                        if type_key(prev) != *arg {
                             *all_match = false;
                         }
                     } else {
-                        bindings.push((name.to_string(), arg.to_string()));
+                        bindings.push((name.to_string(), arg_ty.clone()));
                     }
                 };
                 if pat.ends_with('*') && arg.starts_with("p_") {
@@ -320,7 +328,7 @@ impl TemplateRegistry {
                     if pat_key == "T" || arg.contains(&pat_key) {
                         specificity += 2; // 指针模式比通配符更特化
                         if Self::is_param_name(pat, &p.param_names) {
-                            bind_check(&mut bindings, &pat_key, arg, &mut all_match);
+                            bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
                         }
                     } else {
                         all_match = false;
@@ -332,9 +340,22 @@ impl TemplateRegistry {
                 } else if pat_key == *arg {
                     // 精确匹配: 最特化
                     specificity += 3;
+                } else if let (Some(pv), Some(av)) = (
+                    Self::parse_non_type_pattern(&pat_key),
+                    Self::parse_non_type_pattern(arg),
+                ) {
+                    // M30.1: 非类型实参匹配 (`conditional<false, T, F>` 的
+                    // pattern `false` 与实参 NonType(0)). pattern 与实参
+                    // key 都是编译期常量字面量, 值相等才匹配.
+                    if pv == av {
+                        specificity += 3;
+                    } else {
+                        all_match = false;
+                        break;
+                    }
                 } else if Self::is_param_name(pat, &p.param_names) {
                     // 通配符: 匹配任意类型, 最不特化; 需绑定一致
-                    bind_check(&mut bindings, &pat_key, arg, &mut all_match);
+                    bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
                     specificity += 1;
                 } else {
                     all_match = false;
@@ -346,20 +367,59 @@ impl TemplateRegistry {
             }
             if all_match {
                 candidates.push((specificity, p));
+                candidate_binds.push(bindings);
             }
         }
         if candidates.is_empty() {
             return None;
         }
         // 选特化度最高的候选 (分数越大越特化)
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
-        let p = candidates[0].1;
-        Some((p.decl.clone(), p.param_names.clone(), args.to_vec()))
+        // 按 specificity 排序时同步取该候选的绑定表
+        let mut ranked: Vec<(usize, &PartialSpecEntry, Vec<(String, MangleType)>)> = candidates
+            .into_iter()
+            .zip(candidate_binds.into_iter())
+            .map(|((s, p), b)| (s, p, b))
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        let (_, p, bindings) = &ranked[0];
+        // M30.1: 按偏特化形参名对齐绑定值; pattern 中未出现的形参
+        // (极少见) 用主实参同位置兜底, 保证 substitute 不越界
+        let bound: Vec<MangleType> = p
+            .param_names
+            .iter()
+            .enumerate()
+            .map(|(i, pn)| {
+                bindings
+                    .iter()
+                    .find(|(n, _)| n == pn)
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_else(|| args.get(i).cloned().unwrap_or(MangleType::Int))
+            })
+            .collect();
+        Some((p.decl.clone(), p.param_names.clone(), bound))
     }
 
     /// 判断 pattern 文本是否是形参名 (通配符)
     fn is_param_name(pat: &str, param_names: &[String]) -> bool {
         param_names.iter().any(|p| p == pat)
+    }
+
+    /// M30.1: 把 pattern/key 文本解析为非类型常量值.
+    /// 接受 true/false 及十/十六进制整数; 非 NonType 文本返回 None.
+    /// (arg key 由 type_key(NonType) 生成, 形如 `n0` / `n1` / `n-3`.)
+    fn parse_non_type_pattern(s: &str) -> Option<i64> {
+        match s {
+            "true" => return Some(1),
+            "false" => return Some(0),
+            _ => {}
+        }
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            return i64::from_str_radix(hex, 16).ok();
+        }
+        if let Some(num) = s.strip_prefix('n') {
+            return num.parse::<i64>().ok();
+        }
+        s.parse::<i64>().ok()
     }
 }
 
@@ -937,6 +997,7 @@ mod tests {
                 params: vec![crate::cpp::parser::TemplateParam {
                     name: "T".to_string(),
                     default: None,
+                    non_type: None,
                 }],
             },
             &None,
@@ -997,10 +1058,12 @@ mod tests {
                 crate::cpp::parser::TemplateParam {
                     name: "T".to_string(),
                     default: None,
+                    non_type: None,
                 },
                 crate::cpp::parser::TemplateParam {
                     name: "U".to_string(),
                     default: None,
+                    non_type: None,
                 },
             ],
         };
@@ -1031,6 +1094,7 @@ mod tests {
             params: vec![crate::cpp::parser::TemplateParam {
                 name: "T".to_string(),
                 default: Some(MangleType::Int),
+                non_type: None,
             }],
         };
         reg.register(&targs, &None, &inner);
@@ -1056,6 +1120,7 @@ mod tests {
             params: vec![crate::cpp::parser::TemplateParam {
                 name: "T".to_string(),
                 default: None,
+                non_type: None,
             }],
         };
         reg.register(&targs, &Some("sizeof(T) <= 4".to_string()), &inner);

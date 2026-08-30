@@ -1,0 +1,83 @@
+// <type_traits> - dcc++ C++ 标准库
+// 类型特征: 编译期类型查询与类型变换.
+//
+// 语义说明:
+//   - conditional / enable_if 用非类型模板实参 (M30.1) 实现
+//     真实选择语义: conditional<B,T,F> 按 B 选 T/F, enable_if
+//     在 B=false 时不提供 ::type (SFINAE 惯用法依赖此空体).
+//   - trivially_* 系列: dcc 对象均为平凡布局 (无用户析构/拷贝
+//     的差异), 恒为 1; is_convertible 近似恒真.
+//   - underlying_type<E>: 近似透传 E (dcc 枚举参与算术运算时
+//     提升, 与其底层整数类型等价).
+
+namespace std {
+
+    // ===== 类型变换 (type transformations) =====
+
+    // conditional<B, T, F>::type = B ? T : F
+    template <bool B, typename T, typename F> struct conditional {
+        typedef T type;
+    };
+    template <typename T, typename F> struct conditional<false, T, F> {
+        typedef F type;
+    };
+
+    // enable_if<B, T = void>: B 为 true 时提供 ::type = T,
+    // 否则无成员 (替换失败 -> SFINAE 跳过)
+    template <bool B, typename T = void> struct enable_if {
+    };
+    template <typename T> struct enable_if<true, T> {
+        typedef T type;
+    };
+
+    // remove_const / remove_reference / remove_pointer:
+    // 近似透传 (dcc 类型系统不携带 cv/引用限定参与模板匹配)
+    template <typename T> struct remove_const {
+        typedef T type;
+    };
+    template <typename T> struct remove_reference {
+        typedef T type;
+    };
+    template <typename T> struct remove_pointer {
+        typedef T type;
+    };
+
+    // underlying_type<E>::type = 枚举 E 的底层整数类型 (近似透传)
+    template <typename T> struct underlying_type {
+        typedef T type;
+    };
+
+    // ===== 类型谓词 (type predicates) =====
+
+    template <typename T> struct is_trivially_destructible {
+        enum { value = 1 };
+    };
+    template <typename T> struct is_trivially_copyable {
+        enum { value = 1 };
+    };
+    template <typename T> struct is_trivially_default_constructible {
+        enum { value = 1 };
+    };
+
+    // is_same<T, U>: T 与 U 为同一类型时 value = 1
+    template <typename T, typename U> struct is_same {
+        enum { value = 0 };
+    };
+    template <typename T> struct is_same<T, T> {
+        enum { value = 1 };
+    };
+
+    // is_convertible<From, To>: 近似恒真 (标量/引用可互转)
+    template <typename From, typename To> struct is_convertible {
+        enum { value = 1 };
+    };
+
+    // is_pointer<T> / is_integral<T>: 近似恒 0 (按需扩展)
+    template <typename T> struct is_pointer {
+        enum { value = 0 };
+    };
+    template <typename T> struct is_integral {
+        enum { value = 0 };
+    };
+
+}  // namespace std

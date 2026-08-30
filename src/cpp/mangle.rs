@@ -69,6 +69,10 @@ pub enum MangleType {
         args: Vec<MangleType>,
         member: String,
     },
+    /// M30.1: 非类型模板实参 (`conditional<false, T, F>` 的 `false`,
+    /// `arr<int, 16>` 的 `16`). 编译期常量, 不作为 C 类型出现;
+    /// 参与实例 key / 偏特化匹配. Itanium 编码 `Li<val>E`.
+    NonType(i64),
 }
 
 impl MangleType {
@@ -123,6 +127,15 @@ impl MangleType {
                 }
                 out.push('E');
                 out.push_str(&format!("{}{}", member.len(), member));
+            }
+            // M30.1: 非类型实参编码成整数字面量 (Li1E / LiN3E),
+            // 与 GCC `int_const` 形式的 Itanium 编码一致.
+            Self::NonType(v) => {
+                if *v < 0 {
+                    out.push_str(&format!("LiN{}E", -*v));
+                } else {
+                    out.push_str(&format!("Li{}E", v));
+                }
             }
         }
     }

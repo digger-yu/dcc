@@ -5761,6 +5761,9 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         // typedef 成员的真实类型; 到达此模块级函数说明展开未发生,
         // 输出占位并注释 (同 Auto 处理).
         MangleType::TplMember { .. } => "int /*M30 unresolved tpl-member*/".into(),
+        // M30.1: 非类型实参不是 C 类型, 到达此处说明它被误当类型使用;
+        // 输出占位 int 便于后续 C 后端报错定位.
+        MangleType::NonType(_) => "int /*M30 non-type arg*/".into(),
     }
 }
 
@@ -5809,6 +5812,8 @@ fn template_arg_to_c(ty: &MangleType) -> String {
             s.push_str(member);
             s
         }
+        // M30.1: 非类型实参序列化为 `n<值>` 标识符片段
+        MangleType::NonType(v) => format!("n{}", v),
     }
 }
 
@@ -8322,7 +8327,16 @@ impl Lower {
         // alias 是 C 关键字 (int/char/void/...) 时跳过, 否则 dcc C 报 E0004.
         if qname.contains('_') {
             if let Some(last) = qname.rsplit('_').next() {
-                if last != qname && !self.emitted_typedefs.contains(last) && !is_c_keyword(last) {
+                // M30.1: 模板实例名尾段是非类型 key (`n<值>`) 时不是有意义的
+                // 短别名 (`__dcc_template_picker_char_n1` -> "n1"), 跳过
+                let nontype_seg = qname.starts_with("__dcc_template_")
+                    && last.starts_with('n')
+                    && last[1..].chars().all(|c| c.is_ascii_digit() || c == '-');
+                if last != qname
+                    && !nontype_seg
+                    && !self.emitted_typedefs.contains(last)
+                    && !is_c_keyword(last)
+                {
                     self.emitted_typedefs.insert(last.to_string());
                     self.out
                         .push_str(&format!("typedef struct {} {};\n", qname, last));

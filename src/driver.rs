@@ -1709,10 +1709,21 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     //    当 CppParser 失败或有错误时, 回退到“预处理 + strip C++ 关键字 → C 后端”
     //    直通模式. 此外, 当源文件本身不含 C++ 关键字 (class/template/namespace)
     //    时也使用直通模式, 以避免系统头文件中的类型定义在 lower 过程中丢失.
+    //    M30.1: 检测范围加入预处理后文本 - 纯 include 型源 (`#include
+    //    <type_traits>` + 使用) 的 C++ 构造全在头文件里, 只看原始源码
+    //    会误走 strip 直通, 模板 / namespace 全部丢失.
     let src_has_cpp = {
         let raw = String::from_utf8_lossy(&src);
-        raw.contains("class ") || raw.contains("template") || raw.contains("namespace ")
-            || raw.contains("try {") || raw.contains("throw ")
+        raw.contains("class ")
+            || raw.contains("template")
+            || raw.contains("namespace ")
+            || raw.contains("try {")
+            || raw.contains("throw ")
+            || pp_out.text.contains("class ")
+            || pp_out.text.contains("template")
+            || pp_out.text.contains("namespace ")
+            || pp_out.text.contains("try {")
+            || pp_out.text.contains("throw ")
     };
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let (decls, c_src, module_bmf) = match parser.parse_top_level() {

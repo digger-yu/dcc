@@ -105,6 +105,10 @@ pub struct TemplateParam {
     pub name: String,
     /// 默认实参 (M8: 简化, 解析但不强求)
     pub default: Option<MangleType>,
+    /// M30.1: 非类型形参种类 (`template <typename T, bool B>` 的 B 为
+    /// Some(Bool)). None = 类型形参. 种类仅用于解析/默认值求值,
+    /// 实例化管道统一用 MangleType::NonType 表示值.
+    pub non_type: Option<MangleType>,
 }
 
 #[derive(Debug, Clone)]
@@ -1174,6 +1178,7 @@ impl<'a> CppParser<'a> {
                 params.push(TemplateParam {
                     name: anon,
                     default,
+                    non_type: None,
                 });
                 if matches!(
                     &self.peek,
@@ -1187,6 +1192,26 @@ impl<'a> CppParser<'a> {
                 }
                 break;
             }
+            // M30.1: 非类型形参 (`template <typename T, bool B>` /
+            // `<int N>` / `<unsigned long N>` / `<size_t N>`).
+            // 尝试 <类型> <名> 形态; 失败回退原路径 (保留旧容忍度).
+            let non_type = if has_kw {
+                None
+            } else {
+                let saved_lex = self.lex.clone();
+                let saved_peek = self.peek.clone();
+                match self.parse_mangle_type() {
+                    Ok(ty) if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
+                    ) => Some(ty),
+                    _ => {
+                        self.lex = saved_lex;
+                        self.peek = saved_peek;
+                        None
+                    }
+                }
+            };
             let name = self.expect_ident()?;
             let default = if matches!(
                 &self.peek,
@@ -1196,11 +1221,20 @@ impl<'a> CppParser<'a> {
                 }))
             ) {
                 self.bump();
-                Some(self.parse_mangle_type()?)
+                // M30.1: 非类型形参默认值是编译期字面量 (`= true` / `= 42`)
+                if non_type.is_some() {
+                    Some(self.parse_non_type_value()?)
+                } else {
+                    Some(self.parse_mangle_type()?)
+                }
             } else {
                 None
             };
-            params.push(TemplateParam { name, default });
+            params.push(TemplateParam {
+                name,
+                default,
+                non_type,
+            });
             if matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -1311,6 +1345,16 @@ impl<'a> CppParser<'a> {
                         }
                         Some(CppTok::ColonColon(_)) => {
                             pattern_text.push_str("::");
+                        }
+                        // M30.1: true/false 字面量转回文本 (非类型偏特化
+                        // pattern 如 `picker<T, false>` 需要与 pick_partial
+                        // 的 NonType key 匹配; Debug 格式含逗号会破坏
+                        // pattern_text 的 split(',') 约定)
+                        Some(CppTok::Kw(CppKw::True, _)) => {
+                            pattern_text.push_str("true");
+                        }
+                        Some(CppTok::Kw(CppKw::False, _)) => {
+                            pattern_text.push_str("false");
                         }
                         Some(other) => {
                             // 其他 token 转为文本
@@ -2075,7 +2119,7 @@ impl<'a> CppParser<'a> {
                 self.bump(); // 吞 `<`
                 let mut targs: Vec<crate::cpp::mangle::MangleType> = Vec::new();
                 loop {
-                    let arg = self.parse_mangle_type_depth(1)?;
+                    let arg = self.parse_template_arg(1)?;
                     targs.push(arg);
                     if matches!(
                         &self.peek,
@@ -3672,6 +3716,80 @@ impl<'a> CppParser<'a> {
         })
     }
 
+    /// M30.1: 解析单个模板实参 (类型或非类型字面量).
+    /// 实参位置的统一入口: true/false/整数走 NonType, 其余走类型解析.
+    /// parse_mangle_type 内部循环 / 局部变量 qualified 分支 /
+    /// 基类列表 / 函数显式实参共用.
+    fn parse_template_arg(&mut self, depth: u32) -> Result<MangleType, CppParseError> {
+        if self.at(CppKw::True)
+            || self.at(CppKw::False)
+            || matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Number | TokKind::Minus,
+                    ..
+                }))
+            )
+        {
+            return self.parse_non_type_value();
+        }
+        self.parse_mangle_type_depth(depth)
+    }
+
+    /// M30.1: 解析非类型模板实参 / 非类型形参默认值.
+    /// 接受 true / false / 整数字面量 (含负号), 返回 MangleType::NonType.
+    fn parse_non_type_value(&mut self) -> Result<MangleType, CppParseError> {
+        if self.at(CppKw::True) {
+            self.bump();
+            return Ok(MangleType::NonType(1));
+        }
+        if self.at(CppKw::False) {
+            self.bump();
+            return Ok(MangleType::NonType(0));
+        }
+        let neg = matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Minus,
+                ..
+            }))
+        );
+        if neg {
+            self.bump();
+        }
+        if let Some(CppTok::C(Tok {
+            kind: TokKind::Number,
+            text,
+            ..
+        })) = &self.peek
+        {
+            // 去掉整数后缀 (u/U/l/L 组合); hex/octal 交给 i64 解析
+            let raw: String = text
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == 'x' || *c == 'X')
+                .collect();
+            let v: i64 = if let Some(hex) = raw
+                .strip_prefix("0x")
+                .or_else(|| raw.strip_prefix("0X"))
+            {
+                i64::from_str_radix(hex, 16).map_err(|_| {
+                    CppParseError::Unexpected("non-type template argument", raw, self.span())
+                })?
+            } else {
+                raw.parse::<i64>().map_err(|_| {
+                    CppParseError::Unexpected("non-type template argument", raw, self.span())
+                })?
+            };
+            self.bump();
+            return Ok(MangleType::NonType(if neg { -v } else { v }));
+        }
+        Err(CppParseError::Unexpected(
+            "non-type template argument",
+            format!("{:?}", self.peek),
+            self.span(),
+        ))
+    }
+
     fn parse_mangle_type(&mut self) -> Result<MangleType, CppParseError> {
         self.parse_mangle_type_depth(0)
     }
@@ -3783,6 +3901,12 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Const) {
             self.bump();
             is_const = true;
+        }
+        // M30.1: `typename` dependent-type 前缀 (`typename T::type` /
+        // `typename std::enable_if<B, T>::type`) 同样是限定符, 吞掉后
+        // 按普通限定名解析.
+        if self.at(CppKw::Typename) {
+            self.bump();
         }
         // 接受普通 ident (含 'auto') 和 C 类型关键字 (int, void, char, ...)
         let name = match self.peek.clone() {
@@ -3997,7 +4121,7 @@ impl<'a> CppParser<'a> {
             let mut args = Vec::new();
             // 至少 1 个实参; 跨过嵌套 `<`/`>`
             loop {
-                let arg = self.parse_mangle_type_depth(depth + 1)?;
+                let arg = self.parse_template_arg(depth + 1)?;
                 args.push(arg);
                 if matches!(
                     &self.peek,
@@ -6375,6 +6499,83 @@ impl<'a> CppParser<'a> {
                     }
                 }
                 let parts = self.parse_qualified_name()?;
+                // M30.1: 限定名 + 模板实参 + `::member`
+                // (`std::conditional<true, T, F>::type` /
+                // `std::is_trivially_destructible<char>::value`).
+                // 此前 qualified 分支直接返回 QualifiedAccess, `<` 落到
+                // 比较运算符导致整个表达式解析失败.
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Lt,
+                        ..
+                    }))
+                ) && self.looks_like_template_args_after_lt()
+                {
+                    let last = parts.last().cloned().unwrap_or_default();
+                    self.bump(); // 吞 `<`
+                    let mut targs: Vec<MangleType> = Vec::new();
+                    loop {
+                        let arg = self.parse_template_arg(1)?;
+                        targs.push(arg);
+                        if matches!(
+                            &self.peek,
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Comma,
+                                ..
+                            }))
+                        ) {
+                            self.bump();
+                            continue;
+                        }
+                        if self.deferred_gt > 0 {
+                            self.deferred_gt -= 1;
+                            break;
+                        }
+                        if matches!(
+                            &self.peek,
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Gt,
+                                ..
+                            }))
+                        ) {
+                            self.bump();
+                            break;
+                        }
+                        if matches!(
+                            &self.peek,
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Shr,
+                                ..
+                            }))
+                        ) {
+                            self.bump();
+                            self.deferred_gt += 1;
+                            break;
+                        }
+                        return Err(CppParseError::Unexpected(
+                            ">",
+                            format!("{:?}", self.peek),
+                            self.span(),
+                        ));
+                    }
+                    // 限定模板实例名后跟 `::`: 静态成员 / 枚举常量访问,
+                    // 与裸名分支 (TplStaticAccess) 同构
+                    if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                        self.bump(); // ::
+                        let member = self.expect_ident()?;
+                        return Ok(CppExpr::TplStaticAccess {
+                            name: last,
+                            args: targs,
+                            member,
+                        });
+                    }
+                    // 无 `::` 尾缀的限定模板实例表达式: 回退为 TemplateIdent
+                    return Ok(CppExpr::TemplateIdent {
+                        name: last,
+                        args: targs,
+                    });
+                }
                 if let Some(last) = parts.last().cloned() {
                     let path = parts[..parts.len() - 1].to_vec();
                     return Ok(CppExpr::QualifiedAccess(path, last));
@@ -6395,7 +6596,7 @@ impl<'a> CppParser<'a> {
                 self.bump(); // 吞 `<`
                 let mut targs: Vec<MangleType> = Vec::new();
                 loop {
-                    let arg = self.parse_mangle_type_depth(1)?;
+                    let arg = self.parse_template_arg(1)?;
                     targs.push(arg);
                     if matches!(
                         &self.peek,
@@ -7408,7 +7609,7 @@ impl<'a> CppParser<'a> {
                 self.bump(); // 吞 `<`
                 let mut args = Vec::new();
                 loop {
-                    let arg = self.parse_mangle_type_depth(1)?;
+                    let arg = self.parse_template_arg(1)?;
                     args.push(arg);
                     if matches!(
                         &self.peek,
