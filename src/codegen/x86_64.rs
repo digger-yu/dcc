@@ -7116,7 +7116,16 @@ impl Codegen {
                             self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
                         }
                     } else {
-                        self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                        // 按 *ptr 类型宽度选择 store 指令 (截断语义:
+                        // 只写低 n 字节). 旧实现恒用 8 字节 movq,
+                        // 会越界覆盖相邻内存 (如 decNumber
+                        // *up=(Unit)out 破坏后续单元 → 系数全 0).
+                        match assign_l_ty.size() {
+                            1 => self.emit(&[0x88, 0x01]), // mov [rcx], al
+                            2 => self.emit(&[0x66, 0x89, 0x01]), // mov [rcx], ax
+                            4 => self.emit(&[0x89, 0x01]), // mov [rcx], eax
+                            _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
+                        }
                     }
                 } else if let Expr::Member {
                     expr,
