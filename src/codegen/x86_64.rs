@@ -6846,11 +6846,19 @@ impl Codegen {
                     }
                     self.binop(*op, dst, 1, is_signed);
                 }
-                // ptr - ptr: 字节差 ÷ 元素大小 = 元素数
+                // ptr - ptr: 字节差 ÷ 元素大小 = 元素数.
+                // idiv 固定以 rax 为被除数, 而 binop 结果在 dst:
+                // dst != 0 时须先搬 rax, 除完再把商搬回 dst.
                 if is_ptr_sub && elem_size > 1 {
+                    if dst != 0 {
+                        self.mov(0, dst); // rax = 字节差
+                    }
                     self.mov_imm(1, elem_size as i128); // rcx = elem_size
                     self.emit(&[0x48, 0x99]); // cqo (符号扩展 rax→rdx:rax)
                     self.emit(&[0x48, 0xf7, 0xf9]); // idiv rcx
+                    if dst != 0 {
+                        self.mov(dst, 0); // dst = 商
+                    }
                 }
                 // C 语义: 32 位整数运算结果需截断回 32 位 (溢出 wrap),
                 // 否则 64 位寄存器高位垃圾会泄漏给后续移位/除法等运算.
@@ -10942,12 +10950,18 @@ impl Codegen {
             BinOp::Mul => self.emit(&[0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)]),
             BinOp::Div | BinOp::Mod => {
                 // idiv uses rdx:rax as dividend and rdx for remainder.
-                // cqto/cqo sign-extends rax into rdx, destroying any value in rdx.
-                // If the divisor is in rdx (src==2), save it to stack first.
+                // binop 约定被除数在 dst, dst != 0 时须先搬到 rax;
+                // cqo 会覆盖 rdx, 故 src==2 (除数在 rdx) 时先 push 保存,
+                // 除前恢复到 rcx.
                 if src == 2 {
                     self.emit(&[0x52]); // push rdx (save divisor)
-                    self.emit(&[0x48, 0x99]); // cqto (sign-extend rax into rdx:rax)
-                    self.emit(&[0x59]); // pop rcx (restore divisor to rcx)
+                }
+                if dst != 0 {
+                    self.mov(0, dst); // rax = 被除数
+                }
+                if src == 2 {
+                    self.emit(&[0x59]); // pop rcx (restore divisor)
+                    self.emit(&[0x48, 0x99]); // cqto (rdx 已保存, 扩展被除数)
                     self.emit(&[0x48, 0xF7, 0xF9]); // idiv rcx
                 } else {
                     self.emit(&[0x48, 0x99]); // cqto
@@ -10959,6 +10973,8 @@ impl Codegen {
                 }
                 if matches!(op, BinOp::Mod) {
                     self.mov(dst, 2);
+                } else if dst != 0 {
+                    self.mov(dst, 0); // 商在 rax → dst
                 }
             }
             BinOp::Shl | BinOp::Shr => {
