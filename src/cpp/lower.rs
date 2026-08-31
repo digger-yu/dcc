@@ -4700,6 +4700,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // M30.3: 剥离 __attribute__((...)) 属性标记.
     // C 后端不支持 __attribute__ 语法, 需要移除.
     result = strip_attributes(&result);
+    // M30.3: 解混淆 C 标准库函数.
+    // parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
+    // _ZN6strlenEv -> strlen, _ZN6strcmpEv -> strcmp, 等.
+    result = demangle_c_functions(&result);
     result
 }
 
@@ -4862,6 +4866,30 @@ fn strip_attributes(s: &str) -> String {
             result.push(bytes[i] as char);
             i += 1;
         }
+    }
+    result
+}
+
+/// M30.3: 解混淆 C 标准库函数.
+/// parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
+/// 将 _ZN6strlenEv 还原为 strlen, _ZN6strcmpEv 还原为 strcmp 等.
+fn demangle_c_functions(s: &str) -> String {
+    let mut result = s.to_string();
+    // 常见 C 标准库函数 (无参或可变参的简单函数)
+    let c_functions = [
+        "strlen", "strcmp", "strncmp", "memcpy", "memcmp", "memset",
+        "strcpy", "strncpy", "strcat", "strncat", "strchr", "strrchr",
+        "strstr", "malloc", "free", "calloc", "realloc", "abort",
+        "exit", "atoi", "atol", "atof", "abs", "labs", "printf",
+        "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf",
+        "vsprintf", "vsnprintf", "fopen", "fclose", "fread", "fwrite",
+        "fseek", "ftell", "rewind", "feof", "ferror", "clearerr",
+        "getenv", "setenv", "system", "qsort", "bsearch",
+    ];
+    for func in &c_functions {
+        // _ZN<len><name>Ev 模式 (Itanium ABI: 无参函数)
+        let mangled = format!("_ZN{}{}Ev", func.len(), func);
+        result = result.replace(&mangled, func);
     }
     result
 }
