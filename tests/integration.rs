@@ -20489,3 +20489,17 @@ fn c23_attributes_compile_and_run() {
         "c23 attrs test should print PASS. got: {stdout}"
     );
 }
+
+/// Phase 5.1: C++98 iostream - clog and ws manipulator
+#[test]
+#[cfg(unix)]
+fn cpp98_iostream_clog_ws_compile() {
+    let src = include_str!("fixtures/cpp/iostream_basic.cpp");
+    let (out, obj) = run_cpp_object_test("cpp98-iostream", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}

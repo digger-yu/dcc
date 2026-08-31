@@ -1,5 +1,5 @@
 // <iostream> - dcc++ C++ 标准库
-// cout / cin / cerr 全局对象 + << / >> 操作符 (简化版, 无 endl 操纵器)
+// cout / cin / cerr / clog 全局对象 + << / >> 操作符 + ws/endl 操纵器
 
 extern "C" {
     struct dccpp_ostream;
@@ -7,6 +7,7 @@ extern "C" {
 
     dccpp_ostream* dccpp_cout(void);
     dccpp_ostream* dccpp_cerr(void);
+    dccpp_ostream* dccpp_clog(void);
     dccpp_istream* dccpp_cin(void);
 
     void dccpp_ostream_putc(dccpp_ostream* os, char c);
@@ -156,6 +157,10 @@ namespace std {
         static ostream os(dccpp_cerr());
         return os;
     }
+    inline ostream& clog() {
+        static ostream os(dccpp_clog());
+        return os;
+    }
     inline istream& cin() {
         static istream is(dccpp_cin());
         return is;
@@ -164,5 +169,14 @@ namespace std {
     inline ostream& endl(ostream& os) {
         dccpp_ostream_endl(0);
         return os;
+    }
+
+    // ws manipulator: skips leading whitespace
+    inline istream& ws(istream& is) {
+        int c = is.get();
+        while (c != EOF && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+            c = is.get();
+        }
+        return is;
     }
 }

@@ -247,6 +247,7 @@ void dccpp_vector_resize(struct dccpp_vector* v, size_t n) {
 /* C 中 stdout/stderr/stdin 不是常量表达式, 使用 NULL 初始化并在首次使用时延迟赋值 */
 static struct dccpp_ostream _dccpp_cout = { NULL };
 static struct dccpp_ostream _dccpp_cerr = { NULL };
+static struct dccpp_ostream _dccpp_clog = { NULL };
 static struct dccpp_istream _dccpp_cin  = { NULL };
 
 struct dccpp_ostream* dccpp_cout(void) {
@@ -256,6 +257,10 @@ struct dccpp_ostream* dccpp_cout(void) {
 struct dccpp_ostream* dccpp_cerr(void) {
     if (!_dccpp_cerr.fp) _dccpp_cerr.fp = stderr;
     return &_dccpp_cerr;
+}
+struct dccpp_ostream* dccpp_clog(void) {
+    if (!_dccpp_clog.fp) _dccpp_clog.fp = stderr;
+    return &_dccpp_clog;
 }
 struct dccpp_istream* dccpp_cin(void) {
     if (!_dccpp_cin.fp) _dccpp_cin.fp = stdin;
