@@ -4758,6 +4758,14 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 为每个匿名 union/struct 生成相同的 `__anon_aggr` 构造函数,
     // 导致链接时 multiple definition. 保留第一个定义, 其余转为 static.
     result = dedup_anon_aggr_ctors(&result);
+    // M30.3: 将 std_* 模板函数转为 static inline.
+    // C++ 标准库头文件中的 inline 函数被 parser 当作普通函数定义,
+    // 导致多 TU 链接冲突. 转为 static inline 避免冲突.
+    result = staticize_std_functions(&result);
+    // M30.3: 将 _sch_* 全局变量转为 extern 声明.
+    // safe-ctype.h 中的 extern 变量被 parser 当作定义,
+    // 导致多 TU 链接冲突. 转为 extern 声明.
+    result = fix_sch_extern_decls(&result);
     result
 }
 
@@ -5413,6 +5421,78 @@ fn dedup_anon_aggr_ctors(s: &str) -> String {
         result.push_str(lines[i]);
         result.push('\n');
         i += 1;
+    }
+    result
+}
+
+/// M30.3: 将 _sch_* 全局变量定义转为 extern 声明.
+/// safe-ctype.h 中的 `extern const unsigned short _sch_istable[256]` 等
+/// 被 parser 当作定义 `unsigned short _sch_istable;`, 导致多 TU 链接冲突.
+/// 转为 extern 声明.
+fn fix_sch_extern_decls(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    for line in &lines {
+        let trimmed = line.trim();
+        // 检测 _sch_* 变量定义: "unsigned short _sch_istable;" 等
+        if (trimmed.starts_with("unsigned short _sch_") 
+            || trimmed.starts_with("unsigned char _sch_"))
+            && trimmed.ends_with(';')
+            && !trimmed.contains('[') // 数组声明保持原样
+        {
+            // 转为 extern 声明
+            result.push_str("extern ");
+            result.push_str(trimmed);
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+/// M30.3: 将 std_* 函数定义转为 static inline.
+/// C++ 标准库头文件中的 inline 函数 (如 std_strlen, std_memcpy 等)
+/// 被 parser 当作普通函数定义, 导致多 TU 链接冲突.
+/// 检测这些函数并添加 static inline 前缀.
+fn staticize_std_functions(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    for line in &lines {
+        let trimmed = line.trim();
+        // 检测 std_* 或 GCC inline 函数定义
+        // 返回类型 + _ZN* 或 std_* 或 _hwi 或 *_or_zerop 等
+        let is_std_fn = (trimmed.starts_with("void ") 
+            || trimmed.starts_with("void*") 
+            || trimmed.starts_with("size_t ")
+            || trimmed.starts_with("int ")
+            || trimmed.starts_with("char ")
+            || trimmed.starts_with("char*")
+            || trimmed.starts_with("long ")
+            || trimmed.starts_with("long*")
+            || trimmed.starts_with("double ")
+            || trimmed.starts_with("unsigned ")
+            || trimmed.starts_with("bool ")
+            || trimmed.starts_with("_Bool "))
+            && (trimmed.contains("_ZN") 
+                || trimmed.contains("std_")
+                || trimmed.contains("_hwi(")
+                || trimmed.contains("_or_zerop(")
+                || trimmed.contains("startswith(")
+                || trimmed.contains("endswith("))
+            && trimmed.contains('(')
+            && !trimmed.starts_with("static")
+            && !trimmed.starts_with("extern")
+            && !trimmed.ends_with(';');
+        if is_std_fn {
+            result.push_str("static inline ");
+            result.push_str(line.trim_start());
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
     }
     result
 }
