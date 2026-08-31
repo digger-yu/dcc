@@ -1972,6 +1972,16 @@ impl Preprocessor {
             let phase3 = self.strip_comments_line(&ll.text);
             let trimmed = phase3.trim();
 
+            // C89 digraph %: is equivalent to # for directive lines
+            let trimmed_owned;
+            let trimmed = if trimmed.starts_with("%:") && !trimmed[2..].starts_with("%:") {
+                // %: at start → # directive prefix
+                trimmed_owned = format!("#{}", &trimmed[2..]);
+                trimmed_owned.as_str()
+            } else {
+                trimmed
+            };
+
             if trimmed.starts_with('#') {
                 if !active_source.is_empty() && !self.has_unclosed_paren(&active_source) {
                     self.flush_active_source(&mut active_source, &mut active_spans);
@@ -2764,7 +2774,9 @@ impl Preprocessor {
             if variadic && !gnu_named_variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
                 params.push("__VA_ARGS__".to_string());
             }
-            let body = after_name[paren_end + 1..].trim().to_string();
+            let body = Self::convert_body_digraphs(
+                after_name[paren_end + 1..].trim(),
+            );
             self.macros.insert(
                 name.to_string(),
                 MacroDef {
@@ -2775,7 +2787,7 @@ impl Preprocessor {
             );
         } else {
             // object-like macro
-            let body = after_name.trim().to_string();
+            let body = Self::convert_body_digraphs(after_name.trim());
             self.macros.insert(
                 name.to_string(),
                 MacroDef {
@@ -2785,6 +2797,56 @@ impl Preprocessor {
                 },
             );
         }
+    }
+
+    /// Convert C89 digraphs `%:%:` → `##` and `%:` → `#` in macro bodies,
+    /// outside of string/character literals. This enables token paste
+    /// and stringize operations using digraph equivalents.
+    fn convert_body_digraphs(s: &str) -> String {
+        if !s.contains("%:") {
+            return s.to_string();
+        }
+        let bytes = s.as_bytes();
+        let mut result = String::with_capacity(s.len());
+        let mut i = 0;
+        let mut in_string = false;
+        let mut in_char = false;
+        while i < bytes.len() {
+            // Track string literal state
+            if bytes[i] == b'"' && !in_char && (i == 0 || bytes[i - 1] != b'\\') {
+                in_string = !in_string;
+                result.push('"');
+                i += 1;
+                continue;
+            }
+            if bytes[i] == b'\'' && !in_string && (i == 0 || bytes[i - 1] != b'\\') {
+                in_char = !in_char;
+                result.push('\'');
+                i += 1;
+                continue;
+            }
+            if in_string || in_char {
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            // Check for %:%: digraph (##)
+            if bytes[i] == b'%' && i + 1 < bytes.len() && bytes[i + 1] == b':' {
+                if i + 3 < bytes.len() && bytes[i + 2] == b'%' && bytes[i + 3] == b':' {
+                    result.push_str("##");
+                    i += 4;
+                    continue;
+                }
+                // Check for %: digraph (#)
+                // Make sure it's not part of %:%: (already handled above)
+                result.push('#');
+                i += 2;
+                continue;
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
     }
 
     fn needs_linux_stddef_bool_fixup(path: &str) -> bool {

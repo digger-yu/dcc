@@ -20213,3 +20213,55 @@ int lg = stdc_log2_floor_ui(256);
         "stdc_count_ones_ui should expand to popcount. got: {stdout}"
     );
 }
+
+/// C89 digraph support: <: :> <% %> %: %:%:
+/// Digraphs are alternative tokens for [ ] { } # ##
+#[test]
+fn c89_digraphs_compile_and_run() {
+    let source = include_str!("fixtures/c/c89_digraphs.c");
+    let (output, exe) = run_compile_and_run("c89-digraphs", source);
+    assert!(
+        output.status.success(),
+        "digraph compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run digraph test");
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "digraph test should return 0"
+    );
+    let _ = fs::remove_file(&exe);
+}
+
+/// C89 digraph preprocessing: %:define and %:%: token paste
+#[test]
+fn c89_digraphs_preprocess() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-digraph-pp-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        "%:define MAGIC 42\n\
+         %:define CONCAT(a, b) a %:%: b\n\
+         int CONCAT(my_, var) = MAGIC;\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -E");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "digraph preprocess should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("int my_var = 42"),
+        "digraphs should expand correctly. got: {stdout}"
+    );
+}

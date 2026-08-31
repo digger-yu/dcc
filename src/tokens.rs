@@ -795,7 +795,15 @@ impl<'a> Lexer<'a> {
             b']' => (TokKind::RBracket, 1),
             b',' => (TokKind::Comma, 1),
             b';' => (TokKind::Semi, 1),
-            b':' => (TokKind::Colon, 1),
+            b':' => {
+                if self.peek() == Some(b'>') {
+                    // digraph :> → ]
+                    self.bump();
+                    (TokKind::RBracket, 2)
+                } else {
+                    (TokKind::Colon, 1)
+                }
+            }
             b'?' => (TokKind::Question, 1),
             b'~' => (TokKind::Tilde, 1),
             b'#' => (TokKind::Hash, 1),
@@ -844,6 +852,14 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some(b'=') {
                     self.bump();
                     (TokKind::PercentEq, 2)
+                } else if self.peek() == Some(b'>') {
+                    // digraph %> → }
+                    self.bump();
+                    (TokKind::RBrace, 2)
+                } else if self.peek() == Some(b':') {
+                    // digraph %: → # (and %:%: → ## as two Hash tokens)
+                    self.bump();
+                    (TokKind::Hash, 2)
                 } else {
                     (TokKind::Percent, 1)
                 }
@@ -906,6 +922,14 @@ impl<'a> Lexer<'a> {
                     } else {
                         (TokKind::Shl, 2)
                     }
+                } else if self.peek() == Some(b':') {
+                    // digraph <: → [
+                    self.bump();
+                    (TokKind::LBracket, 2)
+                } else if self.peek() == Some(b'%') {
+                    // digraph <% → {
+                    self.bump();
+                    (TokKind::LBrace, 2)
                 } else {
                     (TokKind::Lt, 1)
                 }
