@@ -598,6 +598,10 @@ pub struct CppParser<'a> {
     /// (Alias -> 模板名 + 实参). 表达式 `Alias::member` 展开为
     /// TplStaticAccess, 以触发实例化并引用带前缀的常量.
     pub typedef_alias: std::collections::HashMap<String, (String, Vec<MangleType>)>,
+    /// M30.4: 匿名聚合体计数器, 为每个匿名 union/struct 生成唯一名
+    /// (`__anon_aggr_1`, `__anon_aggr_2`, ...) 避免同名导致构造函数/
+    /// typeinfo/typedef 符号重复.
+    anon_counter: u32,
 }
 
 impl<'a> CppParser<'a> {
@@ -612,6 +616,7 @@ impl<'a> CppParser<'a> {
             lambdas: vec![],
             deferred_gt: 0,
             typedef_alias: std::collections::HashMap::new(),
+            anon_counter: 0,
         }
     }
 
@@ -2397,8 +2402,13 @@ impl<'a> CppParser<'a> {
             ));
         }
         self.bump();
-        // tag 名用于成员解析类上下文 (无 tag 用占位)
-        let ctx_name = name.clone().unwrap_or_else(|| "__anon_aggr".into());
+        // M30.4: 匿名聚合体分配唯一名 (`__anon_aggr_1`, `__anon_aggr_2`, ...)
+        // 避免多个匿名 union/struct 共享同名导致构造函数/typeinfo 重复定义.
+        let anon_name = name.clone().unwrap_or_else(|| {
+            self.anon_counter += 1;
+            format!("__anon_aggr_{}", self.anon_counter)
+        });
+        let ctx_name = anon_name.clone();
         let mut members = vec![];
         while let Some(t) = &self.peek {
             if matches!(
@@ -2456,9 +2466,9 @@ impl<'a> CppParser<'a> {
                 bases,
                 members,
             })),
-            // 匿名纯定义: 占位名
+            // M30.4: 匿名纯定义: 使用唯一占位名 (避免同名构造函数冲突)
             (None, None) => Ok(CppDecl::Class(ClassDecl {
-                name: "__anon_aggr".into(),
+                name: anon_name,
                 is_struct: true,
                 is_union,
                 bases,

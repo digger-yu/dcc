@@ -2151,12 +2151,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             ));
         }
     } else if !link_mode && inputs.len() == 1 {
-        // 单个 .o 文件输入: 自动启用内置链接器
-        if let Some(ext) = inputs[0].extension().and_then(|e| e.to_str()) {
-            if ext == "o" && !relocatable && !emit_asm && !preprocess_only && !syntax_only {
-                built_link = true;
-            }
-        }
+        // 单个 .o 文件输入: 不设置 built_link, 让 driver 的
+        // needs_host_cc_link 委托 host cc 做最终链接 (内置链接器
+        // 无法解析 libc 符号, GCC 构建等场景需要 host cc 链接).
     }
 
     // -j0 无意义，报错

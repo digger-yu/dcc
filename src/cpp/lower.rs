@@ -4754,10 +4754,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 有时会将函数体内的局部变量声明泄漏到全局作用域,
     // 导致 conflicting types 错误. 检测并移除这些泄漏语句.
     result = remove_leaked_fn_body_stmts(&result);
-    // M30.3: 去重匿名聚合体构造函数.
-    // parser 为每个匿名 union/struct 生成相同的 `__anon_aggr` 构造函数,
-    // 导致链接时 multiple definition. 保留第一个定义, 其余转为 static.
-    result = dedup_anon_aggr_ctors(&result);
+    // M30.3: 去重全局函数定义.
+    // parser 可能将同一函数声明解析为多个定义 (如 snprintf, strtoimax),
+    // 导致链接时 multiple definition. 保留第一个, 后续转为声明.
+    result = dedup_global_fn_defs(&result);
     // M30.3: 将 std_* 模板函数转为 static inline.
     // C++ 标准库头文件中的 inline 函数被 parser 当作普通函数定义,
     // 导致多 TU 链接冲突. 转为 static inline 避免冲突.
@@ -5391,42 +5391,86 @@ fn remove_leaked_fn_body_stmts(s: &str) -> String {
     result
 }
 
-/// M30.3: 去重匿名聚合体构造函数.
-/// parser 为每个匿名 union/struct 生成相同的 `__anon_aggr` 构造函数,
-/// 导致链接时 multiple definition. 保留第一个定义, 其余移除.
-fn dedup_anon_aggr_ctors(s: &str) -> String {
+/// M30.3: 去重全局函数定义.
+/// parser 可能将同一函数声明解析为多个定义 (如 snprintf, strtoimax 等),
+/// 导致链接时 multiple definition. 保留第一个定义, 后续重复转为声明.
+fn dedup_global_fn_defs(s: &str) -> String {
+    use std::collections::HashSet;
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
-    let mut seen_anon_ctor = false;
+    let mut defined_fns: HashSet<String> = HashSet::new();
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        // 检查是否是 __anon_aggr 构造函数定义
-        if trimmed.starts_with("void _ZN11__anon_aggrC1Ev") {
-            // 单行函数: void _ZN11__anon_aggrC1Ev (...) { (void)this; }
-            if trimmed.contains('{') && trimmed.contains('}') {
-                if seen_anon_ctor {
-                    // 跳过这个重复定义
-                    i += 1;
-                    continue;
-                } else {
-                    seen_anon_ctor = true;
-                }
-            }
-            // 多行函数: void _ZN11__anon_aggrC1Ev (...) {
-            else if trimmed.ends_with('{') {
-                if seen_anon_ctor {
-                    // 跳过这个重复定义
-                    i += 1;
-                    while i < lines.len() && lines[i].trim() != "}" {
-                        i += 1;
+        // 检测函数定义模式: "... fn_name (...) {" 或 "... fn_name (...) { body }"
+        // 排除: static, extern, typedef, if, while, for, switch, preprocessor
+        if !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && !trimmed.starts_with("static")
+            && !trimmed.starts_with("extern")
+            && !trimmed.starts_with("typedef")
+            && !trimmed.starts_with("if")
+            && !trimmed.starts_with("while")
+            && !trimmed.starts_with("for")
+            && !trimmed.starts_with("switch")
+            && !trimmed.starts_with("return")
+            && !trimmed.starts_with("struct ")
+            && !trimmed.starts_with("union ")
+            && !trimmed.starts_with("enum ")
+        {
+            // 查找模式: identifier '(' ... ')' 后面跟 '{'
+            if let Some(paren_pos) = trimmed.find('(') {
+                // 提取函数名 (括号前的标识符)
+                let before_paren = trimmed[..paren_pos].trim();
+                if let Some(fn_name) = before_paren.rsplit_once(' ').or_else(|| before_paren.rsplit_once('*')).map(|(_, name)| name.trim()).or_else(|| {
+                    // 如果没空格, 整个 before_paren 可能是 fn_name
+                    if !before_paren.is_empty() && before_paren.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        Some(before_paren)
+                    } else {
+                        None
                     }
-                    if i < lines.len() {
-                        i += 1; // 跳过 `}`
+                }) {
+                    if !fn_name.is_empty()
+                        && fn_name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                    {
+                        // 检查行是否包含 '{' (函数定义开始)
+                        if trimmed.contains('{') {
+                            if defined_fns.contains(fn_name) {
+                                // 重复定义 - 转为声明
+                                // 提取到 ')' 为止的部分作为声明
+                                if let Some(close_paren) = trimmed.rfind(')') {
+                                    let decl_part = &trimmed[..=close_paren];
+                                    result.push_str(decl_part);
+                                    result.push_str(";\n");
+                                }
+                                // 跳过函数体
+                                if trimmed.ends_with('}') {
+                                    // 单行函数
+                                    i += 1;
+                                } else {
+                                    // 多行函数 - 跳过到匹配的 '}'
+                                    let mut brace_depth: i32 = 0;
+                                    for ch in trimmed.chars() {
+                                        if ch == '{' { brace_depth += 1; }
+                                        if ch == '}' { brace_depth -= 1; }
+                                    }
+                                    i += 1;
+                                    while i < lines.len() && brace_depth > 0 {
+                                        for ch in lines[i].chars() {
+                                            if ch == '{' { brace_depth += 1; }
+                                            if ch == '}' { brace_depth -= 1; }
+                                        }
+                                        i += 1;
+                                    }
+                                }
+                                continue;
+                            } else {
+                                defined_fns.insert(fn_name.to_string());
+                            }
+                        }
                     }
-                    continue;
-                } else {
-                    seen_anon_ctor = true;
                 }
             }
         }
@@ -9386,7 +9430,13 @@ impl Lower {
                 let nontype_seg = qname.starts_with("__dcc_template_")
                     && last.starts_with('n')
                     && last[1..].chars().all(|c| c.is_ascii_digit() || c == '-');
+                // M30.4: 别名必须以字母或下划线开头 (合法 C 标识符).
+                // `__anon_aggr_1` 的尾段 `1` 是数字, 不能作为 typedef 名.
+                let valid_ident = last.chars().next()
+                    .map(|c| c.is_ascii_alphabetic() || c == '_')
+                    .unwrap_or(false);
                 if last != qname
+                    && valid_ident
                     && !nontype_seg
                     && !self.emitted_typedefs.contains(last)
                     && !is_c_keyword(last)

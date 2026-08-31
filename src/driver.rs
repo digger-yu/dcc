@@ -2875,6 +2875,9 @@ fn link_objects_with_host_cc(
     );
     if dcc_runtime.exists() {
         cmd.arg(&dcc_runtime);
+        // dccpp_runtime.c 使用 __cxa_allocate_exception / __cxa_throw
+        // 等 C++ 异常运行时函数, 需要链接 libstdc++.
+        cmd.arg("-lstdc++");
     }
     cmd.arg("-o").arg(output);
     if let Some(sr) = sysroot {
