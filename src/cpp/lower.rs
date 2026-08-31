@@ -735,7 +735,9 @@ fn clean_struct_bodies(s: &str) -> String {
                             format!("{}, {}", this_param, params_clean.trim())
                         };
                         let mut ctor_func = String::new();
-                        ctor_func.push_str(&format!("\nvoid _ctor_{}({}) {{\n", struct_name, all_params));
+                        // Count parameters (including this_) for overloaded ctor naming
+                        let param_count = all_params.split(',').count();
+                        ctor_func.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
                         // 输出初始化列表: this_->member = init;
                         for (mname, mval) in &init_list {
                             // 替换参数名中的引用为指针访问
@@ -787,7 +789,9 @@ fn clean_struct_bodies(s: &str) -> String {
                             format!("{}, {}", this_param, params_clean.trim())
                         };
                         let mut ctor_decl = String::new();
-                        ctor_decl.push_str(&format!("\nvoid _ctor_{}({}) {{\n", struct_name, all_params));
+                        // Count parameters (including this_) for overloaded ctor naming
+                        let param_count = all_params.split(',').count();
+                        ctor_decl.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
                         for (mname, mval) in &init_list {
                             ctor_decl.push_str(&format!("  this_->{} = {};\n", mname, mval));
                         }
@@ -1026,7 +1030,9 @@ fn clean_struct_bodies(s: &str) -> String {
                             format!("{}, {}", this_param, params_clean.trim())
                         };
                         let mut ctor_func = String::new();
-                        ctor_func.push_str(&format!("\nvoid _ctor_{}({}) {{\n", struct_name, all_params));
+                        // Count parameters (including this_) for overloaded ctor naming
+                        let param_count = all_params.split(',').count();
+                        ctor_func.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
                         for (mname, mval) in &init_list {
                             ctor_func.push_str(&format!("  this_->{} = {};\n", mname, mval));
                         }
@@ -1844,29 +1850,37 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                                     } else { false }
                                 };
                                 let type_prefix = if has_struct_prefix { "struct " } else { "" };
+                                // Count arguments to match overloaded constructor name
+                                let arg_count = if args.is_empty() {
+                                    0
+                                } else {
+                                    args.split(',').count()
+                                };
+                                // +1 for the &this parameter
+                                let ctor_suffix = arg_count + 1;
                                 if in_for_init {
                                     if args.is_empty() {
                                         result.push_str(&format!(
-                                            "{}{} {}; _ctor_{}(&{})",
-                                            type_prefix, ty, var_name, ty, var_name
+                                            "{}{} {}; _ctor_{}_{}(&{})",
+                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name
                                         ));
                                     } else {
                                         result.push_str(&format!(
-                                            "{}{} {}; _ctor_{}(&{}, {})",
-                                            type_prefix, ty, var_name, ty, var_name, args
+                                            "{}{} {}; _ctor_{}_{}(&{}, {})",
+                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name, args
                                         ));
                                     }
                                     i = after + 1;
                                 } else {
                                     if args.is_empty() {
                                         result.push_str(&format!(
-                                            "{}{} {}; _ctor_{}(&{});",
-                                            type_prefix, ty, var_name, ty, var_name
+                                            "{}{} {}; _ctor_{}_{}(&{});",
+                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name
                                         ));
                                     } else {
                                         result.push_str(&format!(
-                                            "{}{} {}; _ctor_{}(&{}, {});",
-                                            type_prefix, ty, var_name, ty, var_name, args
+                                            "{}{} {}; _ctor_{}_{}(&{}, {});",
+                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name, args
                                         ));
                                     }
                                     i = after + 1;
@@ -3662,7 +3676,7 @@ fn replace_constructors(s: &str) -> String {
                     if result.as_bytes().last() == Some(&b'}') {
                         result.push('\n');
                     }
-                    result.push_str(&format!("void _ctor_{}()", class_name));
+                    result.push_str(&format!("void _ctor_{}_1()", class_name));
                     i = k;
                     continue;
                 }
@@ -3800,6 +3814,14 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
                     }
                 }
                 let replacement = format!("void _ctor_{}", name);
+                // Count parameters to disambiguate overloaded constructors
+                let params_str = &result[after..after_params];
+                let param_count = if params_str.trim().is_empty() || params_str.trim() == "void" {
+                    0
+                } else {
+                    params_str.split(',').count()
+                };
+                let replacement = format!("void _ctor_{}_{}", name, param_count);
                 // Keep: prefix + replacement + params + rest from j
                 result = format!(
                     "{}{} {}{}",
@@ -3959,10 +3981,12 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                 let after_paren = skip_ws(bytes, j);
                                 let has_init_list = after_paren < len && bytes[after_paren] == b':';
                                 
-                                // Output: void _ctor_ClassName(struct ClassName *this_, params)
+                                // Output: void _ctor_ClassName_N(struct ClassName *this_, params)
+                                // Count parameters for overloaded ctor naming
+                                let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
                                 result.push_str(&format!(
-                                    "\nvoid _ctor_{}(struct {} *this_{}", 
-                                    struct_info.0, struct_info.0,
+                                    "\nvoid _ctor_{}_{}(struct {} *this_{}", 
+                                    struct_info.0, param_count, struct_info.0,
                                     if params.trim().is_empty() { "" } else { ", " }
                                 ));
                                 result.push_str(params);
@@ -4859,10 +4883,11 @@ fn fix_broken_constructors(s: &str) -> String {
                                         k += 1;
                                     }
                                     let body = &s[body_start..k-1];
-                                    // Output: void _ctor_ClassName(struct ClassName *this_, params) { assignments; body }
+                                    // Output: void _ctor_ClassName_N(struct ClassName *this_, params) { assignments; body }
+                                    let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
                                     result.push_str(&format!(
-                                        "void _ctor_{}(struct {} *this_{}", 
-                                        class_name, class_name,
+                                        "void _ctor_{}_{}(struct {} *this_{}", 
+                                        class_name, param_count, class_name,
                                         if params.trim().is_empty() { "" } else { ", " }
                                     ));
                                     result.push_str(params.trim());
@@ -4886,9 +4911,10 @@ fn fix_broken_constructors(s: &str) -> String {
                                     k += 1;
                                 }
                                 let body = &s[body_start..k-1];
+                                let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
                                 result.push_str(&format!(
-                                    "void _ctor_{}(struct {} *this_{}", 
-                                    class_name, class_name,
+                                    "void _ctor_{}_{}(struct {} *this_{}", 
+                                    class_name, param_count, class_name,
                                     if params.trim().is_empty() { "" } else { ", " }
                                 ));
                                 result.push_str(params.trim());
@@ -6003,9 +6029,9 @@ fn add_forward_declarations(s: &str) -> String {
 extern struct source_range get_range_from_loc (struct line_maps *set, int loc);
 struct encoding_rich_location;
 struct unpaired_bidi_rich_location;
-void _ctor_encoding_rich_location(struct encoding_rich_location *this_, struct cpp_reader *pfile);
-void _ctor_encoding_rich_location(struct encoding_rich_location *this_, struct cpp_reader *pfile, int loc);
-void _ctor_unpaired_bidi_rich_location(struct unpaired_bidi_rich_location *this_, struct cpp_reader *pfile, int loc);
+void _ctor_encoding_rich_location_2(struct encoding_rich_location *this_, struct cpp_reader *pfile);
+void _ctor_encoding_rich_location_3(struct encoding_rich_location *this_, struct cpp_reader *pfile, int loc);
+void _ctor_unpaired_bidi_rich_location_3(struct unpaired_bidi_rich_location *this_, struct cpp_reader *pfile, int loc);
 const char * bidi_to_str (int kind);
 int bidi_current_ctx (void);
 int bidi_current_ctx_ucn_p (void);
@@ -6015,8 +6041,8 @@ void bidi_on_close (void);
 int bidi_vec_count (void);
 void rich_loc_set_escape_on_output (struct rich_location *this_, int val);
 void rich_loc_add_range (struct rich_location *this_, int loc);
-void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt, int loc);
-void _ctor_rich_location(struct rich_location *this_, struct cpp_reader *pfile, void *lt);
+void _ctor_rich_location_5(struct rich_location *this_, struct cpp_reader *pfile, void *lt, int loc);
+void _ctor_rich_location_4(struct rich_location *this_, struct cpp_reader *pfile, void *lt);
 struct mkdeps;
 struct mkdeps *_new_mkdeps(void);
 struct cpp_substring_ranges;
