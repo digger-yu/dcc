@@ -1,0 +1,105 @@
+// <iterator> - dcc++ C++ 标准库
+// Iterator traits, category tags, and basic iterator utilities.
+//
+// 语义说明:
+//   - iterator_category tags: input_iterator_tag 等为空结构体,
+//     仅用于标签分派 (tag dispatch).
+//   - iterator_traits<Iter>: 提取迭代器关联类型. 指针特化
+//     提供随机访问迭代器范畴.
+//   - distance / advance: 基础迭代器操作, 按范畴分派.
+
+namespace std {
+
+    // ===== Iterator category tags =====
+    struct input_iterator_tag {};
+    struct output_iterator_tag {};
+    struct forward_iterator_tag : input_iterator_tag {};
+    struct bidirectional_iterator_tag : forward_iterator_tag {};
+    struct random_access_iterator_tag : bidirectional_iterator_tag {};
+
+    // ===== iterator_traits =====
+    // Primary template: expects Iter to define nested typedefs
+    template <typename Iter>
+    struct iterator_traits {
+        typedef typename Iter::iterator_category iterator_category;
+        typedef typename Iter::value_type value_type;
+        typedef typename Iter::difference_type difference_type;
+        typedef typename Iter::pointer pointer;
+        typedef typename Iter::reference reference;
+    };
+
+    // Pointer specialization: random access iterator
+    template <typename T>
+    struct iterator_traits<T*> {
+        typedef random_access_iterator_tag iterator_category;
+        typedef T value_type;
+        typedef long difference_type;
+        typedef T* pointer;
+        typedef T& reference;
+    };
+
+    // Const pointer specialization
+    template <typename T>
+    struct iterator_traits<const T*> {
+        typedef random_access_iterator_tag iterator_category;
+        typedef T value_type;
+        typedef long difference_type;
+        typedef const T* pointer;
+        typedef const T& reference;
+    };
+
+    // ===== Basic iterator operations =====
+
+    // distance: count steps from first to last
+    template <typename InputIt>
+    inline long distance_impl(InputIt first, InputIt last, input_iterator_tag) {
+        long n = 0;
+        while (first != last) {
+            ++first;
+            ++n;
+        }
+        return n;
+    }
+
+    template <typename RandIt>
+    inline long distance_impl(RandIt first, RandIt last, random_access_iterator_tag) {
+        return last - first;
+    }
+
+    template <typename InputIt>
+    inline long distance(InputIt first, InputIt last) {
+        return distance_impl(first, last,
+            typename iterator_traits<InputIt>::iterator_category());
+    }
+
+    // advance: move iterator forward by n steps
+    template <typename InputIt>
+    inline void advance_impl(InputIt& it, long n, input_iterator_tag) {
+        while (n > 0) { ++it; --n; }
+    }
+
+    template <typename RandIt>
+    inline void advance_impl(RandIt& it, long n, random_access_iterator_tag) {
+        it += n;
+    }
+
+    template <typename InputIt>
+    inline void advance(InputIt& it, long n) {
+        advance_impl(it, n,
+            typename iterator_traits<InputIt>::iterator_category());
+    }
+
+    // next / prev (C++11)
+    template <typename InputIt>
+    inline InputIt next(InputIt it, long n) {
+        advance(it, n);
+        return it;
+    }
+
+    template <typename BidirIt>
+    inline BidirIt prev(BidirIt it, long n) {
+        advance(it, -n);
+        return it;
+    }
+
+}  // namespace std

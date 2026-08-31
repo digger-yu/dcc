@@ -20517,3 +20517,17 @@ fn cpp98_dtor_implicit_noexcept_compile() {
     );
     let _ = fs::remove_file(obj);
 }
+
+/// Phase 5.3: C++98 iterator_traits and iterator category tags
+#[test]
+#[cfg(unix)]
+fn cpp98_iterator_traits_compile() {
+    let src = include_str!("fixtures/cpp/iterator_traits.cpp");
+    let (out, obj) = run_cpp_object_test("cpp98-iterator-traits", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}
