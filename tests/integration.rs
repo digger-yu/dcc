@@ -20503,3 +20503,17 @@ fn cpp98_iostream_clog_ws_compile() {
     );
     let _ = fs::remove_file(obj);
 }
+
+/// Phase 5.2: C++98/11 implicit destructor noexcept
+#[test]
+#[cfg(unix)]
+fn cpp98_dtor_implicit_noexcept_compile() {
+    let src = include_str!("fixtures/cpp/dtor_implicit_noexcept.cpp");
+    let (out, obj) = run_cpp_object_test("cpp98-dtor-noexcept", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}

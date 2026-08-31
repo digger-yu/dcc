@@ -4830,7 +4830,8 @@ impl<'a> CppParser<'a> {
                     class: cls,
                     body,
                     is_virtual: false,
-                    is_noexcept: spec.is_noexcept,
+                    // C++11 [except.spec]/3: destructors are implicitly noexcept
+                    is_noexcept: true,
                 });
             }
             parts.push(self.expect_ident()?);
@@ -5084,7 +5085,7 @@ impl<'a> CppParser<'a> {
         let class = self.expect_ident()?;
         let _params = self.parse_param_list()?;
         let spec = self.skip_specifiers();
-        let is_noexcept = spec.is_noexcept;
+        let _is_noexcept = spec.is_noexcept; // C++11: dtors always implicitly noexcept
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -5100,7 +5101,8 @@ impl<'a> CppParser<'a> {
                 is_decl: true,
             },
                 is_virtual,
-                is_noexcept,
+                // C++11 [except.spec]/3: destructors are implicitly noexcept
+                is_noexcept: true,
             });
         }
         let body = self.parse_body()?;
@@ -5108,7 +5110,8 @@ impl<'a> CppParser<'a> {
             class,
             body,
             is_virtual,
-            is_noexcept,
+            // C++11 [except.spec]/3: destructors are implicitly noexcept
+            is_noexcept: true,
         })
     }
 

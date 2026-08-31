@@ -328,7 +328,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ `new T[n]` 数组分配 | `CppExpr::NewArr` + `_Znam` |
 | dcc++ `placement new` | `new (ptr) T(args)` 原地构造 |
 | dcc++ `static` 类成员 | C `static` 字段 + Itanium ABI mangling |
-| C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛） / `final` / `override` / `mutable`（M27: 跟踪 mutable 字段，C 端输出 `/* mutable */` 注释标记，const 方法中可写） / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
+| C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛、析构函数隐式 `noexcept` per C++11 [except.spec]/3） / `final` / `override` / `mutable`（M27: 跟踪 mutable 字段，C 端输出 `/* mutable */` 注释标记，const 方法中可写） / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
 | 模板嵌套深度 | `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认一致（Clang 为 1024），含深度超限诊断 |
 | `if constexpr` | 编译期分支：const_eval 在 lower 端选分支 |
 | C++ 标准库扩展 | `<iostream>` (cout/cerr/clog/cin + endl/ws 操纵器) / `<chrono>` / `<thread>` / `<mutex>` / `<condition_variable>` / `<filesystem>` / `<expected>` / `<flat_map>` / `<regex>` / `<ranges>` |
