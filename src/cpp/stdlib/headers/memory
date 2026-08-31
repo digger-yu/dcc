@@ -116,9 +116,9 @@ namespace std {
     public:
         weak_ptr() : s_() {}
         weak_ptr(const shared_ptr& sp) : s_(sp.s_) {}
-        int expired() const { return use_count() == 0; }
+        int expired() const { return this->use_count() == 0; }
         size_t use_count() const { return dccpp_shared_ptr_use_count(&s_); }
-        shared_ptr lock() const { return shared_ptr(); }
+        shared_ptr lock() const { shared_ptr __tmp; return __tmp; }
     private:
         dccpp_shared_ptr s_;
     };

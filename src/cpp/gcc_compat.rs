@@ -18,21 +18,22 @@
 /// __cxa_guard_* 运行时: 线程安全单次初始化
 /// dcc 简化实现: guard 字节状态 0/1/2 (未初始化/初始化中/已初始化),
 /// 单线程语义. 同时提供 Itanium 双下划线变体.
+/// 使用 static inline 避免多 TU 链接冲突.
 pub fn cxa_guard_runtime() -> String {
     let mut s = String::from(
-        "/* dcc GCC ABI: __cxa_guard_* thread-safe static init (weak: multi-TU safe) */\n\
-         __attribute__((weak)) int _cxa_guard_acquire(unsigned char* g) {\n\
+        "/* dcc GCC ABI: __cxa_guard_* thread-safe static init (static inline: multi-TU safe) */\n\
+         static inline int _cxa_guard_acquire(unsigned char* g) {\n\
          \x20   if (*g != 0) return 0;\n\
          \x20   *g = 1;\n\
          \x20   return 1;\n\
          }\n\
-         __attribute__((weak)) void _cxa_guard_release(unsigned char* g) { *g = 2; }\n\
-         __attribute__((weak)) void _cxa_guard_abort(unsigned char* g) { *g = 0; }\n",
+         static inline void _cxa_guard_release(unsigned char* g) { *g = 2; }\n\
+         static inline void _cxa_guard_abort(unsigned char* g) { *g = 0; }\n",
     );
     s.push_str(
-        "__attribute__((weak)) int __cxa_guard_acquire(unsigned char* g) { return _cxa_guard_acquire(g); }\n\
-         __attribute__((weak)) void __cxa_guard_release(unsigned char* g) { _cxa_guard_release(g); }\n\
-         __attribute__((weak)) void __cxa_guard_abort(unsigned char* g) { _cxa_guard_abort(g); }\n",
+        "static inline int __cxa_guard_acquire(unsigned char* g) { return _cxa_guard_acquire(g); }\n\
+         static inline void __cxa_guard_release(unsigned char* g) { _cxa_guard_release(g); }\n\
+         static inline void __cxa_guard_abort(unsigned char* g) { _cxa_guard_abort(g); }\n",
     );
     s
 }
@@ -46,10 +47,11 @@ pub fn typeinfo_struct_decl() -> String {
 /// - ptr 为空: 返回空
 /// - offset < 0 (上转): 返回原指针
 /// - 否则: 按偏移调整到目标子对象
+/// 使用 static inline 避免多 TU 链接冲突.
 pub fn dynamic_cast_runtime() -> String {
     String::from(
-        "/* dcc GCC ABI: __dynamic_cast (cross-virtual cast helper; weak: multi-TU safe) */\n\
-         __attribute__((weak)) void* __dynamic_cast(void* ptr, void* src_ti, void* dst_ti, long offset) {\n\
+        "/* dcc GCC ABI: __dynamic_cast (cross-virtual cast helper; static inline: multi-TU safe) */\n\
+         static inline void* __dynamic_cast(void* ptr, void* src_ti, void* dst_ti, long offset) {\n\
          \x20   (void)src_ti;\n\
          \x20   (void)dst_ti;\n\
          \x20   if (ptr == 0) return 0;\n\

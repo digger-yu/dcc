@@ -2299,15 +2299,25 @@ fn strip_gcc_attributes(s: &str) -> String {
             {
                 let j = skip_ws(bytes, ident_end);
                 if j < len && bytes[j] == b'(' {
-                    // 跳过整个属性宏 (包括嵌套括号)
+                    // 提取属性内容, 检查是否是 weak
                     let mut depth = 1i32;
                     let mut k = j + 1;
+                    let content_start = k;
                     while k < len && depth > 0 {
                         if bytes[k] == b'(' { depth += 1; }
                         else if bytes[k] == b')' { depth -= 1; }
                         k += 1;
                     }
-                    // 跳过属性宏后的空白
+                    let content_end = k - 1;
+                    let content = &s[content_start..content_end];
+                    // 保留 __attribute__((weak)) - 用于多 TU 安全
+                    if ident == "__attribute__" && content.trim() == "weak" {
+                        // 保留整个属性
+                        result.push_str(&s[i..k]);
+                        i = skip_ws(bytes, k);
+                        continue;
+                    }
+                    // 跳过其他属性宏
                     i = skip_ws(bytes, k);
                     continue;
                 }
@@ -4725,6 +4735,13 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 可能将 `signed long int` 等基本类型误加上 `struct` 前缀,
     // 生成无效的 `struct signed long int`. 需要移除.
     result = fix_struct_primitive_types(&result);
+    // M30.3: 修复模板实例化缺少 struct 关键字的问题.
+    // 模板 struct 实例化可能生成 `identifier {` 而非 `struct identifier {`.
+    result = fix_missing_struct_keywords(&result);
+    // M30.3: 将 glibc inline 函数定义转为声明.
+    // glibc 头文件中的 `extern __inline` 函数被 parser 当作普通函数定义,
+    // 链接时与 libc 冲突 (multiple definition). 转为声明避免冲突.
+    result = staticize_clib_inline_fns(&result);
     // M30.3: 将 C 标准库函数的空定义转换为声明.
     // parser 可能将系统头文件中的函数声明解析为空函数体 `{ }`,
     // 导致链接时与 libc/libiberty 的实现冲突 (multiple definition).
@@ -4874,6 +4891,7 @@ fn fix_broken_constructors(s: &str) -> String {
 
 /// M30.3: 剥离 __attribute__((...)) 和 __attribute__(...) 属性标记.
 /// C 后端不支持 __attribute__ 语法, 需要移除.
+/// 但保留 __attribute__((weak)) - 用于多 TU 安全.
 fn strip_attributes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -4882,6 +4900,7 @@ fn strip_attributes(s: &str) -> String {
     while i < len {
         // 检查 __attribute__
         if i + 13 <= len && &bytes[i..i+13] == b"__attribute__" {
+            let attr_start = i;
             // 跳过 __attribute__
             i += 13;
             // 跳过空格
@@ -4889,12 +4908,20 @@ fn strip_attributes(s: &str) -> String {
             // 检查 (( 或 (
             if i < len && bytes[i] == b'(' {
                 i += 1;
+                // 记录内容开始位置
+                let content_start = i;
                 // 跳过 balanced parens
                 let mut depth = 1i32;
                 while i < len && depth > 0 {
                     if bytes[i] == b'(' { depth += 1; }
                     else if bytes[i] == b')' { depth -= 1; }
                     i += 1;
+                }
+                let content_end = i - 1;
+                let content = &s[content_start..content_end];
+                // 保留 __attribute__((weak))
+                if content.trim() == "weak" {
+                    result.push_str(&s[attr_start..i]);
                 }
                 // 跳过尾部空格
                 while i < len && bytes[i] == b' ' { i += 1; }
@@ -4929,6 +4956,64 @@ fn fix_struct_primitive_types(s: &str) -> String {
         // 替换 `struct <type>` 为 `<type>`
         let pattern = format!("struct {}", ty);
         result = result.replace(&pattern, ty);
+    }
+    result
+}
+
+/// M30.3: 修复模板实例化缺少 struct 关键字的问题.
+/// 模板 struct 实例化时可能生成 `identifier {` 而非 `struct identifier {`.
+/// 检测这种模式并添加 struct 前缀, 同时添加 typedef 以便无 struct 前缀引用.
+fn fix_missing_struct_keywords(s: &str) -> String {
+    let c_keywords = [
+        "if", "else", "for", "while", "do", "switch", "case", "break",
+        "continue", "return", "goto", "typedef", "struct", "union", "enum",
+        "extern", "static", "const", "volatile", "inline", "register",
+        "void", "int", "char", "float", "double", "long", "short",
+        "signed", "unsigned", "sizeof", "typeof", "__typeof__",
+    ];
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // 检测 "identifier {" 模式 (行首是标识符后跟 '{')
+        let is_struct_def = if trimmed.ends_with('{') {
+            let before_brace = trimmed.trim_end_matches('{').trim();
+            !before_brace.is_empty()
+                && !before_brace.contains(' ')
+                && !before_brace.contains('*')
+                && !before_brace.contains('(')
+                && !before_brace.contains(')')
+                && !before_brace.contains('=')
+                && before_brace.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !c_keywords.iter().any(|k| before_brace == *k)
+                && i + 1 < lines.len()
+                && (lines[i + 1].trim() == "};" || lines[i + 1].trim().starts_with("void _ZN"))
+        } else {
+            false
+        };
+        if is_struct_def {
+            let struct_name = trimmed.trim_end_matches('{').trim();
+            result.push_str(&format!("struct {}", lines[i].trim_start()));
+            result.push('\n');
+            // 跳过 struct 体直到 };
+            i += 1;
+            while i < lines.len() {
+                result.push_str(lines[i]);
+                result.push('\n');
+                if lines[i].trim() == "};" {
+                    // 添加 typedef 以便无 struct 前缀引用
+                    result.push_str(&format!("typedef struct {} {};\n", struct_name, struct_name));
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
     }
     result
 }
@@ -5048,82 +5133,66 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
     result2
 }
 
-/// M30.3: 将 C 标准库函数的非空 inline 定义标记为 static.
-/// glibc 头文件中的 inline 函数 (如 `extern __inline void *memchr(...)
-/// { return __builtin_memchr(...); }`) 被 parser 当作普通函数定义.
-/// 链接时与 libc 的实现冲突 (multiple definition).
-/// 将这些函数标记为 static 以避免符号冲突.
+/// M30.3: 将 glibc inline 函数定义转为声明.
+/// glibc 头文件中的 inline 函数模式:
+///   extern __inline <return_type>
+///   <fn_name> (<params>)
+///   {
+///     return __builtin_...(...);
+///   }
+/// 被 parser 当作普通函数定义, 链接时与 libc 冲突 (multiple definition).
+/// 将整个块转为声明: `<return_type> <fn_name>(<params>);`
 fn staticize_clib_inline_fns(s: &str) -> String {
-    let clib_fns = [
-        "memchr", "rawmemchr", "memrchr", "memcmp", "memcpy",
-        "memmove", "memset", "strcpy", "strncpy", "strcat",
-        "strncat", "strchr", "strrchr", "strstr", "strpbrk",
-        "strnlen", "strlen", "strcmp", "strncmp", "strcoll",
-        "index", "rindex", "stpcpy", "stpncpy",
-        "strchrnul", "strdup", "strndup",
-        "fopen", "fclose", "fread", "fwrite",
-        "fseek", "ftell", "rewind", "feof", "ferror",
-        "getenv", "setenv", "fopencookie",
-        "fgetpos", "fsetpos", "fgetpos64", "fsetpos64",
-        "malloc", "free", "calloc", "realloc",
-    ];
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        // 检查当前行是否是 C 库函数定义的开始
-        let is_clib_fn_def = clib_fns.iter().any(|f| {
-            let pat1 = format!("{} (", f);
-            let pat2 = format!("{}(", f);
-            let pat3 = format!(" {} (", f);
-            let matches = trimmed.starts_with(&pat1)
-                || trimmed.starts_with(&pat2)
-                || trimmed.contains(&pat3);
-            matches
-                && !trimmed.starts_with("static")
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with("#")
-                && !trimmed.ends_with(';')
-                && !trimmed.starts_with("return")
-                && (trimmed.ends_with('(')
-                    || trimmed.ends_with(')')
-                    || trimmed.contains(')'))
-        });
-        if is_clib_fn_def {
-            // 检查后续行是否有函数体 (包含 __builtin_ 调用)
-            let mut has_builtin = false;
+        // 检测 "extern __inline" 开头的行
+        if trimmed.starts_with("extern __inline") {
+            // 提取返回类型 (去掉 "extern __inline" 前缀)
+            let ret_type = trimmed
+                .strip_prefix("extern __inline")
+                .map(|s| s.trim())
+                .unwrap_or("");
+            // 收集后续行直到找到 ')' 和 '{'
+            let mut sig_lines = Vec::new();
             let mut j = i + 1;
-            let mut brace_depth = 0;
+            let mut found_close_paren = false;
+            let mut found_open_brace = false;
             while j < lines.len() && j < i + 10 {
                 let lt = lines[j].trim();
-                if lt.contains("__builtin_") {
-                    has_builtin = true;
-                }
-                if lt == "{" || lt.ends_with(" {") {
-                    brace_depth = 1;
-                }
-                for ch in lt.chars() {
-                    if ch == '{' { brace_depth += 1; }
-                    if ch == '}' { brace_depth -= 1; }
-                }
-                if brace_depth > 0 && lt == "}" {
+                if lt == "{" {
+                    found_open_brace = true;
                     break;
                 }
+                sig_lines.push(lt);
+                if lt.contains(')') {
+                    found_close_paren = true;
+                }
                 j += 1;
-                if brace_depth > 0 && j > i + 20 { break; }
-                if brace_depth == 0 && j > i + 5 { break; }
             }
-            if has_builtin && brace_depth > 0 {
-                // 将函数定义转为声明: 收集函数签名行,
-                // 跳过函数体, 添加 ';'
-                // 先输出返回类型行 (当前行之前未输出的行)
-                // 当前行是函数名行, 需要与前面的返回类型行合并
-                // 简单做法: 将当前行改为声明格式
-                let decl_line = format!("{};", trimmed);
-                result.push_str(&decl_line);
+            // 如果找到了完整的签名和 '{', 转为声明
+            if found_close_paren && found_open_brace && !sig_lines.is_empty() {
+                let fn_sig = sig_lines.join(" ");
+                // 构建声明: <return_type> <fn_name>(<params>);
+                let decl = if ret_type.is_empty() {
+                    format!("{};", fn_sig)
+                } else {
+                    format!("{} {};", ret_type, fn_sig)
+                };
+                result.push_str(&decl);
                 result.push('\n');
-                // 跳过函数体
+                // 跳过函数体 (从 '{' 到匹配的 '}')
+                let mut brace_depth = 1;
+                j += 1;
+                while j < lines.len() && brace_depth > 0 {
+                    for ch in lines[j].chars() {
+                        if ch == '{' { brace_depth += 1; }
+                        if ch == '}' { brace_depth -= 1; }
+                    }
+                    j += 1;
+                }
                 i = j;
                 continue;
             }
@@ -5313,22 +5382,32 @@ fn dedup_anon_aggr_ctors(s: &str) -> String {
     while i < lines.len() {
         let trimmed = lines[i].trim();
         // 检查是否是 __anon_aggr 构造函数定义
-        if trimmed.starts_with("void _ZN11__anon_aggrC1Ev")
-            && trimmed.ends_with('{')
-        {
-            if seen_anon_ctor {
-                // 已经见过一个定义, 跳过这个重复定义
-                // 找到函数体结束的 `}`
-                i += 1;
-                while i < lines.len() && lines[i].trim() != "}" {
+        if trimmed.starts_with("void _ZN11__anon_aggrC1Ev") {
+            // 单行函数: void _ZN11__anon_aggrC1Ev (...) { (void)this; }
+            if trimmed.contains('{') && trimmed.contains('}') {
+                if seen_anon_ctor {
+                    // 跳过这个重复定义
                     i += 1;
+                    continue;
+                } else {
+                    seen_anon_ctor = true;
                 }
-                if i < lines.len() {
-                    i += 1; // 跳过 `}`
+            }
+            // 多行函数: void _ZN11__anon_aggrC1Ev (...) {
+            else if trimmed.ends_with('{') {
+                if seen_anon_ctor {
+                    // 跳过这个重复定义
+                    i += 1;
+                    while i < lines.len() && lines[i].trim() != "}" {
+                        i += 1;
+                    }
+                    if i < lines.len() {
+                        i += 1; // 跳过 `}`
+                    }
+                    continue;
+                } else {
+                    seen_anon_ctor = true;
                 }
-                continue;
-            } else {
-                seen_anon_ctor = true;
             }
         }
         result.push_str(lines[i]);
@@ -8350,7 +8429,7 @@ impl Lower {
                 }
                 // 类体内定义的成员函数隐式 inline (Itanium ABI: weak linkage)
                 // 多 TU 包含相同类定义时不报 multiple definition
-                self.out.push_str("__attribute__((weak)) ");
+                self.out.push_str("static inline ");
                 // M17.0: volatile 成员函数 - 标记此函数; lower 端不区分 volatile
                 // (C 端 volatile 与 C++ volatile 语义在 ABI 上等价, 由 caller 决定
                 // this 访问的 volatile 属性).
@@ -8393,7 +8472,7 @@ impl Lower {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
                 // 类体内定义的构造函数隐式 inline (weak linkage)
-                self.out.push_str("__attribute__((weak)) ");
+                self.out.push_str("static inline ");
                 if *is_explicit {
                     // M17.0: explicit 标记不生成特殊代码 (C++ 端禁止隐式转换)
                     // 我们通过函数注释标记; C 端不强制 (没有隐式转换)
@@ -8417,7 +8496,7 @@ impl Lower {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
                 // 类体内定义的析构函数隐式 inline (weak linkage)
-                self.out.push_str("__attribute__((weak)) ");
+                self.out.push_str("static inline ");
                 self.current_class = Some(class_q);
                 self.emit_fn(&m, &MangleType::Void, &all_params, body);
                 let _ = is_virtual;
@@ -8481,7 +8560,7 @@ impl Lower {
                         vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
                     // 类体内定义的运算符隐式 inline (weak linkage)
-                    self.out.push_str("__attribute__((weak)) ");
+                    self.out.push_str("static inline ");
                     // 设置 current_class, 让 body 内裸字段名 -> this->field
                     self.current_class = Some(class_q);
                     self.emit_fn(&m, ret, &all_params, body);
@@ -9066,7 +9145,7 @@ impl Lower {
             let m = mangle_ctor(&n, &[], 1);
             if vbs.is_empty() {
                 self.out.push_str(&format!(
-                    "__attribute__((weak)) void {} (struct {}* this) {{ (void)this; }}\n",
+                    "static inline void {} (struct {}* this) {{ (void)this; }}\n",
                     m, qname
                 ));
             } else {
@@ -9114,7 +9193,7 @@ impl Lower {
         for m in &c.members {
             if let CppDecl::MemberVar { name, .. } = m {
                 self.out.push_str(&format!(
-                    "__attribute__((weak)) size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{1} - (char*)&__f); }}\n",
+                    "static inline size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{1} - (char*)&__f); }}\n",
                     qname, name,
                 ));
             }
@@ -9159,7 +9238,7 @@ impl Lower {
         // 生成继承成员的 __dcc_mbr
         for (member_name, access) in &inherited_mbrs {
             self.out.push_str(&format!(
-                "__attribute__((weak)) size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{2}.{1} - (char*)&__f); }}\n",
+                "static inline size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{2}.{1} - (char*)&__f); }}\n",
                 qname, member_name, access,
             ));
         }
@@ -9240,9 +9319,9 @@ impl Lower {
             "static __dcc_typeinfo_t __dcc_ti_{0} = {{ __dcc_ti_{0}_name }};\n",
             name
         ));
-        // Itanium _ZTI<Name> 兼容符号 (weak: 多 TU 允许重复定义)
+        // Itanium _ZTI<Name> 兼容符号 (static: 多 TU 允许重复定义)
         self.out.push_str(&format!(
-            "__attribute__((weak)) void* {} = (void*)&__dcc_ti_{};\n",
+            "static void* {} = (void*)&__dcc_ti_{};\n",
             zti, name
         ));
     }
@@ -9286,7 +9365,7 @@ impl Lower {
         self.out.push_str("    (void*)0\n");
         self.out.push_str("};\n");
         self.out.push_str(&format!(
-            "__attribute__((weak)) void* {} = __dcc_vt_{};\n",
+            "static void* {} = __dcc_vt_{};\n",
             ztv, name
         ));
     }
@@ -10931,18 +11010,18 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         assert!(
-            s.contains("__attribute__((weak)) void* _ZTV"),
-            "vtable must weak: {}",
+            s.contains("static void* _ZTV"),
+            "vtable must be static: {}",
             s
         );
         assert!(
-            s.contains("__attribute__((weak)) void* _ZTI"),
-            "typeinfo 必须 weak: {}",
+            s.contains("static void* _ZTI"),
+            "typeinfo must be static: {}",
             s
         );
         assert!(
-            s.contains("__attribute__((weak)) size_t __dcc_mbr_"),
-            "member offset 必须 weak: {}",
+            s.contains("static inline size_t __dcc_mbr_"),
+            "member offset must be static inline: {}",
             s
         );
     }
