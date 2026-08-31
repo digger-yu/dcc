@@ -1,5 +1,13 @@
 // <utility> - dcc++ C++ 标准库
-// pair / swap (简化版, 无模板 forward/move)
+// pair / move / forward / swap / declval / integer_sequence.
+//
+// 语义说明:
+//   - pair<T1, T2>: 值对, 降级为 C 结构体.
+//   - move<T>: 等价 static_cast<T&&>(x), 降级为直接返回.
+//   - forward<T>: 完美转发, 降级为直接返回.
+//   - swap: 交换两个值.
+//   - declval<T>: 返回 T&& (仅用于 decltype 上下文).
+//   - integer_sequence / index_sequence (C++14).
 
 extern "C" {
     struct dccpp_pair {
@@ -11,32 +19,94 @@ extern "C" {
 }
 
 namespace std {
-    class pair {
-    public:
-        pair() : first(0), second(0) {}
-        pair(void* a, void* b) : first(a), second(b) {}
 
-        void* first;
-        void* second;
+    // ===== pair<T1, T2> =====
+    template <typename T1, typename T2>
+    struct pair {
+        T1 first;
+        T2 second;
+
+        pair() : first(), second() {}
+        pair(const T1& a, const T2& b) : first(a), second(b) {}
 
         int operator==(const pair& other) const {
             return first == other.first && second == other.second;
         }
         int operator!=(const pair& other) const {
-            int eq = (first == other.first) && (second == other.second);
-            return !eq;
+            return !((*this) == other);
+        }
+        int operator<(const pair& other) const {
+            if (first < other.first) return 1;
+            if (other.first < first) return 0;
+            return second < other.second;
         }
     };
 
-    inline pair make_pair(void* a, void* b) {
-        return pair(a, b);
+    // Non-template pair for backward compat
+    class pair_void {
+    public:
+        pair_void() : first(0), second(0) {}
+        pair_void(void* a, void* b) : first(a), second(b) {}
+        void* first;
+        void* second;
+    };
+
+    // make_pair
+    template <typename T1, typename T2>
+    pair<T1, T2> make_pair(const T1& a, const T2& b) {
+        return pair<T1, T2>(a, b);
+    }
+
+    // ===== move / forward =====
+    // move<T>: cast to rvalue reference. In dcc's C lowering,
+    // this is equivalent to identity (no real move semantics in C).
+    template <typename T>
+    T& move(T& x) { return x; }
+
+    template <typename T>
+    const T& move(const T& x) { return x; }
+
+    // forward<T>: perfect forwarding. In dcc's C lowering,
+    // equivalent to identity.
+    template <typename T>
+    T& forward(T& x) { return x; }
+
+    template <typename T>
+    const T& forward(const T& x) { return x; }
+
+    // ===== swap =====
+    template <typename T>
+    void swap(T& a, T& b) {
+        T tmp = a;
+        a = b;
+        b = tmp;
     }
 
     inline void swap_bytes(void* a, void* b, size_t n) {
         dccpp_swap_bytes(a, b, n);
     }
 
-    // 简化版 move: 直接返回 x (C++ 语义上等价于 static_cast<T&&>(x))
-    // 不支持模板, 仅作为占位
-    inline int identity_int(int x) { return x; }
-}
+    // ===== declval (for decltype contexts only) =====
+    // Cannot actually be called; used only in unevaluated contexts.
+    // In dcc, we provide a template that returns T&.
+    template <typename T>
+    T& declval();
+
+    // ===== integer_sequence (C++14) =====
+    template <typename T, T... Ints>
+    struct integer_sequence {
+        static size_t size() { return sizeof...(Ints); }
+    };
+
+    template <size_t... Ints>
+    struct index_sequence : integer_sequence<size_t, Ints...> {};
+
+    // ===== exchange (C++14) =====
+    template <typename T, typename U>
+    T exchange(T& obj, U&& new_value) {
+        T old_value = obj;
+        obj = new_value;
+        return old_value;
+    }
+
+}  // namespace std
