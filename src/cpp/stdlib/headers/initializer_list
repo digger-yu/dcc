@@ -1,5 +1,11 @@
 // <initializer_list> - dcc++ C++ 标准库
-// std::initializer_list 简化版 (无模板, 按字节存储)
+// std::initializer_list<T> 统一初始化支持.
+//
+// 语义说明:
+//   - initializer_list<T> 提供对花括号初始化列表的类型安全访问.
+//   - 降级为 C 时, 编译器将 {a, b, c} 转为复合字面量,
+//     initializer_list 指向该数组.
+//   - begin()/end() 返回 const T* 指针.
 
 extern "C" {
     struct dccpp_initializer_list {
@@ -9,14 +15,31 @@ extern "C" {
 }
 
 namespace std {
+    template <typename T>
     class initializer_list {
     public:
+        typedef T value_type;
+        typedef const T& reference;
+        typedef const T& const_reference;
+        typedef size_t size_type;
+        typedef const T* iterator;
+        typedef const T* const_iterator;
+
         initializer_list() : data_(0), n_(0) {}
-        initializer_list(const void* data, size_t n) : data_(data), n_(n) {}
-        const void* data() const { return data_; }
-        size_t      size() const { return n_; }
+        initializer_list(const T* data, size_t n) : data_(data), n_(n) {}
+
+        // C++11: 无模板的旧接口兼容
+        initializer_list(const void* data, size_t n)
+            : data_((const T*)data), n_(n) {}
+
+        const T* begin() const { return data_; }
+        const T* end() const { return data_ + n_; }
+        const T* data() const { return data_; }
+        size_t size() const { return n_; }
+        int empty() const { return n_ == 0; }
+
     private:
-        const void* data_;
-        size_t      n_;
+        const T* data_;
+        size_t n_;
     };
 }

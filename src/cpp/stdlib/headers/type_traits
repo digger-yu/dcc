@@ -80,4 +80,96 @@ namespace std {
         enum { value = 0 };
     };
 
+    // integral_constant / true_type / false_type (C++11 base)
+    template <typename T, T v>
+    struct integral_constant {
+        static const T value = v;
+        typedef T value_type;
+        typedef integral_constant type;
+    };
+    typedef integral_constant<bool, true> true_type;
+    typedef integral_constant<bool, false> false_type;
+
+    // is_void<T>: 近似恒 0 (dcc 不区分 void 参与模板匹配)
+    template <typename T> struct is_void {
+        enum { value = 0 };
+    };
+
+    // is_arithmetic<T>: 近似恒 0 (按需扩展)
+    template <typename T> struct is_arithmetic {
+        enum { value = 0 };
+    };
+
+    // is_floating_point<T>: 近似恒 0
+    template <typename T> struct is_floating_point {
+        enum { value = 0 };
+    };
+
+    // is_signed<T> / is_unsigned<T>: 近似恒 0
+    template <typename T> struct is_signed {
+        enum { value = 0 };
+    };
+    template <typename T> struct is_unsigned {
+        enum { value = 0 };
+    };
+
+    // add_const<T> / add_pointer<T>: 近似透传
+    template <typename T> struct add_const {
+        typedef T type;
+    };
+    template <typename T> struct add_pointer {
+        typedef T* type;
+    };
+
+    // decay<T>: 近似透传 (dcc 不携带 cv/引用/数组衰减)
+    template <typename T> struct decay {
+        typedef T type;
+    };
+
+    // is_base_of<Base, Derived>: 近似恒 1 (dcc 继承关系在 lower 端处理)
+    template <typename Base, typename Derived>
+    struct is_base_of {
+        enum { value = 1 };
+    };
+
+    // is_class<T>: 近似恒 0 (按需扩展)
+    template <typename T> struct is_class {
+        enum { value = 0 };
+    };
+
+    // is_enum<T>: 近似恒 0
+    template <typename T> struct is_enum {
+        enum { value = 0 };
+    };
+
+    // is_constructible<T, Args...>: 近似恒 1
+    template <typename T, typename... Args>
+    struct is_constructible {
+        enum { value = 1 };
+    };
+
+    // is_default_constructible<T>
+    template <typename T>
+    struct is_default_constructible {
+        enum { value = 1 };
+    };
+
+    // is_copy_constructible<T>
+    template <typename T>
+    struct is_copy_constructible {
+        enum { value = 1 };
+    };
+
+    // is_assignable<T, U>: 近似恒 1
+    template <typename T, typename U>
+    struct is_assignable {
+        enum { value = 1 };
+    };
+
+    // is_nothrow_move_constructible<T>: 近似恒 1
+    template <typename T>
+    struct is_nothrow_move_constructible {
+        enum { value = 1 };
+    };
+
 }  // namespace std
