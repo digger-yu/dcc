@@ -8493,6 +8493,16 @@ impl Lower {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
         }
+        // M30.3: 先收集并发射嵌套类, 在 enclosing struct 定义之前.
+        // 避免嵌套类的 post-class 代码 (constructor, typedef, offsetof)
+        // 被发射到 enclosing struct 内部.
+        let nested_classes: Vec<&ClassDecl> = c.members.iter().filter_map(|m| {
+            if let CppDecl::Class(nested) = m { Some(nested) } else { None }
+        }).collect();
+        for nested in &nested_classes {
+            self.out.push_str(&format!("/* nested class {} */\n", nested.name));
+            self.lower_class(nested);
+        }
         // 阶段 1: 仅 struct/union 定义 (成员字段 + vptr + vbptr + 虚基子对象)
         // M30.2: union 聚合发射 union 关键字 (成员重叠语义; vptr/vbtable
         // 等类机制降级路径仅适用于 class/struct, union 不含虚函数).
@@ -8530,9 +8540,12 @@ impl Lower {
                         .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
                 }
                 CppDecl::Class(nested) => {
-                    self.out
-                        .push_str(&format!("/* nested class {} */\n", nested.name));
-                    self.lower_class(nested);
+                    // M30.3: 嵌套类已在 struct 定义前发射,
+                    // 这里只发射成员变量实例.
+                    let kw = if nested.is_union { "union" } else { "struct" };
+                    // 注意: 原始成员名可能不是 "val", 但 parser 未保留
+                    // 嵌套类的成员名, 这里用类名作为近似.
+                    self.out.push_str(&format!("    {} {};\n", kw, nested.name));
                 }
                 CppDecl::AnonAggr {
                     is_union,
