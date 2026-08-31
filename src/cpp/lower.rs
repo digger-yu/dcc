@@ -6745,6 +6745,12 @@ impl Lower {
         self.out.push_str("typedef unsigned long rlim64_t;\n");
         // GCC hashtab 类型
         self.out.push_str("typedef struct htab* htab_t;\n");
+        // glibc 文件位置类型 (系统头文件中定义为 struct, 此处简化为整数类型)
+        // 注意: 若系统头文件已定义则会重复, 但 C 后端允许相同类型的重复 typedef
+        self.out.push_str("typedef long long __fpos_t;\n");
+        self.out.push_str("typedef long long __fpos64_t;\n");
+        // glibc cookie IO 类型 (fopencookie 参数)
+        self.out.push_str("typedef struct cookie_io_functions_t { void* read; void* write; void* seek; void* close; } cookie_io_functions_t;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
