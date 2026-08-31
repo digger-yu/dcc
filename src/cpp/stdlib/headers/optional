@@ -1,0 +1,56 @@
+// <optional> - dcc++ C++ 标准库
+// std::optional<T> (C++17) 可能包含值的容器.
+//
+// 语义说明:
+//   - optional<T> 降级为 C 结构体含 T value + int has_value.
+//   - value() 访问值 (无值时未定义行为).
+//   - value_or(default) 提供默认值.
+//   - nullopt 表示空值.
+
+namespace std {
+
+    // nullopt_t: empty optional tag
+    struct nullopt_t {
+        nullopt_t() {}
+    };
+    static const nullopt_t nullopt{};
+
+    template <typename T>
+    class optional {
+    public:
+        optional() : has_value_(0) {}
+        optional(nullopt_t) : has_value_(0) {}
+        optional(const T& val) : value_(val), has_value_(1) {}
+
+        // Access
+        T& value() { return value_; }
+        const T& value() const { return value_; }
+        T& operator*() { return value_; }
+        const T& operator*() const { return value_; }
+        T* operator->() { return &value_; }
+        const T* operator->() const { return &value_; }
+
+        // Observers
+        int has_value() const { return has_value_; }
+        T value_or(const T& default_val) const {
+            return has_value_ ? value_ : default_val;
+        }
+
+        // Modifiers
+        void reset() { has_value_ = 0; }
+
+        // Bool conversion
+        operator int() const { return has_value_; }
+
+    private:
+        T value_;
+        int has_value_;
+    };
+
+    // make_optional
+    template <typename T>
+    optional<T> make_optional(const T& value) {
+        return optional<T>(value);
+    }
+
+}  // namespace std

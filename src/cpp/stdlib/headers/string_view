@@ -1,0 +1,104 @@
+// <string_view> - dcc++ C++ 标准库
+// std::basic_string_view / string_view (C++17) 非拥有字符串视图.
+//
+// 语义说明:
+//   - string_view 降级为 const char* + size_t.
+//   - 不拥有内存, 不分配/释放.
+//   - 提供 substr/find/rfind/compare 等操作.
+
+namespace std {
+
+    class string_view {
+    public:
+        typedef const char* const_iterator;
+        typedef size_t size_type;
+
+        static const size_type npos = (size_type)-1;
+
+        string_view() : data_(0), size_(0) {}
+        string_view(const char* s) : data_(s), size_(0) {
+            if (s) { while (s[size_]) ++size_; }
+        }
+        string_view(const char* s, size_t n) : data_(s), size_(n) {}
+
+        // Iterators
+        const_iterator begin() const { return data_; }
+        const_iterator end() const { return data_ + size_; }
+        const_iterator cbegin() const { return data_; }
+        const_iterator cend() const { return data_ + size_; }
+
+        // Capacity
+        size_t size() const { return size_; }
+        size_t length() const { return size_; }
+        int empty() const { return size_ == 0; }
+
+        // Element access
+        char operator[](size_t i) const { return data_[i]; }
+        char front() const { return data_[0]; }
+        char back() const { return data_[size_ - 1]; }
+        const char* data() const { return data_; }
+
+        // Modifiers
+        void remove_prefix(size_t n) { data_ += n; size_ -= n; }
+        void remove_suffix(size_t n) { size_ -= n; }
+
+        // Operations
+        string_view substr(size_t pos, size_t count) const {
+            if (pos >= size_) return string_view();
+            if (count > size_ - pos) count = size_ - pos;
+            return string_view(data_ + pos, count);
+        }
+
+        int compare(const string_view& other) const {
+            size_t n = size_ < other.size_ ? size_ : other.size_;
+            for (size_t i = 0; i < n; ++i) {
+                if (data_[i] < other.data_[i]) return -1;
+                if (data_[i] > other.data_[i]) return 1;
+            }
+            if (size_ < other.size_) return -1;
+            if (size_ > other.size_) return 1;
+            return 0;
+        }
+
+        size_t find(char c, size_t pos) const {
+            for (size_t i = pos; i < size_; ++i) {
+                if (data_[i] == c) return i;
+            }
+            return npos;
+        }
+
+        size_t find(const string_view& s, size_t pos) const {
+            if (s.size_ == 0) return pos;
+            if (s.size_ > size_) return npos;
+            for (size_t i = pos; i <= size_ - s.size_; ++i) {
+                size_t j = 0;
+                while (j < s.size_ && data_[i + j] == s.data_[j]) ++j;
+                if (j == s.size_) return i;
+            }
+            return npos;
+        }
+
+        size_t rfind(char c) const {
+            for (size_t i = size_; i > 0; --i) {
+                if (data_[i - 1] == c) return i - 1;
+            }
+            return npos;
+        }
+
+        // Comparison operators
+        int operator==(const string_view& other) const {
+            return size_ == other.size_ && compare(other) == 0;
+        }
+        int operator!=(const string_view& other) const {
+            return !(*this == other);
+        }
+        int operator<(const string_view& other) const {
+            return compare(other) < 0;
+        }
+
+    private:
+        const char* data_;
+        size_t size_;
+    };
+
+}  // namespace std

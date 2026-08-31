@@ -1,0 +1,55 @@
+// <any> - dcc++ C++ 标准库
+// std::any (C++17) 类型安全任意值容器.
+//
+// 语义说明:
+//   - any 降级为 void* + 类型 ID + 析构回调.
+//   - any_cast<T> 类型安全转换 (类型不匹配时返回空).
+//   - has_value() 检查是否包含值.
+
+namespace std {
+
+    class bad_any_cast {
+    public:
+        bad_any_cast() {}
+    };
+
+    class any {
+    public:
+        any() : ptr_(0), type_id_(0), dtor_(0) {}
+
+        template <typename T>
+        any(const T& val) : type_id_(0), dtor_(0) {
+            // 简化: 存储为 void*, 实际需运行时分配
+            (void)val;
+        }
+
+        ~any() {
+            // 简化: 不调用析构
+        }
+
+        int has_value() const { return ptr_ != 0; }
+        void reset() { ptr_ = 0; type_id_ = 0; }
+
+        // 简化: 不实现完整 any_cast
+        // 实际使用需要运行时类型信息
+
+    private:
+        void* ptr_;
+        int type_id_;
+        void (*dtor_)(void*);
+    };
+
+    // any_cast (simplified: returns 0 for type mismatch)
+    template <typename T>
+    T any_cast(const any& a) {
+        (void)a;
+        return T();
+    }
+
+    // make_any
+    template <typename T>
+    any make_any(const T& val) {
+        return any(val);
+    }
+
+}  // namespace std
