@@ -4566,6 +4566,9 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
         ("__clockid_t", "int"),
         ("__timer_t", "void*"),
         ("__id_t", "unsigned int"),
+        ("__socklen_t", "unsigned int"),
+        ("__intptr_t", "long"),
+        ("__wchar_t", "int"),
     ];
     for (ty, base) in &gcc_builtin_types {
         let pattern = format!("typedef {} {};", ty, ty);
@@ -4899,17 +4902,26 @@ fn demangle_c_functions(s: &str) -> String {
 }
 
 /// M30.3: 动态全局初始化转换.
-/// C++ 允许 `Type var = func(args);` 作为全局初始化, C 不允许.
+/// C++ 允许全局变量用函数调用初始化, C 不允许.
 /// 转换为: 声明 `Type var;` + 生成 `__dcc_init_var()` 函数.
 /// 注意: 这只是简单文本转换, 复杂情况可能不完整.
 fn convert_dynamic_global_inits(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut init_fns = String::new();
+    let mut brace_depth: i32 = 0;
     for line in s.lines() {
-        // 检测模式: `Type var = func(...);` 在全局作用域
-        // 简单启发式: 行首不是空格/static/extern, 包含 `= ` 和 `(`
+        // 跟踪花括号深度 (0 = 全局作用域)
+        for ch in line.chars() {
+            if ch == '{' { brace_depth += 1; }
+            if ch == '}' { brace_depth -= 1; }
+        }
+        // 只在全局作用域 (brace_depth == 0) 转换
+        // 注意: 上面的循环已更新了 depth, 所以当前行的 depth
+        // 可能已经变了. 我们需要行首的 depth.
+        // 简化: 只在 depth == 0 且行匹配模式时转换
         let trimmed = line.trim();
-        if !trimmed.is_empty()
+        if brace_depth == 0
+            && !trimmed.is_empty()
             && !trimmed.starts_with("//")
             && !trimmed.starts_with("/*")
             && !trimmed.starts_with('#')
@@ -4927,6 +4939,8 @@ fn convert_dynamic_global_inits(s: &str) -> String {
             && !trimmed.starts_with("while")
             && !trimmed.starts_with("}")
             && !trimmed.starts_with("{")
+            && !trimmed.contains("->")
+            && !trimmed.contains("this")
             && trimmed.contains(" = ")
             && trimmed.contains('(')
             && trimmed.ends_with(";")
@@ -4934,30 +4948,29 @@ fn convert_dynamic_global_inits(s: &str) -> String {
             // 尝试解析: `Type var = expr;`
             if let Some(eq_pos) = trimmed.find(" = ") {
                 let decl_part = &trimmed[..eq_pos];
-                let init_part = &trimmed[eq_pos + 3..trimmed.len() - 1]; // 去掉 `;`
+                let init_part = &trimmed[eq_pos + 3..trimmed.len() - 1];
                 // 检查 init 是否包含函数调用 (含有 `(`)
-                if init_part.contains('(') {
-                    // 提取变量名 (decl_part 的最后一部分)
+                // 且 decl_part 看起来像类型+变量名 (至少两个单词)
+                if init_part.contains('(') && decl_part.split_whitespace().count() >= 2 {
                     let var_name = decl_part.split_whitespace().last().unwrap_or("unknown");
-                    // 输出无初始化声明
-                    result.push_str(&format!("{};\n", decl_part));
-                    // 生成初始化函数
-                    init_fns.push_str(&format!(
-                        "static void __dcc_init_{}(void) {{ {} = {}; }}\n",
-                        var_name, decl_part, init_part
-                    ));
-                    continue;
+                    // 确保变量名是合法标识符
+                    if var_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        result.push_str(&format!("{};\n", decl_part));
+                        init_fns.push_str(&format!(
+                            "static void __dcc_init_{}(void) {{ {} = {}; }}\n",
+                            var_name, decl_part, init_part
+                        ));
+                        continue;
+                    }
                 }
             }
         }
         result.push_str(line);
         result.push('\n');
     }
-    // 追加初始化函数
     if !init_fns.is_empty() {
         result.push_str("\n/* M30.3: dynamic global initializers */\n");
         result.push_str(&init_fns);
-        // 生成 __dcc_run_global_inits 函数
         result.push_str("void __dcc_run_global_inits(void) {\n");
         for line in init_fns.lines() {
             if line.starts_with("static void __dcc_init_") {
@@ -6730,6 +6743,8 @@ impl Lower {
         // POSIX rlimit 类型 (<bits/types.h>)
         self.out.push_str("typedef unsigned long rlim_t;\n");
         self.out.push_str("typedef unsigned long rlim64_t;\n");
+        // GCC hashtab 类型
+        self.out.push_str("typedef struct htab* htab_t;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
@@ -9147,6 +9162,20 @@ impl Lower {
                         // 类构造: 单独放在下一个 stmt 调用, 这里仅以 0 占位
                         self.out.push_str(" = 0 /*ctor*/");
                         let _ = e; // 抑制未使用警告
+                    } else if matches!(e, CppExpr::InitList(_)) {
+                        // M30.3: 聚合大括号初始化 `Type var = {a, b, c}`.
+                        // 直接发射 `{a, b, c}` 而非经 emit_expr 生成 `(int){...}`.
+                        // emit_expr 对 InitList 默认 int 复合字面量,
+                        // 但作为变量初始化器时 C 语言允许直接聚合初始化.
+                        self.out.push_str(" = ");
+                        if let CppExpr::InitList(elems) = e {
+                            self.out.push('{');
+                            for (i, elem) in elems.iter().enumerate() {
+                                if i > 0 { self.out.push_str(", "); }
+                                self.emit_expr(elem);
+                            }
+                            self.out.push('}');
+                        }
                     } else {
                         self.out.push_str(" = ");
                         self.emit_expr(e);
