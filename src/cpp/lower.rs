@@ -6619,6 +6619,9 @@ impl Lower {
         self.out.push_str("typedef struct ht_identifier *hashnode;\n");
         self.out.push_str("typedef struct line_map_macro line_map_macro;\n");
         self.out.push_str("typedef struct line_maps line_maps;\n");
+        // POSIX rlimit 类型 (<bits/types.h>)
+        self.out.push_str("typedef unsigned long rlim_t;\n");
+        self.out.push_str("typedef unsigned long rlim64_t;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
