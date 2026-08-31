@@ -581,6 +581,12 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 3. **AST lower 阈值**: 调整 parser 错误阈值，错误数过多时回退到 strip-keywords 路径以保留更多函数定义。
 
+4. **重载构造函数命名冲突**: C++ 支持构造函数重载，但 C 不支持。多个构造函数被降级为相同的 `_ctor_ClassName`，导致 C 编译错误。修复：添加参数数量后缀 `_ctor_ClassName_N` 确保唯一命名。
+
 ### 已知限制
 
-- gengtype 降级后的 C 代码包含大量 printf 格式字符串（内含 C 代码片段），dcc C 前端在解析时出现花括号不平衡错误。gcc 可正确编译该文件，证明问题在 dcc C 解析器。
+- gengtype 降级后的 C 代码仍有 46 个 gcc 编译错误，主要问题：
+  - AST lower 生成的 if/else 块缺少闭合花括号
+  - 控制流结构不完整（else 无匹配的 if，case 无匹配的 switch）
+  - 系统函数重复声明类型冲突（sigaction, stat, getrlimit 等）
+  - 这些是 C++ to C 降级的根本性问题，需要深度修改 AST lower 逻辑
