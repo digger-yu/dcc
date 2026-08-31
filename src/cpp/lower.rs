@@ -4534,7 +4534,6 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // 导致后续 typedef __fsid_t fsid_t; 中 __fsid_t 未知.
     // 这些类型在 glibc 中都是整数/结构体类型的别名, 统一用 typedef 占位.
     let gcc_builtin_types = [
-        ("__fsid_t", "int"),
         ("__u_char", "unsigned char"),
         ("__u_short", "unsigned short"),
         ("__u_int", "unsigned int"),
