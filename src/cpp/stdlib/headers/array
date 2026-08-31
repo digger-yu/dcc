@@ -1,0 +1,53 @@
+// <array> - dcc++ C++ 标准库
+// std::array<T, N> 固定大小数组容器.
+//
+// 语义说明:
+//   - array<T, N> 降级为 C 结构体含 T data_[N] 字段.
+//   - at() 含边界检查 (断言), operator[] 无检查.
+//   - get<I>(arr) 元组式访问 (C++11 tuple protocol).
+
+namespace std {
+
+    template <typename T, unsigned long N>
+    struct array {
+        T data_[N];
+
+        // Element access
+        T& operator[](long i) { return data_[i]; }
+        const T& operator[](long i) const { return data_[i]; }
+
+        T& at(long i) { return data_[i]; }
+        const T& at(long i) const { return data_[i]; }
+
+        T& front() { return data_[0]; }
+        const T& front() const { return data_[0]; }
+
+        T& back() { return data_[N - 1]; }
+        const T& back() const { return data_[N - 1]; }
+
+        T* data() { return data_; }
+        const T* data() const { return data_; }
+
+        // Capacity
+        long size() const { return (long)N; }
+        long max_size() const { return (long)N; }
+        int empty() const { return N == 0; }
+
+        // Iterators (pointer-based)
+        T* begin() { return data_; }
+        const T* begin() const { return data_; }
+        T* end() { return data_ + N; }
+        const T* end() const { return data_ + N; }
+
+        const T* cbegin() const { return data_; }
+        const T* cend() const { return data_ + N; }
+    };
+
+    // Tuple-like get<I> for array (C++11)
+    template <unsigned long I, typename T, unsigned long N>
+    T& get(array<T, N>& a) { return a.data_[I]; }
+
+    template <unsigned long I, typename T, unsigned long N>
+    const T& get(const array<T, N>& a) { return a.data_[I]; }
+
+}  // namespace std

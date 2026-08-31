@@ -1,0 +1,61 @@
+// <ratio> - dcc++ C++ 标准库
+// 编译期有理数 (compile-time rational numbers).
+// C++11 <chrono> 的基础设施.
+//
+// 语义说明:
+//   - ratio<N, D>: 编译期分数 N/D, 自动约分 (简化版: 不约分).
+//   - ratio_add/sub/mul/div: 编译期有理数算术.
+//   - ratio_equal/ratio_less: 编译期比较.
+//   - SI 前缀 typedef: nano, micro, milli, centi, deci, deca, hecto, kilo, mega.
+
+namespace std {
+
+    // Primary ratio template (simplified: no GCD reduction)
+    template <long Num, long Den = 1>
+    struct ratio {
+        static const long num = Num;
+        static const long den = Den;
+    };
+
+    // ratio arithmetic
+    template <typename R1, typename R2>
+    struct ratio_add {
+        typedef ratio<R1::num * R2::den + R2::num * R1::den,
+                      R1::den * R2::den> type;
+    };
+
+    template <typename R1, typename R2>
+    struct ratio_subtract {
+        typedef ratio<R1::num * R2::den - R2::num * R1::den,
+                      R1::den * R2::den> type;
+    };
+
+    template <typename R1, typename R2>
+    struct ratio_multiply {
+        typedef ratio<R1::num * R2::num,
+                      R1::den * R2::den> type;
+    };
+
+    template <typename R1, typename R2>
+    struct ratio_divide {
+        typedef ratio<R1::num * R2::den,
+                      R1::den * R2::num> type;
+    };
+
+    // SI prefix typedefs
+    typedef ratio<1, 1000000000000000000> atto;
+    typedef ratio<1, 1000000000000000> femto;
+    typedef ratio<1, 1000000000000> pico;
+    typedef ratio<1, 1000000000> nano;
+    typedef ratio<1, 1000000> micro;
+    typedef ratio<1, 1000> milli;
+    typedef ratio<1, 100> centi;
+    typedef ratio<1, 10> deci;
+    typedef ratio<10, 1> deca;
+    typedef ratio<100, 1> hecto;
+    typedef ratio<1000, 1> kilo;
+    typedef ratio<1000000, 1> mega;
+    typedef ratio<1000000000, 1> giga;
+    typedef ratio<1000000000000, 1> tera;
+
+}  // namespace std

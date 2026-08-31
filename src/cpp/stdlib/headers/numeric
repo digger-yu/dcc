@@ -1,0 +1,89 @@
+// <numeric> - dcc++ C++ 标准库
+// 数值算法: accumulate, inner_product, partial_sum, adjacent_difference.
+//
+// 语义说明:
+//   - accumulate: 区间求和 (带初始值).
+//   - inner_product: 两区间内积.
+//   - partial_sum: 前缀和写入目标区间.
+//   - adjacent_difference: 相邻差分写入目标区间.
+//   - iota (C++11): 递增值填充区间.
+
+namespace std {
+
+    // accumulate: sum of [first, last) starting from init
+    template <typename InputIt, typename T>
+    T accumulate(InputIt first, InputIt last, T init) {
+        while (first != last) {
+            init = init + *first;
+            ++first;
+        }
+        return init;
+    }
+
+    // accumulate with custom binary op
+    template <typename InputIt, typename T, typename BinaryOp>
+    T accumulate(InputIt first, InputIt last, T init, BinaryOp op) {
+        while (first != last) {
+            init = op(init, *first);
+            ++first;
+        }
+        return init;
+    }
+
+    // inner_product: dot product of two ranges
+    template <typename InputIt1, typename InputIt2, typename T>
+    T inner_product(InputIt1 first1, InputIt1 last1, InputIt2 first2, T init) {
+        while (first1 != last1) {
+            init = init + (*first1) * (*first2);
+            ++first1;
+            ++first2;
+        }
+        return init;
+    }
+
+    // partial_sum: prefix sums written to [result, ...)
+    template <typename InputIt, typename OutputIt>
+    OutputIt partial_sum(InputIt first, InputIt last, OutputIt result) {
+        if (first == last) return result;
+        *result = *first;
+        T acc = *first;
+        ++first;
+        ++result;
+        while (first != last) {
+            acc = acc + *first;
+            *result = acc;
+            ++first;
+            ++result;
+        }
+        return result;
+    }
+
+    // adjacent_difference: differences of adjacent elements
+    template <typename InputIt, typename OutputIt>
+    OutputIt adjacent_difference(InputIt first, InputIt last, OutputIt result) {
+        if (first == last) return result;
+        *result = *first;
+        T prev = *first;
+        ++first;
+        ++result;
+        while (first != last) {
+            T curr = *first;
+            *result = curr - prev;
+            prev = curr;
+            ++first;
+            ++result;
+        }
+        return result;
+    }
+
+    // iota (C++11): fill [first, last) with incrementing value
+    template <typename ForwardIt, typename T>
+    void iota(ForwardIt first, ForwardIt last, T value) {
+        while (first != last) {
+            *first = value;
+            ++first;
+            ++value;
+        }
+    }
+
+}  // namespace std
