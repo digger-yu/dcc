@@ -235,8 +235,18 @@ fn match_word_at(bytes: &[u8], pos: usize, word: &str) -> bool {
 }
 
 /// 跳过 C 风格字符串字面量 "..." (含转义)
+/// 注意: 调用方逐字符扫描时, 字符字面量 `'"'` 的引号会被误认为
+/// 字符串开头 (GCC 源码如 libcpp/mkdeps.cc 大量使用 `fputc ('"', fp)`),
+/// 一旦误判就会吞掉到下一个 `"` 为止的全部代码, 使后续模板展平 /
+/// 关键字剥离全部失步. 因此这里检测前导 `'`, 将 `"` 视为普通字符.
 fn skip_string_literal(bytes: &[u8], mut pos: usize) -> usize {
     if pos >= bytes.len() || bytes[pos] != b'"' { return pos; }
+    // 前一个字符是 `'` → 这是字符字面量 `'"'` 的引号, 不是字符串
+    if pos > 0 && bytes[pos - 1] == b'\'' {
+        // 但若前导 `'` 自身是 `\'` 转义的一部分 (即处于字符串内),
+        // 不应到这里; 逐字符扫描的调用方只会把真正的字符串开头交进来.
+        return pos + 1;
+    }
     pos += 1;
     while pos < bytes.len() {
         if bytes[pos] == b'\\' { pos += 2; continue; }
@@ -4515,6 +4525,55 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
             result.insert_str(0, "#ifndef HAVE_UCHAR\ntypedef unsigned char uchar;\n#endif\n");
         }
     }
+    // M30.2: 注入 GCC/glibc 内建类型前向声明.
+    // AST 降级可能丢失系统头文件中的 typedef 定义 (如 __fsid_t,__u_char 等),
+    // 导致后续 typedef __fsid_t fsid_t; 中 __fsid_t 未知.
+    // 这些类型在 glibc 中都是整数/结构体类型的别名, 统一用 typedef 占位.
+    let gcc_builtin_types = [
+        ("__fsid_t", "int"),
+        ("__u_char", "unsigned char"),
+        ("__u_short", "unsigned short"),
+        ("__u_int", "unsigned int"),
+        ("__u_long", "unsigned long"),
+        ("__quad_t", "long long"),
+        ("__u_quad_t", "unsigned long long"),
+        ("__loff_t", "long long"),
+        ("__ino_t", "unsigned long"),
+        ("__ino64_t", "unsigned long"),
+        ("__dev_t", "unsigned long"),
+        ("__gid_t", "unsigned int"),
+        ("__uid_t", "unsigned int"),
+        ("__mode_t", "unsigned int"),
+        ("__nlink_t", "unsigned long"),
+        ("__blksize_t", "long"),
+        ("__blkcnt_t", "long"),
+        ("__blkcnt64_t", "long"),
+        ("__off_t", "long"),
+        ("__off64_t", "long"),
+        ("__pid_t", "int"),
+        ("__ssize_t", "long"),
+        ("__syscall_slong_t", "long"),
+        ("__syscall_ulong_t", "unsigned long"),
+        ("__time_t", "long"),
+        ("__useconds_t", "unsigned int"),
+        ("__suseconds_t", "long"),
+        ("__daddr_t", "int"),
+        ("__key_t", "int"),
+        ("__clock_t", "long"),
+        ("__clockid_t", "int"),
+        ("__timer_t", "void*"),
+        ("__id_t", "unsigned int"),
+    ];
+    for (ty, base) in &gcc_builtin_types {
+        let pattern = format!("typedef {} {};", ty, ty);
+        if !result.contains(&pattern) && !result.contains(&format!("typedef {} {};", base, ty)) {
+            // 仅在类型未定义时注入
+            let def = format!("typedef {} {};\n", base, ty);
+            if let Some(pos) = result.find('\n') {
+                result.insert_str(pos, &format!("\n{}", def));
+            }
+        }
+    }
     // Convert C++ functional casts: Type(expr) -> (Type)(expr)
     result = convert_simple_functional_casts(&result);
     // Workaround: handle 'unsigned (expr)' pattern that convert_simple_functional_casts misses
@@ -7548,6 +7607,25 @@ impl Lower {
 
     fn lower_decl(&mut self, d: &CppDecl) {
         match d {
+            // M30.2: 顶层匿名聚合实例 `struct { ... } x;` - 原样发射
+            CppDecl::AnonAggr {
+                is_union,
+                members: am,
+                name: an,
+            } => {
+                let kw = if *is_union { "union" } else { "struct" };
+                self.out.push_str(&format!("{} {{\n", kw));
+                for am_m in am {
+                    if let CppDecl::MemberVar { ty, name, .. } = am_m {
+                        self.out.push_str(&format!(
+                            "    {} {};\n",
+                            self.mangle_to_c_ns(ty),
+                            name
+                        ));
+                    }
+                }
+                self.out.push_str(&format!("}} {};\n", an));
+            }
             // M30: 顶层全局变量 (`int g = 5;` / `static unsigned long h;`)
             CppDecl::GlobalVar {
                 ty,
@@ -7639,6 +7717,22 @@ impl Lower {
                     // 直接当作自由函数处理; lower 端不再加 this 形参
                     self.emit_fn(name, ret, params, body);
                     let _ = (is_override, is_final, is_volatile);
+                    return;
+                }
+                // M30.2: 类内纯声明 (无 body) → 输出原型; 空定义会与类外
+                // 定义产生重复符号 (链接器可能选空的那个, 静默丢实现).
+                if body.is_decl {
+                    let class_q = self.qualify_name(class);
+                    let n = NestedName::from_dotted(vec![class_q.clone(), name.clone()]);
+                    let m = mangle_member_function(&n, &[], ret);
+                    let this_ty =
+                        MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
+                    let mut all_params: Vec<(String, MangleType)> =
+                        vec![("this".to_string(), this_ty)];
+                    all_params.extend(params.iter().cloned());
+                    let proto = self.fn_decl_c(&m, ret, &all_params);
+                    self.out.push_str(&proto);
+                    self.out.push_str(";\n");
                     return;
                 }
                 let class_q = self.qualify_name(class);
@@ -8252,8 +8346,11 @@ impl Lower {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
         }
-        // 阶段 1: 仅 struct 定义 (成员字段 + vptr + vbptr + 虚基子对象)
-        self.out.push_str(&format!("struct {} {{\n", qname));
+        // 阶段 1: 仅 struct/union 定义 (成员字段 + vptr + vbptr + 虚基子对象)
+        // M30.2: union 聚合发射 union 关键字 (成员重叠语义; vptr/vbtable
+        // 等类机制降级路径仅适用于 class/struct, union 不含虚函数).
+        let agg_kw = if c.is_union { "union" } else { "struct" };
+        self.out.push_str(&format!("{} {} {{\n", agg_kw, qname));
         // 继承: 嵌入非虚基类子结构 (虚基子对象在尾部统一嵌入)
         for b in &c.bases {
             // 模板基类: 先实例化, 然后用实例化后的类名
@@ -8290,6 +8387,27 @@ impl Lower {
                         .push_str(&format!("/* nested class {} */\n", nested.name));
                     self.lower_class(nested);
                 }
+                CppDecl::AnonAggr {
+                    is_union,
+                    members: am,
+                    name: an,
+                } => {
+                    // M30.2: 匿名聚合实例成员 - 原样发射 C 匿名聚合定义
+                    // + 变量 (`union { size_t i; void *p; } temp;`),
+                    // 字段引用 `h->temp.i` 在 C 中合法, 重叠语义保留.
+                    let kw = if *is_union { "union" } else { "struct" };
+                    self.out.push_str(&format!("    {} {{\n", kw));
+                    for am_m in am {
+                        if let CppDecl::MemberVar { ty, name, .. } = am_m {
+                            self.out.push_str(&format!(
+                                "        {} {};\n",
+                                self.mangle_to_c_ns(ty),
+                                name
+                            ));
+                        }
+                    }
+                    self.out.push_str(&format!("    }} {};\n", an));
+                }
                 _ => {} // 成员函数 / 构造 / 析构 -> 阶段 2
             }
         }
@@ -8299,12 +8417,19 @@ impl Lower {
             self.out.push_str(&format!("    {} __vb_{};\n", vb_c, vb));
         }
         self.out.push_str("};\n");
-        // M26.3: 无用户 ctor 且含虚基 -> 自动生成默认 ctor:
-        //   1) this->__vbptr = __vbt_<C>   (vbtable 指针初始化)
-        //   2) 依次调用虚基 ctor (共享基类只初始化一次)
-        if !vbs.is_empty() && !c.members.iter().any(|m| matches!(m, CppDecl::Ctor { .. })) {
+        // M26.3/M30.2: 无用户 ctor -> 自动生成默认 ctor.
+        //   含虚基: 初始化 vbptr + 依次调用虚基 ctor (共享基只初始化一次)
+        //   否则: weak 空体 - 调用点 `_ZN<C>C1Ev(&obj)` (局部对象默认构造)
+        //   需要符号可链; C++ 语义上 POD 不初始化, 空体即正确.
+        if !c.members.iter().any(|m| matches!(m, CppDecl::Ctor { .. })) {
             let n = NestedName::from_dotted(vec![qname.clone()]);
             let m = mangle_ctor(&n, &[], 1);
+            if vbs.is_empty() {
+                self.out.push_str(&format!(
+                    "__attribute__((weak)) void {} (struct {}* this) {{ (void)this; }}\n",
+                    m, qname
+                ));
+            } else {
             self.out
                 .push_str(&format!("void {} (struct {}* this) {{\n", m, qname));
             self.out
@@ -8316,6 +8441,7 @@ impl Lower {
                     .push_str(&format!("    {}(&this->__vb_{});\n", m_vb, vb));
             }
             self.out.push_str("}\n");
+            }
         }
         // M18.0: 同时输出 typedef 让 unqualified 类名可作为类型
         // 例如 `std::duration` -> `typedef struct std_duration duration;`
