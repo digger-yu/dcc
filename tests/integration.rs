@@ -20463,3 +20463,29 @@ fn c11_noreturn_compile_and_run() {
         "noreturn test should print PASS. got: {stdout}"
     );
 }
+
+/// C23 [[unsequenced]] and [[reproducible]] attributes
+#[test]
+fn c23_attributes_compile_and_run() {
+    let source = include_str!("fixtures/c/c23_attributes.c");
+    let (output, exe) = run_compile_and_run("c23-attrs", source);
+    assert!(
+        output.status.success(),
+        "c23 attrs compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run c23 attrs test");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "c23 attrs test should return 0"
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PASS"),
+        "c23 attrs test should print PASS. got: {stdout}"
+    );
+}

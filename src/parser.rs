@@ -1502,7 +1502,8 @@ impl<'a> Parser<'a> {
     }
     /// 解析 C23 标准属性 [[attr]]: 提取语义效果而非静默跳过
     /// 支持: [[deprecated]], [[deprecated("msg")]], [[fallthrough]],
-    ///        [[nodiscard]], [[maybe_unused]], [[noreturn]]
+    ///        [[nodiscard]], [[maybe_unused]], [[noreturn]],
+    ///        [[unsequenced]], [[reproducible]]
     fn parse_std_attributes(&mut self) {
         while self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
             self.advance(); // [
@@ -1570,6 +1571,14 @@ impl<'a> Parser<'a> {
             } else if attr_trimmed == "noreturn" {
                 // [[noreturn]]: 函数不返回
                 self.decl_attrs.is_noreturn = true;
+            } else if attr_trimmed == "unsequenced" {
+                // [[unsequenced]]: C23 函数无副作用且结果仅依赖参数
+                // 等价于 always_inline 优化提示
+                self.decl_attrs.is_always_inline = true;
+            } else if attr_trimmed == "reproducible" {
+                // [[reproducible]]: C23 函数结果仅依赖参数, 允许通过指针参数的副作用
+                // 等价于 always_inline 优化提示
+                self.decl_attrs.is_always_inline = true;
             }
         }
     }

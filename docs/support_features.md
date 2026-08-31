@@ -106,7 +106,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `<stdnoreturn.h>` 宏 | `noreturn` → `_Noreturn` (C11+ 所有模式) |
 | `<stdalign.h>` 宏 | `alignas` → `_Alignas`, `alignof` → `_Alignof` (C11/C17 模式) |
 | C23 `<stdbit.h>` 位操作宏 | `stdc_count_ones_*` / `stdc_count_zeros_*` / `stdc_has_single_bit_*` / `stdc_log2_floor_*` / `stdc_log2_ceil_*` 全系列 (uc/us/ui/ul/ull) |
-| C23 `[[...]]` 属性语法 | 解析并应用语义效果: `[[deprecated]]`/`[[deprecated("msg")]` → deprecated 标记; `[[maybe_unused]]` → 抑制未使用警告; `[[noreturn]]` → 函数不返回; `[[fallthrough]]` → switch case 贯穿标记 (解析接受); `[[nodiscard]]` → 函数返回值不可忽略 (丢弃时发 W0401 警告) |
+| C23 `[[...]]` 属性语法 | 解析并应用语义效果: `[[deprecated]]`/`[[deprecated("msg")]` → deprecated 标记; `[[maybe_unused]]` → 抑制未使用警告; `[[noreturn]]` → 函数不返回; `[[fallthrough]]` → switch case 贯穿标记 (解析接受); `[[nodiscard]]` → 函数返回值不可忽略 (丢弃时发 W0401 警告); `[[unsequenced]]` → 函数无副作用, 映射到 always_inline; `[[reproducible]]` → 函数结果仅依赖参数, 映射到 always_inline。测试: `tests/fixtures/c/c23_attributes.c` + `c23_attributes_compile_and_run` |
 | C23 `constexpr` 变量 | 隐含 const 限定符 + always_inline 提示; 变量必须常量初始化 |
 | C23 `char8_t` 类型 | 8-bit UTF-8 字符类型, size=1, align=1, 完整类型系统支持 |
 | C11 匿名 struct/union 成员 | 无名字段透明穿透查找, `find_field()` 递归支持; 内核 `struct_group()` 模式兼容 |

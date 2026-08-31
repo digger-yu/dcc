@@ -50,7 +50,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `static_assert` 无消息参数 — ✅ 已实装 (文件级与函数内)
 - 枚举底层类型 `enum E : type` — ✅ 已实装 (枚举常量类型=底层类型)
 - 省略 `=` 的大括号初始化 `int x{5}` — ✅ 已实装 (标量/数组/结构体/嵌套)
-- `[[attributes]]` — ✅ 已实装 (解析器静默跳过 `[[deprecated]]`, `[[maybe_unused]]`, `[[nodiscard]]`)
+- `[[attributes]]` — ✅ 已实装 (解析器静默跳过 `[[deprecated]]`, `[[maybe_unused]]`, `[[nodiscard]]`; 语义处理 `[[unsequenced]]`, `[[reproducible]]` 映射到 always_inline)
 - `_BitInt(N)` — ✅ 已实装 (按宽度映射到标准整数类型 8/16/32/64)
 - 数字分隔符 `1'000'000` — ✅ 已实装 (词法分析器跳过 `'`)
 - `#embed` — ✅ 已实装 (预处理器嵌入文件内容为字节数组, 支持 `limit`/`prefix`/`suffix`/`if_empty` 参数)
