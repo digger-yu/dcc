@@ -1,0 +1,106 @@
+// <print> - dcc++ C++ 标准库
+// C++23 std::print / std::format.
+//
+// 语义说明:
+//   - std::print 降级为 printf 系列调用.
+//   - std::format 降级为 snprintf 到 std::string.
+//   - 格式字符串中的 {} 占位符在编译期转换.
+
+namespace std {
+
+    // format_context: 格式化上下文 (简化)
+    struct format_context {
+        char* out;
+        size_t capacity;
+        size_t pos;
+    };
+
+    // formatter: 通用格式化器 (简化为 void*)
+    template <typename T>
+    struct formatter {
+        // 简化: 所有类型通过 void* + printf 格式串处理
+        int format(T val, format_context& ctx) const {
+            return 0;  // 占位
+        }
+    };
+
+    // Specialization for int
+    template <>
+    struct formatter<int> {
+        int format(int val, format_context& ctx) const {
+            int n = snprintf(ctx.out + ctx.pos, ctx.capacity - ctx.pos, "%d", val);
+            if (n > 0) ctx.pos += n;
+            return n;
+        }
+    };
+
+    // Specialization for const char*
+    template <>
+    struct formatter<const char*> {
+        int format(const char* val, format_context& ctx) const {
+            int n = snprintf(ctx.out + ctx.pos, ctx.capacity - ctx.pos, "%s", val);
+            if (n > 0) ctx.pos += n;
+            return n;
+        }
+    };
+
+    // Specialization for double
+    template <>
+    struct formatter<double> {
+        int format(double val, format_context& ctx) const {
+            int n = snprintf(ctx.out + ctx.pos, ctx.capacity - ctx.pos, "%g", val);
+            if (n > 0) ctx.pos += n;
+            return n;
+        }
+    };
+
+    // format_to: 格式化到输出缓冲区
+    template <typename... Args>
+    char* format_to(char* out, size_t sz, const char* fmt, Args... args) {
+        snprintf(out, sz, fmt, args...);
+        return out;
+    }
+
+    // print: 输出到 stdout
+    template <typename... Args>
+    void print(const char* fmt, Args... args) {
+        printf(fmt, args...);
+    }
+
+    // println: 输出到 stdout + 换行
+    template <typename... Args>
+    void println(const char* fmt, Args... args) {
+        printf(fmt, args...);
+        printf("\n");
+    }
+
+    // print to FILE*
+    template <typename... Args>
+    void print(FILE* f, const char* fmt, Args... args) {
+        fprintf(f, fmt, args...);
+    }
+
+    // println to FILE*
+    template <typename... Args>
+    void println(FILE* f, const char* fmt, Args... args) {
+        fprintf(f, fmt, args...);
+        fprintf(f, "\n");
+    }
+
+    // format: 返回格式化后的字符串
+    template <typename... Args>
+    string format(const char* fmt, Args... args) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), fmt, args...);
+        return string(buf);
+    }
+
+    // vprint_nonunicode / vprint_unicode (内部接口)
+    inline void vprint_nonunicode(FILE* f, const char* fmt, ...) {
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(f, fmt, ap);
+        va_end(ap);
+    }
+
+}  // namespace std

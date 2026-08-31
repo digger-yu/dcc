@@ -20559,3 +20559,17 @@ fn cpp20_features_compile() {
     );
     let _ = fs::remove_file(obj);
 }
+
+/// Phase 10: C++23 features (<expected>, <flat_map>, <print>, <stdfloat>)
+#[test]
+#[cfg(unix)]
+fn cpp23_features_compile() {
+    let src = include_str!("fixtures/cpp/cpp23_features.cpp");
+    let (out, obj) = run_cpp_object_test("cpp23-features", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}

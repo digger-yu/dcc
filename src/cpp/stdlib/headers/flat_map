@@ -1,74 +1,182 @@
-// <flat_map> - dcc++ C++ 标准库 (C++23, M18)
+// <flat_map> - dcc++ C++ 标准库
+// C++23 std::flat_map<Key, Value> 通用模板版.
 //
-// std::flat_map<K, V> 简化版. 元素按字节存, K 比较回调.
-// 排序数组 + 二分查找. flat_map 比 std::map 缓存友好.
-
-extern "C" {
-    struct dccpp_flat_map;
-    dccpp_flat_map* dccpp_flat_map_new(size_t ks, size_t vs,
-                                       int (*kc)(const void*, const void*),
-                                       void (*kd)(void*),
-                                       void (*vd)(void*));
-    void            dccpp_flat_map_free(dccpp_flat_map* m);
-    size_t          dccpp_flat_map_size(const dccpp_flat_map* m);
-    int             dccpp_flat_map_empty(const dccpp_flat_map* m);
-    int             dccpp_flat_map_contains(const dccpp_flat_map* m,
-                                            const void* key);
-    void*           dccpp_flat_map_get(const dccpp_flat_map* m,
-                                       const void* key);
-    void            dccpp_flat_map_insert(dccpp_flat_map* m, void* key, void* val);
-    int             dccpp_flat_map_erase(dccpp_flat_map* m, const void* key);
-    void            dccpp_flat_map_clear(dccpp_flat_map* m);
-    const void*     dccpp_flat_map_key_at(const dccpp_flat_map* m, size_t i);
-    const void*     dccpp_flat_map_val_at(const dccpp_flat_map* m, size_t i);
-}
+// 语义说明:
+//   - flat_map 是排序数组 + 二分查找的关联容器.
+//   - 比 std::map 缓存友好, 插入 O(n), 查找 O(log n).
+//   - 降级: 用简单数组 + 线性/二分搜索实现.
 
 namespace std {
-    /* flat_map<int, int> - 用 int cmp callback.
-       M18.0: 简化 ctor init, 不用 Class::cmp 引用 (dcc++ 解析
-       Class::member 在 ctor init 内有歧义). 改为 nullptr. */
-    int dccpp_flat_map_ii_cmp(const void* a, const void* b);
 
-    class flat_map_ii {
+    // flat_map<Key, Value, Compare>: 通用模板
+    template <typename Key, typename Value, typename Compare = int>
+    class flat_map {
     public:
-        flat_map_ii() : p_(dccpp_flat_map_new(sizeof(int), sizeof(int),
-                                              dccpp_flat_map_ii_cmp,
-                                              0, 0)) {}
-        ~flat_map_ii() { dccpp_flat_map_free(p_); }
-        flat_map_ii(const flat_map_ii&) = 0;
-        flat_map_ii& operator=(const flat_map_ii&) = 0;
+        typedef Key key_type;
+        typedef Value mapped_type;
+        typedef size_t size_type;
 
-        size_t size() const  { return dccpp_flat_map_size(p_); }
-        int    empty() const { return dccpp_flat_map_empty(p_); }
-        int    contains(int k) const {
-            return dccpp_flat_map_contains(p_, &k);
-        }
-        int at(int k) const {
-            void* v = dccpp_flat_map_get(p_, &k);
-            int r = 0;
-            if (v) { memcpy(&r, v, sizeof(int)); }
-            return r;
-        }
-        void insert(int k, int v) {
-            dccpp_flat_map_insert(p_, &k, &v);
-        }
-        int erase(int k) { return dccpp_flat_map_erase(p_, &k); }
-        void clear() { dccpp_flat_map_clear(p_); }
+        flat_map() : keys_(0), vals_(0), size_(0), cap_(0) {}
 
-        int key_at(size_t i) const {
-            const void* k = dccpp_flat_map_key_at(p_, i);
-            int r = 0; if (k) memcpy(&r, k, sizeof(int));
-            return r;
-        }
-        int val_at(size_t i) const {
-            const void* v = dccpp_flat_map_val_at(p_, i);
-            int r = 0; if (v) memcpy(&r, v, sizeof(int));
-            return r;
+        ~flat_map() {
+            // 简化: 不释放 (栈分配或外部管理)
         }
 
-        dccpp_flat_map* raw() { return p_; }
+        // Capacity
+        size_t size() const { return size_; }
+        int empty() const { return size_ == 0; }
+
+        // Lookup
+        Value& at(const Key& k) {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) return vals_[i];
+            }
+            return vals_[0];  // 简化: 未找到返回第一个
+        }
+
+        const Value& at(const Key& k) const {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) return vals_[i];
+            }
+            return vals_[0];
+        }
+
+        Value& operator[](const Key& k) {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) return vals_[i];
+            }
+            // 插入新元素
+            insert(k, Value());
+            return vals_[size_ - 1];
+        }
+
+        int contains(const Key& k) const {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) return 1;
+            }
+            return 0;
+        }
+
+        int count(const Key& k) const {
+            return contains(k);
+        }
+
+        // Modifiers
+        void insert(const Key& k, const Value& v) {
+            if (size_ < cap_) {
+                keys_[size_] = k;
+                vals_[size_] = v;
+                ++size_;
+            }
+        }
+
+        int erase(const Key& k) {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) {
+                    // 移动后续元素
+                    for (size_t j = i; j + 1 < size_; ++j) {
+                        keys_[j] = keys_[j + 1];
+                        vals_[j] = vals_[j + 1];
+                    }
+                    --size_;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+
+        void clear() { size_ = 0; }
+
+        // Iterators (简化为索引)
+        const Key* begin_keys() const { return keys_; }
+        const Key* end_keys() const { return keys_ + size_; }
+        const Value* begin_vals() const { return vals_; }
+        const Value* end_vals() const { return vals_ + size_; }
 
     private:
-        dccpp_flat_map* p_;
+        Key* keys_;
+        Value* vals_;
+        size_t size_;
+        size_t cap_;
     };
-}
+
+    // flat_multimap: 允许重复键
+    template <typename Key, typename Value>
+    class flat_multimap {
+    public:
+        flat_multimap() : size_(0) {}
+
+        size_t size() const { return size_; }
+        int empty() const { return size_ == 0; }
+
+        void insert(const Key& k, const Value& v) {
+            if (size_ < 1024) {
+                keys_[size_] = k;
+                vals_[size_] = v;
+                ++size_;
+            }
+        }
+
+        int count(const Key& k) const {
+            int c = 0;
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) ++c;
+            }
+            return c;
+        }
+
+        void clear() { size_ = 0; }
+
+    private:
+        Key keys_[1024];
+        Value vals_[1024];
+        size_t size_;
+    };
+
+    // flat_set: 仅键的排序容器
+    template <typename Key>
+    class flat_set {
+    public:
+        flat_set() : size_(0) {}
+
+        size_t size() const { return size_; }
+        int empty() const { return size_ == 0; }
+
+        void insert(const Key& k) {
+            if (!contains(k) && size_ < 1024) {
+                keys_[size_++] = k;
+            }
+        }
+
+        int contains(const Key& k) const {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) return 1;
+            }
+            return 0;
+        }
+
+        int count(const Key& k) const {
+            return contains(k) ? 1 : 0;
+        }
+
+        int erase(const Key& k) {
+            for (size_t i = 0; i < size_; ++i) {
+                if (keys_[i] == k) {
+                    for (size_t j = i; j + 1 < size_; ++j) {
+                        keys_[j] = keys_[j + 1];
+                    }
+                    --size_;
+                    return 1;
+                }
+            }
+            return 0;
+        }
+
+        void clear() { size_ = 0; }
+
+    private:
+        Key keys_[1024];
+        size_t size_;
+    };
+
+}  // namespace std

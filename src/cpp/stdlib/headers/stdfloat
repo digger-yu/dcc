@@ -1,0 +1,85 @@
+// <stdfloat> - dcc++ C++ 标准库
+// C++23 扩展浮点类型支持.
+//
+// 语义说明:
+//   - 提供 std::float16_t, std::float32_t, std::float64_t, std::float128_t
+//   - 以及对应的 std::bfloat16_t (Brain float)
+//   - 降级: 映射到 C 基本浮点类型或整数占位
+
+namespace std {
+
+    // ===== Extended floating-point type aliases =====
+    // C++23 [basic.fundamental]: 扩展浮点类型是可选的
+
+    // IEEE 754 binary16 (half precision) - 降级为 float (精度损失)
+    typedef float float16_t;
+
+    // IEEE 754 binary32 (single precision) - 直接映射 float
+    typedef float float32_t;
+
+    // IEEE 754 binary64 (double precision) - 直接映射 double
+    typedef double float64_t;
+
+    // IEEE 754 binary128 (quad precision) - 降级为 double (精度损失)
+    // 在支持 __float128 的平台可映射
+    typedef double float128_t;
+
+    // ===== Optional extended types =====
+
+    // std::decimal32_t / decimal64_t / decimal128_t - 十进制浮点 (可选)
+    // dcc: 降级为对应二进制类型
+    typedef float decimal32_t;
+    typedef double decimal64_t;
+    typedef double decimal128_t;
+
+    // ===== Brain float =====
+    // bfloat16: Google Brain 的 16-bit 浮点 (8 指数位 + 7 尾数位)
+    // 降级为 uint16_t 存储
+    typedef unsigned short bfloat16_t;
+
+    // ===== Type traits for extended float =====
+
+    template <typename T>
+    struct is_extended_floating_point {
+        enum { value = 0 };
+    };
+
+    template <>
+    struct is_extended_floating_point<float16_t> {
+        enum { value = 1 };
+    };
+
+    template <>
+    struct is_extended_floating_point<float32_t> {
+        enum { value = 1 };
+    };
+
+    template <>
+    struct is_extended_floating_point<float64_t> {
+        enum { value = 1 };
+    };
+
+    template <>
+    struct is_extended_floating_point<float128_t> {
+        enum { value = 1 };
+    };
+
+    // ===== Constants =====
+    // 与 <limits> 配合使用
+
+    // float16_t limits
+    static const float16_t float16_min = 6.103515625e-05f;
+    static const float16_t float16_max = 65504.0f;
+    static const float16_t float16_epsilon = 9.765625e-04f;
+
+    // float32_t limits (same as float)
+    static const float32_t float32_min = 1.175494351e-38f;
+    static const float32_t float32_max = 3.402823466e+38f;
+    static const float32_t float32_epsilon = 1.192092896e-07f;
+
+    // float64_t limits (same as double)
+    static const float64_t float64_min = 2.2250738585072014e-308;
+    static const float64_t float64_max = 1.7976931348623158e+308;
+    static const float64_t float64_epsilon = 2.2204460492503131e-16;
+
+}  // namespace std
