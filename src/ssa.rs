@@ -2425,6 +2425,10 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_pure: false,
+            is_const_attr: false,
+            returns_twice: false,
+            no_instrument: false,
             is_nodiscard: false,
         asm_label: None,
         };
@@ -2510,6 +2514,10 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_pure: false,
+            is_const_attr: false,
+            returns_twice: false,
+            no_instrument: false,
             is_nodiscard: false,
         asm_label: None,
         };
@@ -2579,6 +2587,10 @@ mod tests {
             is_host: false,
             is_naked: false,
             is_noreturn: false,
+            is_pure: false,
+            is_const_attr: false,
+            returns_twice: false,
+            no_instrument: false,
             is_nodiscard: false,
         asm_label: None,
         };

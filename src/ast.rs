@@ -160,6 +160,17 @@ pub struct FuncDecl {
     /// 编译器应在函数末尾插入 trap 指令（ud2 / brk / 等价指令）防止
     /// 执行流落入后续代码；优化器可利用此信息进行死代码消除。
     pub is_noreturn: bool,
+    /// __attribute__((pure)): 函数无副作用, 结果仅依赖参数和/或全局变量
+    /// 优化器可消除无副作用的重复调用 (CSE)
+    pub is_pure: bool,
+    /// __attribute__((const)): 函数结果仅依赖参数, 不读全局内存
+    /// 比 pure 更强的约束: 优化器可折叠相同参数的多次调用
+    pub is_const_attr: bool,
+    /// __attribute__((returns_twice)): 函数可能多次返回 (如 setjmp)
+    /// 阻止优化器对调用点做单次返回假设
+    pub returns_twice: bool,
+    /// __attribute__((no_instrument_function)): 禁止 profiling/fuzzer 插桩
+    pub no_instrument: bool,
     /// C23 [[nodiscard]]: 函数返回值不应被忽略
     /// 当该函数的调用结果作为语句被丢弃时, 编译器应发射警告
     pub is_nodiscard: bool,

@@ -80,6 +80,14 @@ struct ParsedAttrs {
     asm_label: Option<String>,
     /// C23 constexpr: 变量必须常量初始化, 函数等价 inline + always_inline
     is_constexpr: bool,
+    /// __attribute__((pure)): 函数无副作用, 结果仅依赖参数和/或全局变量
+    is_pure: bool,
+    /// __attribute__((const)): 函数结果仅依赖参数, 不读全局内存
+    is_const_attr: bool,
+    /// __attribute__((returns_twice)): 函数可能多次返回 (如 setjmp)
+    returns_twice: bool,
+    /// __attribute__((no_instrument_function)): 禁止 profiling 插桩
+    no_instrument: bool,
     /// C23 [[fallthrough]]: 标记 switch case 有意贯穿
     is_fallthrough: bool,
     /// C23 [[nodiscard]]: 函数返回值不应被忽略
@@ -144,6 +152,21 @@ impl ParsedAttrs {
         }
         if other.is_cold {
             self.is_cold = true;
+        }
+        if other.is_hot {
+            self.is_hot = true;
+        }
+        if other.is_pure {
+            self.is_pure = true;
+        }
+        if other.is_const_attr {
+            self.is_const_attr = true;
+        }
+        if other.returns_twice {
+            self.returns_twice = true;
+        }
+        if other.no_instrument {
+            self.no_instrument = true;
         }
         if other.is_noinline {
             self.is_noinline = true;
@@ -1454,6 +1477,37 @@ impl<'a> Parser<'a> {
                             "device" => attrs.is_device = true,
                             _ => attrs.is_host = true,
                         }
+                        self.advance();
+                    }
+                    // __attribute__((hot)): 热函数, 放入 .text.hot 段
+                    "hot" => {
+                        attrs.is_hot = true;
+                        self.advance();
+                    }
+                    // __attribute__((pure)): 无副作用函数
+                    "pure" => {
+                        attrs.is_pure = true;
+                        self.advance();
+                    }
+                    // __attribute__((const)): 纯函数 (不读全局内存)
+                    "const" => {
+                        attrs.is_const_attr = true;
+                        self.advance();
+                    }
+                    // __attribute__((returns_twice)): 可多次返回 (setjmp 等)
+                    "returns_twice" => {
+                        attrs.returns_twice = true;
+                        self.advance();
+                    }
+                    // __attribute__((no_instrument_function)):
+                    // 禁止 profiling/fuzzer 插桩
+                    "no_instrument_function" => {
+                        attrs.no_instrument = true;
+                        self.advance();
+                    }
+                    // 以下属性仅解析消费, 无 codegen 效果:
+                    // noclone / noipa / nocf_check
+                    "noclone" | "noipa" | "nocf_check" => {
                         self.advance();
                     }
                     _ => {
@@ -3128,6 +3182,10 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_pure: attrs.is_pure,
+                    is_const_attr: attrs.is_const_attr,
+                    returns_twice: attrs.returns_twice,
+                    no_instrument: attrs.no_instrument,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3186,6 +3244,10 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_pure: attrs.is_pure,
+                    is_const_attr: attrs.is_const_attr,
+                    returns_twice: attrs.returns_twice,
+                    no_instrument: attrs.no_instrument,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3573,6 +3635,10 @@ impl<'a> Parser<'a> {
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
                     is_noreturn: attrs.is_noreturn,
+                    is_pure: attrs.is_pure,
+                    is_const_attr: attrs.is_const_attr,
+                    returns_twice: attrs.returns_twice,
+                    no_instrument: attrs.no_instrument,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3658,6 +3724,10 @@ impl<'a> Parser<'a> {
                 is_host: attrs.is_host,
                 is_naked: attrs.is_naked,
                 is_noreturn: attrs.is_noreturn,
+                is_pure: attrs.is_pure,
+                is_const_attr: attrs.is_const_attr,
+                returns_twice: attrs.returns_twice,
+                no_instrument: attrs.no_instrument,
                 is_nodiscard: attrs.is_nodiscard,
                 asm_label: attrs.asm_label.clone(),
             })])
