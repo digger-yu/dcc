@@ -4704,6 +4704,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
     // _ZN6strlenEv -> strlen, _ZN6strcmpEv -> strcmp, 等.
     result = demangle_c_functions(&result);
+    // M30.3: 动态全局初始化转换.
+    // C++ 允许全局变量用函数调用初始化, C 不允许.
+    // 将 `Type var = func(args);` 转换为无初始化声明 + __dcc_init_var 函数.
+    result = convert_dynamic_global_inits(&result);
     result
 }
 
@@ -4890,6 +4894,82 @@ fn demangle_c_functions(s: &str) -> String {
         // _ZN<len><name>Ev 模式 (Itanium ABI: 无参函数)
         let mangled = format!("_ZN{}{}Ev", func.len(), func);
         result = result.replace(&mangled, func);
+    }
+    result
+}
+
+/// M30.3: 动态全局初始化转换.
+/// C++ 允许 `Type var = func(args);` 作为全局初始化, C 不允许.
+/// 转换为: 声明 `Type var;` + 生成 `__dcc_init_var()` 函数.
+/// 注意: 这只是简单文本转换, 复杂情况可能不完整.
+fn convert_dynamic_global_inits(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut init_fns = String::new();
+    for line in s.lines() {
+        // 检测模式: `Type var = func(...);` 在全局作用域
+        // 简单启发式: 行首不是空格/static/extern, 包含 `= ` 和 `(`
+        let trimmed = line.trim();
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("static")
+            && !trimmed.starts_with("extern")
+            && !trimmed.starts_with("typedef")
+            && !trimmed.starts_with("struct")
+            && !trimmed.starts_with("union")
+            && !trimmed.starts_with("enum")
+            && !trimmed.starts_with("void ")
+            && !trimmed.starts_with("int ")
+            && !trimmed.starts_with("return")
+            && !trimmed.starts_with("if")
+            && !trimmed.starts_with("for")
+            && !trimmed.starts_with("while")
+            && !trimmed.starts_with("}")
+            && !trimmed.starts_with("{")
+            && trimmed.contains(" = ")
+            && trimmed.contains('(')
+            && trimmed.ends_with(";")
+        {
+            // 尝试解析: `Type var = expr;`
+            if let Some(eq_pos) = trimmed.find(" = ") {
+                let decl_part = &trimmed[..eq_pos];
+                let init_part = &trimmed[eq_pos + 3..trimmed.len() - 1]; // 去掉 `;`
+                // 检查 init 是否包含函数调用 (含有 `(`)
+                if init_part.contains('(') {
+                    // 提取变量名 (decl_part 的最后一部分)
+                    let var_name = decl_part.split_whitespace().last().unwrap_or("unknown");
+                    // 输出无初始化声明
+                    result.push_str(&format!("{};\n", decl_part));
+                    // 生成初始化函数
+                    init_fns.push_str(&format!(
+                        "static void __dcc_init_{}(void) {{ {} = {}; }}\n",
+                        var_name, decl_part, init_part
+                    ));
+                    continue;
+                }
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    // 追加初始化函数
+    if !init_fns.is_empty() {
+        result.push_str("\n/* M30.3: dynamic global initializers */\n");
+        result.push_str(&init_fns);
+        // 生成 __dcc_run_global_inits 函数
+        result.push_str("void __dcc_run_global_inits(void) {\n");
+        for line in init_fns.lines() {
+            if line.starts_with("static void __dcc_init_") {
+                if let Some(name) = line.split("__dcc_init_").nth(1) {
+                    if let Some(paren_pos) = name.find('(') {
+                        let fn_name = &name[..paren_pos];
+                        result.push_str(&format!("    __dcc_init_{}();\n", fn_name));
+                    }
+                }
+            }
+        }
+        result.push_str("}\n");
     }
     result
 }
