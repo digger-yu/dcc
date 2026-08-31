@@ -108,6 +108,8 @@ struct ParsedAttrs {
     transparent_union: bool,
     /// __attribute__((externally_visible)): 阻止 LTO 隐藏符号
     externally_visible: bool,
+    /// __attribute__((mode(__DI__))): 类型模式 (SI/DI/HI/QI/word/SF/DF/TF/pointer)
+    mode_name: Option<String>,
 }
 
 /// 解析选项（Driver 传入）
@@ -318,6 +320,9 @@ impl ParsedAttrs {
         }
         if other.externally_visible {
             self.externally_visible = true;
+        }
+        if other.mode_name.is_some() {
+            self.mode_name = other.mode_name;
         }
     }
 }
@@ -725,6 +730,23 @@ impl<'a> Parser<'a> {
             Some("check the syntax near this position"),
         );
         false
+    }
+    /// 将 __attribute__((mode(...))) 的模式名映射为对应的 Type
+    /// SI=32bit, DI=64bit, HI=16bit, QI=8bit, word=pointer-sized
+    /// SF=float, DF=double, TF=long double, pointer=uintptr
+    fn mode_to_type(&self, mode: &str, is_unsigned: bool) -> Option<Type> {
+        match mode {
+            "QI" => Some(if is_unsigned { Type::UChar } else { Type::SChar }),
+            "HI" => Some(if is_unsigned { Type::UShort } else { Type::Short }),
+            "SI" => Some(if is_unsigned { Type::UInt } else { Type::Int }),
+            "DI" => Some(if is_unsigned { Type::ULong } else { Type::Long }),
+            "word" => Some(if is_unsigned { Type::ULong } else { Type::Long }),
+            "SF" => Some(Type::Float),
+            "DF" => Some(Type::Double),
+            "TF" => Some(Type::LongDouble),
+            "pointer" => Some(Type::ULong), // pointer-sized uint
+            _ => None,
+        }
     }
     /// 静默剥离 __attribute__((...)): GNU 扩展属性不影响代码生成
     fn skip_attributes(&mut self) {
@@ -1676,6 +1698,22 @@ impl<'a> Parser<'a> {
                                 if self.cur.kind == TokKind::Eof {
                                     break;
                                 }
+                            }
+                        }
+                    }
+                    // __attribute__((mode(__DI__))): 类型模式映射
+                    "mode" | "__mode__" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            // 模式名可以是 __DI__/DI 等标识符
+                            if self.cur.kind == TokKind::Ident {
+                                attrs.mode_name =
+                                    Some(self.cur.text.trim_matches('_').to_string());
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
                             }
                         }
                     }
@@ -2707,6 +2745,22 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
             let mut ty = self.parse_type_mode(true)?;
+            // __attribute__((mode(...))): 覆盖基类大小/符号性
+            // 例如: typedef int __attribute__((mode(DI))) int64_t;
+            // 将 int (32-bit) 覆盖为 DI (64-bit long)
+            if let Some(ref mode) = self.decl_attrs.mode_name {
+                let is_unsigned = matches!(
+                    ty,
+                    Type::UInt
+                        | Type::ULong
+                        | Type::ULongLong
+                        | Type::UChar
+                        | Type::UShort
+                );
+                if let Some(mode_ty) = self.mode_to_type(mode, is_unsigned) {
+                    ty = mode_ty;
+                }
+            }
             ty = self.parse_ptr_suffix(ty);
             // typedef ret_type (name)(params) — 无 * 的函数 typedef
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
@@ -2842,9 +2896,23 @@ impl<'a> Parser<'a> {
                 ty = Type::Array(Box::new(ty.into()), sz);
             }
             let ty = self.try_parse_vector_attr(ty);
-            // typedef 声明符后的非 vector 属性 (如 __mode__): 消费但不处理
+            let mut ty = ty;
+            // typedef 声明符后的属性: 解析并应用 mode 属性
             if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                self.skip_attributes();
+                let attrs = self.parse_attributes();
+                if let Some(ref mode) = attrs.mode_name {
+                    let is_unsigned = matches!(
+                        ty,
+                        Type::UInt
+                            | Type::ULong
+                            | Type::ULongLong
+                            | Type::UChar
+                            | Type::UShort
+                    );
+                    if let Some(mode_ty) = self.mode_to_type(mode, is_unsigned) {
+                        ty = mode_ty;
+                    }
+                }
             }
             if !self.expect(TokKind::Semi, "';'") {
                 return None;
