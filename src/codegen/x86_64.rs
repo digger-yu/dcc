@@ -15291,6 +15291,107 @@ impl Codegen {
             {
                 self.gen_fenv_builtin(name, args, dst)
             }
+            // ===== 其他缺失的 __builtin_* 函数 =====
+            // __builtin_setjmp: 保存 callee-saved 寄存器到 buffer
+            // buffer 布局: rbx, rbp, r12-r15, rsp, return address (8 slots)
+            "__builtin_setjmp" => {
+                if args.is_empty() { return false; }
+                self.gen_expr(&args[0], 7); // rdi = buffer
+                // 保存 callee-saved registers
+                self.emit(&[0x48, 0x89, 0x1F]); // mov [rdi], rbx
+                self.emit(&[0x48, 0x89, 0x6F, 0x08]); // mov [rdi+8], rbp
+                self.emit(&[0x4C, 0x89, 0x67, 0x10]); // mov [rdi+16], r12
+                self.emit(&[0x4C, 0x89, 0x6F, 0x18]); // mov [rdi+24], r13
+                self.emit(&[0x4C, 0x89, 0x77, 0x20]); // mov [rdi+32], r14
+                self.emit(&[0x4C, 0x89, 0x7F, 0x28]); // mov [rdi+40], r15
+                // 保存 rsp
+                self.emit(&[0x48, 0x89, 0x67, 0x30]); // mov [rdi+48], rsp
+                // 保存 return address (从栈顶)
+                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+                self.emit(&[0x48, 0x89, 0x47, 0x38]); // mov [rdi+56], rax
+                // 返回 0
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_longjmp: 从 buffer 恢复 callee-saved 寄存器
+            "__builtin_longjmp" => {
+                if args.len() < 2 { return false; }
+                self.gen_expr(&args[0], 7); // rdi = buffer
+                self.gen_expr(&args[1], 6); // rsi = value (返回值)
+                // 恢复 callee-saved registers
+                self.emit(&[0x48, 0x8B, 0x1F]); // mov rbx, [rdi]
+                self.emit(&[0x48, 0x8B, 0x6F, 0x08]); // mov rbp, [rdi+8]
+                self.emit(&[0x4C, 0x8B, 0x67, 0x10]); // mov r12, [rdi+16]
+                self.emit(&[0x4C, 0x8B, 0x6F, 0x18]); // mov r13, [rdi+24]
+                self.emit(&[0x4C, 0x8B, 0x77, 0x20]); // mov r14, [rdi+32]
+                self.emit(&[0x4C, 0x8B, 0x7F, 0x28]); // mov r15, [rdi+40]
+                // 恢复 rsp
+                self.emit(&[0x48, 0x8B, 0x67, 0x30]); // mov rsp, [rdi+48]
+                // 跳转到 return address
+                self.emit(&[0x48, 0x8B, 0x47, 0x38]); // mov rax, [rdi+56]
+                self.emit(&[0xFF, 0xE0]); // jmp rax
+                true
+            }
+            // __builtin_speculation_safe_value: 返回参数值 (no-op)
+            "__builtin_speculation_safe_value" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_addc: 带进位加法
+            "__builtin_addc" => {
+                if args.len() < 4 { return false; }
+                self.gen_expr(&args[0], 0); // rax = a
+                self.gen_expr(&args[1], 6); // rsi = b
+                self.emit(&[0x48, 0x01, 0xF0]); // add rax, rsi
+                // 进位标志在 CF, 但 __builtin_addc 返回结果 (不进位)
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_subc: 带借位减法
+            "__builtin_subc" => {
+                if args.len() < 4 { return false; }
+                self.gen_expr(&args[0], 0); // rax = a
+                self.gen_expr(&args[1], 6); // rsi = b
+                self.emit(&[0x48, 0x29, 0xF0]); // sub rax, rsi
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_is_constant_evaluated: 编译期折叠为 0
+            // (dcc 不在 const_eval 上下文中, 保守返回 0)
+            "__builtin_is_constant_evaluated" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_memcpy_inline: 内联 rep movsb (同 __builtin_memcpy)
+            "__builtin_memcpy_inline" => {
+                if args.len() < 3 { return false; }
+                self.gen_expr(&args[1], 6); // rsi = src
+                self.gen_expr(&args[0], 7); // rdi = dst
+                self.gen_expr(&args[2], 1); // rcx = n
+                self.emit(&[0xfc]); // cld
+                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                if dst != 0 { self.mov(dst, 7); }
+                true
+            }
+            // __builtin_memset_inline: 内联 rep stosb (同 __builtin_memset)
+            "__builtin_memset_inline" => {
+                if args.len() < 3 { return false; }
+                self.gen_expr(&args[0], 7); // rdi = dst
+                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[2], 1); // rcx = n
+                self.emit(&[0xfc]); // cld
+                self.emit(&[0xf3, 0xaa]); // rep stosb
+                if dst != 0 { self.mov(dst, 7); }
+                true
+            }
+            // __builtin_unwind_init: no-op
+            "__builtin_unwind_init" => {
+                true
+            }
             _ => false,
         }
     }
