@@ -1,0 +1,142 @@
+// <compare> - dcc++ C++ 标准库
+// C++20 Three-way comparison support.
+//
+// 语义说明:
+//   - comparison_category 枚举: strong_ordering, weak_ordering, partial_ordering.
+//   - 降级为 int 返回值: <0, 0, >0.
+//   - operator<=> 在 dcc 中降级为比较函数调用.
+
+namespace std {
+
+    // ===== Comparison category types =====
+
+    struct strong_ordering {
+        int value;
+
+        constexpr strong_ordering(int v) : value(v) {}
+
+        constexpr int operator<=>(strong_ordering other) const {
+            return value - other.value;
+        }
+
+        friend constexpr int operator==(strong_ordering a, strong_ordering b) {
+            return a.value == b.value;
+        }
+        friend constexpr int operator!=(strong_ordering a, strong_ordering b) {
+            return a.value != b.value;
+        }
+
+        // Predefined comparison constants
+        static const strong_ordering less;
+        static const strong_ordering equal;
+        static const strong_ordering greater;
+    };
+
+    // Static member definitions (inline variables approx)
+    static const strong_ordering strong_ordering::less = strong_ordering(-1);
+    static const strong_ordering strong_ordering::equal = strong_ordering(0);
+    static const strong_ordering strong_ordering::greater = strong_ordering(1);
+
+    struct weak_ordering {
+        int value;
+
+        constexpr weak_ordering(int v) : value(v) {}
+
+        operator strong_ordering() const {
+            return strong_ordering(value);
+        }
+
+        friend constexpr int operator==(weak_ordering a, weak_ordering b) {
+            return a.value == b.value;
+        }
+        friend constexpr int operator!=(weak_ordering a, weak_ordering b) {
+            return a.value != b.value;
+        }
+
+        static const weak_ordering less;
+        static const weak_ordering equivalent;
+        static const weak_ordering greater;
+    };
+
+    static const weak_ordering weak_ordering::less = weak_ordering(-1);
+    static const weak_ordering weak_ordering::equivalent = weak_ordering(0);
+    static const weak_ordering weak_ordering::greater = weak_ordering(1);
+
+    struct partial_ordering {
+        int value;
+        int is_ordered;  // 0 = unordered (NaN case)
+
+        constexpr partial_ordering(int v, int ordered)
+            : value(v), is_ordered(ordered) {}
+
+        operator weak_ordering() const {
+            return weak_ordering(value);
+        }
+
+        friend constexpr int operator==(partial_ordering a, partial_ordering b) {
+            return a.value == b.value && a.is_ordered == b.is_ordered;
+        }
+        friend constexpr int operator!=(partial_ordering a, partial_ordering b) {
+            return !(a == b);
+        }
+
+        int is_ordered_val() const { return is_ordered; }
+
+        static const partial_ordering less;
+        static const partial_ordering equivalent;
+        static const partial_ordering greater;
+        static const partial_ordering unordered;
+    };
+
+    static const partial_ordering partial_ordering::less = partial_ordering(-1, 1);
+    static const partial_ordering partial_ordering::equivalent = partial_ordering(0, 1);
+    static const partial_ordering partial_ordering::greater = partial_ordering(1, 1);
+    static const partial_ordering partial_ordering::unordered = partial_ordering(0, 0);
+
+    // ===== Comparison result type traits =====
+
+    template <typename T>
+    struct is_arithmetic_comparison {
+        enum { value = 1 };
+    };
+
+    // compare_three_way function object
+    struct compare_three_way {
+        template <typename T, typename U>
+        auto operator()(const T& t, const U& u) const {
+            return t <=> u;
+        }
+    };
+
+    // compare_strong_order_fallback
+    struct compare_strong_order_fallback {
+        template <typename T, typename U>
+        strong_ordering operator()(const T& t, const U& u) const {
+            if (t == u) return strong_ordering::equal;
+            if (t < u) return strong_ordering::less;
+            return strong_ordering::greater;
+        }
+    };
+
+    // compare_weak_order_fallback
+    struct compare_weak_order_fallback {
+        template <typename T, typename U>
+        weak_ordering operator()(const T& t, const U& u) const {
+            if (t == u) return weak_ordering::equivalent;
+            if (t < u) return weak_ordering::less;
+            return weak_ordering::greater;
+        }
+    };
+
+    // ===== Helper functions =====
+
+    template <typename T>
+    int is_lt(T val) { return val < 0; }
+
+    template <typename T>
+    int is_eq(T val) { return val == 0; }
+
+    template <typename T>
+    int is_gt(T val) { return val > 0; }
+
+}  // namespace std

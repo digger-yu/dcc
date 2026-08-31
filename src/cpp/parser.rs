@@ -239,6 +239,9 @@ pub enum CppDecl {
         /// 限定路径
         path: Vec<String>,
     },
+    /// C++20: `using enum Color;` - 将枚举值引入当前作用域
+    /// 降级: C 枚举值已在同一作用域, 故为 no-op.
+    UsingEnum { name: String },
     /// 运算符重载函数 (M8)
     OperatorFn {
         /// 限定名 (含 class 与 operator 名)
@@ -1773,8 +1776,24 @@ impl<'a> CppParser<'a> {
 
     /// 解析 using namespace std; 或 using std::cout; 或 using Base::Base;
     /// 或 using Name = Type; (C++11 类型别名)
+    /// 或 using enum Color; (C++20)
     fn parse_using_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Using)?;
+        // C++20: using enum Name;
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwEnum,
+                ..
+            }))
+        ) {
+            self.bump(); // consume 'enum'
+            let name = self.expect_ident()?;
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppDecl::UsingEnum { name });
+        }
         let is_namespace = if self.at(CppKw::Namespace) {
             self.bump();
             true
@@ -9521,6 +9540,7 @@ fn is_reserved_word(s: &str) -> bool {
             | "typeid"
             | "constexpr"
             | "consteval"
+            | "constinit"
             | "noexcept"
             | "mutable"
             | "volatile"

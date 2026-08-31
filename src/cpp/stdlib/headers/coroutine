@@ -1,0 +1,55 @@
+// <coroutine> - dcc++ C++ 标准库
+// C++20 协程支持: coroutine_handle, coroutine_traits.
+//
+// 语义说明:
+//   - dcc 协程降级为 Duff's device 状态机.
+//   - coroutine_handle 封装状态机指针.
+//   - coroutine_traits 从返回类型提取 promise 类型.
+
+namespace std {
+
+    // coroutine_handle: opaque handle to coroutine frame
+    struct coroutine_handle {
+        void* ptr;
+
+        coroutine_handle() : ptr(0) {}
+
+        static coroutine_handle from_address(void* p) {
+            coroutine_handle h;
+            h.ptr = p;
+            return h;
+        }
+
+        void* address() const { return ptr; }
+        operator void*() const { return ptr; }
+
+        int done() const { return 0; }  // 简化: 需状态机查询
+        void resume() const { /* 状态机步进 */ }
+        void destroy() const { /* 释放帧 */ }
+
+        static coroutine_handle from_promise(void*) {
+            return coroutine_handle();
+        }
+    };
+
+    // coroutine_traits: extract promise_type from return type
+    template <typename R, typename... Args>
+    struct coroutine_traits {
+        // typedef R::promise_type promise_type;
+    };
+
+    // suspend_always: awaitable that always suspends
+    struct suspend_always {
+        int await_ready() const { return 0; }
+        void await_suspend(coroutine_handle) const {}
+        void await_resume() const {}
+    };
+
+    // suspend_never: awaitable that never suspends
+    struct suspend_never {
+        int await_ready() const { return 1; }
+        void await_suspend(coroutine_handle) const {}
+        void await_resume() const {}
+    };
+
+}  // namespace std

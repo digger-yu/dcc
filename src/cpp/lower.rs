@@ -8459,6 +8459,10 @@ impl Lower {
                 // M8: 仅注释提示 (lower 阶段忽略)
                 let _ = (is_namespace, path);
             }
+            CppDecl::UsingEnum { ref name } => {
+                // C++20: using enum - C 枚举值已在同一作用域, no-op
+                let _ = name;
+            }
             CppDecl::OperatorFn {
                 class,
                 op,

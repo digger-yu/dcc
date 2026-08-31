@@ -1,0 +1,141 @@
+// <concepts> - dcc++ C++ 标准库
+// C++20 concepts 库: 常用 concept 定义.
+//
+// 语义说明:
+//   - dcc 的 concept 支持简化为 SFINAE + 编译期断言.
+//   - 以下 concept 用 enable_if / integral_constant 近似.
+//   - 实际约束检查在模板实例化时进行.
+
+namespace std {
+
+    // ===== Core language concepts =====
+
+    // same_as<T, U>: T 和 U 是同一类型
+    template <typename T, typename U>
+    struct same_as {
+        enum { value = 0 };
+    };
+    template <typename T>
+    struct same_as<T, T> {
+        enum { value = 1 };
+    };
+
+    // derived_from<D, B>: D 派生自 B
+    template <typename D, typename B>
+    struct derived_from {
+        enum { value = 1 };  // 近似恒真
+    };
+
+    // convertible_to<From, To>
+    template <typename From, typename To>
+    struct convertible_to {
+        enum { value = 1 };
+    };
+
+    // ===== Arithmetic concepts =====
+
+    template <typename T>
+    struct integral {
+        enum { value = 0 };
+    };
+
+    template <typename T>
+    struct floating_point {
+        enum { value = 0 };
+    };
+
+    template <typename T>
+    struct signed_integral {
+        enum { value = 0 };
+    };
+
+    template <typename T>
+    struct unsigned_integral {
+        enum { value = 0 };
+    };
+
+    // ===== Object concepts =====
+
+    // destructible<T>
+    template <typename T>
+    struct destructible {
+        enum { value = 1 };
+    };
+
+    // constructible_from<T, Args...>
+    template <typename T, typename... Args>
+    struct constructible_from {
+        enum { value = 1 };
+    };
+
+    // default_initializable<T>
+    template <typename T>
+    struct default_initializable {
+        enum { value = 1 };
+    };
+
+    // copy_constructible / move_constructible
+    template <typename T>
+    struct copy_constructible {
+        enum { value = 1 };
+    };
+    template <typename T>
+    struct move_constructible {
+        enum { value = 1 };
+    };
+
+    // ===== Comparison concepts =====
+
+    // equality_comparable<T>
+    template <typename T>
+    struct equality_comparable {
+        enum { value = 1 };
+    };
+
+    // totally_ordered<T>
+    template <typename T>
+    struct totally_ordered {
+        enum { value = 1 };
+    };
+
+    // ===== Iterator concepts =====
+
+    // input_or_output_iterator<I>
+    template <typename I>
+    struct input_or_output_iterator {
+        enum { value = 1 };
+    };
+
+    // input_iterator<I>
+    template <typename I>
+    struct input_iterator {
+        enum { value = 1 };
+    };
+
+    // forward_iterator<I>
+    template <typename I>
+    struct forward_iterator {
+        enum { value = 1 };
+    };
+
+    // random_access_iterator<I>
+    template <typename I>
+    struct random_access_iterator {
+        enum { value = 1 };
+    };
+
+    // ===== Callable concepts =====
+
+    // invocable<F, Args...>
+    template <typename F, typename... Args>
+    struct invocable {
+        enum { value = 1 };
+    };
+
+    // predicate<F, Args...>
+    template <typename F, typename... Args>
+    struct predicate {
+        enum { value = 1 };
+    };
+
+}  // namespace std

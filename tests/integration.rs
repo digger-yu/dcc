@@ -20545,3 +20545,17 @@ fn cpp11_using_type_alias_compile() {
     );
     let _ = fs::remove_file(obj);
 }
+
+/// Phase 9: C++20 features (using enum, consteval, constinit, <span>, <concepts>, <compare>)
+#[test]
+#[cfg(unix)]
+fn cpp20_features_compile() {
+    let src = include_str!("fixtures/cpp/cpp20_features.cpp");
+    let (out, obj) = run_cpp_object_test("cpp20-features", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}
