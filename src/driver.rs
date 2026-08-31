@@ -1736,6 +1736,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                 || t.contains("protected:")
                 || t.contains(" new ")
                 || t.contains(" delete ")
+                // C++11: using type alias (using Name = Type;)
+                || t.contains("using ")
         };
         has(&raw) || has(&pp_out.text)
     };

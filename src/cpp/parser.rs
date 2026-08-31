@@ -1772,6 +1772,7 @@ impl<'a> CppParser<'a> {
     }
 
     /// 解析 using namespace std; 或 using std::cout; 或 using Base::Base;
+    /// 或 using Name = Type; (C++11 类型别名)
     fn parse_using_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Using)?;
         let is_namespace = if self.at(CppKw::Namespace) {
@@ -1781,6 +1782,20 @@ impl<'a> CppParser<'a> {
             false
         };
         let path = self.parse_qualified_name()?;
+        // C++11: using Name = Type; (类型别名声明)
+        if !is_namespace && path.len() == 1 {
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
+                self.bump(); // consume '='
+                let target = self.parse_mangle_type()?;
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                    self.bump();
+                }
+                // Record in typedef_alias for template resolution
+                self.typedef_alias.insert(path[0].clone(),
+                    (format!("{:?}", target), vec![]));
+                return Ok(CppDecl::Typedef { target, name: path[0].clone() });
+            }
+        }
         // M10+: using Base::Base 形式 (继承构造)
         if path.len() == 2 && path[0] == path[1] {
             // `using Base::Base;` 继承构造
@@ -10022,5 +10037,20 @@ mod tests {
         let decls = d.unwrap();
         // 验证解析成功
         assert!(!decls.is_empty());
+    }
+
+    #[test]
+    fn parse_using_type_alias() {
+        // C++11: using Name = Type;
+        let src = b"using int_alias = int;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        assert_eq!(d.len(), 1);
+        match &d[0] {
+            CppDecl::Typedef { name, .. } => {
+                assert_eq!(name, "int_alias");
+            }
+            _ => panic!("expected Typedef, got {:?}", d[0]),
+        }
     }
 }

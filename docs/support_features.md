@@ -335,6 +335,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | C++23 多维下标 | `obj[i,j,k]` → `__dcc_multi_index_N` |
 | Itanium C++ ABI 名字修饰 | 成员函数 / 运算符 / vtable / typeinfo / 模板形参 |
 | C++→C 降级 | struct 字段 / 隐式 this / 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 / lambda 闭包 / 模板完整单态化 |
+| dcc++ C++11 `using` 类型别名 | `using Name = Type;` 等价 `typedef Type Name;`，降级为 C typedef 输出 |
 
 ## C 前端补洞
 

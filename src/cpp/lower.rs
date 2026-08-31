@@ -11799,4 +11799,18 @@ mod tests {
         assert!(s.contains("__dcc_mbr_Child_y"), "{}", s);
         assert!(s.contains("__f.__base_Parent.y"), "{}", s);
     }
+
+    #[test]
+    fn lower_using_type_alias() {
+        let src = b"using int_alias = int;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // Should produce typedef int int_alias;
+        assert!(s.contains("typedef int int_alias"), "{}", s);
+        // Should NOT contain 'using' keyword
+        assert!(!s.contains("using int_alias"), "{}", s);
+    }
 }

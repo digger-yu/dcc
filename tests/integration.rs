@@ -20531,3 +20531,17 @@ fn cpp98_iterator_traits_compile() {
     );
     let _ = fs::remove_file(obj);
 }
+
+/// Phase 6.5: C++11 using type alias (using Name = Type;)
+#[test]
+#[cfg(unix)]
+fn cpp11_using_type_alias_compile() {
+    let src = include_str!("fixtures/cpp/using_type_alias.cpp");
+    let (out, obj) = run_cpp_object_test("cpp11-using-alias", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}
