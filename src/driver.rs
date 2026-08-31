@@ -1545,6 +1545,81 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
 ///   2. 调 cpp 前端 lex/parse/lower → 降级到 C 字符串
 ///   3. 写到临时 .c 文件
 ///   4. 调 C 链路 (re-preprocess / parse / IR / codegen) 写 .o 或 .s
+/// M30.4: AST lower 可能因 parser 容错恢复丢失尾部的 `main` 函数.
+/// 检测: 若预处理文本含 `main` 定义但 lowered C 不含, 从预处理文本
+/// 提取 `main` 函数体并追加到 lowered C 末尾.
+fn recover_missing_main(c_src: String, pp_text: &str) -> String {
+    // 检查 lowered C 是否已有 main
+    let has_main_in_c = c_src.lines().any(|line| {
+        let t = line.trim();
+        t.contains("main") && (t.contains('(') || t.contains('{'))
+            && !t.starts_with("//") && !t.starts_with("/*")
+            && !t.contains("getdomainname") && !t.contains("setdomainname")
+    });
+    if has_main_in_c {
+        return c_src;
+    }
+    // 检查预处理文本是否有 main 定义
+    let pp_lines: Vec<&str> = pp_text.lines().collect();
+    let mut main_start = None;
+    for (i, line) in pp_lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("main") && t.contains('(') {
+            main_start = Some(i);
+            break;
+        }
+        // 也检测 "int\nmain (void)" 模式: 上一行是 "int", 当前行是 "main ("
+        if t.starts_with("main") && t.contains('(') == false {
+            // 检查下一行是否继续 main 的签名
+            if i + 1 < pp_lines.len() && pp_lines[i + 1].trim().starts_with('(') {
+                main_start = Some(i);
+                break;
+            }
+        }
+        // 检查 "int\nmain" 模式
+        if t == "int" && i + 1 < pp_lines.len() {
+            let next = pp_lines[i + 1].trim();
+            if next.starts_with("main") {
+                main_start = Some(i);
+                break;
+            }
+        }
+    }
+    let main_start = match main_start {
+        Some(s) => s,
+        None => return c_src,
+    };
+    // 从 main_start 提取到匹配的 '}' 结束
+    let mut brace_depth = 0i32;
+    let mut found_open = false;
+    let mut main_end = main_start;
+    for i in main_start..pp_lines.len() {
+        for ch in pp_lines[i].chars() {
+            if ch == '{' { brace_depth += 1; found_open = true; }
+            if ch == '}' { brace_depth -= 1; }
+        }
+        if found_open && brace_depth <= 0 {
+            main_end = i;
+            break;
+        }
+    }
+    if !found_open {
+        return c_src;
+    }
+    // 提取 main 函数文本
+    let main_text: String = pp_lines[main_start..=main_end]
+        .iter()
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+    // 追加到 lowered C 末尾
+    let mut result = c_src;
+    result.push_str("\n/* recovered main function (lost during AST lower) */\n");
+    result.push_str(&main_text);
+    result.push('\n');
+    result
+}
+
 ///
 /// 设计: C++ 不另起 IR, 而是降级到 C 后复用整条 C 链路 (M7 决策)。
 /// 这意味着 C++ 的所有限制 = 现有 C 后端能表达的限制。
@@ -1818,6 +1893,9 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let c_src = crate::cpp::lower::flatten_all_scope_operators(&c_src);
     // Apply additional C++ to C conversions that might have been missed by AST lowering
     let c_src = crate::cpp::lower::apply_post_lowering_conversions(&c_src);
+    // M30.4: AST lower 可能因 parser 容错恢复丢失尾部函数 (如 main).
+    // 检测: 若预处理文本含 main 但 lowered C 不含, 从预处理文本提取并追加.
+    let c_src = recover_missing_main(c_src, &pp_out.text);
 
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {
