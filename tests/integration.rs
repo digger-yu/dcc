@@ -20411,3 +20411,55 @@ fn c99_restrict_compile_and_run() {
         "restrict test should print PASS. got: {stdout}"
     );
 }
+
+/// C11 _Atomic with non-basic types (struct)
+#[test]
+fn c11_atomic_struct_compile_and_run() {
+    let source = include_str!("fixtures/c/c11_atomic_struct.c");
+    let (output, exe) = run_compile_and_run("c11-atomic-struct", source);
+    assert!(
+        output.status.success(),
+        "atomic struct compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run atomic struct test");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "atomic struct test should return 0"
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PASS"),
+        "atomic struct test should print PASS. got: {stdout}"
+    );
+}
+
+/// C11 _Noreturn function qualifier
+#[test]
+fn c11_noreturn_compile_and_run() {
+    let source = include_str!("fixtures/c/c11_noreturn.c");
+    let (output, exe) = run_compile_and_run("c11-noreturn", source);
+    assert!(
+        output.status.success(),
+        "noreturn compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run noreturn test");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "noreturn test should return 0"
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PASS"),
+        "noreturn test should print PASS. got: {stdout}"
+    );
+}
