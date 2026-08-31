@@ -94,6 +94,8 @@ pub struct ClassDecl {
     pub name: String,
     /// `class` 或 `struct` (M8: 统一为 struct 在 C 中表达)
     pub is_struct: bool,
+    /// M30.2: `union` 聚合 - lower 发射 union 关键字 (成员重叠语义).
+    pub is_union: bool,
     /// 基类列表 (M8: 含普通 / 虚基)
     pub bases: Vec<BaseSpec>,
     pub members: Vec<CppDecl>,
@@ -214,6 +216,14 @@ pub enum CppDecl {
         /// M17.0: `mutable` 标记 - 即使在 const 方法中也可修改
         is_mutable: bool,
     },
+    /// M30.2: 匿名聚合实例成员 `union { ... } temp;` / `struct {...} x;`
+    /// (obstack temp/chunkfun/freefun, cpp_hash_table val) - 定义与
+    /// 实例变量一体, lower 原样发射 C 匿名聚合 (字段重叠保留).
+    AnonAggr {
+        is_union: bool,
+        members: Vec<CppDecl>,
+        name: String,
+    },
     /// 类 / 结构体声明
     Class(ClassDecl),
     /// 命名空间 (M8)
@@ -311,9 +321,22 @@ pub enum CppDecl {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CppBody {
     pub stmts: Vec<CppStmt>,
+    /// M30.2: true = 纯声明 (类内 `Ret m() const;` 无 body). lower 端据此
+    /// 输出原型而非空 weak 定义 (空定义会与类外定义产生重复符号, 链接器
+    /// 可能选空的那个, 静默吞掉正确实现).
+    pub is_decl: bool,
+}
+
+impl Default for CppBody {
+    fn default() -> Self {
+        CppBody {
+            stmts: Vec::new(),
+            is_decl: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +690,64 @@ impl<'a> CppParser<'a> {
         }
     }
 
+    /// M30.2: 跳过 GNU 声明尾缀 `__attribute__ (( ... ))` / `__asm__ (
+    /// ... )` (可连续多组; glibc 头的 noexcept/leaf/mode/asm 重命名等,
+    /// 尾缀不参与语义, 仅需从 token 流移除).
+    fn skip_gnu_suffixes(&mut self) {
+        loop {
+            let is_gnu = match &self.peek {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                })) => {
+                    text == "__attribute__"
+                        || text == "__asm__"
+                        || text == "__asm"
+                        || text == "asm"
+                }
+                _ => false,
+            };
+            if !is_gnu {
+                break;
+            }
+            self.bump();
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+            ) {
+                let mut depth = 0i32;
+                while let Some(t) = self.peek.clone() {
+                    match t {
+                        CppTok::C(Tok {
+                            kind: TokKind::LParen,
+                            ..
+                        }) => {
+                            depth += 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::RParen,
+                            ..
+                        }) => {
+                            self.bump();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {
+                            self.bump();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn expect_ident(&mut self) -> Result<String, CppParseError> {
         match self.bump() {
             Some(CppTok::C(Tok {
@@ -863,6 +944,64 @@ impl<'a> CppParser<'a> {
         }
     }
 
+    /// M30.2: `struct/union [Name]` 后是否是聚合定义/前向/继承形态
+    /// (`{` / `:` / `;`)；`struct tm *gmtime(...)` 等类型使用形态返回
+    /// false，交由函数/变量声明解析。
+    fn aggr_looks_like_def(&self) -> bool {
+        match self.peek_token_at(1) {
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBrace | TokKind::Colon | TokKind::Semi,
+                ..
+            })) => true,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            })) => matches!(
+                self.peek_token_at(2),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace | TokKind::Colon | TokKind::Semi,
+                    ..
+                }))
+            ),
+            _ => false,
+        }
+    }
+
+    /// M30.2: 跳过 token 直到成员声明结束 (`;` 或平衡所有括号后的 `}`).
+    /// 用于类/结构体成员解析失败时的容错恢复.
+    fn skip_to_member_end(&mut self) {
+        let mut depth = 0i32;
+        while let Some(tok) = &self.peek {
+            match tok {
+                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                    self.bump();
+                    return;
+                }
+                CppTok::C(Tok { kind: TokKind::RBrace, .. }) if depth <= 0 => {
+                    // 不消耗 `}`, 留给外层循环
+                    return;
+                }
+                CppTok::C(Tok { kind: TokKind::LBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::LParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                    depth += 1;
+                    self.bump();
+                }
+                CppTok::C(Tok { kind: TokKind::RBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::RParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
     /// 解析一条声明
     fn parse_decl(&mut self) -> Result<CppDecl, CppParseError> {
         // typedef <type> <name>; (M11 stdlib: 解析为 no-op 占位)
@@ -917,9 +1056,64 @@ impl<'a> CppParser<'a> {
         if self.is_extern_c_block_start() {
             return self.parse_extern_c_block();
         }
+        // M30.2: `extern` 链接性说明 + 普通声明 (`extern void f(...);`,
+        // `extern T g;`) - 无 "C" 字面量时跳过 extern, 按普通声明解析.
+        // 之前 KwExtern 不在任何分发分支, 直接落到 declaration form 错误.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwExtern,
+                ..
+            }))
+        ) && !matches!(
+            self.peek_token_at(1),
+            Some(CppTok::C(Tok {
+                kind: TokKind::StringLit,
+                ..
+            }))
+        ) {
+            self.bump();
+            return self.parse_decl();
+        }
+        // M30.2: `__extension__` GNU 前缀 - 无语义, 跳过后按普通声明
+        // 解析 (`__extension__ typedef struct {...} lldiv_t;` 等).
+        if let Some(CppTok::C(Tok {
+            kind: TokKind::Ident,
+            text,
+            ..
+        })) = &self.peek
+        {
+            if text == "__extension__" {
+                self.bump();
+                return self.parse_decl();
+            }
+        }
         // class / struct Name (M8: 可继承)
+        // M30.2: `class Name *fn()` / `class Name var` 是 elaborated type
+        // 说明符 (函数声明/变量声明), 不是类定义. 只有 `class Name {` /
+        // `class Name :` / `class Name ;` 才是类定义/前向声明.
         if self.at(CppKw::Class) {
-            return self.parse_class_decl();
+            let is_def = match self.peek_token_at(1) {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace | TokKind::Colon | TokKind::Semi,
+                    ..
+                })) => true,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                })) => matches!(
+                    self.peek_token_at(2),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBrace | TokKind::Colon | TokKind::Semi,
+                        ..
+                    }))
+                ),
+                _ => false,
+            };
+            if is_def {
+                return self.parse_class_decl();
+            }
+            // elaborated type: fall through 到 free fn / global var
         }
         if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
@@ -928,7 +1122,10 @@ impl<'a> CppParser<'a> {
         })) = &self.peek
         {
             if text == "struct" {
-                return self.parse_struct_decl();
+                if self.aggr_looks_like_def() {
+                    return self.parse_aggr_decl(false);
+                }
+                self.bump();
             }
         }
         // `struct` 作为 C 关键字直接出现 (dcc C lexer 把 struct 标为 KwStruct)
@@ -938,8 +1135,22 @@ impl<'a> CppParser<'a> {
                 kind: TokKind::KwStruct,
                 ..
             }))
-        ) {
-            return self.parse_struct_decl();
+        ) && self.aggr_looks_like_def()
+        {
+            return self.parse_aggr_decl(false);
+        }
+        // M30.2: 顶层 union 定义 (`union U { ... };`) - 复用聚合解析,
+        // is_union 标记 lower 发射 union 关键字. 之前 KwUnion 只在类型
+        // 关键字列表里走变量声明回退, 遇 `{` 直接 declaration form 错误.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwUnion,
+                ..
+            }))
+        ) && self.aggr_looks_like_def()
+        {
+            return self.parse_aggr_decl(true);
         }
         // 运算符重载: Type operator op ( ... )
         if self.is_operator_fn_start() {
@@ -989,7 +1200,7 @@ impl<'a> CppParser<'a> {
         ) || matches!(
             &self.peek,
             Some(CppTok::Kw(
-                CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile,
+                CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile | CppKw::Class,
                 _
             ))
         );
@@ -1007,13 +1218,29 @@ impl<'a> CppParser<'a> {
             // 跳过额外的类型关键字 (例: `inline void*` 中的 void, `long long`,
             // `unsigned char` 等) 或 typedef 标识符 (例: `FILE*`, `size_t`)
             while let Some(tok) = self.peek_token_at(j) {
-                // C++ 关键字: inline, static, const, volatile
+                // C++ 关键字: inline, static, const, volatile, class
                 if let CppTok::Kw(k, _) = &tok {
                     if matches!(
                         k,
                         CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile
                     ) {
                         j += 1;
+                        continue;
+                    }
+                    // M30.2: elaborated type `class Name` 在返回类型位置
+                    // (`class mkdeps *cpp_get_deps(...)`).
+                    if matches!(k, CppKw::Class) {
+                        j += 1;
+                        // 吞类名标识符
+                        if matches!(
+                            self.peek_token_at(j),
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Ident,
+                                ..
+                            }))
+                        ) {
+                            j += 1;
+                        }
                         continue;
                     }
                 }
@@ -1034,6 +1261,26 @@ impl<'a> CppParser<'a> {
                             | TokKind::KwBool
                     ) {
                         j += 1;
+                        continue;
+                    }
+                    // M30.2: elaborated type `struct S` / `union U` / `enum E`
+                    // 在返回类型位置 (如 `const struct line_map *fn(...)`).
+                    // 吞关键字 + 后续标识符 (类型名).
+                    if matches!(
+                        t.kind,
+                        TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                    ) {
+                        j += 1;
+                        // 吞可选的类型名标识符
+                        if matches!(
+                            self.peek_token_at(j),
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Ident,
+                                ..
+                            }))
+                        ) {
+                            j += 1;
+                        }
                         continue;
                     }
                 }
@@ -1096,19 +1343,47 @@ impl<'a> CppParser<'a> {
             }
             let name_pos = j;
             let name_tok = self.peek_token_at(name_pos);
-            let is_fn = matches!(
+            let is_name_ident = matches!(
                 name_tok,
                 Some(CppTok::C(Tok {
                     kind: TokKind::Ident,
                     ..
                 }))
-            ) && matches!(
-                self.peek_token_at(name_pos + 1),
-                Some(CppTok::C(Tok {
-                    kind: TokKind::LParen,
-                    ..
-                }))
             );
+            // M30.2: 类外成员定义 `Ret Class::method(` / `Ret C::~C(` -
+            // 名字段为 `Ident (:: Ident)+ (` (析构中间带 ~); 此前只认
+            // `Ident (` 导致 libcpp/line-map.cc 等整文件降级 strip.
+            let is_qualified_fn = is_name_ident
+                && matches!(self.peek_token_at(name_pos + 1), Some(CppTok::ColonColon(_)))
+                && (matches!(
+                    self.peek_token_at(name_pos + 2),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ident,
+                        ..
+                    }))
+                ) || matches!(
+                    self.peek_token_at(name_pos + 2),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Tilde,
+                        ..
+                    }))
+                ))
+                && matches!(
+                    self.peek_token_at(name_pos + 3),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ident | TokKind::LParen,
+                        ..
+                    }))
+                );
+            let is_fn = (is_name_ident
+                && matches!(
+                    self.peek_token_at(name_pos + 1),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }))
+                ))
+                || is_qualified_fn;
             if is_fn {
                 return self.parse_free_fn();
             }
@@ -1410,6 +1685,7 @@ impl<'a> CppParser<'a> {
                 let decl = CppDecl::Class(ClassDecl {
                     name: _name,
                     is_struct,
+                    is_union: false,
                     bases,
                     members,
                 });
@@ -1970,6 +2246,21 @@ impl<'a> CppParser<'a> {
     fn parse_class_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Class)?;
         let name = self.expect_ident()?;
+        // M30.2: 前置声明 `class X;` - no-op (Typedef 占位, lower 不输出;
+        // 后续完整定义正常处理). GCC 头大量使用前向声明.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+            return Ok(CppDecl::Typedef {
+                target: MangleType::Class(name.clone()),
+                name,
+            });
+        }
         let bases = self.parse_base_list()?;
         if !matches!(
             &self.peek,
@@ -1996,7 +2287,15 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
-            members.push(self.parse_member_decl_with_class(&name)?);
+            match self.parse_member_decl_with_class(&name) {
+                Ok(d) => members.push(d),
+                Err(e) => {
+                    // M30.2: 记录错误但继续解析, 跳过无法解析的成员到下一个
+                    // `;` 或 `}` (与 parse_top_level 容错一致).
+                    self.diags.push(e.to_diag(&self.file));
+                    self.skip_to_member_end();
+                }
+            }
         }
         self.bump();
         if matches!(
@@ -2011,15 +2310,44 @@ impl<'a> CppParser<'a> {
         Ok(CppDecl::Class(ClassDecl {
             name,
             is_struct: false,
+            is_union: false,
             bases,
             members,
         }))
     }
 
-    fn parse_struct_decl(&mut self) -> Result<CppDecl, CppParseError> {
-        // 'struct' already peeked
+    /// 解析 struct/union 聚合声明 (M30.2: is_union 区分 union 关键字)
+    fn parse_aggr_decl(&mut self, is_union: bool) -> Result<CppDecl, CppParseError> {
+        // 'struct'/'union' already peeked
         self.bump();
-        let name = self.expect_ident()?;
+        // M30.2: tag 名可选 (`union { ... } temp;` 匿名定义实例成员)
+        let name = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }))
+        ) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        // M30.2: 前置声明 `struct X;` - 同 class, no-op 占位.
+        if let Some(n) = &name {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
+                return Ok(CppDecl::Typedef {
+                    target: MangleType::Class(n.clone()),
+                    name: n.clone(),
+                });
+            }
+        }
         let bases = self.parse_base_list()?;
         if !matches!(
             &self.peek,
@@ -2035,6 +2363,8 @@ impl<'a> CppParser<'a> {
             ));
         }
         self.bump();
+        // tag 名用于成员解析类上下文 (无 tag 用占位)
+        let ctx_name = name.clone().unwrap_or_else(|| "__anon_aggr".into());
         let mut members = vec![];
         while let Some(t) = &self.peek {
             if matches!(
@@ -2046,9 +2376,27 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
-            members.push(self.parse_member_decl_with_class(&name)?);
+            match self.parse_member_decl_with_class(&ctx_name) {
+                Ok(d) => members.push(d),
+                Err(e) => {
+                    self.diags.push(e.to_diag(&self.file));
+                    self.skip_to_member_end();
+                }
+            }
         }
         self.bump();
+        // M30.2: 定义后实例名 (`union { ... } temp;` / `struct X {} x;`)
+        let inst = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }))
+        ) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -2058,12 +2406,31 @@ impl<'a> CppParser<'a> {
         ) {
             self.bump();
         }
-        Ok(CppDecl::Class(ClassDecl {
-            name,
-            is_struct: true,
-            bases,
-            members,
-        }))
+        match (name, inst) {
+            // 匿名定义 + 实例: AnonAggr 一体发射 (实例名保留, 成员
+            // 字段引用 `h->temp.i` 在 C 中合法).
+            (None, Some(inst)) => Ok(CppDecl::AnonAggr {
+                is_union,
+                members,
+                name: inst,
+            }),
+            // 带 tag 定义 (变量实例罕见, 忽略实例名)
+            (Some(n), _) => Ok(CppDecl::Class(ClassDecl {
+                name: n,
+                is_struct: true,
+                is_union,
+                bases,
+                members,
+            })),
+            // 匿名纯定义: 占位名
+            (None, None) => Ok(CppDecl::Class(ClassDecl {
+                name: "__anon_aggr".into(),
+                is_struct: true,
+                is_union,
+                bases,
+                members,
+            })),
+        }
     }
 
     /// 带类上下文的成员解析: 用于类内 inline 成员函数
@@ -2220,7 +2587,68 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return self.parse_enum_decl();
+            // M30.2: 仅当 `enum [Name] {` 才是定义; `enum Name member`
+            // (elaborated 类型成员, 可带位域) 落到成员变量解析.
+            let defines = match self.peek_token_at(1) {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })) => true,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                })) => matches!(
+                    self.peek_token_at(2),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBrace,
+                        ..
+                    }))
+                ),
+                _ => false,
+            };
+            if defines {
+                return self.parse_enum_decl();
+            }
+            self.bump();
+        }
+        // M30.2: 类内 `struct/union [Tag] { ... };` 嵌套定义成员 -
+        // defines 前瞻 (同 enum 模式); `struct IOB *_chain;` (elaborated
+        // 类型指针成员) bump struct 落成员变量解析.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwStruct | TokKind::KwUnion,
+                ..
+            }))
+        ) {
+            let defines = match self.peek_token_at(1) {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })) => true,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                })) => matches!(
+                    self.peek_token_at(2),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBrace,
+                        ..
+                    }))
+                ),
+                _ => false,
+            };
+            if defines {
+                let is_u = matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::KwUnion,
+                        ..
+                    }))
+                );
+                return self.parse_aggr_decl(is_u);
+            }
+            self.bump();
         }
         if matches!(
             &self.peek,
@@ -2277,6 +2705,19 @@ impl<'a> CppParser<'a> {
             self.bump();
             return self.parse_member_var();
         }
+        // M30.2: `__extension__` GNU 前缀成员 - 跳过后按普通成员解析
+        // (`__extension__ unsigned long long int __a;` rand48 组合).
+        if let Some(CppTok::C(Tok {
+            kind: TokKind::Ident,
+            text,
+            ..
+        })) = &self.peek
+        {
+            if text == "__extension__" {
+                self.bump();
+                return self.parse_member_decl();
+            }
+        }
         // M17.0: `explicit` 是 ctor 修饰, 跳过然后 parse_ctor
         if self.at(CppKw::Explicit) {
             self.bump();
@@ -2328,6 +2769,29 @@ impl<'a> CppParser<'a> {
             }
             return self.parse_member_fn_inline();
         }
+        // M30.2: 通用函数指针成员检测 `RetType (*name)(params);`
+        // 支持关键字返回类型 (`bool (*f)(...)`, `int (*f)(...)`,
+        // `void (*f)(...)`) 和多 token 返回类型 (`const char *(*f)(...)`,
+        // `cpp_hashnode *(*f)(...)`).  扫描 `(*` 模式, 在 `;` 前找到
+        // 则判定为函数指针成员.
+        {
+            let mut k = 0;
+            loop {
+                match self.peek_token_at(k) {
+                    Some(CppTok::C(Tok { kind: TokKind::Semi, .. })) | None => break,
+                    Some(CppTok::C(Tok { kind: TokKind::LParen, .. })) => {
+                        if matches!(
+                            self.peek_token_at(k + 1),
+                            Some(CppTok::C(Tok { kind: TokKind::Star, .. }))
+                        ) {
+                            return self.parse_member_fnptr();
+                        }
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+        }
         if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
             ..
@@ -2339,6 +2803,18 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::LParen,
                     ..
                 })) => {
+                    // M30.2: `Ret (*name)(args);` 类内函数指针成员
+                    // (cpp_hash_table::alloc_node 等) - ctor 形态是 `Name(`,
+                    // fnptr 形态是 `Name (*`, 以 `(` 后是否 `*` 区分.
+                    if matches!(
+                        self.peek_token_at(2),
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Star,
+                            ..
+                        }))
+                    ) {
+                        return self.parse_member_fnptr();
+                    }
                     return self.parse_ctor();
                 }
                 Some(CppTok::C(Tok {
@@ -2587,8 +3063,24 @@ impl<'a> CppParser<'a> {
                     ..
                 }))
             );
+            // M30.2: `Ret (*name)(args);` 函数指针成员 (类型词起始形态)
+            let is_fnptr = matches!(
+                name_tok,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+            ) && matches!(
+                self.peek_token_at(j + 1),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Star,
+                    ..
+                }))
+            );
             return if is_fn {
                 self.parse_member_fn_inline()
+            } else if is_fnptr {
+                self.parse_member_fnptr()
             } else {
                 self.parse_member_var()
             };
@@ -2696,22 +3188,277 @@ impl<'a> CppParser<'a> {
     fn parse_typedef_decl(&mut self) -> Result<CppDecl, CppParseError> {
         // 跳过 `typedef`
         self.bump();
+        // M30.2: `typedef __typeof__(expr) Name;` (glibc nullptr_t) -
+        // depth 跳过 __typeof__ 的括号表达式, 与 decltype 同等处理.
+        if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+            if text == "__typeof__" || text == "__typeof" || text == "typeof" {
+                self.bump();
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }))
+                ) {
+                    let mut depth = 0i32;
+                    while let Some(t) = self.peek.clone() {
+                        match t {
+                            CppTok::C(Tok {
+                                kind: TokKind::LParen,
+                                ..
+                            }) => {
+                                depth += 1;
+                                self.bump();
+                            }
+                            CppTok::C(Tok {
+                                kind: TokKind::RParen,
+                                ..
+                            }) => {
+                                self.bump();
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                }
+                // M30.2: __typeof__(expr) 即目标类型本身; 跳过后的下一
+                // 个 ident 是 typedef 名 (glibc nullptr_t), 直接早退.
+                let name = self.expect_ident()?;
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Semi,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                }
+                return Ok(CppDecl::Typedef {
+                    target: MangleType::Int,
+                    name,
+                });
+            }
+        }
         // M30: 解析目标类型 (parse_mangle_type 覆盖 builtin/类名/
         // 模板实例/限定名/指针). 失败时回退 lex 状态并退化为旧跳过
         // 逻辑: 匿名 enum/struct 定义等无法简单解析的 typedef 仍走
         // no-op 路径 (target 置 Int, 不被引用).
         let saved_lex = self.lex.clone();
         let saved_peek = self.peek.clone();
+        let mut fp_name: Option<String> = None;
         let target = match self.parse_mangle_type() {
-            Ok(t) => t,
+            Ok(t) => {
+                // M30.2: 函数指针 typedef `Ret (*name)(args);` - 返回类型
+                // 解析成功后名字在括号内 (`void (*new_handler)()`).
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }))
+                ) && matches!(
+                    self.peek_token_at(1),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Star,
+                        ..
+                    }))
+                ) {
+                    self.bump(); // (
+                    self.bump(); // *
+                    fp_name = Some(self.expect_ident()?);
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::RParen,
+                            ..
+                        }))
+                    ) {
+                        self.bump(); // )
+                    }
+                    // M30.2: 参数组 `(Args)` - depth 跳过 (嵌套括号内的
+                    // 逗号不影响). 例: `typedef int (*cb)(void*, void*);`
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LParen,
+                            ..
+                        }))
+                    ) {
+                        let mut depth = 0i32;
+                        while let Some(t) = self.peek.clone() {
+                            match t {
+                                CppTok::C(Tok {
+                                    kind: TokKind::LParen,
+                                    ..
+                                }) => {
+                                    depth += 1;
+                                    self.bump();
+                                }
+                                CppTok::C(Tok {
+                                    kind: TokKind::RParen,
+                                    ..
+                                }) => {
+                                    self.bump();
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    self.bump();
+                                }
+                            }
+                        }
+                    }
+                }
+                // M30.2: `typedef struct Tag { ... } Name;` - 带 tag 的
+                // 定义形态 parse_mangle_type 消费 `struct Tag` 后返回 Ok,
+                // typedef 真名在 brace 定义之后; depth 跳过成员体.
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBrace,
+                        ..
+                    }))
+                ) {
+                    let mut depth = 0i32;
+                    while let Some(t) = self.peek.clone() {
+                        match t {
+                            CppTok::C(Tok {
+                                kind: TokKind::LBrace,
+                                ..
+                            }) => {
+                                depth += 1;
+                                self.bump();
+                            }
+                            CppTok::C(Tok {
+                                kind: TokKind::RBrace,
+                                ..
+                            }) => {
+                                self.bump();
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                }
+                t
+            }
             Err(_) => {
                 self.lex = saved_lex;
                 self.peek = saved_peek;
-                // 简化策略: 跳过所有 * / 关键字, ident 留给 expect_ident.
+                // M30.2: 回退路径统一 "定位 typedef 名". 形态覆盖:
+                //   a. `struct/union/enum [Tag] { ... } Name;` (定义,
+                //      glibc max_align_t / __fsid_t; body 内成员名会提前
+                //      终止简单跳过, 必须先按定义形态处理)
+                //   b. `decltype ( ... ) Name;` (C++11 nullptr_t)
+                //   c. `Ret (* Name) (Args);` (函数指针, 名在括号内)
+                //   d. 其余: 跳过类型关键字 / `*` / `&` / 括号 depth.
+                // a: struct/union/enum 定义.
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    // 可选 tag 名: 仅当下一个是 `{` 才吃掉.
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Ident,
+                            ..
+                        }))
+                    ) && matches!(
+                        self.peek_token_at(1),
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LBrace,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                    }
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LBrace,
+                            ..
+                        }))
+                    ) {
+                        let mut depth = 0i32;
+                        loop {
+                            match &self.peek {
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::LBrace,
+                                    ..
+                                })) => {
+                                    depth += 1;
+                                    self.bump();
+                                }
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::RBrace,
+                                    ..
+                                })) => {
+                                    depth -= 1;
+                                    self.bump();
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                                _ => {
+                                    self.bump();
+                                }
+                            }
+                        }
+                    }
+                }
+                // b: decltype ( ... ).
+                if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+                    if text == "decltype"
+                        && matches!(
+                            self.peek_token_at(1),
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::LParen,
+                                ..
+                            }))
+                        )
+                    {
+                        self.bump();
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            match self.bump() {
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::LParen,
+                                    ..
+                                })) => depth += 1,
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::RParen,
+                                    ..
+                                })) => depth -= 1,
+                                None => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // c+d: 跳过类型关键字 / `*` / `&`; 括号 depth 跳过,
+                // `(* Name)` 函数指针形态在括号内取名.
                 loop {
                     match &self.peek {
                         Some(CppTok::C(Tok {
-                            kind: TokKind::Star,
+                            kind: TokKind::Star | TokKind::Amp,
                             ..
                         })) => {
                             self.bump();
@@ -2740,7 +3487,96 @@ impl<'a> CppParser<'a> {
                         })) => {
                             self.bump();
                         }
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LParen,
+                            ..
+                        })) => {
+                            // 前瞻 `(` cv* `*` cv* Ident → 函数指针.
+                            let mut k = 1usize;
+                            while matches!(
+                                self.peek_token_at(k),
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::KwConst | TokKind::KwVolatile,
+                                    ..
+                                }))
+                            ) {
+                                k += 1;
+                            }
+                            if matches!(
+                                self.peek_token_at(k),
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::Star,
+                                    ..
+                                }))
+                            ) {
+                                k += 1;
+                                while matches!(
+                                    self.peek_token_at(k),
+                                    Some(CppTok::C(Tok {
+                                        kind: TokKind::KwConst | TokKind::KwVolatile,
+                                        ..
+                                    }))
+                                ) {
+                                    k += 1;
+                                }
+                                if let Some(CppTok::C(Tok {
+                                    kind: TokKind::Ident,
+                                    text,
+                                    ..
+                                })) = self.peek_token_at(k)
+                                {
+                                    fp_name = Some(text);
+                                }
+                            }
+                            // depth 跳过整组 `(...)`, 再 continue 处理尾随组.
+                            self.bump();
+                            let mut depth = 1i32;
+                            while depth > 0 {
+                                match self.bump() {
+                                    Some(CppTok::C(Tok {
+                                        kind: TokKind::LParen,
+                                        ..
+                                    })) => depth += 1,
+                                    Some(CppTok::C(Tok {
+                                        kind: TokKind::RParen,
+                                        ..
+                                    })) => depth -= 1,
+                                    None => break,
+                                    _ => {}
+                                }
+                            }
+                            if fp_name.is_some() {
+                                break;
+                            }
+                        }
                         _ => break,
+                    }
+                }
+                // c 续: 函数指针的参数列表 `(...)` (可能多组).
+                if fp_name.is_some() {
+                    while matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LParen,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            match self.bump() {
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::LParen,
+                                    ..
+                                })) => depth += 1,
+                                Some(CppTok::C(Tok {
+                                    kind: TokKind::RParen,
+                                    ..
+                                })) => depth -= 1,
+                                None => break,
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 MangleType::Int
@@ -2750,11 +3586,53 @@ impl<'a> CppParser<'a> {
         // 已由 parse_mangle_type 解析为 Template; 记录别名映射,
         // 表达式 `alias::member` 可展开为 TplStaticAccess (触发实例化
         // 并引用带实例前缀的常量).
-        let name = self.expect_ident()?;
+        let name = match fp_name {
+            Some(n) => n,
+            None => self.expect_ident()?,
+        };
+        // M30.2: 函数类型 typedef `typedef Ret Name(Args);` (无 `*`,
+        // glibc cookie_read_function_t) - 名字后是参数组, depth 跳过;
+        // 函数签名 typedef 仅作占位, 不产生 C 输出.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            let mut depth = 0i32;
+            while let Some(t) = self.peek.clone() {
+                match t {
+                    CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }) => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    CppTok::C(Tok {
+                        kind: TokKind::RParen,
+                        ..
+                    }) => {
+                        self.bump();
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
         if let MangleType::Template { name: tname, args } = &target {
             self.typedef_alias
                 .insert(name.clone(), (tname.clone(), args.clone()));
         }
+        // M30.2: typedef 尾部 GNU 尾缀 (`typedef int register_t
+        // __attribute__ ((__mode__ (__word__)));`)
+        self.skip_gnu_suffixes();
         // 跳过 `;`
         if matches!(
             &self.peek,
@@ -3059,6 +3937,10 @@ impl<'a> CppParser<'a> {
                     | TokKind::KwRestrict,
                 ..
             })) => true,
+            // M30.2: Cpp lexer 的 Kw 形式限定符 (`const T& operator[]`)
+            // 同样是返回类型起始; 之前仅认 C(Tok) 形式导致
+            // "expected operator, got Const".
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)) => true,
             Some(CppTok::C(Tok {
                 kind: TokKind::Ident,
                 ..
@@ -3156,7 +4038,10 @@ impl<'a> CppParser<'a> {
                 class,
                 op,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 ret,
                 is_unary,
             });
@@ -3174,7 +4059,10 @@ impl<'a> CppParser<'a> {
                 class,
                 op,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 ret,
                 is_unary,
             });
@@ -3200,6 +4088,12 @@ impl<'a> CppParser<'a> {
             // M11 stdlib: 直接按 TokKind 映射, 避免多字符组合错误.
             if let CppTok::C(tok) = &t1 {
                 if let Some(op) = crate::cpp::mangle::from_tok_kind(&tok.kind) {
+                    // M30.2: operator[] / operator() 的 `[`/`(` 在
+                    // from_tok_kind 命中提前返回, 需补吃配对的 `]` / `)`. 之前
+                    // parse_param_list 撞上 RBracket 报 "expected (".
+                    if matches!(tok.kind, TokKind::LBracket | TokKind::LParen) {
+                        self.bump();
+                    }
                     return Ok(op);
                 }
             }
@@ -3278,6 +4172,12 @@ impl<'a> CppParser<'a> {
                 }
             }
             if let Some(op) = Operator::from_token(s1) {
+                // M30.2: operator[] / operator() 的 `[`/`(` 已消费,
+                // 补吃配对的 `]` / `)` (否则后续 parse_param_list 撞上
+                // RBracket 报 "expected (").
+                if s1 == "[]" || s1 == "()" {
+                    self.bump();
+                }
                 return Ok(op);
             }
         }
@@ -3347,15 +4247,52 @@ impl<'a> CppParser<'a> {
                 break;
             }
             let mut ty = self.parse_mangle_type()?;
+            // M30.2: 数组形参 `char[20]` / `int a[2][3]` - 下标 depth
+            // 跳过 (glibc tmpnam 等; 形参退化为指针).
+            while matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBracket,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let mut depth = 1i32;
+                while let Some(t) = self.peek.clone() {
+                    match t {
+                        CppTok::C(Tok {
+                            kind: TokKind::LBracket,
+                            ..
+                        }) => {
+                            depth += 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::RBracket,
+                            ..
+                        }) => {
+                            self.bump();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {
+                            self.bump();
+                        }
+                    }
+                }
+            }
             // 跳过 const 后缀限定
             if self.at(CppKw::Const) {
                 self.bump();
             }
-            // 跳过 & 和 * 后缀 (C++ 中可放在标识符前)
-            if matches!(
+            // 跳过 & / && / * 后缀 (C++ 中可放在标识符前);
+            // M30.2: `T&&` 右值引用同按引用处理 (移动语义降级).
+            while matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
-                    kind: TokKind::Amp,
+                    kind: TokKind::Amp | TokKind::AndAnd,
                     ..
                 }))
             ) {
@@ -3445,7 +4382,89 @@ impl<'a> CppParser<'a> {
             } else {
                 None
             };
+            // M30.2: 带名数组形参 `char __s[20]` (tmpnam_r) - 名字后
+            // 下标 depth 跳过.
+            while matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBracket,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let mut depth = 1i32;
+                while let Some(t) = self.peek.clone() {
+                    match t {
+                        CppTok::C(Tok {
+                            kind: TokKind::LBracket,
+                            ..
+                        }) => {
+                            depth += 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::RBracket,
+                            ..
+                        }) => {
+                            self.bump();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {
+                            self.bump();
+                        }
+                    }
+                }
+            }
             params.push((name.unwrap_or_else(|| "_".into()), ty));
+            // M30.2: 默认实参 `= expr` - depth 跳到 `,` / `)` (值不需要).
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Assign,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let mut depth = 0i32;
+                while let Some(tt) = &self.peek {
+                    match tt {
+                        CppTok::C(Tok {
+                            kind: TokKind::LParen | TokKind::LBrace,
+                            ..
+                        }) => {
+                            depth += 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::RParen,
+                            ..
+                        }) => {
+                            if depth == 0 {
+                                break;
+                            }
+                            depth -= 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::RBrace,
+                            ..
+                        }) => {
+                            depth -= 1;
+                            self.bump();
+                        }
+                        CppTok::C(Tok {
+                            kind: TokKind::Comma,
+                            ..
+                        }) if depth == 0 => break,
+                        _ => {
+                            self.bump();
+                        }
+                    }
+                }
+            }
             if matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -3470,7 +4489,94 @@ impl<'a> CppParser<'a> {
             false
         };
         let ty = self.parse_mangle_type()?;
-        let name = self.expect_ident()?;
+        // M30.2: 无名位域 `int :32;` (结构体 padding, glibc __fd_set) -
+        // 无名字, 仅跳过位宽; 成员名占位避免 expect_ident 撞 `:`.
+        let name = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            }))
+        ) {
+            "_".to_string()
+        } else {
+            self.expect_ident()?
+        };
+        // M30.2: 数组成员 `char _shortbuf[1];` (_IO_FILE) - 下标 depth
+        // 跳过 (数组成员退化为指针; 与位域同位置处理).
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBracket,
+                ..
+            }))
+        ) {
+            self.bump();
+            let mut depth = 1i32;
+            while let Some(t) = self.peek.clone() {
+                match t {
+                    CppTok::C(Tok {
+                        kind: TokKind::LBracket,
+                        ..
+                    }) => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    CppTok::C(Tok {
+                        kind: TokKind::RBracket,
+                        ..
+                    }) => {
+                        self.bump();
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
+        // M30.2: 位域 `int x : 3;` / `enum E e : 8;` - 跳过位宽表达式.
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            }))
+        ) {
+            self.bump();
+            let mut depth = 0i32;
+            while let Some(t) = &self.peek {
+                match t {
+                    CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }) => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    CppTok::C(Tok {
+                        kind: TokKind::RParen,
+                        ..
+                    }) => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                        self.bump();
+                    }
+                    CppTok::C(Tok {
+                        kind: TokKind::Semi | TokKind::Comma,
+                        ..
+                    }) if depth == 0 => break,
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
         // 简单: 只取第一个名字, 后续 `, name` 直接吃掉
         while matches!(
             &self.peek,
@@ -3526,6 +4632,385 @@ impl<'a> CppParser<'a> {
         })
     }
 
+    /// M30.2: 类内函数指针成员 `Ret (*name) (args);`
+    /// (cpp_hash_table::alloc_node 等). dcc Cpp AST 无函数指针类型,
+    /// 降级为 void* 成员 (声明/赋值场景兼容).
+    fn parse_member_fnptr(&mut self) -> Result<CppDecl, CppParseError> {
+        // 入口: peek 从返回类型开始 (`Ret (*name)(...)` / `(*name)(...)`),
+        // 调用方前瞻已确认 `( * name` 形态; 此处先吃掉返回类型词到 `(`.
+        let mut guard = 0;
+        while guard < 8 {
+            match &self.peek {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+                | None => break,
+                _ => {
+                    self.bump();
+                }
+            }
+            guard += 1;
+        }
+        self.bump(); // (
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Star | TokKind::KwConst | TokKind::KwVolatile,
+                ..
+            }))
+        ) {
+            self.bump();
+        }
+        let name = self.expect_ident()?;
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::RParen,
+                ..
+            }))
+        ) {
+            self.bump(); // )
+        }
+        // 参数列表 `(...)` (可能多组, 返回函数指针)
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            self.bump();
+            let mut depth = 1i32;
+            while depth > 0 {
+                match self.bump() {
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    })) => depth += 1,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::RParen,
+                        ..
+                    })) => depth -= 1,
+                    None => break,
+                    _ => {}
+                }
+            }
+        }
+        // `noexcept` / `= 0` / `__attribute__` 后缀
+        loop {
+            if self.at(CppKw::Noexcept) {
+                self.bump();
+                continue;
+            }
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Assign,
+                    ..
+                }))
+            ) {
+                self.bump();
+                continue;
+            }
+            // M30.2: `__attribute__ ((...))` 后缀 - 跳过整个属性
+            // (gcc 回调函数指针成员大量使用 __format__/__nonnull__ 等).
+            if let Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                text,
+                ..
+            })) = &self.peek
+            {
+                if text == "__attribute__" || text == "__attribute" {
+                    self.bump();
+                    // 跳过 ((...))
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::LParen,
+                            ..
+                        }))
+                    ) {
+                        let mut depth = 0i32;
+                        while let Some(t) = self.peek.clone() {
+                            match t {
+                                CppTok::C(Tok {
+                                    kind: TokKind::LParen,
+                                    ..
+                                }) => {
+                                    depth += 1;
+                                    self.bump();
+                                }
+                                CppTok::C(Tok {
+                                    kind: TokKind::RParen,
+                                    ..
+                                }) => {
+                                    self.bump();
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    self.bump();
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+        }
+        Ok(CppDecl::MemberVar {
+            ty: MangleType::Pointer(Box::new(MangleType::Void)),
+            name,
+            is_mutable: false,
+        })
+    }
+
+    /// M30.2: 类外成员函数 / 构造 / 析构定义
+    ///   `Ret Class::method(params) [const] [noexcept] { ... }`
+    ///   `Class::Class(params) [: init, ...] { ... }`
+    ///   `Class::~Class(params) { ... }`
+    /// 调用点: parse_free_fn 已消费返回类型与限定名首段, peek 为 `::`.
+    /// GCC 主体 (libcpp/rich_location 等) 大量使用类外定义, 此前不识别
+    /// 导致整文件降级 strip 管道 (尾部 const / this 改写全部丢失, 产出
+    /// 非法 C).
+    fn parse_out_of_class_member(
+        &mut self,
+        first: String,
+        ret: MangleType,
+    ) -> Result<CppDecl, CppParseError> {
+        let mut parts = vec![first];
+        // 收集完整限定链 `A::B::m` (嵌套命名空间 / 外层类)
+        loop {
+            if !matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+                break;
+            }
+            self.bump();
+            // 析构 `Class::~Class`
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Tilde,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let nm = self.expect_ident()?;
+                let cls = parts.pop().unwrap_or(nm.clone());
+                let _params = self.parse_param_list()?;
+                let spec = self.skip_specifiers();
+                let body = if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Semi,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    CppBody {
+                    stmts: vec![],
+                    is_decl: true,
+                }
+                } else {
+                    self.parse_body()?
+                };
+                return Ok(CppDecl::Dtor {
+                    class: cls,
+                    body,
+                    is_virtual: false,
+                    is_noexcept: spec.is_noexcept,
+                });
+            }
+            parts.push(self.expect_ident()?);
+        }
+        let name = parts.pop().unwrap_or_default();
+        let class = parts.join("::");
+        // 构造 `Class::Class(params) [: inits] {...}` - 方法名与类名相同
+        if !class.is_empty() && name == parts.join("::") {
+            let params = self.parse_param_list()?;
+            let spec = self.skip_specifiers();
+            let inits = self.parse_ctor_init_list()?;
+            let body = if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
+                CppBody {
+                    stmts: vec![],
+                    is_decl: true,
+                }
+            } else {
+                self.parse_body()?
+            };
+            return Ok(CppDecl::Ctor {
+                class,
+                params,
+                inits,
+                body,
+                is_virtual: false,
+                is_explicit: false,
+                is_noexcept: spec.is_noexcept,
+            });
+        }
+        // 普通成员函数
+        let params = self.parse_param_list()?;
+        let is_const = self.skip_cv_qual();
+        let is_volatile = if self.at(CppKw::Volatile) {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let spec = self.skip_specifiers();
+        let body = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+            CppBody {
+                    stmts: vec![],
+                    is_decl: true,
+                }
+        } else {
+            self.parse_body()?
+        };
+        Ok(CppDecl::MemberFn {
+            class,
+            ret,
+            name,
+            params,
+            body,
+            is_virtual: false,
+            is_override: spec.is_override,
+            is_const,
+            is_final: spec.is_final,
+            is_noexcept: spec.is_noexcept,
+            is_volatile,
+            is_friend: false,
+        })
+    }
+
+    /// M30.2: 解析构造函数初始化列表 `: a(1), b{2}` (类内外定义共用).
+    /// 无列表时返回空 vec. 逻辑自 parse_ctor 抽出.
+    fn parse_ctor_init_list(&mut self) -> Result<Vec<(String, CppExpr)>, CppParseError> {
+        let mut inits: Vec<(String, CppExpr)> = vec![];
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            }))
+        ) {
+            return Ok(inits);
+        }
+        self.bump();
+        loop {
+            let member = self.expect_ident()?;
+            let init = if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let e = if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::RParen,
+                        ..
+                    }))
+                ) {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::RParen,
+                        ..
+                    }))
+                ) {
+                    return Err(CppParseError::Unexpected(
+                        ")",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                self.bump();
+                e
+            } else if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                }))
+            ) {
+                self.bump();
+                let e = if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::RBrace,
+                        ..
+                    }))
+                ) {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::RBrace,
+                        ..
+                    }))
+                ) {
+                    return Err(CppParseError::Unexpected(
+                        "}",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                self.bump();
+                e
+            } else {
+                None
+            };
+            inits.push((member, init.unwrap_or(CppExpr::IntLit(0))));
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }))
+            ) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        Ok(inits)
+    }
+
     fn parse_ctor(&mut self) -> Result<CppDecl, CppParseError> {
         // M17.0: 检测 `explicit` 修饰
         let is_explicit = if self.at(CppKw::Explicit) {
@@ -3540,103 +5025,8 @@ impl<'a> CppParser<'a> {
         // M17.0: 可能有 `noexcept` / `final` (override 对 ctor 无意义)
         let spec = self.skip_specifiers();
         let is_noexcept = spec.is_noexcept;
-        // 解析 ctor 初始化列表 `: re(r), im(i)`
-        let mut inits: Vec<(String, CppExpr)> = vec![];
-        if matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::Colon,
-                ..
-            }))
-        ) {
-            self.bump();
-            loop {
-                let member = self.expect_ident()?;
-                let init = if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::LParen,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                    let e = if !matches!(
-                        &self.peek,
-                        Some(CppTok::C(Tok {
-                            kind: TokKind::RParen,
-                            ..
-                        }))
-                    ) {
-                        Some(self.parse_expr()?)
-                    } else {
-                        None
-                    };
-                    if !matches!(
-                        &self.peek,
-                        Some(CppTok::C(Tok {
-                            kind: TokKind::RParen,
-                            ..
-                        }))
-                    ) {
-                        return Err(CppParseError::Unexpected(
-                            ")",
-                            format!("{:?}", self.peek),
-                            self.span(),
-                        ));
-                    }
-                    self.bump();
-                    e
-                } else if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::LBrace,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                    let e = if !matches!(
-                        &self.peek,
-                        Some(CppTok::C(Tok {
-                            kind: TokKind::RBrace,
-                            ..
-                        }))
-                    ) {
-                        Some(self.parse_expr()?)
-                    } else {
-                        None
-                    };
-                    if !matches!(
-                        &self.peek,
-                        Some(CppTok::C(Tok {
-                            kind: TokKind::RBrace,
-                            ..
-                        }))
-                    ) {
-                        return Err(CppParseError::Unexpected(
-                            "}",
-                            format!("{:?}", self.peek),
-                            self.span(),
-                        ));
-                    }
-                    self.bump();
-                    e
-                } else {
-                    None
-                };
-                inits.push((member, init.unwrap_or(CppExpr::IntLit(0))));
-                if matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::Comma,
-                        ..
-                    }))
-                ) {
-                    self.bump();
-                } else {
-                    break;
-                }
-            }
-        }
+        // 解析 ctor 初始化列表 `: re(r), im(i)` (M30.2: 逻辑抽出共用)
+        let inits = self.parse_ctor_init_list()?;
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -3649,7 +5039,10 @@ impl<'a> CppParser<'a> {
                 class,
                 params,
                 inits,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_virtual,
                 is_explicit,
                 is_noexcept,
@@ -3702,7 +5095,10 @@ impl<'a> CppParser<'a> {
             self.bump();
             return Ok(CppDecl::Dtor {
                 class,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_virtual,
                 is_noexcept,
             });
@@ -3805,6 +5201,30 @@ impl<'a> CppParser<'a> {
                 max: MAX_TEMPLATE_DEPTH,
                 span: self.span(),
             });
+        }
+        // M30.2: `__restrict` 仅是优化提示, 类型上等同无限制 (glibc
+        // string.h 参数列表大量使用); 作为类型前缀/`*` 后缀跳过.
+        // M30.2: `volatile` 前缀限定同理 (`typedef volatile int ...`,
+        // Kw/Volatile 与 C 形式双 token 形态都要覆盖).
+        loop {
+            match &self.peek {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwRestrict,
+                    ..
+                })) => {
+                    self.bump();
+                }
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwVolatile,
+                    ..
+                })) => {
+                    self.bump();
+                }
+                Some(CppTok::Kw(CppKw::Volatile, _)) => {
+                    self.bump();
+                }
+                _ => break,
+            }
         }
         // M17.0: `decltype(expr)` 是类型, 需要整体解析
         // 形式: decltype ( expr )
@@ -3963,6 +5383,9 @@ impl<'a> CppParser<'a> {
                 kind: TokKind::KwStruct,
                 ..
             })) => "struct".to_string(),
+            // M30.2: elaborated type specifier `class X` 参数/成员
+            // (Cpp lexer 把 class 标为 Kw(Class), 非 C(Tok))
+            Some(CppTok::Kw(CppKw::Class, _)) => "class".to_string(),
             Some(CppTok::C(Tok {
                 kind: TokKind::KwUnion,
                 ..
@@ -4012,14 +5435,20 @@ impl<'a> CppParser<'a> {
         // enum/struct/union 后跟类型名标识符时, 消费标识符作为类型名的一部分
         // 例如 `enum location_resolution_kind` → "enum location_resolution_kind"
         // 而非仅 "enum" (否则后续标识符被误认为参数名/变量名)
-        if matches!(name.as_str(), "enum" | "struct" | "union") {
+        if matches!(name.as_str(), "enum" | "struct" | "union" | "class") {
             if let Some(CppTok::C(Tok {
                 kind: TokKind::Ident,
                 text,
                 ..
             })) = &self.peek
             {
-                full_name = format!("{} {}", full_name, text);
+                // M30.2: `class X` 的 C 输出无 class 关键字 - full_name
+                // 只取类型名 (否则 lower 输出 `struct class X` 非法).
+                full_name = if name == "class" {
+                    text.clone()
+                } else {
+                    format!("{} {}", full_name, text)
+                };
                 self.bump();
                 // 也支持限定名: enum ns::Kind
                 while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
@@ -4036,6 +5465,22 @@ impl<'a> CppParser<'a> {
                         break;
                     }
                 }
+            } else if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                }))
+            ) {
+                // M30.2: 匿名 tag 定义 `struct { ... }` 在类型位置
+                // (typedef struct {...} N;) 不是可命名类型, 之前被当
+                // Class("struct") 返回 Ok 导致 typedef 取名撞上 `{`.
+                // 返回 Err 让调用方 (parse_typedef_decl 回退) 跳过定义体.
+                return Err(CppParseError::Unexpected(
+                    "type name",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
             }
         }
         // 跳过 const 限定后缀 (`int const*` 等)
@@ -4068,6 +5513,9 @@ impl<'a> CppParser<'a> {
                     TokKind::KwInt => " int",
                     TokKind::KwSigned => " signed",
                     TokKind::KwUnsigned => " unsigned",
+                    // M30.2: `long double` 组合 (strtold 等) - 缺失时
+                    // double 被误认为下一个 ident 名.
+                    TokKind::KwDouble => " double",
                     _ => break,
                 };
                 full_name.push_str(txt);
@@ -4195,15 +5643,36 @@ impl<'a> CppParser<'a> {
                 };
             }
         }
-        while matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::Star,
-                ..
-            }))
-        ) {
-            self.bump();
-            ty = MangleType::Pointer(Box::new(ty));
+        loop {
+            // M30.2: `*` 之间可有 cv 限定 (`char * const p` 合法 C),
+            // 之前 break 导致 expect_ident 撞上 Const.
+            if self.at(CppKw::Const) || self.at(CppKw::Volatile) {
+                self.bump();
+                continue;
+            }
+            // M30.2: `*` 后的 __restrict 同 cv 位置 (`char * __restrict p`)
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwRestrict,
+                    ..
+                }))
+            ) {
+                self.bump();
+                continue;
+ }
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Star,
+                    ..
+                }))
+            ) {
+                self.bump();
+                ty = MangleType::Pointer(Box::new(ty));
+                continue;
+            }
+            break;
         }
         if matches!(
             &self.peek,
@@ -4214,10 +5683,12 @@ impl<'a> CppParser<'a> {
         ) {
             self.bump();
             ty = MangleType::Reference(Box::new(ty));
+            // const T& 已经由 & 创建了 Reference, is_const 不再重复包装
+            is_const = false;
         }
         if is_const {
             ty = MangleType::Reference(Box::new(ty));
-        } // 简化: const T& -> T*
+        } // 简化: const T (无 &) -> T* (按值传递, const 无影响)
         let _ = is_const;
         Ok(ty)
     }
@@ -4283,7 +5754,10 @@ impl<'a> CppParser<'a> {
                 ret,
                 name,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_virtual,
                 is_override: spec.is_override,
                 is_const,
@@ -4306,7 +5780,10 @@ impl<'a> CppParser<'a> {
                 ret,
                 name,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_virtual,
                 is_override: spec.is_override,
                 is_const,
@@ -4414,7 +5891,10 @@ impl<'a> CppParser<'a> {
                 ret: MangleType::Void,
                 name: String::new(),
                 params: vec![],
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_noexcept: false,
             });
         }
@@ -4443,7 +5923,10 @@ impl<'a> CppParser<'a> {
                 ret,
                 name,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_noexcept: spec.is_noexcept,
             });
         }
@@ -4462,15 +5945,44 @@ impl<'a> CppParser<'a> {
         // M30: 记录 static (Ident 起始的顶层变量声明需要内部链接信息)
         let mut is_static = false;
         loop {
+            // M30.2: 说明符同认 C 形式关键字 (KwStatic/KwInline/KwAuto/
+            // KwRegister) 与 GNU 宏 Ident `__inline` / `__extension__`
+            // (glibc bits/byteswap.h `static __inline __uint16_t ...`).
             let is_spec = matches!(
                 &self.peek,
                 Some(CppTok::Kw(
                     CppKw::Inline | CppKw::Static | CppKw::Virtual | CppKw::Explicit,
                     _
                 ))
-            );
+            ) || matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwStatic
+                        | TokKind::KwInline
+                        | TokKind::KwAuto
+                        | TokKind::KwRegister
+                        | TokKind::KwExtern,
+                    ..
+                }))
+            )
+                || match &self.peek {
+                    Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) => {
+                        text == "__inline" || text == "__inline__" || text == "__extension__"
+                    }
+                    _ => false,
+                };
             if is_spec {
-                if matches!(&self.peek, Some(CppTok::Kw(CppKw::Static, _))) {
+                let is_c_static = matches!(
+                    &self.peek,
+                    Some(CppTok::Kw(CppKw::Static, _))
+                ) || matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::KwStatic,
+                        ..
+                    }))
+                );
+                if is_c_static {
                     is_static = true;
                 }
                 self.bump();
@@ -4522,6 +6034,11 @@ impl<'a> CppParser<'a> {
             self.parse_mangle_type()?
         };
         let name = self.expect_ident()?;
+        // M30.2: 名字后是 `::` → 类外成员定义 `Ret Class::method(...)` /
+        // `Class::Class(...)` / `Class::~Class(...)`.
+        if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+            return self.parse_out_of_class_member(name, ret);
+        }
         // M30: 名字后不是 `(` → 全局变量声明 (`Tpl<Args>::member g = 5;`
         // / `MyType g;`). 变量与函数共用 Ident 起始的声明入口, 变量
         // 尾部 (init / `;`) 由 finish_global_var 完成.
@@ -4536,6 +6053,9 @@ impl<'a> CppParser<'a> {
         }
         let params = self.parse_param_list()?;
         self.skip_cv_qual();
+        // M30.2: GNU 尾缀 `__attribute__ ((__nothrow__ ...))` /
+        // `__asm__ ("" "__isoc23_scanf")` (glibc 头大量使用).
+        self.skip_gnu_suffixes();
         // M26.1: 自由函数 noexcept 修饰 (noexcept / noexcept(expr))
         let spec = self.skip_specifiers();
         // M18.0: 函数声明 (无 body) `int foo(...);` 接受为声明, 不强制 body
@@ -4551,7 +6071,10 @@ impl<'a> CppParser<'a> {
                 ret,
                 name,
                 params,
-                body: CppBody::default(),
+                body: CppBody {
+                stmts: vec![],
+                is_decl: true,
+            },
                 is_noexcept: spec.is_noexcept,
             });
         }
@@ -4593,6 +6116,42 @@ impl<'a> CppParser<'a> {
             ty = MangleType::Reference(Box::new(ty));
         }
         let name = self.expect_ident()?;
+        // M30.2: 全局变量数组下标 `extern char *__tzname[2];` - depth 跳
+        // (数组退化为指针).
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBracket,
+                ..
+            }))
+        ) {
+            self.bump();
+            let mut depth = 1i32;
+            while let Some(t) = self.peek.clone() {
+                match t {
+                    CppTok::C(Tok {
+                        kind: TokKind::LBracket,
+                        ..
+                    }) => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    CppTok::C(Tok {
+                        kind: TokKind::RBracket,
+                        ..
+                    }) => {
+                        self.bump();
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
         self.finish_global_var(ty, name, is_static)
     }
 
@@ -4759,7 +6318,10 @@ impl<'a> CppParser<'a> {
             stmts.push(self.parse_stmt()?);
         }
         self.bump();
-        Ok(CppBody { stmts })
+        Ok(CppBody {
+            stmts,
+            is_decl: false,
+        })
     }
 
     /// 解析 body 或单个 stmt (用于 if/while 等的 body, 支持无 `{}` 的单语句)
@@ -4774,7 +6336,10 @@ impl<'a> CppParser<'a> {
             self.parse_body()
         } else {
             let stmt = self.parse_stmt()?;
-            Ok(CppBody { stmts: vec![stmt] })
+            Ok(CppBody {
+            stmts: vec![stmt],
+            is_decl: false,
+        })
         }
     }
 
@@ -4787,7 +6352,10 @@ impl<'a> CppParser<'a> {
             }))
         ) {
             self.bump();
-            return Ok(CppStmt::Block(CppBody { stmts: vec![] }));
+            return Ok(CppStmt::Block(CppBody {
+                stmts: vec![],
+                is_decl: false,
+            }));
         }
         if self.at(CppKw::Try) {
             return self.parse_try_stmt();
@@ -7590,6 +9158,12 @@ impl<'a> CppParser<'a> {
         }
         // M18.0: 支持限定类型 `std::duration`, `::foo` 等
         // 检测 :: 开头 (全局作用域) 或 ident + :: (命名空间)
+        // M30.2: 先跳过 const/volatile 前缀, 否则 `const bidi::context &x`
+        // 因 const 挡住 is_qualified_type_start 检测而走 parse_mangle_type,
+        // 丢失命名空间上下文.
+        while self.at(CppKw::Const) || self.at(CppKw::Volatile) {
+            self.bump();
+        }
         let is_qualified_type = self.is_qualified_type_start();
         let ty = if is_qualified_type {
             // 解析限定名为 class 类型, 存为 (last segment, qualified path)

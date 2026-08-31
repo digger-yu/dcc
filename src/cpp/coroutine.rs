@@ -168,7 +168,7 @@ mod tests {
     use crate::cpp::parser::{CppBody, CppExpr, CppStmt};
 
     fn body(stmts: Vec<CppStmt>) -> CppBody {
-        CppBody { stmts }
+        CppBody { stmts, is_decl: false }
     }
 
     #[test]

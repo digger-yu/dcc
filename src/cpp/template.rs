@@ -717,6 +717,7 @@ pub fn substitute_body(b: &CppBody, params: &[String], args: &[MangleType]) -> C
             .iter()
             .map(|s| substitute_stmt(s, params, args))
             .collect(),
+        is_decl: b.is_decl,
     }
 }
 
@@ -736,6 +737,7 @@ pub fn substitute_decl(
             CppDecl::Class(ClassDecl {
                 name: new_name,
                 is_struct: c.is_struct,
+                is_union: c.is_union,
                 bases: c.bases.clone(),
                 members: c
                     .members
@@ -974,6 +976,7 @@ mod tests {
         let inner = CppDecl::Class(ClassDecl {
             name: "Box".to_string(),
             is_struct: true,
+            is_union: false,
             bases: vec![],
             members: vec![
                 CppDecl::MemberVar {
@@ -985,7 +988,7 @@ mod tests {
                     class: "Box".to_string(),
                     params: vec![("v".to_string(), MangleType::Class("T".to_string()))],
                     inits: vec![("payload".to_string(), CppExpr::Ident("v".to_string()))],
-                    body: CppBody { stmts: vec![] },
+                    body: CppBody { stmts: vec![], is_decl: false },
                     is_virtual: false,
                     is_explicit: false,
                     is_noexcept: false,
@@ -1050,6 +1053,7 @@ mod tests {
             ],
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::Ident("a".to_string())))],
+                is_decl: false,
             },
             is_noexcept: false,
         };
@@ -1087,6 +1091,7 @@ mod tests {
             params: vec![],
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::IntLit(42)))],
+                is_decl: false,
             },
             is_noexcept: false,
         };
@@ -1113,6 +1118,7 @@ mod tests {
             params: vec![("x".to_string(), MangleType::Class("T".to_string()))],
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::Ident("x".to_string())))],
+                is_decl: false,
             },
             is_noexcept: false,
         };
@@ -1142,6 +1148,7 @@ mod tests {
             decl: CppDecl::Class(ClassDecl {
                 name: "Foo".to_string(),
                 is_struct: true,
+                is_union: false,
                 bases: vec![],
                 members: vec![],
             }),
