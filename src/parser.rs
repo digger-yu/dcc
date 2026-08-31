@@ -88,6 +88,18 @@ struct ParsedAttrs {
     returns_twice: bool,
     /// __attribute__((no_instrument_function)): 禁止 profiling 插桩
     no_instrument: bool,
+    /// __attribute__((malloc)): 返回指针不别名已有内存
+    is_malloc: bool,
+    /// __attribute__((alloc_size(N[,M]))): 参数 N(,M) 指定分配大小
+    alloc_size: Option<(u32, Option<u32>)>,
+    /// __attribute__((assume_aligned(N))): 返回指针对齐至少 N 字节
+    assume_aligned: Option<usize>,
+    /// __attribute__((warn_unused_result)): 返回值不应被忽略
+    warn_unused_result: bool,
+    /// __attribute__((sentinel)): 可变参函数需 NULL 结尾
+    is_sentinel: bool,
+    /// __attribute__((format_arg(N))): 第 N 个参数是格式字符串
+    format_arg_idx: Option<u32>,
     /// C23 [[fallthrough]]: 标记 switch case 有意贯穿
     is_fallthrough: bool,
     /// C23 [[nodiscard]]: 函数返回值不应被忽略
@@ -167,6 +179,24 @@ impl ParsedAttrs {
         }
         if other.no_instrument {
             self.no_instrument = true;
+        }
+        if other.is_malloc {
+            self.is_malloc = true;
+        }
+        if other.alloc_size.is_some() {
+            self.alloc_size = other.alloc_size;
+        }
+        if other.assume_aligned.is_some() {
+            self.assume_aligned = other.assume_aligned;
+        }
+        if other.warn_unused_result {
+            self.warn_unused_result = true;
+        }
+        if other.is_sentinel {
+            self.is_sentinel = true;
+        }
+        if other.format_arg_idx.is_some() {
+            self.format_arg_idx = other.format_arg_idx;
         }
         if other.is_noinline {
             self.is_noinline = true;
@@ -1509,6 +1539,97 @@ impl<'a> Parser<'a> {
                     // noclone / noipa / nocf_check
                     "noclone" | "noipa" | "nocf_check" => {
                         self.advance();
+                    }
+                    // __attribute__((malloc)): 返回指针不别名已有内存
+                    "malloc" => {
+                        attrs.is_malloc = true;
+                        self.advance();
+                    }
+                    // __attribute__((alloc_size(N[,M]))): 分配大小参数索引
+                    "alloc_size" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            let mut idx1 = 0u32;
+                            let mut idx2: Option<u32> = None;
+                            if self.cur.kind == TokKind::Number {
+                                idx1 = parse_int_lit(&self.cur.text) as u32;
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::Comma {
+                                self.advance();
+                                if self.cur.kind == TokKind::Number {
+                                    idx2 = Some(parse_int_lit(&self.cur.text) as u32);
+                                    self.advance();
+                                }
+                            }
+                            attrs.alloc_size = Some((idx1, idx2));
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
+                            }
+                        }
+                    }
+                    // __attribute__((assume_aligned(N))): 返回指针对齐
+                    "assume_aligned" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if self.cur.kind == TokKind::Number {
+                                attrs.assume_aligned =
+                                    Some(parse_int_lit(&self.cur.text) as usize);
+                                self.advance();
+                            }
+                            // skip optional second arg (offset)
+                            while self.cur.kind != TokKind::RParen
+                                && self.cur.kind != TokKind::Eof
+                            {
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
+                            }
+                        }
+                    }
+                    // __attribute__((warn_unused_result))
+                    "warn_unused_result" => {
+                        attrs.warn_unused_result = true;
+                        self.advance();
+                    }
+                    // __attribute__((sentinel)): 可变参需 NULL 结尾
+                    "sentinel" => {
+                        attrs.is_sentinel = true;
+                        self.advance();
+                        // optional (N) argument
+                        if self.cur.kind == TokKind::LParen {
+                            let mut depth = 0i32;
+                            loop {
+                                if self.cur.kind == TokKind::LParen {
+                                    depth += 1;
+                                } else if self.cur.kind == TokKind::RParen {
+                                    depth -= 1;
+                                    self.advance();
+                                    if depth == 0 { break; }
+                                    continue;
+                                }
+                                self.advance();
+                                if self.cur.kind == TokKind::Eof { break; }
+                            }
+                        }
+                    }
+                    // __attribute__((format_arg(N)))
+                    "format_arg" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if self.cur.kind == TokKind::Number {
+                                attrs.format_arg_idx =
+                                    Some(parse_int_lit(&self.cur.text) as u32);
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
+                            }
+                        }
                     }
                     _ => {
                         self.advance();
@@ -3186,6 +3307,12 @@ impl<'a> Parser<'a> {
                     is_const_attr: attrs.is_const_attr,
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
+                    is_malloc: attrs.is_malloc,
+                    alloc_size: attrs.alloc_size,
+                    assume_aligned: attrs.assume_aligned,
+                    warn_unused_result: attrs.warn_unused_result,
+                    is_sentinel: attrs.is_sentinel,
+                    format_arg_idx: attrs.format_arg_idx,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3248,6 +3375,12 @@ impl<'a> Parser<'a> {
                     is_const_attr: attrs.is_const_attr,
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
+                    is_malloc: attrs.is_malloc,
+                    alloc_size: attrs.alloc_size,
+                    assume_aligned: attrs.assume_aligned,
+                    warn_unused_result: attrs.warn_unused_result,
+                    is_sentinel: attrs.is_sentinel,
+                    format_arg_idx: attrs.format_arg_idx,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3639,6 +3772,12 @@ impl<'a> Parser<'a> {
                     is_const_attr: attrs.is_const_attr,
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
+                    is_malloc: attrs.is_malloc,
+                    alloc_size: attrs.alloc_size,
+                    assume_aligned: attrs.assume_aligned,
+                    warn_unused_result: attrs.warn_unused_result,
+                    is_sentinel: attrs.is_sentinel,
+                    format_arg_idx: attrs.format_arg_idx,
                     is_nodiscard: attrs.is_nodiscard,
                     asm_label: attrs.asm_label.clone(),
                 })])
@@ -3728,6 +3867,12 @@ impl<'a> Parser<'a> {
                 is_const_attr: attrs.is_const_attr,
                 returns_twice: attrs.returns_twice,
                 no_instrument: attrs.no_instrument,
+                is_malloc: attrs.is_malloc,
+                alloc_size: attrs.alloc_size,
+                assume_aligned: attrs.assume_aligned,
+                warn_unused_result: attrs.warn_unused_result,
+                is_sentinel: attrs.is_sentinel,
+                format_arg_idx: attrs.format_arg_idx,
                 is_nodiscard: attrs.is_nodiscard,
                 asm_label: attrs.asm_label.clone(),
             })])

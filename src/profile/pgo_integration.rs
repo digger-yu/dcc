@@ -428,6 +428,12 @@ mod tests {
             is_const_attr: false,
             returns_twice: false,
             no_instrument: false,
+            is_malloc: false,
+            alloc_size: None,
+            assume_aligned: None,
+            warn_unused_result: false,
+            is_sentinel: false,
+            format_arg_idx: None,
             is_nodiscard: false,
         asm_label: None,
         }));

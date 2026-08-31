@@ -171,6 +171,18 @@ pub struct FuncDecl {
     pub returns_twice: bool,
     /// __attribute__((no_instrument_function)): 禁止 profiling/fuzzer 插桩
     pub no_instrument: bool,
+    /// __attribute__((malloc)): 返回指针不别名已有内存
+    pub is_malloc: bool,
+    /// __attribute__((alloc_size(N[,M]))): 分配大小参数索引
+    pub alloc_size: Option<(u32, Option<u32>)>,
+    /// __attribute__((assume_aligned(N))): 返回指针对齐至少 N 字节
+    pub assume_aligned: Option<usize>,
+    /// __attribute__((warn_unused_result)): 返回值不应被忽略
+    pub warn_unused_result: bool,
+    /// __attribute__((sentinel)): 可变参函数需 NULL 结尾
+    pub is_sentinel: bool,
+    /// __attribute__((format_arg(N))): 第 N 个参数是格式字符串
+    pub format_arg_idx: Option<u32>,
     /// C23 [[nodiscard]]: 函数返回值不应被忽略
     /// 当该函数的调用结果作为语句被丢弃时, 编译器应发射警告
     pub is_nodiscard: bool,
