@@ -141,6 +141,10 @@ pub struct Lower {
     pub module_partition: Option<String>,
     /// M26.4: 当前模块导入的分区列表 (`import :part;`)
     pub module_part_imports: Vec<String>,
+    /// M30.3: 顶层 typedef 别名表 (name -> target type).
+    /// 用于将 `MangleType::Class("linenum_arith_t")` 等误判为类的
+    /// typedef 名解析到底层类型, 避免生成 `struct` 前缀和构造函数调用.
+    pub typedef_aliases: std::collections::HashMap<String, MangleType>,
 }
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
@@ -4694,6 +4698,9 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     }
     // Fix broken constructor definitions: "ClassName_\nClassName(...)" -> "void _ctor_ClassName(struct ClassName *this_, ...)"
     result = fix_broken_constructors(&result);
+    // M30.3: 剥离 __attribute__((...)) 属性标记.
+    // C 后端不支持 __attribute__ 语法, 需要移除.
+    result = strip_attributes(&result);
     result
 }
 
@@ -4821,6 +4828,41 @@ fn fix_broken_constructors(s: &str) -> String {
         }
         result.push(bytes[i] as char);
         i += 1;
+    }
+    result
+}
+
+/// M30.3: 剥离 __attribute__((...)) 和 __attribute__(...) 属性标记.
+/// C 后端不支持 __attribute__ 语法, 需要移除.
+fn strip_attributes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 检查 __attribute__
+        if i + 13 <= len && &bytes[i..i+13] == b"__attribute__" {
+            // 跳过 __attribute__
+            i += 13;
+            // 跳过空格
+            while i < len && bytes[i] == b' ' { i += 1; }
+            // 检查 (( 或 (
+            if i < len && bytes[i] == b'(' {
+                i += 1;
+                // 跳过 balanced parens
+                let mut depth = 1i32;
+                while i < len && depth > 0 {
+                    if bytes[i] == b'(' { depth += 1; }
+                    else if bytes[i] == b')' { depth -= 1; }
+                    i += 1;
+                }
+                // 跳过尾部空格
+                while i < len && bytes[i] == b' ' { i += 1; }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
     }
     result
 }
@@ -5884,6 +5926,12 @@ impl Lower {
             MangleType::Class(n) => {
                 // Normalize: flatten `::` to `_` so `std::string` → `std_string`
                 let n = if n.contains("::") { n.replace("::", "_") } else { n.clone() };
+                // M30.3: 检查 typedef 别名表, 若 name 是已知 typedef,
+                // 直接输出名字 (不加 struct 前缀). C 编译器会通过
+                // 降级器发射的 typedef 声明解析到真实类型.
+                if self.typedef_aliases.contains_key(&n) {
+                    return n;
+                }
                 // Known typedef names: these are NOT struct types,
                 // output the name directly without `struct` prefix.
                 match n.as_str() {
@@ -5994,6 +6042,7 @@ impl Lower {
             imported_modules: vec![],
             module_partition: None,
             module_part_imports: vec![],
+            typedef_aliases: std::collections::HashMap::new(),
         }
     }
     pub fn with_options(_opt: LowerOptions) -> Self {
@@ -6367,6 +6416,44 @@ impl Lower {
         )
     }
 
+    /// M30.3: 递归解析 typedef 别名链.
+    /// 如 `MangleType::Class("linenum_arith_t")` -> `MangleType::LongLong`.
+    /// 防止 typedef 名被误判为类类型而生成 struct 前缀和构造函数调用.
+    fn resolve_typedef_chain(&self, ty: &MangleType) -> MangleType {
+        self.resolve_typedef_chain_inner(ty, 0)
+    }
+
+    fn resolve_typedef_chain_inner(&self, ty: &MangleType, depth: usize) -> MangleType {
+        if depth > 16 { return ty.clone(); } // 防止循环 typedef 导致栈溢出
+        match ty {
+            MangleType::Class(n) => {
+                if let Some(target) = self.typedef_aliases.get(n) {
+                    // 递归解析 (typedef A = B, typedef B = C)
+                    self.resolve_typedef_chain_inner(target, depth + 1)
+                } else {
+                    ty.clone()
+                }
+            }
+            MangleType::Pointer(inner) => {
+                let resolved = self.resolve_typedef_chain_inner(inner, depth + 1);
+                if std::mem::discriminant(&resolved) == std::mem::discriminant(inner.as_ref()) {
+                    ty.clone()
+                } else {
+                    MangleType::Pointer(Box::new(resolved))
+                }
+            }
+            MangleType::Reference(inner) => {
+                let resolved = self.resolve_typedef_chain_inner(inner, depth + 1);
+                if std::mem::discriminant(&resolved) == std::mem::discriminant(inner.as_ref()) {
+                    ty.clone()
+                } else {
+                    MangleType::Reference(Box::new(resolved))
+                }
+            }
+            _ => ty.clone(),
+        }
+    }
+
     /// 解析类名: 尝试原名, 然后 namespace 限定名
     fn resolve_class_name(&self, c: &str) -> String {
         // 1) 原名直接命中 class_methods (e.g. 全局类)
@@ -6652,6 +6739,16 @@ impl Lower {
                     .insert(name.clone(), body_text.clone());
             }
             _ => {
+                // M30.3: 收集顶层 typedef 别名, 用于后续
+                // Class(name) 解析到底层类型.
+                // 跳过自引用 typedef (如 `typedef struct X X;`),
+                // 这类 typedef 的 target 是 Class(name) 且 name 相同.
+                if let CppDecl::Typedef { target, name } = d {
+                    let is_self_ref = matches!(target, MangleType::Class(cn) if cn == name);
+                    if !is_self_ref {
+                        self.typedef_aliases.insert(name.clone(), target.clone());
+                    }
+                }
                 // M26: 普通声明扫描类型, 触发模板类实例化 (定义先于使用)
                 if let CppDecl::FreeFn { name, .. } = d {
                     self.plain_fns.insert(name.clone());
@@ -8235,10 +8332,44 @@ impl Lower {
                 }
                 self.out.push('\n');
             }
-            CppDecl::Typedef { .. } => {
-                /* M11 stdlib: typedef 不产生 C 输出 (lower 后的 C
-                 * 代码会引入 stddef.h 等系统头处理 size_t). M30:
-                 * 目标类型随声明保留, 由 TplMember 引用展开使用. */
+            CppDecl::Typedef { target, name } => {
+                // M30.3: 发射 typedef 到 C 输出, 确保后续使用
+                // 该类型名时 C 编译器能识别.
+                // 跳过已在 lower_decls 硬编码的 typedef (避免重复定义)
+                static SKIP_TYPEDEFS: &[&str] = &[
+                    "__gnuc_va_list", "va_list", "size_t", "wchar_t",
+                    "intmax_t", "uintmax_t", "int64_t", "uint64_t",
+                    "int32_t", "uint32_t", "int16_t", "uint16_t",
+                    "int8_t", "uint8_t", "off_t", "ssize_t",
+                    "__off_t", "__off64_t", "__ssize_t", "__dev_t",
+                    "__uid_t", "__gid_t", "__ino_t", "__mode_t",
+                    "__nlink_t", "__time_t", "__blksize_t", "__blkcnt_t",
+                    "__syscall_slong_t", "__syscall_ulong_t", "__loff_t",
+                    "__clock_t", "__suseconds_t", "__pid_t", "__key_t",
+                    "__caddr_t", "__daddr_t", "__quad_t", "__u_quad_t",
+                    "__id_t", "__ino64_t", "__blkcnt64_t",
+                    "__fsblkcnt_t", "__fsblkcnt64_t", "__fsfilcnt_t", "__fsfilcnt64_t",
+                    "__locale_t", "__u_char", "__u_short", "__u_int", "__u_long",
+                    "__useconds_t", "__socklen_t", "__timer_t", "__clockid_t",
+                    "__int8_t", "__int16_t", "__int32_t", "__int64_t",
+                    "__uint8_t", "__uint16_t", "__uint32_t", "__uint64_t",
+                ];
+                if SKIP_TYPEDEFS.contains(&name.as_str()) {
+                    // 跳过已硬编码的 typedef
+                } else {
+                    let c_target = self.mangle_to_c_ns(target);
+                    // 跳过目标类型带 struct 前缀但实际不是类的情况
+                    // (如 parser 误将 "signed short int" 解析为 Class)
+                    let is_bad_struct = c_target.starts_with("struct ")
+                        && !self.classes.contains(&c_target[7..].to_string())
+                        && !self.typedef_aliases.contains_key(&c_target[7..].to_string());
+                    // 跳过自引用 typedef (如 `typedef cpp_hashnode cpp_hashnode;`)
+                    // 其中 c_target 和 name 相同
+                    let is_self_ref_output = c_target == *name;
+                    if !is_bad_struct && !is_self_ref_output {
+                        self.out.push_str(&format!("typedef {} {};\n", c_target, name));
+                    }
+                }
             }
             CppDecl::Empty => {
                 /* M18.0: enum / 修饰后无实际声明时使用, 不产生 C 输出. */
@@ -8814,6 +8945,9 @@ impl Lower {
                 } else {
                     ty.clone()
                 };
+                // M30.3: 解析 typedef 别名链
+                // 如 linenum_arith_t -> long long, 避免被误判为类类型.
+                let resolved_ty = self.resolve_typedef_chain(&resolved_ty);
                 // 记录局部变量类型, 用于 c.method() 改写
                 self.local_var_types
                     .insert(name.clone(), resolved_ty.clone());
