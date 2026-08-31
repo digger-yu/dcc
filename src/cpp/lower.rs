@@ -4569,15 +4569,29 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
         ("__socklen_t", "unsigned int"),
         ("__intptr_t", "long"),
         ("__wchar_t", "int"),
+        ("__fpos_t", "long long"),
+        ("__fpos64_t", "long long"),
     ];
     for (ty, base) in &gcc_builtin_types {
         let pattern = format!("typedef {} {};", ty, ty);
-        if !result.contains(&pattern) && !result.contains(&format!("typedef {} {};", base, ty)) {
+        // 检查类型是否已定义: 自身 typedef、基础类型 typedef、或 struct typedef
+        let already_defined = result.contains(&pattern)
+            || result.contains(&format!("typedef {} {};", base, ty))
+            || result.contains(&format!("}} {};", ty))  // struct typedef 结尾
+            || result.contains(&format!("typedef struct {} {};", ty, ty));  // struct 前向声明
+        if !already_defined {
             // 仅在类型未定义时注入
             let def = format!("typedef {} {};\n", base, ty);
             if let Some(pos) = result.find('\n') {
                 result.insert_str(pos, &format!("\n{}", def));
             }
+        }
+    }
+    // cookie_io_functions_t: fopencookie 参数类型, glibc 中定义为 struct typedef
+    if !result.contains("cookie_io_functions_t") {
+        let def = "typedef struct cookie_io_functions_t { void* read; void* write; void* seek; void* close; } cookie_io_functions_t;\n";
+        if let Some(pos) = result.find('\n') {
+            result.insert_str(pos, &format!("\n{}", def));
         }
     }
     // Convert C++ functional casts: Type(expr) -> (Type)(expr)
@@ -4928,7 +4942,6 @@ fn convert_dynamic_global_inits(s: &str) -> String {
             && !trimmed.starts_with("static")
             && !trimmed.starts_with("extern")
             && !trimmed.starts_with("typedef")
-            && !trimmed.starts_with("struct")
             && !trimmed.starts_with("union")
             && !trimmed.starts_with("enum")
             && !trimmed.starts_with("void ")
@@ -6745,12 +6758,6 @@ impl Lower {
         self.out.push_str("typedef unsigned long rlim64_t;\n");
         // GCC hashtab 类型
         self.out.push_str("typedef struct htab* htab_t;\n");
-        // glibc 文件位置类型 (系统头文件中定义为 struct, 此处简化为整数类型)
-        // 注意: 若系统头文件已定义则会重复, 但 C 后端允许相同类型的重复 typedef
-        self.out.push_str("typedef long long __fpos_t;\n");
-        self.out.push_str("typedef long long __fpos64_t;\n");
-        // glibc cookie IO 类型 (fopencookie 参数)
-        self.out.push_str("typedef struct cookie_io_functions_t { void* read; void* write; void* seek; void* close; } cookie_io_functions_t;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
