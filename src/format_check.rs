@@ -634,6 +634,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 },
                 params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                     ty: Type::Ptr(Box::new(Type::Char.into())),
                     name: Some(Ident {
                         name: "fmt".to_string(),
@@ -733,6 +734,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 },
                 params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                     ty: Type::Ptr(Box::new(Type::Char.into())),
                     name: Some(Ident {
                         name: "fmt".to_string(),

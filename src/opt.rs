@@ -2068,6 +2068,7 @@ mod tests {
                 span: span.clone(),
             },
             params: vec![crate::ast::Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                 ty: int.clone(),
                 name: Some(Ident {
                     name: "x".into(),
@@ -2502,11 +2503,13 @@ mod tests {
             name: Ident { name: "add".into(), span: sp.clone() },
             params: vec![
                 crate::ast::Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                     name: Some(Ident { name: "x".into(), span: sp.clone() }),
                     ty: int_ty(),
                     span: sp.clone(),
                 },
                 crate::ast::Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                     name: Some(Ident { name: "y".into(), span: sp.clone() }),
                     ty: int_ty(),
                     span: sp.clone(),

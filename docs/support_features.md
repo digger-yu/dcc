@@ -79,6 +79,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c`；按 pointee 匹配 |
 | C89 Digraphs | `<:`→`[` `:>`→`]` `<%`→`{` `%>`→`}` `%:`→`#` `%:%:`→`##`；词法分析器 (`tokens.rs`) 与预处理器 (`preproc.rs`) 双层识别；指令行 `%:define` 等价 `#define`；宏体 `%:%:` 等价 `##` token paste；字符串/字符字面量内不转换。测试: `tests/fixtures/c/c89_digraphs.c` + `c89_digraphs_compile_and_run` + `c89_digraphs_preprocess` |
 | C89 Trigraphs | `??=`→`#` `??(`→`[` `??/`→`\` `??)`→`]` `??'`→`^` `??<`→`{` `??!`→`|` `??>`→`}` `??-`→`~`；需 `-trigraphs` 启用；翻译阶段 1 (行续接前) 转换；字符串/字符字面量内不转换。测试: `tests/fixtures/c/c89_trigraphs.c` + `c89_trigraphs_compile_and_run` + `c89_trigraphs_preprocess` + `c89_trigraphs_not_in_strings` + `c89_trigraphs_disabled_by_default` |
+| C99 restrict 语义 | 解析 `restrict`/`__restrict__`/`__restrict` 限定符；`Param` 结构存储参数限定符；SSA `Function::param_quals` 记录参数限定符；别名分析 (`ssa_passes.rs::alias_analysis`) 将 restrict 参数放入独立 alias set，不与其他指针合并，保证不别名语义。测试: `tests/fixtures/c/c99_restrict.c` + `c99_restrict_compile_and_run` |
 | 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接；`#` 操作符只转义 `"` 不转义 `\` (与 GCC 一致，内核 `__stringify(\reg)` 正确展开) |
 | `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解；`, ## __VA_ARGS__` GCC 扩展兼容；非可变参宏中保留为字面 token；测试: preproc 单测 `va_opt_*` |
 | `__COUNTER__` | 单调递增，跨宏嵌套共享 preproc 状态；在 `#if` 中可被求值 |

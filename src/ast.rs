@@ -172,6 +172,8 @@ pub struct Param {
     pub ty: Type,
     pub name: Option<Ident>,
     pub span: Span,
+    /// ISO C 限定符 (const/volatile/restrict) 附着在该参数上
+    pub quals: QualifierFlags,
 }
 
 #[derive(Debug, Clone)]

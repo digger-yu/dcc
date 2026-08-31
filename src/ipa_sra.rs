@@ -632,6 +632,7 @@ fn rewrite_function_params(
                 if let Some(field_ty) = field_map.get(field_name.as_str()) {
                     let scalar_name = scalar_param_name(&analysis.param_name, field_name);
                     new_params.push(Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                         ty: (*field_ty).clone(),
                         name: Some(Ident {
                             name: scalar_name,
@@ -1121,6 +1122,7 @@ mod tests {
                 span: span_zero(),
             },
             params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                 ty: struct_ty,
                 name: Some(Ident {
                     name: "p".into(),
@@ -1214,6 +1216,7 @@ mod tests {
                 span: span_zero(),
             },
             params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                 ty: struct_ty,
                 name: Some(Ident {
                     name: "p".into(),
@@ -1307,6 +1310,7 @@ mod tests {
                 span: span_zero(),
             },
             params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                 ty: struct_ty,
                 name: Some(Ident {
                     name: "p".into(),
@@ -1429,6 +1433,7 @@ mod tests {
                 span: span_zero(),
             },
             params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                 ty: struct_ty.clone(),
                 name: Some(Ident {
                     name: "p".into(),

@@ -316,10 +316,26 @@ fn find_induction_vars(func: &Function) -> HashSet<String> {
 ///   p = q   => union(set(p), set(q))
 ///   p = alloc => 新 set
 ///  函数返回 map: SSA 名 -> set id.
+///
+/// C99 restrict 语义: 标记为 restrict 的函数参数保证不与其他指针别名。
+/// 分析时将 restrict 参数放入独立的 alias set, 不与其它指针合并。
 pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
     let mut sets: HashMap<String, usize> = HashMap::new();
     let mut parents: HashMap<usize, usize> = HashMap::new();
     let mut next_id = 0usize;
+    // Collect restrict-qualified parameter names (base names, version 0)
+    let restrict_params: std::collections::HashSet<String> = func
+        .param_quals
+        .iter()
+        .filter(|(_, quals)| quals.is_restrict())
+        .map(|(name, _)| name.clone())
+        .collect();
+    // Assign unique alias sets to restrict parameters upfront
+    for name in &restrict_params {
+        let id = next_id;
+        next_id += 1;
+        sets.insert(format!("{}_0", name), id);
+    }
     for b in func.blocks.values() {
         for inst in &b.insts {
             match &inst.kind {
@@ -330,13 +346,19 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                         i
                     });
                     if let Some(d) = &inst.dest {
-                        sets.insert(d.name(), id);
+                        // Don't union if dest is a restrict parameter
+                        if !restrict_params.contains(&d.base) {
+                            sets.insert(d.name(), id);
+                        }
                     }
                 }
                 InstKind::Load { e, .. } => {
                     if let Some(d) = &inst.dest {
                         if let Some(s) = set_of(e, &sets) {
-                            sets.insert(d.name(), s);
+                            // Don't union if dest is a restrict parameter
+                            if !restrict_params.contains(&d.base) {
+                                sets.insert(d.name(), s);
+                            }
                         }
                     }
                 }
@@ -344,8 +366,11 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                     e: Operand::Var(v),
                     src,
                 } => {
-                    let src_set = set_of(src, &sets).unwrap_or(0);
-                    union_into(&mut sets, &mut parents, &v.name(), src_set);
+                    // Don't union if target is a restrict parameter
+                    if !restrict_params.contains(&v.base) {
+                        let src_set = set_of(src, &sets).unwrap_or(0);
+                        union_into(&mut sets, &mut parents, &v.name(), src_set);
+                    }
                 }
                 InstKind::Call { args, .. } => {
                     if let Some(d) = &inst.dest {
@@ -354,9 +379,12 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                                 let _ = s;
                             }
                         }
-                        let id = next_id;
-                        next_id += 1;
-                        sets.insert(d.name(), id);
+                        // Don't union if dest is a restrict parameter
+                        if !restrict_params.contains(&d.base) {
+                            let id = next_id;
+                            next_id += 1;
+                            sets.insert(d.name(), id);
+                        }
                     }
                 }
                 _ => {}

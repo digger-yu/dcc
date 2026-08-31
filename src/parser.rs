@@ -5824,6 +5824,7 @@ impl<'a> Parser<'a> {
                         span: Span::point("", 0, 0),
                     }),
                     span: Span::point("", 0, 0),
+                    quals: QualifierFlags::NONE,
                 });
             }
             // 设置 is_kr 标志 (通过返回特殊 Param, 后续在 parse_var_or_func 中处理)
@@ -5912,6 +5913,7 @@ impl<'a> Parser<'a> {
                     ty,
                     name: nm,
                     span: param_span,
+                    quals: QualifierFlags::NONE,
                 });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
@@ -5961,6 +5963,7 @@ impl<'a> Parser<'a> {
                     ty,
                     name: Some(id),
                     span: param_span,
+                    quals: QualifierFlags::NONE,
                 });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
@@ -6056,6 +6059,7 @@ impl<'a> Parser<'a> {
                 ty,
                 name: nm,
                 span: self.cur.span.clone(),
+                quals: QualifierFlags::NONE,
             });
             if self.cur.kind == TokKind::Comma {
                 self.advance();

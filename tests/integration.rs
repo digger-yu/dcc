@@ -20385,3 +20385,29 @@ fn c89_trigraphs_disabled_by_default() {
         "trigraphs should not be converted without -trigraphs. got: {stdout}"
     );
 }
+
+/// C99 restrict qualifier: parsed and used in alias analysis
+#[test]
+fn c99_restrict_compile_and_run() {
+    let source = include_str!("fixtures/c/c99_restrict.c");
+    let (output, exe) = run_compile_and_run("c99-restrict", source);
+    assert!(
+        output.status.success(),
+        "restrict compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run restrict test");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "restrict test should return 0"
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PASS"),
+        "restrict test should print PASS. got: {stdout}"
+    );
+}

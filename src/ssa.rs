@@ -180,6 +180,9 @@ pub struct Function {
     /// 原始局部变量的类型限定符 (volatile/const/restrict),
     /// 用于 SSA→AST 重建时保留 volatile 语义,防止优化器错误移除读写
     pub local_quals: HashMap<String, crate::ast::QualifierFlags>,
+    /// 函数参数的类型限定符 (volatile/const/restrict),
+    /// 用于别名分析利用 restrict 不别名保证
+    pub param_quals: HashMap<String, crate::ast::QualifierFlags>,
 }
 
 impl Function {
@@ -198,6 +201,7 @@ impl Function {
             span,
             original_locals: HashSet::new(),
             local_quals: HashMap::new(),
+            param_quals: HashMap::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -1366,6 +1370,8 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
                 span: p.span.clone(),
             };
             builder.func.params.push(v.clone());
+            // Store parameter qualifiers for alias analysis (restrict)
+            builder.func.param_quals.insert(n.name.clone(), p.quals);
             builder.define(v);
         }
     }

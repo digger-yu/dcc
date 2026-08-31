@@ -3037,6 +3037,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 },
                 params: vec![Param {
+                    quals: crate::ast::QualifierFlags::NONE,
                     ty: Type::Int,
                     name: None,
                     span: Span::point("t.c", 1, 1),
