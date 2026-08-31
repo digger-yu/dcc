@@ -13721,6 +13721,25 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_mempcpy: 同 memcpy 但返回 dst+n (而非 dst)
+            "__builtin_mempcpy" => {
+                if args.len() < 3 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 参数: dst(rdi), src(rsi), n(rcx)
+                self.gen_expr(&args[1], 6); // rsi = src
+                self.gen_expr(&args[0], 7); // rdi = dst
+                self.gen_expr(&args[2], 1); // rcx = n
+                self.emit(&[0xfc]); // cld
+                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                // rep movsb 后 rdi = dst+n, 移到 rax 作为返回值
+                self.mov(0, 7); // rax = rdi
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             // __builtin_memcmp: 转发到 libc ( memcmp 不适合简单内联)
             "__builtin_memcmp" => {
                 let ar = [7u8, 6, 2, 1, 8, 9];
@@ -13738,7 +13757,10 @@ impl Codegen {
             // __builtin_strcpy/__builtin_strncpy/__builtin_strcmp 等
             "__builtin_strcpy" | "__builtin_strncpy" | "__builtin_strcmp" | "__builtin_strlen"
             | "__builtin_strchr" | "__builtin_strrchr"
-            | "__builtin_strstr" | "__builtin_strpbrk" => {
+            | "__builtin_strstr" | "__builtin_strpbrk"
+            | "__builtin_stpcpy" | "__builtin_strnlen"
+            | "__builtin_strspn" | "__builtin_strcspn"
+            | "__builtin_strcasestr" | "__builtin_strncmp" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 let ar = [7u8, 6, 2, 1, 8, 9];
                 for (i, a) in args.iter().enumerate() {
