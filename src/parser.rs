@@ -104,6 +104,10 @@ struct ParsedAttrs {
     is_fallthrough: bool,
     /// C23 [[nodiscard]]: 函数返回值不应被忽略
     is_nodiscard: bool,
+    /// __attribute__((transparent_union)): struct 字段透明联合
+    transparent_union: bool,
+    /// __attribute__((externally_visible)): 阻止 LTO 隐藏符号
+    externally_visible: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -308,6 +312,12 @@ impl ParsedAttrs {
         }
         if other.is_nodiscard {
             self.is_nodiscard = true;
+        }
+        if other.transparent_union {
+            self.transparent_union = true;
+        }
+        if other.externally_visible {
+            self.externally_visible = true;
         }
     }
 }
@@ -1628,6 +1638,44 @@ impl<'a> Parser<'a> {
                             }
                             if self.cur.kind == TokKind::RParen {
                                 self.advance();
+                            }
+                        }
+                    }
+                    // __attribute__((transparent_union)): struct 字段
+                    // 作为透明联合处理
+                    "transparent_union" => {
+                        attrs.transparent_union = true;
+                        self.advance();
+                    }
+                    // __attribute__((externally_visible)): 阻止 LTO
+                    // 将符号转为 hidden visibility
+                    "externally_visible" => {
+                        attrs.externally_visible = true;
+                        self.advance();
+                    }
+                    // 以下属性仅消费, 无 codegen 效果:
+                    "no_reorder" | "no_split_stack" => {
+                        self.advance();
+                    }
+                    "optimize" | "patchable_function_entry" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            let mut depth = 0i32;
+                            loop {
+                                if self.cur.kind == TokKind::LParen {
+                                    depth += 1;
+                                } else if self.cur.kind == TokKind::RParen {
+                                    depth -= 1;
+                                    self.advance();
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                self.advance();
+                                if self.cur.kind == TokKind::Eof {
+                                    break;
+                                }
                             }
                         }
                     }
