@@ -5610,7 +5610,12 @@ fn fix_gengtype_global_vars(s: &str) -> String {
                 || trimmed.ends_with(&format!("* {};", v))
                 || trimmed.ends_with(&format!("** {};", v))
         });
-        if is_gengtype_var && !trimmed.starts_with("extern") && !trimmed.starts_with("static") {
+        if is_gengtype_var && !trimmed.starts_with("extern") 
+            && !trimmed.starts_with("static")
+            && !trimmed.contains('=')  // 排除赋值语句 (如 p->next = typedefs;)
+            && !trimmed.contains("->") // 排除成员访问
+            && !trimmed.contains('.')  // 排除成员访问
+        {
             result.push_str("extern ");
             result.push_str(trimmed);
             result.push('\n');
