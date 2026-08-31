@@ -5048,6 +5048,93 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
     result2
 }
 
+/// M30.3: 将 C 标准库函数的非空 inline 定义标记为 static.
+/// glibc 头文件中的 inline 函数 (如 `extern __inline void *memchr(...)
+/// { return __builtin_memchr(...); }`) 被 parser 当作普通函数定义.
+/// 链接时与 libc 的实现冲突 (multiple definition).
+/// 将这些函数标记为 static 以避免符号冲突.
+fn staticize_clib_inline_fns(s: &str) -> String {
+    let clib_fns = [
+        "memchr", "rawmemchr", "memrchr", "memcmp", "memcpy",
+        "memmove", "memset", "strcpy", "strncpy", "strcat",
+        "strncat", "strchr", "strrchr", "strstr", "strpbrk",
+        "strnlen", "strlen", "strcmp", "strncmp", "strcoll",
+        "index", "rindex", "stpcpy", "stpncpy",
+        "strchrnul", "strdup", "strndup",
+        "fopen", "fclose", "fread", "fwrite",
+        "fseek", "ftell", "rewind", "feof", "ferror",
+        "getenv", "setenv", "fopencookie",
+        "fgetpos", "fsetpos", "fgetpos64", "fsetpos64",
+        "malloc", "free", "calloc", "realloc",
+    ];
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // 检查当前行是否是 C 库函数定义的开始
+        let is_clib_fn_def = clib_fns.iter().any(|f| {
+            let pat1 = format!("{} (", f);
+            let pat2 = format!("{}(", f);
+            let pat3 = format!(" {} (", f);
+            let matches = trimmed.starts_with(&pat1)
+                || trimmed.starts_with(&pat2)
+                || trimmed.contains(&pat3);
+            matches
+                && !trimmed.starts_with("static")
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with("#")
+                && !trimmed.ends_with(';')
+                && !trimmed.starts_with("return")
+                && (trimmed.ends_with('(')
+                    || trimmed.ends_with(')')
+                    || trimmed.contains(')'))
+        });
+        if is_clib_fn_def {
+            // 检查后续行是否有函数体 (包含 __builtin_ 调用)
+            let mut has_builtin = false;
+            let mut j = i + 1;
+            let mut brace_depth = 0;
+            while j < lines.len() && j < i + 10 {
+                let lt = lines[j].trim();
+                if lt.contains("__builtin_") {
+                    has_builtin = true;
+                }
+                if lt == "{" || lt.ends_with(" {") {
+                    brace_depth = 1;
+                }
+                for ch in lt.chars() {
+                    if ch == '{' { brace_depth += 1; }
+                    if ch == '}' { brace_depth -= 1; }
+                }
+                if brace_depth > 0 && lt == "}" {
+                    break;
+                }
+                j += 1;
+                if brace_depth > 0 && j > i + 20 { break; }
+                if brace_depth == 0 && j > i + 5 { break; }
+            }
+            if has_builtin && brace_depth > 0 {
+                // 将函数定义转为声明: 收集函数签名行,
+                // 跳过函数体, 添加 ';'
+                // 先输出返回类型行 (当前行之前未输出的行)
+                // 当前行是函数名行, 需要与前面的返回类型行合并
+                // 简单做法: 将当前行改为声明格式
+                let decl_line = format!("{};", trimmed);
+                result.push_str(&decl_line);
+                result.push('\n');
+                // 跳过函数体
+                i = j;
+                continue;
+            }
+        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
+    }
+    result
+}
+
 /// M30.3: 动态全局初始化转换.
 /// C++ 允许全局变量用函数调用初始化, C 不允许.
 /// 转换为: 声明 `Type var;` + 生成 `__dcc_init_var()` 函数.
