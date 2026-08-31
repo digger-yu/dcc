@@ -4766,6 +4766,14 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // safe-ctype.h 中的 extern 变量被 parser 当作定义,
     // 导致多 TU 链接冲突. 转为 extern 声明.
     result = fix_sch_extern_decls(&result);
+    // M30.3: 修复缺失的指针 typedef.
+    // parser 可能不发射 `typedef struct X *X_p;` 形式的 typedef,
+    // 但后续代码使用了 X_p 类型. 检测并添加缺失的 typedef.
+    result = fix_missing_ptr_typedefs(&result);
+    // M30.3: 修复可变参数函数语法.
+    // C++ 的 `void ...` 应转为 C 的 `...`.
+    result = result.replace(", void ...", ", ...");
+    result = result.replace("(void ...)", "(...)");
     result
 }
 
@@ -5493,6 +5501,54 @@ fn staticize_std_functions(s: &str) -> String {
             result.push_str(line);
             result.push('\n');
         }
+    }
+    result
+}
+
+/// M30.3: 修复缺失的指针 typedef.
+/// GCC 代码中常见 `typedef struct X *X_p;` 形式的 typedef,
+/// parser 可能不发射这些 typedef 但后续代码使用了 X_p 类型.
+/// 检测 struct X 存在但 X_p 未定义的情况, 添加 typedef.
+fn fix_missing_ptr_typedefs(s: &str) -> String {
+    // 常见的 GCC 指针 typedef 模式
+    let ptr_typedefs = [
+        ("pair", "pair_p"),
+        ("type", "type_p"),
+        ("options", "options_p"),
+        ("outf", "outf_p"),
+    ];
+    let mut result = String::new();
+    let mut inserted = false;
+    for line in s.lines() {
+        // 在第一个 struct 定义之前插入缺失的 typedef
+        if !inserted && line.trim().starts_with("struct ") && line.contains('{') {
+            for (struct_name, typedef_name) in &ptr_typedefs {
+                // 检查 struct 是否存在
+                let struct_pattern = format!("struct {} {{", struct_name);
+                let struct_pattern2 = format!("struct {}\n", struct_name);
+                if s.contains(&struct_pattern) || s.contains(&struct_pattern2) || s.contains(&format!("struct {} ", struct_name)) {
+                    // 检查 typedef 是否已存在
+                    let typedef_pattern = format!("typedef struct {} *{}", struct_name, typedef_name);
+                    if !s.contains(&typedef_pattern) {
+                        // 检查 typedef_name 是否被使用
+                        if s.contains(typedef_name) {
+                            result.push_str(&format!("typedef struct {} *{};\n", struct_name, typedef_name));
+                        }
+                    }
+                }
+            }
+            // 也检查 const_type_p
+            if s.contains("const_type_p") && !s.contains("typedef const struct type *const_type_p") {
+                result.push_str("typedef const struct type *const_type_p;\n");
+            }
+            // flex 生成的 YY_BUFFER_STATE
+            if s.contains("YY_BUFFER_STATE") && !s.contains("typedef struct yy_buffer_state *YY_BUFFER_STATE") {
+                result.push_str("typedef struct yy_buffer_state *YY_BUFFER_STATE;\n");
+            }
+            inserted = true;
+        }
+        result.push_str(line);
+        result.push('\n');
     }
     result
 }
