@@ -15924,6 +15924,207 @@ impl Codegen {
                 }
                 true
             }
+            // ===== __sync_* legacy atomic operations (GCC 3.x+) =====
+            // These are always sequentially consistent (no memory order parameter)
+            "__sync_fetch_and_add" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
+                // rsi now contains old value
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__sync_fetch_and_sub" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.emit_neg(sz); // neg rsi
+                self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__sync_fetch_and_or" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_or_rdx_rsi(s); });
+                if dst != 1 { self.mov(dst, 1); }
+                true
+            }
+            "__sync_fetch_and_and" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_and_rdx_rsi(s); });
+                if dst != 1 { self.mov(dst, 1); }
+                true
+            }
+            "__sync_fetch_and_xor" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_xor_rdx_rsi(s); });
+                if dst != 1 { self.mov(dst, 1); }
+                true
+            }
+            "__sync_fetch_and_nand" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| {
+                    // and rdx, rsi; not rdx
+                    cg.emit_and_rdx_rsi(s);
+                    match s {
+                        1 => cg.emit(&[0x40, 0xF6, 0xD2]), // not dl
+                        2 => cg.emit(&[0x66, 0xF7, 0xD2]), // not dx
+                        4 => cg.emit(&[0xF7, 0xD2]),       // not edx
+                        _ => cg.emit(&[0x48, 0xF7, 0xD2]), // not rdx
+                    }
+                });
+                if dst != 1 { self.mov(dst, 1); }
+                true
+            }
+            "__sync_add_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
+                // rsi = old value, [rdi] = new value
+                // add rsi, val to get new value
+                self.gen_expr(&args[1], 0); // rax = val
+                match sz {
+                    1 => self.emit(&[0x40, 0x00, 0xC6]), // add sil, al
+                    2 => self.emit(&[0x66, 0x01, 0xC6]), // add si, ax
+                    4 => self.emit(&[0x01, 0xC6]),       // add esi, eax
+                    _ => self.emit(&[0x48, 0x01, 0xC6]), // add rsi, rax
+                }
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__sync_sub_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.emit_neg(sz); // neg rsi
+                self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
+                // rsi = old value (negated val was added)
+                // add rsi, val (original) to get new value
+                self.gen_expr(&args[1], 0); // rax = val
+                match sz {
+                    1 => self.emit(&[0x40, 0x00, 0xC6]), // add sil, al
+                    2 => self.emit(&[0x66, 0x01, 0xC6]), // add si, ax
+                    4 => self.emit(&[0x01, 0xC6]),       // add esi, eax
+                    _ => self.emit(&[0x48, 0x01, 0xC6]), // add rsi, rax
+                }
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__sync_or_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_or_rdx_rsi(s); });
+                // rdx = new value after CAS loop
+                if dst != 2 { self.mov(dst, 2); }
+                true
+            }
+            "__sync_and_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_and_rdx_rsi(s); });
+                if dst != 2 { self.mov(dst, 2); }
+                true
+            }
+            "__sync_xor_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| { cg.emit_xor_rdx_rsi(s); });
+                if dst != 2 { self.mov(dst, 2); }
+                true
+            }
+            "__sync_nand_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| {
+                    cg.emit_and_rdx_rsi(s);
+                    match s {
+                        1 => cg.emit(&[0x40, 0xF6, 0xD2]),
+                        2 => cg.emit(&[0x66, 0xF7, 0xD2]),
+                        4 => cg.emit(&[0xF7, 0xD2]),
+                        _ => cg.emit(&[0x48, 0xF7, 0xD2]),
+                    }
+                });
+                if dst != 2 { self.mov(dst, 2); }
+                true
+            }
+            "__sync_bool_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 0); // rax = old
+                self.gen_expr(&args[2], 6); // rsi = new
+                self.emit_lock_cmpxchg_rdi_rsi(sz); // lock cmpxchg [rdi], rsi
+                // ZF=1 if success (rax was old value)
+                self.emit(&[0x0F, 0x94, 0xC0]); // sete al
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__sync_val_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 0); // rax = old
+                self.gen_expr(&args[2], 6); // rsi = new
+                self.emit_lock_cmpxchg_rdi_rsi(sz); // lock cmpxchg [rdi], rsi
+                // rax = actual old value (whether success or fail)
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__sync_lock_test_and_set" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.gen_expr(&args[1], 6); // rsi = val
+                self.emit_lock_xchg_rdi_rsi(sz); // xchg [rdi], rsi
+                // rsi = old value
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__sync_lock_release" => {
+                if args.len() < 1 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                // mov [rdi], 0 (size-dependent)
+                match sz {
+                    1 => self.emit(&[0xC6, 0x07, 0x00]),       // mov byte [rdi], 0
+                    2 => self.emit(&[0x66, 0xC7, 0x07, 0x00, 0x00]), // mov word [rdi], 0
+                    4 => self.emit(&[0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]), // mov dword [rdi], 0
+                    _ => self.emit(&[0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]), // mov qword [rdi], 0
+                }
+                true
+            }
+            "__sync_synchronize" => {
+                // mfence: full memory barrier
+                self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+                true
+            }
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
     }
