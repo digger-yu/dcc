@@ -331,7 +331,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛、析构函数隐式 `noexcept` per C++11 [except.spec]/3） / `final` / `override` / `mutable`（M27: 跟踪 mutable 字段，C 端输出 `/* mutable */` 注释标记，const 方法中可写） / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
 | 模板嵌套深度 | `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认一致（Clang 为 1024），含深度超限诊断 |
 | `if constexpr` | 编译期分支：const_eval 在 lower 端选分支 |
-| C++ 标准库扩展 | `<iostream>` / `<iterator>` / `<array>` / `<numeric>` / `<ratio>` / `<functional>` / `<tuple>` / `<utility>` / `<initializer_list>` / `<type_traits>` / `<memory>` (unique_ptr/shared_ptr/weak_ptr/make_unique/make_shared) / `<shared_mutex>` / `<optional>` / `<string_view>` / `<any>` / `<chrono>` / `<thread>` / `<mutex>` / `<condition_variable>` / `<filesystem>` / `<expected>` / `<flat_map>` / `<regex>` / `<ranges>` |
+| C++ 标准库扩展 | `<iostream>` / `<iterator>` / `<array>` / `<numeric>` / `<ratio>` / `<functional>` / `<tuple>` / `<utility>` / `<initializer_list>` / `<type_traits>` / `<memory>` (unique_ptr/shared_ptr/weak_ptr/make_unique/make_shared) / `<shared_mutex>` / `<optional>` / `<string_view>` / `<any>` / `<chrono>` / `<thread>` / `<mutex>` / `<condition_variable>` / `<filesystem>` / `<expected>` / `<flat_map>` / `<regex>` / `<ranges>` / `<span>` / `<concepts>` / `<coroutine>` / `<compare>` / `<print>` / `<stdfloat>` |
 | C++23 多维下标 | `obj[i,j,k]` → `__dcc_multi_index_N` |
 | Itanium C++ ABI 名字修饰 | 成员函数 / 运算符 / vtable / typeinfo / 模板形参 |
 | C++→C 降级 | struct 字段 / 隐式 this / 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 / lambda 闭包 / 模板完整单态化 |
