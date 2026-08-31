@@ -1712,24 +1712,47 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     //    M30.1: 检测范围加入预处理后文本 - 纯 include 型源 (`#include
     //    <type_traits>` + 使用) 的 C++ 构造全在头文件里, 只看原始源码
     //    会误走 strip 直通, 模板 / namespace 全部丢失.
+    //    M30.2: 补充 `::` 作用域运算符与 new/delete/operator/访问说明符
+    //    检测. `struct`/`bool` 兼容 C 的源 (libcpp/line-map.cc 风格: 结构体
+    //    + 类外成员定义 `T C::m() const {}`) 此前漏网, strip 管道只会把
+    //    `::` 拼成 `_` 而不剩 const / 注入 this, 产出非法 C.
     let src_has_cpp = {
         let raw = String::from_utf8_lossy(&src);
-        raw.contains("class ")
-            || raw.contains("template")
-            || raw.contains("namespace ")
-            || raw.contains("try {")
-            || raw.contains("throw ")
-            || pp_out.text.contains("class ")
-            || pp_out.text.contains("template")
-            || pp_out.text.contains("namespace ")
-            || pp_out.text.contains("try {")
-            || pp_out.text.contains("throw ")
+        let has = |t: &str| {
+            t.contains("class ")
+                || t.contains("template")
+                || t.contains("namespace ")
+                || t.contains("try {")
+                || t.contains("throw ")
+                // M30.2: C 不存在的作用域运算符 / 访问说明符 / 操作符重载
+                || t.contains("::")
+                || t.contains("operator")
+                || t.contains("public:")
+                || t.contains("private:")
+                || t.contains("protected:")
+                || t.contains(" new ")
+                || t.contains(" delete ")
+        };
+        has(&raw) || has(&pp_out.text)
     };
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let (decls, c_src, module_bmf) = match parser.parse_top_level() {
-        Ok(ref decls) if src_has_cpp
-            && !parser.diags.iter().any(|d| matches!(d.sev, Severity::Error)) =>
-        {
+        Ok(ref decls) if src_has_cpp => {
+            // M30.2: 允许有解析错误时仍走 AST lower 路径.
+            // 类/结构体成员解析已有容错恢复 (skip_to_member_end),
+            // 大部分声明仍可正确降级. 仅当错误数超过阈值时才回退
+            // 到 strip-keywords 模式.
+            let error_count = parser.diags.iter()
+                .filter(|d| matches!(d.sev, Severity::Error))
+                .count();
+            let use_ast = error_count <= 5 || !decls.is_empty();
+            if use_ast {
+                if error_count > 0 && cfg.verbose {
+                    eprintln!(
+                        "dcc: C++ parser had {} errors, using AST lower anyway",
+                        error_count
+                    );
+                }
             let mut search_dirs: Vec<PathBuf> = Vec::new();
             if let Some(p) = input.parent() {
                 search_dirs.push(p.to_path_buf());
@@ -1754,6 +1777,16 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             }
             let module_bmf = lower.module_bmf();
             (Some(decls.clone()), lower.finish(), module_bmf)
+            } else {
+                // 错误太多, 回退到 strip-keywords
+                if std::env::var("DCC_CPP_DUMP_DIAGS").is_ok() {
+                    for d in &parser.diags {
+                        eprintln!("dcc-cpp-diag: {:?} {} @ {:?}", d.sev, d.msg, d.span);
+                    }
+                }
+                let stripped = crate::cpp::lower::strip_cpp_keywords(&pp_out.text);
+                (None, stripped, None)
+            }
         }
         Err(_) | Ok(_) => {
             // Fallback: C++ parser 失败或解析中有错误,
