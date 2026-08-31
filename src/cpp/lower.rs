@@ -6604,6 +6604,22 @@ impl Lower {
         self.out.push_str("typedef int __socklen_t;\n");
         self.out.push_str("typedef int __timer_t;\n");
         self.out.push_str("typedef int __clockid_t;\n");
+        // GCC libcpp 前向声明: AST 降级可能丢失类/结构体前向声明,
+        // 导致后续使用这些类型的代码报错. 统一补充前向声明.
+        // 注意: C 中需要 typedef 才能让名字直接作为类型使用.
+        self.out.push_str("typedef struct cpp_reader cpp_reader;\n");
+        self.out.push_str("typedef struct cpp_hashnode cpp_hashnode;\n");
+        self.out.push_str("typedef struct cpp_token cpp_token;\n");
+        self.out.push_str("typedef struct cpp_string cpp_string;\n");
+        self.out.push_str("typedef struct cpp_identifier cpp_identifier;\n");
+        self.out.push_str("typedef struct cpp_macro_arg cpp_macro_arg;\n");
+        self.out.push_str("typedef struct cpp_token_u cpp_token_u;\n");
+        self.out.push_str("typedef struct cpp_parm_u cpp_parm_u;\n");
+        self.out.push_str("typedef struct cpp_macro cpp_macro;\n");
+        self.out.push_str("typedef struct ht_identifier ht_identifier;\n");
+        self.out.push_str("typedef struct ht_identifier *hashnode;\n");
+        self.out.push_str("typedef struct line_map_macro line_map_macro;\n");
+        self.out.push_str("typedef struct line_maps line_maps;\n");
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
