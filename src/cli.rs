@@ -184,6 +184,8 @@ pub struct Config {
     pub macro_prefix_maps: Vec<(String, String)>,
     /// -fmacro-backtrace-limit=N: 宏展开递归深度上限 (默认 128)
     pub macro_backtrace_limit: usize,
+    /// -trigraphs: 启用 C89 trigraph 替换 (??= ??( ??/ ??) ??' ??< ??! ??> ??-)
+    pub trigraphs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -783,6 +785,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut file_prefix_maps: Vec<(String, String)> = Vec::new();
     let mut macro_prefix_maps: Vec<(String, String)> = Vec::new();
     let mut macro_backtrace_limit: usize = 128;
+    let mut trigraphs = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1794,12 +1797,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-mindirect-branch=keep" => {
                 indirect_branch_thunk_extern = false;
             }
+            "-trigraphs" => {
+                trigraphs = true;
+            }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
             | "-pedantic-errors"
             | "-ansi"
             | "-traditional"
-            | "-trigraphs"
             | "-Wmissing-prototypes"
             | "-Wstrict-prototypes"
             | "-Wold-style-definition"
@@ -2345,6 +2350,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             file_prefix_maps: file_prefix_maps.clone(),
             macro_prefix_maps: macro_prefix_maps.clone(),
             macro_backtrace_limit,
+            trigraphs,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -2454,6 +2460,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             file_prefix_maps: file_prefix_maps.clone(),
             macro_prefix_maps: macro_prefix_maps.clone(),
             macro_backtrace_limit,
+            trigraphs,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

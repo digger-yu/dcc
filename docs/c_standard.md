@@ -11,6 +11,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - K&R 风格函数定义与参数声明
 - 预处理器 (#define, #include, #if, #ifdef, #ifndef, #else, #elif, #endif, #undef)
 - Digraphs (`<:` `:>` `<%` `%>` `%:` `%:%:`) — 替代 `[` `]` `{` `}` `#` `##` 的记法
+- Trigraphs (`??=` `??(` `??/` `??)` `??'` `??<` `??!` `??>` `??-`) — 需 `-trigraphs` 启用
 
 ## C99
 

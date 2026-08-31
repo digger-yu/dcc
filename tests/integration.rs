@@ -20265,3 +20265,123 @@ fn c89_digraphs_preprocess() {
         "digraphs should expand correctly. got: {stdout}"
     );
 }
+
+/// C89 trigraph support: ??= ??( ??/ ??) ??' ??< ??! ??> ??-
+/// Trigraphs are enabled with -trigraphs flag
+#[test]
+fn c89_trigraphs_compile_and_run() {
+    let source = include_str!("fixtures/c/c89_trigraphs.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-c89-trigraphs-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-c89-trigraphs-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-trigraphs", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "trigraph compile failed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+    }
+    let run = std::process::Command::new(&exe_path)
+        .output()
+        .expect("run trigraph test");
+    let _ = fs::remove_file(&exe_path);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "trigraph test should return 0"
+    );
+}
+
+/// C89 trigraph preprocessing: ??= -> #, ??< -> {, etc.
+#[test]
+fn c89_trigraphs_preprocess() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-trigraph-pp-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        "??=define MAGIC 42\n\
+         int x = MAGIC;\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-trigraphs"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -E -trigraphs");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "trigraph preprocess should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("int x = 42"),
+        "??= should become # and MAGIC should expand to 42. got: {stdout}"
+    );
+}
+
+/// C89 trigraphs should NOT be converted in string literals
+#[test]
+fn c89_trigraphs_not_in_strings() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-trigraph-str-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        "const char *s = \"??= ??( ??/\";\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-trigraphs"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -E -trigraphs");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "trigraph preprocess should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Trigraphs inside string literals should remain unchanged
+    assert!(
+        stdout.contains("\"??= ??( ??/\""),
+        "trigraphs in strings should not be converted. got: {stdout}"
+    );
+}
+
+/// Without -trigraphs, trigraph sequences should remain unchanged
+#[test]
+fn c89_trigraphs_disabled_by_default() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-trigraph-off-{}.c", std::process::id()));
+    fs::write(
+        &src_path,
+        "int x = ??<1??>;\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -E");
+    let _ = fs::remove_file(&src_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Without -trigraphs, ??< and ??> should remain as-is
+    // (they'll likely cause a parse error, but the preprocessor should pass them through)
+    assert!(
+        stdout.contains("??<") || stdout.contains("??"),
+        "trigraphs should not be converted without -trigraphs. got: {stdout}"
+    );
+}

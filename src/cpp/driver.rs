@@ -81,6 +81,7 @@ pub fn compile_cpp(
         &crate::cli::TargetTriple::host(),      /* target */
         &[],                                    /* macro_prefix_maps */
         128,                                    /* macro_depth_limit */
+        false,                                  /* trigraphs */
     );
     if !pp_out.diags.is_empty() {
         let mut out = Vec::new();
