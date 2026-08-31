@@ -394,6 +394,12 @@ pub enum CppStmt {
     Break,
     /// `continue;` (M8)
     Continue,
+    /// `switch (expr) { case val: stmts... default: stmts... }`
+    Switch {
+        expr: CppExpr,
+        /// Each arm: None = default, Some(expr) = case expr
+        arms: Vec<(Option<CppExpr>, CppBody)>,
+    },
     /// `co_await expr;` (C++20 协程, M9 占位)
     CoAwait(CppExpr),
     /// `co_yield expr;` (C++20 协程, M9 占位)
@@ -6505,6 +6511,16 @@ impl<'a> CppParser<'a> {
             }
             return Ok(CppStmt::Continue);
         }
+        // switch (expr) { case val: stmts... default: stmts... }
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwSwitch,
+                ..
+            }))
+        ) {
+            return self.parse_switch_stmt();
+        }
         // C++20 协程 (M9: 占位, 直接走对应 C 表达式)
         if self.at(CppKw::CoAwait) {
             self.bump();
@@ -6864,6 +6880,161 @@ impl<'a> CppParser<'a> {
             step,
             body: Box::new(body),
         })
+    }
+
+    /// Parse `switch (expr) { case val: stmts... default: stmts... }`
+    /// case/default are label prefixes inside the brace body, not standalone stmts.
+    fn parse_switch_stmt(&mut self) -> Result<CppStmt, CppParseError> {
+        // bump past `switch`
+        self.bump();
+        // expect `(`
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                "(",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump();
+        let expr = self.parse_expr()?;
+        // expect `)`
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::RParen,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                ")",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump();
+        // expect `{`
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBrace,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                "{",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump();
+        // Parse body: collect case/default arms
+        let mut arms: Vec<(Option<CppExpr>, CppBody)> = Vec::new();
+        let mut cur_expr: Option<CppExpr> = None;
+        let mut cur_stmts: Vec<CppStmt> = Vec::new();
+        while !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::RBrace,
+                ..
+            }))
+        ) {
+            // Check for `case expr:`
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwCase,
+                    ..
+                }))
+            ) {
+                // Push previous arm if any
+                if cur_expr.is_some() || !cur_stmts.is_empty() {
+                    arms.push((
+                        cur_expr.take(),
+                        CppBody {
+                            stmts: std::mem::take(&mut cur_stmts),
+                            is_decl: false,
+                        },
+                    ));
+                }
+                self.bump(); // past `case`
+                let case_expr = self.parse_expr()?;
+                // expect `:`
+                if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Colon,
+                        ..
+                    }))
+                ) {
+                    return Err(CppParseError::Unexpected(
+                        ":",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                self.bump();
+                cur_expr = Some(case_expr);
+                continue;
+            }
+            // Check for `default:`
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwDefault,
+                    ..
+                }))
+            ) {
+                // Push previous arm if any
+                if cur_expr.is_some() || !cur_stmts.is_empty() {
+                    arms.push((
+                        cur_expr.take(),
+                        CppBody {
+                            stmts: std::mem::take(&mut cur_stmts),
+                            is_decl: false,
+                        },
+                    ));
+                }
+                self.bump(); // past `default`
+                // expect `:`
+                if !matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Colon,
+                        ..
+                    }))
+                ) {
+                    return Err(CppParseError::Unexpected(
+                        ":",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                self.bump();
+                cur_expr = None; // None = default arm
+                continue;
+            }
+            // Regular statement inside an arm
+            cur_stmts.push(self.parse_stmt()?);
+        }
+        // Push last arm
+        if cur_expr.is_some() || !cur_stmts.is_empty() {
+            arms.push((
+                cur_expr,
+                CppBody {
+                    stmts: cur_stmts,
+                    is_decl: false,
+                },
+            ));
+        }
+        // bump past `}`
+        self.bump();
+        Ok(CppStmt::Switch { expr, arms })
     }
 
     fn parse_expr(&mut self) -> Result<CppExpr, CppParseError> {

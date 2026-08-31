@@ -8190,6 +8190,12 @@ impl Lower {
                 }
             }
             CppStmt::Throw(Some(e)) => self.scan_expr_types(e),
+            CppStmt::Switch { expr, arms } => {
+                self.scan_expr_types(expr);
+                for (_, body) in arms {
+                    self.scan_body_types(body);
+                }
+            }
             CppStmt::CoAwait(e) | CppStmt::CoYield(e) => self.scan_expr_types(e),
             CppStmt::CoReturn(Some(e)) => self.scan_expr_types(e),
             CppStmt::Decl(d) => self.scan_decl_types(d),
@@ -8488,6 +8494,10 @@ impl Lower {
                     || self.body_needs_system_headers(body)
             }
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
+            CppStmt::Switch { expr, arms } => {
+                self.expr_needs_system_headers(expr)
+                    || arms.iter().any(|(_, b)| self.body_needs_system_headers(b))
+            }
             CppStmt::Try { .. } | CppStmt::Throw(_) => true,
             _ => false,
         }
@@ -10089,6 +10099,27 @@ impl Lower {
             }
             CppStmt::Break => self.out.push_str("break;\n"),
             CppStmt::Continue => self.out.push_str("continue;\n"),
+            CppStmt::Switch { expr, arms } => {
+                self.out.push_str("switch (");
+                self.emit_expr(expr);
+                self.out.push_str(") {\n");
+                for (case_expr, body) in arms {
+                    match case_expr {
+                        Some(e) => {
+                            self.out.push_str("case ");
+                            self.emit_expr(&e);
+                            self.out.push_str(":\n");
+                        }
+                        None => {
+                            self.out.push_str("default:\n");
+                        }
+                    }
+                    for s in &body.stmts {
+                        self.emit_stmt(s);
+                    }
+                }
+                self.out.push_str("}\n");
+            }
             // M26: 真协程状态机 (Duff's device) - 每个挂起点:
             //   state = N+1; value = (expr); return value;  + 恢复标签 case N+1:
             // 状态/返回槽/完成标志变量 per-function 命名 (见 coroutine.rs)

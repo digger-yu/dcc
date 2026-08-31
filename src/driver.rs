@@ -1826,7 +1826,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             let error_count = parser.diags.iter()
                 .filter(|d| matches!(d.sev, Severity::Error))
                 .count();
-            let use_ast = error_count <= 5 || !decls.is_empty();
+            let use_ast = error_count <= 5 || (!decls.is_empty() && error_count <= 10);
             if use_ast {
                 if error_count > 0 && cfg.verbose {
                     eprintln!(
