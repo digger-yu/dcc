@@ -67,13 +67,28 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
   （16 字节大小和对齐；整数加减、位运算、比较、移位、乘/除/取模；
   SysV 传参与返回值占两个 GP 寄存器 `rax:rdx`）
 - 声明属性 `section`、`aligned`、`weak`、`visibility`、`unused`、
-  `cold`、`noinline`、`always_inline`；ET_REL 输出会传递节、对齐、
-  弱绑定和 ELF visibility，`cold` 默认进入 `.text.unlikely`
+  `cold`、`hot`、`noinline`、`always_inline`、`pure`、`const`、
+  `returns_twice`、`no_instrument_function`、`malloc`、`alloc_size`、
+  `assume_aligned`、`warn_unused_result`、`sentinel`、`format_arg`、
+  `transparent_union`、`externally_visible`、`returns_nonnull`；
+  ET_REL 输出会传递节、对齐、弱绑定和 ELF visibility，
+  `cold` 默认进入 `.text.unlikely`，`hot` 进入 `.text.hot`
 - `register TYPE name asm("reg")` 固定寄存器变量
+- `__attribute__((mode(__DI__)))` 类型模式映射（QI=8/HI=16/SI=32/DI=64 位，
+  word=指针大小，SF/DF/TF=浮点模式，pointer=无符号指针大小）
 - `__attribute__((...))` 多位置属性
 - `__asm__ __volatile__` 带约束内联汇编 (Mini x86 汇编器实际发射指令,
   支持 100+ 常见指令；rol/prefetch/movss/addss 等内核常用扩展)
-- `__builtin_*` (expect, expect_with_probability, constant_p, memcpy, memset, memmove, object_size, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
+- `__builtin_*` (expect, expect_with_probability, constant_p, memcpy, memset, memmove,
+  mempcpy, object_size, abs, unreachable, trap, clz, ctz, popcount,
+  strcpy, strlen, stpcpy, strnlen, strspn, strcspn, strcasestr, strncmp,
+  bswap, parity, frame_address, return_address,
+  setjmp, longjmp, addc, subc, is_constant_evaluated,
+  memcpy_inline, memset_inline, unwind_init, speculation_safe_value 等)
+- `__sync_*` 遗留原子操作（fetch_and_add/sub/or/and/xor/nand、
+  add_and_fetch/sub_and_fetch/or_and_fetch/and_and_fetch/xor_and_fetch/nand_and_fetch、
+  bool_compare_and_swap、val_compare_and_swap、lock_test_and_set、
+  lock_release、synchronize）
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
 - `__VA_ARGS__` 可变参数宏

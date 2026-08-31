@@ -158,6 +158,21 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_preserve_access_index` | BPF CO-RE 透传 |
 | `__builtin_btf_type_id` / `has_attribute` | 返回 0 |
 | `__builtin_counted_by_ref` | 透传指针 |
+| `__builtin_mempcpy` | rep movsb + 返回 dst+n |
+| `__builtin_stpcpy` / `strnlen` / `strspn` / `strcspn` / `strcasestr` / `strncmp` | 转发到 libc |
+| `__builtin_setjmp` / `longjmp` | 保存/恢复 callee-saved 寄存器 (rbx/rbp/r12-r15/rsp/return addr) |
+| `__builtin_addc` / `subc` | add/sub + 进位标志 |
+| `__builtin_is_constant_evaluated` | 编译期折叠为 0 |
+| `__builtin_memcpy_inline` / `memset_inline` | rep movsb/stosb 内联 |
+| `__builtin_unwind_init` | no-op |
+| `__builtin_speculation_safe_value` | 返回参数值 (no-op) |
+| `__sync_fetch_and_{add,sub,or,and,xor,nand}` | lock xadd / CAS loop |
+| `__sync_{add,sub,or,and,xor,nand}_and_fetch` | lock xadd + add / CAS loop |
+| `__sync_bool_compare_and_swap` | lock cmpxchg + sete |
+| `__sync_val_compare_and_swap` | lock cmpxchg 返回旧值 |
+| `__sync_lock_test_and_set` | xchg |
+| `__sync_lock_release` | mov [ptr], 0 |
+| `__sync_synchronize` | mfence |
 | `__builtin_alloca_uninitialized` | 同 alloca |
 | `__builtin_strcat` | 转发到 libc strcat |
 | `__builtin_warning` | 返回 0 |
@@ -353,6 +368,19 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `__attribute__((constructor/destructor(priority)))` | 按 priority 排序 |
 | `__attribute__((alias("target")))` | 函数与变量别名：解析存入 `FuncDecl.alias_name` / `VarDecl.alias_name`，codegen 创建 ELF 别名符号 (STT_FUNC / STT_OBJECT) 指向目标符号的同一位置；x86_64/aarch64/riscv64/mips/arm 全后端支持；`-S` asm 输出模式发射 `.set alias, target` 指令；内核 `__weak` + `alias` 符号覆盖模式完整支持。测试: `tests/fixtures/c/m27_attr_alias.c`, `m27_attr_alias_var.c`, `m27_attr_alias_weak.c` |
 | `__attribute__((ifunc/retain/used/flatten/error/warning/deprecated))` | 全部实装 |
+| `__attribute__((hot))` | 热函数放入 `.text.hot` 段（与 `cold` → `.text.unlikely` 对称） |
+| `__attribute__((pure/const))` | 无副作用/纯函数提示（解析存储，codegen 暂未利用） |
+| `__attribute__((returns_twice))` | 函数可多次返回（如 setjmp） |
+| `__attribute__((no_instrument_function))` | 禁止 profiling/sanitizer 插桩 |
+| `__attribute__((malloc))` | 返回指针不别名已有内存 |
+| `__attribute__((alloc_size(N[,M])))` | 参数 N(,M) 指定分配大小 |
+| `__attribute__((assume_aligned(N)))` | 返回指针对齐至少 N 字节 |
+| `__attribute__((warn_unused_result))` | 返回值不应被忽略 |
+| `__attribute__((sentinel))` | 可变参函数需 NULL 结尾 |
+| `__attribute__((format_arg(N)))` | 第 N 个参数是格式字符串 |
+| `__attribute__((transparent_union))` | struct 字段类型透明联合 |
+| `__attribute__((externally_visible))` | 阻止 LTO 隐藏符号 |
+| `__attribute__((mode(__DI__)))` | 类型模式映射（QI/HI/SI/DI/word/SF/DF/TF/pointer） |
 | `__asm__("label")` GNU asm 标签 | 变量和函数声明后的 `__asm__("name")` 覆盖 ELF 符号名；解析存入 `VarDecl.asm_label` / `FuncDecl.asm_label`，codegen 使用 asm_label 作为 ELF 符号名而非 C 标识符名；用于内核符号重命名、ABI 兼容等场景。测试: `tests/fixtures/c/asm_label_test.c` |
 | `__attribute__((naked))` | 不生成 prologue/epilogue，函数体完全由内联汇编组成；x86_64/aarch64/riscv64/arm/mips/mips64 全后端支持；用于内核异常向量、系统调用入口等低级入口点 |
 | 结构体字段级 `__attribute__((aligned(N)))` | 精确控制每个字段的对齐要求；解析存入 `Field.field_align`，布局时 `layout_struct_with_pack()` 使用 `field_align` 覆盖类型自然对齐；与 `#pragma pack` 交互：pack 限制最大对齐，字段 aligned 不能突破 pack 限制；结构体整体对齐取所有字段对齐的最大值。测试: `tests/fixtures/c/field_aligned_attr.c` |
