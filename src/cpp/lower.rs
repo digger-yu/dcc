@@ -4721,6 +4721,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
     // _ZN6strlenEv -> strlen, _ZN6strcmpEv -> strcmp, 等.
     result = demangle_c_functions(&result);
+    // M30.3: 将 C 标准库函数的空定义转换为声明.
+    // parser 可能将系统头文件中的函数声明解析为空函数体 `{ }`,
+    // 导致链接时与 libc/libiberty 的实现冲突 (multiple definition).
+    result = convert_empty_clib_defs_to_decls(&result);
     // M30.3: 动态全局初始化转换.
     // C++ 允许全局变量用函数调用初始化, C 不允许.
     // 将 `Type var = func(args);` 转换为无初始化声明 + __dcc_init_var 函数.
@@ -4911,6 +4915,53 @@ fn demangle_c_functions(s: &str) -> String {
         // _ZN<len><name>Ev 模式 (Itanium ABI: 无参函数)
         let mangled = format!("_ZN{}{}Ev", func.len(), func);
         result = result.replace(&mangled, func);
+    }
+    result
+}
+
+/// M30.3: 将 C 标准库函数的空定义转换为声明.
+/// 系统头文件中的函数声明被 parser 解析为空函数体 `{ }`,
+/// 链接时与 libc/libiberty 的实现冲突. 将空函数体转为 `;` 声明.
+fn convert_empty_clib_defs_to_decls(s: &str) -> String {
+    let clib_fns = [
+        "memchr", "rawmemchr", "memrchr", "memcmp", "memcpy",
+        "memmove", "memset", "strcpy", "strncpy", "strcat",
+        "strncat", "strchr", "strrchr", "strstr", "strpbrk",
+        "strnlen", "strlen", "strcmp", "strncmp", "strcoll",
+        "index", "rindex", "stpcpy", "stpncpy",
+        "strchrnul", "strdup", "strndup", "malloc", "free",
+        "calloc", "realloc", "fopen", "fclose", "fread", "fwrite",
+        "fseek", "ftell", "rewind", "feof", "ferror",
+        "getenv", "setenv", "fopencookie",
+        "fgetpos", "fsetpos", "fgetpos64", "fsetpos64",
+    ];
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // 检查是否是 C 标准库函数的空定义:
+        // 当前行以 `{` 结尾且包含 C 库函数名
+        // 下一行是 `}`
+        let is_clib_fn = clib_fns.iter().any(|f| {
+            // 精确匹配: 函数名后跟 ` (` 或 `(` 且前面是返回类型
+            let pat1 = format!(" {} (", f);
+            let pat2 = format!(" {}(", f);
+            let pat3 = format!("*{} (", f);
+            (trimmed.contains(&pat1) || trimmed.contains(&pat2) || trimmed.contains(&pat3))
+                && trimmed.ends_with('{')
+        });
+        if is_clib_fn && i + 1 < lines.len() && lines[i + 1].trim() == "}" {
+            // 确认是空函数体: 当前行 `{` 结尾, 下一行 `}`
+            let new_line = format!("{};", trimmed[..trimmed.len()-1].trim_end());
+            result.push_str(&new_line);
+            result.push('\n');
+            i += 2; // 跳过 `{` 行和 `}` 行
+            continue;
+        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
     }
     result
 }
