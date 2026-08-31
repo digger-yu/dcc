@@ -97,4 +97,68 @@ namespace std {
         void* allocate(size_t n);
         void  deallocate(void* p, size_t n);
     };
-}
+
+    // ===== make_unique<T> (C++14) =====
+    // Simplified: returns unique_ptr wrapping new'd memory
+    template <typename T>
+    unique_ptr make_unique() {
+        return unique_ptr();
+    }
+
+    // ===== make_shared<T> (C++11) =====
+    template <typename T>
+    shared_ptr make_shared() {
+        return shared_ptr();
+    }
+
+    // ===== weak_ptr (simplified) =====
+    class weak_ptr {
+    public:
+        weak_ptr() : s_() {}
+        weak_ptr(const shared_ptr& sp) : s_(sp.s_) {}
+        int expired() const { return use_count() == 0; }
+        size_t use_count() const { return dccpp_shared_ptr_use_count(&s_); }
+        shared_ptr lock() const { return shared_ptr(); }
+    private:
+        dccpp_shared_ptr s_;
+    };
+
+    // ===== pointer_traits (simplified) =====
+    template <typename Ptr>
+    struct pointer_traits {
+        typedef Ptr pointer;
+    };
+
+    // ===== align (C++11) =====
+    inline void* align(size_t alignment, size_t size, void*& ptr, size_t& space) {
+        size_t uintptr = (size_t)ptr;
+        size_t aligned = (uintptr + alignment - 1) & ~(alignment - 1);
+        size_t diff = aligned - uintptr;
+        if (space >= size + diff) {
+            ptr = (void*)aligned;
+            space -= diff;
+            return ptr;
+        }
+        return 0;
+    }
+
+    // ===== uninitialized_copy / fill (C++11) =====
+    template <typename InputIt, typename ForwardIt>
+    ForwardIt uninitialized_copy(InputIt first, InputIt last, ForwardIt d_first) {
+        while (first != last) {
+            *d_first = *first;
+            ++first;
+            ++d_first;
+        }
+        return d_first;
+    }
+
+    template <typename ForwardIt, typename T>
+    void uninitialized_fill(ForwardIt first, ForwardIt last, const T& value) {
+        while (first != last) {
+            *first = value;
+            ++first;
+        }
+    }
+
+} // namespace std

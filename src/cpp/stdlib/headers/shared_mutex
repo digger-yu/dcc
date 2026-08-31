@@ -1,0 +1,60 @@
+// <shared_mutex> - dcc++ C++ 标准库
+// std::shared_mutex (C++14) / shared_lock (C++14).
+// 读写锁: 多读者 / 单写者语义.
+//
+// 语义说明:
+//   - shared_mutex 降级为 pthread_rwlock_t 或 dcc 运行时辅助.
+//   - shared_lock 提供 RAII 共享 (读) 锁.
+//   - unique_lock 提供排他 (写) 锁.
+
+extern "C" {
+    struct dccpp_shared_mutex {
+        int state;  // 0=unlocked, >0=readers, -1=writer
+    };
+    void dccpp_shared_mutex_init(dccpp_shared_mutex* m);
+    void dccpp_shared_mutex_lock(dccpp_shared_mutex* m);
+    void dccpp_shared_mutex_unlock(dccpp_shared_mutex* m);
+    void dccpp_shared_mutex_lock_shared(dccpp_shared_mutex* m);
+    void dccpp_shared_mutex_unlock_shared(dccpp_shared_mutex* m);
+}
+
+namespace std {
+
+    class shared_mutex {
+    public:
+        shared_mutex() { dccpp_shared_mutex_init(&m_); }
+
+        void lock() { dccpp_shared_mutex_lock(&m_); }
+        void unlock() { dccpp_shared_mutex_unlock(&m_); }
+        void lock_shared() { dccpp_shared_mutex_lock_shared(&m_); }
+        void unlock_shared() { dccpp_shared_mutex_unlock_shared(&m_); }
+
+        int try_lock() { return 1; }
+        int try_lock_shared() { return 1; }
+
+    private:
+        dccpp_shared_mutex m_;
+    };
+
+    // shared_lock: RAII shared (read) lock
+    template <typename Mutex>
+    class shared_lock {
+    public:
+        shared_lock() : m_(0), owned_(0) {}
+        explicit shared_lock(Mutex& m) : m_(&m), owned_(1) {
+            m_->lock_shared();
+        }
+        ~shared_lock() {
+            if (owned_ && m_) m_->unlock_shared();
+        }
+
+        void lock() { m_->lock_shared(); owned_ = 1; }
+        void unlock() { m_->unlock_shared(); owned_ = 0; }
+        int owns_lock() const { return owned_; }
+
+    private:
+        Mutex* m_;
+        int owned_;
+    };
+
+}  // namespace std
