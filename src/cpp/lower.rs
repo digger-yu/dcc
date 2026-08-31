@@ -4721,6 +4721,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
     // _ZN6strlenEv -> strlen, _ZN6strcmpEv -> strcmp, 等.
     result = demangle_c_functions(&result);
+    // M30.3: 修复基本类型被错误添加 struct 前缀的问题.
+    // parser 可能将 `signed long int` 等基本类型误加上 `struct` 前缀,
+    // 生成无效的 `struct signed long int`. 需要移除.
+    result = fix_struct_primitive_types(&result);
     // M30.3: 将 C 标准库函数的空定义转换为声明.
     // parser 可能将系统头文件中的函数声明解析为空函数体 `{ }`,
     // 导致链接时与 libc/libiberty 的实现冲突 (multiple definition).
@@ -4729,6 +4733,14 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // C++ 允许全局变量用函数调用初始化, C 不允许.
     // 将 `Type var = func(args);` 转换为无初始化声明 + __dcc_init_var 函数.
     result = convert_dynamic_global_inits(&result);
+    // M30.3: 清理泄漏到全局作用域的函数体语句.
+    // parser 有时会将函数体内的局部变量声明泄漏到全局作用域,
+    // 导致 conflicting types 错误. 检测并移除这些泄漏语句.
+    result = remove_leaked_fn_body_stmts(&result);
+    // M30.3: 去重匿名聚合体构造函数.
+    // parser 为每个匿名 union/struct 生成相同的 `__anon_aggr` 构造函数,
+    // 导致链接时 multiple definition. 保留第一个定义, 其余转为 static.
+    result = dedup_anon_aggr_ctors(&result);
     result
 }
 
@@ -4895,6 +4907,32 @@ fn strip_attributes(s: &str) -> String {
     result
 }
 
+/// M30.3: 修复基本类型被错误添加 struct 前缀的问题.
+/// parser 可能将 `signed long int` 等基本类型误加上 `struct` 前缀,
+/// 生成无效的 `struct signed long int`. 需要移除 struct 前缀.
+fn fix_struct_primitive_types(s: &str) -> String {
+    let mut result = s.to_string();
+    // 基本类型列表: 这些类型不应该有 struct 前缀
+    let primitive_types = [
+        "signed long int", "unsigned long int",
+        "signed long long", "unsigned long long",
+        "signed int", "unsigned int",
+        "signed short", "unsigned short",
+        "signed char", "unsigned char",
+        "long double", "long long",
+        "long int", "short int",
+        "signed", "unsigned",
+        "long", "short", "int", "char", "float", "double",
+        "void", "size_t", "ssize_t", "ptrdiff_t",
+    ];
+    for ty in &primitive_types {
+        // 替换 `struct <type>` 为 `<type>`
+        let pattern = format!("struct {}", ty);
+        result = result.replace(&pattern, ty);
+    }
+    result
+}
+
 /// M30.3: 解混淆 C 标准库函数.
 /// parser 可能将 extern "C" 块中的函数误作为 C++ 函数混淆.
 /// 将 _ZN6strlenEv 还原为 strlen, _ZN6strcmpEv 还原为 strcmp 等.
@@ -4910,6 +4948,10 @@ fn demangle_c_functions(s: &str) -> String {
         "vsprintf", "vsnprintf", "fopen", "fclose", "fread", "fwrite",
         "fseek", "ftell", "rewind", "feof", "ferror", "clearerr",
         "getenv", "setenv", "system", "qsort", "bsearch",
+        "memchr", "rawmemchr", "memrchr", "strpbrk", "strnlen",
+        "strchrnul", "stpcpy", "stpncpy", "index", "rindex",
+        "strdup", "strndup", "fopencookie", "fgetpos", "fsetpos",
+        "fgetpos64", "fsetpos64", "strcoll",
     ];
     for func in &c_functions {
         // _ZN<len><name>Ev 模式 (Itanium ABI: 无参函数)
@@ -4963,7 +5005,47 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
         result.push('\n');
         i += 1;
     }
-    result
+    // 第二遍: 将所有参数名为 `_` 的空函数定义转为声明.
+    // parser 将系统头文件中的函数声明 (无函数体) 误解析为空定义,
+    // 参数名全为 `_` 是因为 parser 无法识别参数名.
+    let lines2: Vec<&str> = result.lines().collect();
+    let mut result2 = String::with_capacity(result.len());
+    let mut j = 0;
+    while j < lines2.len() {
+        let trimmed = lines2[j].trim();
+        if trimmed.ends_with('{') && !trimmed.starts_with("{") && !trimmed.starts_with("//") {
+            // 检查是否所有参数名为 `_`
+            if let Some(paren_start) = trimmed.rfind('(') {
+                // 提取 ( 和 ) 之间的参数列表
+                let after_paren = &trimmed[paren_start+1..];
+                let params_str = if let Some(close_paren) = after_paren.rfind(')') {
+                    after_paren[..close_paren].trim()
+                } else {
+                    // 没有 ): 尝试去掉末尾的 { 和空白
+                    after_paren.trim_end().trim_end_matches('{').trim()
+                };
+                if !params_str.is_empty() {
+                    let all_underscore = params_str.split(',').all(|p| {
+                        let p = p.trim();
+                        p.ends_with(" _") || p == "void* _" || p == "..." ||
+                        p.split_whitespace().last().map_or(false, |n| n == "_")
+                    });
+                    if all_underscore && j + 1 < lines2.len() && lines2[j + 1].trim() == "}" {
+                        // 空函数体且所有参数名为 _: 转为声明
+                        let decl = format!("{};", trimmed[..trimmed.len()-1].trim_end());
+                        result2.push_str(&decl);
+                        result2.push('\n');
+                        j += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        result2.push_str(lines2[j]);
+        result2.push('\n');
+        j += 1;
+    }
+    result2
 }
 
 /// M30.3: 动态全局初始化转换.
@@ -5047,6 +5129,124 @@ fn convert_dynamic_global_inits(s: &str) -> String {
             }
         }
         result.push_str("}\n");
+    }
+    result
+}
+
+/// M30.3: 清理泄漏到全局作用域的函数体语句.
+/// parser 有时会将函数体内的局部变量声明泄漏到全局作用域,
+/// 导致 conflicting types 错误. 检测并移除这些泄漏语句.
+/// 泄漏语句的特征: 在函数定义之间的连续简单声明行.
+fn remove_leaked_fn_body_stmts(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // 检查是否是函数/宏定义结束后的泄漏语句块
+        // 特征: 前一行是 `}`, 当前行是简单声明, 且后续有多行简单声明
+        if trimmed == "}" && i + 1 < lines.len() {
+            // 检查下一行开始是否是泄漏的声明块
+            let mut leak_start = i + 1;
+            // 跳过空行
+            while leak_start < lines.len() && lines[leak_start].trim().is_empty() {
+                leak_start += 1;
+            }
+            if leak_start < lines.len() {
+                // 检查是否有连续的简单声明行 (泄漏的局部变量)
+                let mut leak_end = leak_start;
+                let mut has_struct_decl = false;
+                while leak_end < lines.len() {
+                    let lt = lines[leak_end].trim();
+                    if lt.is_empty() {
+                        leak_end += 1;
+                        continue;
+                    }
+                    // 检查是否是简单声明: `type name;` 或 `type name = expr;`
+                    let is_simple_decl = (lt.ends_with(';')
+                        && !lt.starts_with("//")
+                        && !lt.starts_with("/*")
+                        && !lt.starts_with("#")
+                        && !lt.starts_with("static")
+                        && !lt.starts_with("extern")
+                        && !lt.starts_with("typedef")
+                        && !lt.starts_with("void __dcc_")
+                        && !lt.contains("{")
+                        && !lt.contains("}"))
+                        || (lt.starts_with("struct ") && lt.ends_with(';'));
+                    if is_simple_decl {
+                        if lt.starts_with("struct ") {
+                            has_struct_decl = true;
+                        }
+                        leak_end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                // 如果检测到泄漏声明块:
+                // - 2+ 行且包含 struct 声明, 或
+                // - 3+ 行简单声明 (无 struct 也可能是泄漏)
+                // 则认为是泄漏的函数体, 移除这些行
+                let is_leak = (has_struct_decl && leak_end - leak_start >= 2)
+                    || leak_end - leak_start >= 3;
+                if is_leak {
+                    // 检查泄漏块后是否是函数定义或文件结尾
+                    let mut after_leak = leak_end;
+                    while after_leak < lines.len() && lines[after_leak].trim().is_empty() {
+                        after_leak += 1;
+                    }
+                    let is_before_fn = after_leak >= lines.len()
+                        || lines[after_leak].trim().ends_with('{')
+                        || lines[after_leak].starts_with("/* M30.3");
+                    if is_before_fn {
+                        // 输出 `}` 后跳过泄漏的声明块
+                        result.push_str(lines[i]);
+                        result.push('\n');
+                        i = leak_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
+    }
+    result
+}
+
+/// M30.3: 去重匿名聚合体构造函数.
+/// parser 为每个匿名 union/struct 生成相同的 `__anon_aggr` 构造函数,
+/// 导致链接时 multiple definition. 保留第一个定义, 其余移除.
+fn dedup_anon_aggr_ctors(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut seen_anon_ctor = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // 检查是否是 __anon_aggr 构造函数定义
+        if trimmed.starts_with("void _ZN11__anon_aggrC1Ev")
+            && trimmed.ends_with('{')
+        {
+            if seen_anon_ctor {
+                // 已经见过一个定义, 跳过这个重复定义
+                // 找到函数体结束的 `}`
+                i += 1;
+                while i < lines.len() && lines[i].trim() != "}" {
+                    i += 1;
+                }
+                if i < lines.len() {
+                    i += 1; // 跳过 `}`
+                }
+                continue;
+            } else {
+                seen_anon_ctor = true;
+            }
+        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
     }
     result
 }

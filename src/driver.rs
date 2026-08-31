@@ -1975,6 +1975,13 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         };
         let mut link_cmd = Command::new(&cc);
         link_cmd.arg(tmp_obj).arg("-o").arg(&cfg.output);
+        // 自动包含 dcc C++ 运行时库
+        let dcc_runtime = std::path::PathBuf::from(
+            "/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c"
+        );
+        if dcc_runtime.exists() {
+            link_cmd.arg(&dcc_runtime);
+        }
         if cfg.verbose {
             eprintln!("dcc: host-link: {} -> {}", tmp_obj.display(), cfg.output.display());
         }
@@ -2855,6 +2862,13 @@ fn link_objects_with_host_cc(
     let mut cmd = Command::new(&cc);
     for obj in objects {
         cmd.arg(obj);
+    }
+    // 自动包含 dcc C++ 运行时库 (如果存在)
+    let dcc_runtime = std::path::PathBuf::from(
+        "/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c"
+    );
+    if dcc_runtime.exists() {
+        cmd.arg(&dcc_runtime);
     }
     cmd.arg("-o").arg(output);
     if let Some(sr) = sysroot {

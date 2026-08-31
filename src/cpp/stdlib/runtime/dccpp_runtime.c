@@ -244,13 +244,23 @@ void dccpp_vector_resize(struct dccpp_vector* v, size_t n) {
  * ========================================================================= */
 
 /* 全局: 标准流对象 (C++ 头 <iostream> 会 extern 引用这些符号) */
-static struct dccpp_ostream _dccpp_cout = { stdout };
-static struct dccpp_ostream _dccpp_cerr = { stderr };
-static struct dccpp_istream _dccpp_cin  = { stdin  };
+/* C 中 stdout/stderr/stdin 不是常量表达式, 使用 NULL 初始化并在首次使用时延迟赋值 */
+static struct dccpp_ostream _dccpp_cout = { NULL };
+static struct dccpp_ostream _dccpp_cerr = { NULL };
+static struct dccpp_istream _dccpp_cin  = { NULL };
 
-struct dccpp_ostream* dccpp_cout(void) { return &_dccpp_cout; }
-struct dccpp_ostream* dccpp_cerr(void) { return &_dccpp_cerr; }
-struct dccpp_istream* dccpp_cin(void)  { return &_dccpp_cin;  }
+struct dccpp_ostream* dccpp_cout(void) {
+    if (!_dccpp_cout.fp) _dccpp_cout.fp = stdout;
+    return &_dccpp_cout;
+}
+struct dccpp_ostream* dccpp_cerr(void) {
+    if (!_dccpp_cerr.fp) _dccpp_cerr.fp = stderr;
+    return &_dccpp_cerr;
+}
+struct dccpp_istream* dccpp_cin(void) {
+    if (!_dccpp_cin.fp) _dccpp_cin.fp = stdin;
+    return &_dccpp_cin;
+}
 
 void dccpp_ostream_putc(struct dccpp_ostream* os, char c) {
     fputc(c, os->fp);
