@@ -4774,6 +4774,10 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // C++ 的 `void ...` 应转为 C 的 `...`.
     result = result.replace(", void ...", ", ...");
     result = result.replace("(void ...)", "(...)");
+    // M30.3: 将 gengtype 全局变量转为 extern 声明.
+    // 这些变量在 gengtype.h 中声明为 extern, 但 parser 发射为定义,
+    // 导致多 TU 链接冲突. 转为 extern 声明.
+    result = fix_gengtype_global_vars(&result);
     result
 }
 
@@ -5482,13 +5486,46 @@ fn staticize_std_functions(s: &str) -> String {
             || trimmed.starts_with("double ")
             || trimmed.starts_with("unsigned ")
             || trimmed.starts_with("bool ")
-            || trimmed.starts_with("_Bool "))
+            || trimmed.starts_with("_Bool ")
+            || trimmed.starts_with("type_p ")
+            || trimmed.starts_with("const_type_p ")
+            || trimmed.starts_with("pair_p ")
+            || trimmed.starts_with("options_p ")
+            || trimmed.starts_with("outf_p ")
+            || trimmed.starts_with("input_file*")
+            || trimmed.starts_with("lang_bitmap ")
+            || trimmed.starts_with("struct fileloc*")
+            || trimmed.starts_with("YY_BUFFER_STATE "))
             && (trimmed.contains("_ZN") 
                 || trimmed.contains("std_")
                 || trimmed.contains("_hwi(")
                 || trimmed.contains("_or_zerop(")
                 || trimmed.contains("startswith(")
-                || trimmed.contains("endswith("))
+                || trimmed.contains("endswith(")
+                || trimmed.contains("input_file_by_name")
+                || trimmed.contains("get_lang_bitmap")
+                || trimmed.contains("create_string_option")
+                || trimmed.contains("create_type_option")
+                || trimmed.contains("create_nested_option")
+                || trimmed.contains("create_nested_ptr_option")
+                || trimmed.contains("type_fileloc")
+                || trimmed.contains("get_ultimate_base_class")
+                || trimmed.contains("get_output_file_with_visibility")
+                || trimmed.contains("resolve_typedef")
+                || trimmed.contains("do_typedef")
+                || trimmed.contains("new_structure")
+                || trimmed.contains("create_user_defined_type")
+                || trimmed.contains("add_subclass")
+                || trimmed.contains("union_or_struct_p")
+                || trimmed.contains("yy_create_buffer")
+                || trimmed.contains("yy_delete_buffer")
+                || trimmed.contains("yy_switch_to_buffer")
+                || trimmed.contains("yy_scan_buffer")
+                || trimmed.contains("yy_scan_string")
+                || trimmed.contains("yy_scan_bytes")
+                || trimmed.contains("yy_flush_buffer")
+                || trimmed.contains("yy_init_buffer")
+                || trimmed.contains("yypush_buffer_state"))
             && trimmed.contains('(')
             && !trimmed.starts_with("static")
             && !trimmed.starts_with("extern")
@@ -5496,6 +5533,42 @@ fn staticize_std_functions(s: &str) -> String {
         if is_std_fn {
             result.push_str("static inline ");
             result.push_str(line.trim_start());
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+/// M30.3: 将 gengtype 全局变量定义转为 extern 声明.
+/// gengtype.h 中声明的全局变量 (如 gt_files, num_gt_files 等)
+/// 被 parser 当作定义发射, 导致多 TU 链接冲突.
+/// 转为 extern 声明, 实际定义应在一个 TU 中.
+fn fix_gengtype_global_vars(s: &str) -> String {
+    // gengtype 全局变量列表
+    let gengtype_vars = [
+        "gt_files", "num_gt_files", "build_headers", "num_build_headers",
+        "this_file", "system_h_file", "lang_dir_names", "num_lang_dirs",
+        "lexer_toplevel_done", "lexer_line", "typedefs", "structures",
+        "variables", "string_type", "scalar_nonchar", "scalar_char",
+        "callback_type", "output_files", "header_file",
+        "hit_error", "verbosity_level", "do_dump", "do_debug",
+    ];
+    let lines: Vec<&str> = s.lines().collect();
+    let mut result = String::with_capacity(s.len());
+    for line in &lines {
+        let trimmed = line.trim();
+        // 检查是否是 gengtype 全局变量定义 (无 extern, 无初始化器)
+        let is_gengtype_var = gengtype_vars.iter().any(|v| {
+            trimmed.ends_with(&format!(" {};", v))
+                || trimmed.ends_with(&format!("* {};", v))
+                || trimmed.ends_with(&format!("** {};", v))
+        });
+        if is_gengtype_var && !trimmed.starts_with("extern") && !trimmed.starts_with("static") {
+            result.push_str("extern ");
+            result.push_str(trimmed);
             result.push('\n');
         } else {
             result.push_str(line);
