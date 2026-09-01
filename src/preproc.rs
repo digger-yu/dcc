@@ -2724,6 +2724,19 @@ impl Preprocessor {
             } else if pragma_text.starts_with("sccs") {
                 // #pragma sccs "string" — SCCS 标识, 静默接受
                 // 与 #pragma ident 类似
+            } else if pragma_text.starts_with("simd") {
+                // #pragma simd — 向量化指示 (C 等价于 !DIR$ SIMD)
+                // 标记下一个循环可安全向量化 (无循环携带依赖)
+                self.openmp_pragmas
+                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+            } else if pragma_text.starts_with("vector") {
+                // #pragma vector always — 强制向量化指示
+                self.openmp_pragmas
+                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+            } else if pragma_text.starts_with("unroll") {
+                // #pragma unroll / #pragma unroll N — 展开指示
+                self.openmp_pragmas
+                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
             }
             // 其他 #pragma 忽略
         } else if let Some(rest) = directive.strip_prefix("error") {

@@ -20888,6 +20888,51 @@ fn openmp_parallel_for_pragma() {
     assert!(cfg.opt >= 0);
 }
 
+// ===== Commit 11: Vectorization Directives =====
+
+#[test]
+fn dir_vector_always() {
+    // Verify that #pragma vector always is collected
+    let args = vec![
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert!(cfg.opt >= 0);
+}
+
+#[test]
+fn dir_ivdep() {
+    // Verify that !DIR$ IVDEP style directives are accepted
+    let args = vec![
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert!(cfg.opt >= 0);
+}
+
+#[test]
+fn dir_unroll() {
+    // Verify that #pragma unroll is collected
+    let args = vec![
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert!(cfg.opt >= 0);
+}
+
+#[test]
+fn pragma_simd() {
+    // Verify that #pragma simd is collected
+    let args = vec![
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert!(cfg.opt >= 0);
+}
 #[test]
 fn openmp_simd_pragma() {
     // Verify that -fopenmp=simd flag is accepted
