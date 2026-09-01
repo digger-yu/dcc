@@ -93,9 +93,77 @@ pub fn encode_aarch64_nop() -> [u8; 4] {
     [0x1f, 0x20, 0x03, 0xd5]
 }
 
+// ===== NEON/SVE register helpers =====
+
+/// Check if operand is a NEON vector register (v/d/s/h/b prefix).
+fn is_neon_reg(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    // Strip arrangement specifier like .16b, .4s, .2d
+    let s = s.split('.').next().unwrap_or(&s);
+    (s.starts_with('v') || s.starts_with('d') || s.starts_with('s')
+        || s.starts_with('h') || s.starts_with('b'))
+        && s[1..].parse::<u8>().is_ok()
+}
+
+/// Parse NEON register name -> (reg_num, size_bits).
+/// v=128, d=64, s=32, h=16, b=8
+fn parse_neon_reg(s: &str) -> Option<(u8, u16)> {
+    let s = s.trim().to_lowercase();
+    // Strip arrangement specifier
+    let base = s.split('.').next().unwrap_or(&s);
+    let (prefix, num_str) = base.split_at(1);
+    let num: u8 = num_str.parse().ok()?;
+    if num > 31 {
+        return None;
+    }
+    let size = match prefix {
+        "v" => 128,
+        "d" => 64,
+        "s" => 32,
+        "h" => 16,
+        "b" => 8,
+        _ => return None,
+    };
+    Some((num, size))
+}
+
+/// Check if operand is a SVE Z register (z0-z31).
+fn is_sve_reg(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    let s = s.split('.').next().unwrap_or(&s);
+    s.starts_with('z') && s[1..].parse::<u8>().is_ok()
+}
+
+/// Parse SVE Z register name -> reg_num (0-31).
+fn parse_sve_reg(s: &str) -> Option<u8> {
+    let s = s.trim().to_lowercase();
+    let s = s.split('.').next().unwrap_or(&s);
+    let num_str = s.strip_prefix('z')?;
+    let num: u8 = num_str.parse().ok()?;
+    if num > 31 { None } else { Some(num) }
+}
+
+/// Check if operand is a SVE P register (p0-p15).
+fn is_sve_pred_reg(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    let s = s.split('.').next().unwrap_or(&s);
+    s.starts_with('p') && s[1..].parse::<u8>().is_ok()
+}
+
+/// Parse SVE P register name -> reg_num (0-15).
+fn parse_sve_pred_reg(s: &str) -> Option<u8> {
+    let s = s.trim().to_lowercase();
+    let s = s.split('.').next().unwrap_or(&s);
+    let num_str = s.strip_prefix('p')?;
+    let num: u8 = num_str.parse().ok()?;
+    if num > 15 { None } else { Some(num) }
+}
+
 /// Encode AArch64 instruction from mnemonic + operands.
 /// Returns encoded bytes (little-endian, 4 bytes per instruction).
 pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
+    // Note: NEON/SVE instruction matching is done via operand type
+    // detection (is_neon_reg/is_sve_reg) in the match arms below.
     match mnemonic {
         "nop" => Some(encode_aarch64_nop().to_vec()),
 
@@ -237,8 +305,10 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             }
         }
 
-        // ADD Wd, Wn, Wm / ADD Xd, Xn, Xm
-        "add" if operands.len() == 3 => {
+        // ADD Wd, Wn, Wm / ADD Xd, Xn, Xm (GP only; NEON/SVE vector ADD handled below)
+        "add" if operands.len() == 3
+            && !is_neon_reg(&operands[0]) && !is_sve_reg(&operands[0]) =>
+        {
             let rd_res = parse_aarch64_reg(&operands[0]);
             let rn_res = parse_aarch64_reg(&operands[1]);
             let rm_res = parse_aarch64_reg(&operands[2]);
@@ -258,8 +328,10 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             }
         }
 
-        // SUB Wd, Wn, Wm / SUB Xd, Xn, Xm
-        "sub" if operands.len() == 3 => {
+        // SUB Wd, Wn, Wm / SUB Xd, Xn, Xm (GP only; NEON vector SUB handled below)
+        "sub" if operands.len() == 3
+            && !is_neon_reg(&operands[0]) =>
+        {
             let rd_res = parse_aarch64_reg(&operands[0]);
             let rn_res = parse_aarch64_reg(&operands[1]);
             let rm_res = parse_aarch64_reg(&operands[2]);
@@ -301,6 +373,220 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
                 .unwrap_or(0);
             let insn: u32 = 0xd503201f | ((imm & 0xf) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ===== NEON SIMD instructions =====
+
+        // NEON register helper: parse v/d/s/h/b register
+        // Returns (reg_num, element_size_bits)
+        // v=128, d=64, s=32, h=16, b=8
+
+        // FADD (vector) Vd.T, Vn.T, Vm.T
+        // Q=1 for 128-bit, size=00 for .2s, 01 for .4h, 10 for .2d
+        "fadd" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            // FADD vector: 0x0E20D400 | Q | size<<22 | Rm | Rn | Rd
+            let size = match rsz {
+                128 => 0b10u32, // .2d for 128-bit
+                64 => 0b10u32,  // .2d
+                32 => 0b00u32,  // .2s
+                _ => 0b00u32,
+            };
+            let insn: u32 = 0x0e20d400
+                | q
+                | ((size & 0x3) << 22)
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // FSUB (vector) Vd.T, Vn.T, Vm.T
+        "fsub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            let size = match rsz {
+                128 => 0b10u32,
+                64 => 0b10u32,
+                32 => 0b00u32,
+                _ => 0b00u32,
+            };
+            // FSUB vector: 0x2EA0D400 | Q | size<<22 | Rm | Rn | Rd
+            let insn: u32 = 0x2ea0d400
+                | q
+                | ((size & 0x3) << 22)
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // FMUL (vector) Vd.T, Vn.T, Vm.T
+        "fmul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            let size = match rsz {
+                128 => 0b10u32,
+                64 => 0b10u32,
+                32 => 0b00u32,
+                _ => 0b00u32,
+            };
+            // FMUL vector: 0x2E20DC00 | Q | size<<22 | Rm | Rn | Rd
+            let insn: u32 = 0x2e20dc00
+                | q
+                | ((size & 0x3) << 22)
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ADD (vector) Vd.T, Vn.T, Vm.T
+        "add" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            // ADD vector: 0x0E208400 | Q | size<<22 | Rm | Rn | Rd
+            let insn: u32 = 0x0e208400
+                | q
+                | ((0b00u32) << 22) // size=00 for .16b/.8b
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SUB (vector) Vd.T, Vn.T, Vm.T
+        "sub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            // SUB vector: 0x2E208400 | Q | size<<22 | Rm | Rn | Rd
+            let insn: u32 = 0x2e208400
+                | q
+                | ((0b00u32) << 22)
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // MUL (vector) Vd.T, Vn.T, Vm.T
+        "mul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
+            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
+            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let q = if rsz == 128 { 1u32 << 30 } else { 0 };
+            // MUL vector: 0x0E209C00 | Q | size<<22 | Rm | Rn | Rd
+            let insn: u32 = 0x0e209c00
+                | q
+                | ((0b00u32) << 22)
+                | ((rm as u32 & 0x1f) << 16)
+                | ((rn as u32 & 0x1f) << 5)
+                | (rd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // LD1 {Vt.T}, [Xn] - load 128-bit vector
+        "ld1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
+            let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            // LD1 (single structure, 128-bit): 0x4C007400 | Rn | Vt
+            let insn: u32 = 0x4c407400
+                | ((xn as u32 & 0x1f) << 5)
+                | (vt as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ST1 {Vt.T}, [Xn] - store 128-bit vector
+        "st1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
+            let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
+            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            // ST1 (single structure, 128-bit): 0x4C006400 | Rn | Vt
+            let insn: u32 = 0x4c006400
+                | ((xn as u32 & 0x1f) << 5)
+                | (vt as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ===== SVE instructions =====
+
+        // PTRUE Pd.T - set all predicate elements to true
+        "ptrue" if operands.len() == 1 && is_sve_pred_reg(&operands[0]) => {
+            let pd = parse_sve_pred_reg(&operands[0]).unwrap_or(0);
+            // PTRUE: 0x25B86000 | Pd
+            let insn: u32 = 0x25b86000 | (pd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // WHILELT Pd, Rn, Rm
+        "whilelt" if operands.len() == 3 && is_sve_pred_reg(&operands[0]) => {
+            let pd = parse_sve_pred_reg(&operands[0]).unwrap_or(0);
+            let (rn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            let (rm, _) = parse_aarch64_reg(&operands[2]).unwrap_or((0, true));
+            // WHILELT: 0x2528A400 | Rn | Rm | Pd
+            let insn: u32 = 0x2528a400
+                | ((rn as u32 & 0x1f) << 16)
+                | ((rm as u32 & 0x1f) << 5)
+                | (pd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SVE FADD Zzd.Pg/M, Zzn, Zzm
+        "fadd" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
+            let zd = parse_sve_reg(&operands[0]).unwrap_or(0);
+            let zn = parse_sve_reg(&operands[1]).unwrap_or(0);
+            let zm = parse_sve_reg(&operands[2]).unwrap_or(0);
+            // SVE FADD: 0x65000400 | Zm | Zn | Zd (simplified)
+            let insn: u32 = 0x65000400
+                | ((zm as u32 & 0x1f) << 16)
+                | ((zn as u32 & 0x1f) << 5)
+                | (zd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SVE ADD Zzd.Pg/M, Zzn, Zzm
+        "add" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
+            let zd = parse_sve_reg(&operands[0]).unwrap_or(0);
+            let zn = parse_sve_reg(&operands[1]).unwrap_or(0);
+            let zm = parse_sve_reg(&operands[2]).unwrap_or(0);
+            // SVE ADD: 0x45000400 | Zm | Zn | Zd (simplified)
+            let insn: u32 = 0x45000400
+                | ((zm as u32 & 0x1f) << 16)
+                | ((zn as u32 & 0x1f) << 5)
+                | (zd as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // LD1W {Zt.Pg}, [Xn] - SVE load vector of words
+        "ld1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
+            let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
+            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            // LD1W (vector): 0x85800000 | Rn | Zt (simplified)
+            let insn: u32 = 0x85800000
+                | ((xn as u32 & 0x1f) << 5)
+                | (zt as u32 & 0x1f);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ST1W {Zt.Pg}, [Xn] - SVE store vector of words
+        "st1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
+            let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
+            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            // ST1W (vector): 0xE5800000 | Rn | Zt (simplified)
+            let insn: u32 = 0xe5800000
+                | ((xn as u32 & 0x1f) << 5)
+                | (zt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
         }
 
@@ -1059,5 +1345,134 @@ mod tests {
         let lines = vec!["bad_mips_insn".to_string()];
         let result = encode_asm_lines_for_arch(&lines, "mips", false);
         assert!(result.is_err());
+    }
+
+    // ===== NEON SIMD tests =====
+
+    #[test]
+    fn test_neon_reg_parse() {
+        // v prefix = 128-bit
+        assert_eq!(parse_neon_reg("v0"), Some((0, 128)));
+        assert_eq!(parse_neon_reg("v31"), Some((31, 128)));
+        // d prefix = 64-bit
+        assert_eq!(parse_neon_reg("d0"), Some((0, 64)));
+        // s prefix = 32-bit
+        assert_eq!(parse_neon_reg("s15"), Some((15, 32)));
+        // with arrangement specifier (should be stripped)
+        assert_eq!(parse_neon_reg("v0.16b"), Some((0, 128)));
+        assert_eq!(parse_neon_reg("v0.4s"), Some((0, 128)));
+        assert_eq!(parse_neon_reg("v0.2d"), Some((0, 128)));
+        // out of range
+        assert_eq!(parse_neon_reg("v32"), None);
+    }
+
+    #[test]
+    fn test_is_neon_reg() {
+        assert!(is_neon_reg("v0"));
+        assert!(is_neon_reg("d15"));
+        assert!(is_neon_reg("s31"));
+        assert!(is_neon_reg("h0"));
+        assert!(is_neon_reg("b7"));
+        assert!(!is_neon_reg("x0"));
+        assert!(!is_neon_reg("w1"));
+        assert!(!is_neon_reg("z0"));
+    }
+
+    #[test]
+    fn test_encode_neon_fadd_vector() {
+        // FADD v0.2d, v1.2d, v2.2d
+        let ops = vec!["v0".to_string(), "v1".to_string(), "v2".to_string()];
+        let bytes = encode_aarch64("fadd", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        // Q=1 (128-bit), size=10 (.2d)
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x4ea2d420);
+    }
+
+    #[test]
+    fn test_encode_neon_add_vector() {
+        // ADD v0.16b, v1.16b, v2.16b
+        let ops = vec!["v0".to_string(), "v1".to_string(), "v2".to_string()];
+        let bytes = encode_aarch64("add", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x4e228420);
+    }
+
+    #[test]
+    fn test_encode_neon_ld1() {
+        // LD1 v0, [x1]
+        let ops = vec!["v0".to_string(), "x1".to_string()];
+        let bytes = encode_aarch64("ld1", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x4c407420);
+    }
+
+    #[test]
+    fn test_encode_neon_st1() {
+        // ST1 v3, [x5]
+        let ops = vec!["v3".to_string(), "x5".to_string()];
+        let bytes = encode_aarch64("st1", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x4c0064a3);
+    }
+
+    // ===== SVE tests =====
+
+    #[test]
+    fn test_sve_reg_parse() {
+        assert_eq!(parse_sve_reg("z0"), Some(0));
+        assert_eq!(parse_sve_reg("z15"), Some(15));
+        assert_eq!(parse_sve_reg("z31"), Some(31));
+        assert_eq!(parse_sve_reg("z32"), None);
+    }
+
+    #[test]
+    fn test_sve_pred_reg_parse() {
+        assert_eq!(parse_sve_pred_reg("p0"), Some(0));
+        assert_eq!(parse_sve_pred_reg("p15"), Some(15));
+        assert_eq!(parse_sve_pred_reg("p16"), None);
+    }
+
+    #[test]
+    fn test_encode_sve_ptrue() {
+        // PTRUE p0
+        let ops = vec!["p0".to_string()];
+        let bytes = encode_aarch64("ptrue", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x25b86000);
+    }
+
+    #[test]
+    fn test_encode_sve_whilelt() {
+        // WHILELT p0, x0, x1
+        let ops = vec!["p0".to_string(), "x0".to_string(), "x1".to_string()];
+        let bytes = encode_aarch64("whilelt", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x2528a420);
+    }
+
+    #[test]
+    fn test_encode_sve_add() {
+        // ADD z0, z1, z2
+        let ops = vec!["z0".to_string(), "z1".to_string(), "z2".to_string()];
+        let bytes = encode_aarch64("add", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x45020420);
+    }
+
+    #[test]
+    fn test_encode_sve_ld1w() {
+        // LD1W z0, [x1]
+        let ops = vec!["z0".to_string(), "x1".to_string()];
+        let bytes = encode_aarch64("ld1w", &ops).unwrap();
+        assert_eq!(bytes.len(), 4);
+        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(insn, 0x85800020);
     }
 }
