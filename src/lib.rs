@@ -25,6 +25,7 @@ pub mod ir;
 pub mod link;
 pub mod loop_opt;
 pub mod lto;
+pub mod memory_report;
 pub mod mmap_io;
 pub mod opt;
 pub mod output_format;
