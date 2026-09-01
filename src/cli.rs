@@ -87,6 +87,7 @@ pub struct Config {
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
     pub data_sections: bool,     // -fdata-sections (每个变量独立 section)
+    pub gc_sections: bool,       // -Wl,--gc-sections (链接时垃圾回收未用 section)
     pub specs: Option<String>,   // -specs=nano.specs (Newlib-nano 规格文件)
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
@@ -820,6 +821,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut function_sections = false;
     let mut no_function_sections = false;
     let mut data_sections = false;
+    let mut gc_sections = false;
     let mut specs: Option<String> = None;
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
@@ -1180,6 +1182,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // -Wl,* : 传递给链接器的选项
             "-Wl,--whole-archive" => { in_whole_archive = true; }
             "-Wl,--no-whole-archive" => { in_whole_archive = false; }
+            "-Wl,--gc-sections" => { gc_sections = true; }
+            "-Wl,--no-gc-sections" => { gc_sections = false; }
             a if a.starts_with("-Wl,") => {} // 忽略其他 -Wl 选项
             // -Wp,* : 仅白名单预处理器子选项；未知项报错，避免静默丢参
             "-Wp" => return Err(CliError::new("empty -Wp option")),
@@ -2276,6 +2280,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         function_sections = true;
     }
 
+    // Auto-enable gc-sections when both function-sections and data-sections are set
+    // This is common for bare-metal embedded targets to minimize code size
+    if function_sections && data_sections && !gc_sections {
+        gc_sections = true;
+    }
+
     let link_mode = relocatable_link
         && !inputs.is_empty()
         && inputs
@@ -2491,6 +2501,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             lto_enabled,
             function_sections,
             data_sections,
+            gc_sections,
             specs,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
@@ -2611,6 +2622,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             lto_enabled,
             function_sections,
             data_sections,
+            gc_sections,
             specs,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
@@ -3629,5 +3641,41 @@ BAR");
         let cfg = parse(&args).expect("-O2 should parse");
         assert!(!cfg.size_opt);
         assert_eq!(cfg.opt, 2);
+    }
+
+    // === gc-sections tests ===
+
+    #[test]
+    fn wl_gc_sections_enables_gc() {
+        let args = vec!["-Wl,--gc-sections".to_string(), "test.o".to_string()];
+        let cfg = parse(&args).expect("-Wl,--gc-sections should parse");
+        assert!(cfg.gc_sections);
+    }
+
+    #[test]
+    fn auto_gc_sections_with_function_and_data_sections() {
+        let args = vec![
+            "-c".to_string(),
+            "-ffunction-sections".to_string(),
+            "-fdata-sections".to_string(),
+            "test.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("should parse");
+        assert!(cfg.function_sections);
+        assert!(cfg.data_sections);
+        assert!(cfg.gc_sections); // auto-enabled
+    }
+
+    #[test]
+    fn no_gc_sections_without_both_sections() {
+        let args = vec![
+            "-c".to_string(),
+            "-ffunction-sections".to_string(),
+            "test.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("should parse");
+        assert!(cfg.function_sections);
+        assert!(!cfg.data_sections);
+        assert!(!cfg.gc_sections); // not auto-enabled
     }
 }
