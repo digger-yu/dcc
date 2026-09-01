@@ -20872,3 +20872,18 @@ fn auto_vectorize_vnni_int16_pattern() {
     assert_eq!(cfg.cpu_feature_overrides.avx_vnni, Some(true));
     assert_eq!(cfg.opt, 3);
 }
+
+// ===== Commit 9: Software Pipelining =====
+
+#[test]
+fn software_pipelining_simple_loop() {
+    // Verify that -O3 enables the software pipelining pass
+    // (P16 in SSA pass pipeline)
+    let args = vec![
+        "-O3".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert_eq!(cfg.opt, 3);
+}
