@@ -5342,11 +5342,20 @@ fn remove_leaked_fn_body_stmts(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
     let mut i = 0;
+    // M26: 跟踪花括号深度, 只在顶层 `}` (深度回到 0) 后才检测泄漏.
+    // 避免将函数体内 if/while 块后的局部变量声明误判为“泄漏语句”.
+    let mut brace_depth: i32 = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
+        // 更新花括号深度
+        for ch in trimmed.chars() {
+            if ch == '{' { brace_depth += 1; }
+            else if ch == '}' { brace_depth -= 1; }
+        }
         // 检查是否是函数/宏定义结束后的泄漏语句块
-        // 特征: 前一行是 `}`, 当前行是简单声明, 且后续有多行简单声明
-        if trimmed == "}" && i + 1 < lines.len() {
+        // 特征: 前一行是 `}` 且花括号深度回到 0 (顶层函数结束),
+        // 当前行是简单声明, 且后续有多行简单声明
+        if trimmed == "}" && brace_depth == 0 && i + 1 < lines.len() {
             // 检查下一行开始是否是泄漏的声明块
             let mut leak_start = i + 1;
             // 跳过空行
@@ -5537,16 +5546,20 @@ fn fix_sch_extern_decls(s: &str) -> String {
 /// C++ 标准库头文件中的 inline 函数 (如 std_strlen, std_memcpy 等)
 /// 被 parser 当作普通函数定义, 导致多 TU 链接冲突.
 /// 检测这些函数并添加 static inline 前缀.
+/// M26: 排除含 _ZN 的 C++ mangled 名函数 (模块导出等), 这些需要
+/// 保持外部链接; 只针对 std_ 前缀的函数.
 fn staticize_std_functions(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
     for line in &lines {
         let trimmed = line.trim();
-        // 检测 std_* 或 GCC inline 函数定义
-        // 返回类型 + _ZN* 或 std_* 或 _hwi 或 *_or_zerop 等
+        // 检测 std_* 函数定义 (返回类型 + std_ 前缀函数名)
         // 排除 main 函数 (trampoline 必须是全局的, 否则链接器找不到 main)
+        // M26: 排除含 _ZN 的 C++ mangled 名函数 (模块导出需要外部链接)
         let is_main_fn = trimmed.contains("main") && trimmed.contains('(') && trimmed.contains('{');
+        let has_cpp_mangled = trimmed.contains("_ZN");
         let is_std_fn = !is_main_fn
+            && !has_cpp_mangled
             && (trimmed.starts_with("void ") 
                 || trimmed.starts_with("void*") 
                 || trimmed.starts_with("size_t ")
@@ -5568,8 +5581,7 @@ fn staticize_std_functions(s: &str) -> String {
                 || trimmed.starts_with("lang_bitmap ")
                 || trimmed.starts_with("struct fileloc*")
                 || trimmed.starts_with("YY_BUFFER_STATE "))
-            && (trimmed.contains("_ZN") 
-                || trimmed.contains("std_"))
+            && trimmed.contains("std_")
             && trimmed.contains('(')
             && !trimmed.starts_with("static")
             && !trimmed.starts_with("extern")
@@ -6368,6 +6380,11 @@ pub fn strip_cpp_keywords(s: &str) -> String {
     result.push_str("#endif\n");
     // Helper for std::swap → std_swap (used by GCC source)
     result.push_str("#define std_swap(a, b) do { __typeof__(a) _tmp = (a); (a) = (b); (b) = _tmp; } while(0)\n");
+    // M26/C++23: stdfloat 类型降级
+    result.push_str("typedef float std_float32_t;\n");
+    result.push_str("typedef double std_float64_t;\n");
+    // std::print → printf 降级
+    result.push_str("#define std_print printf\n");
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -6584,8 +6601,8 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                 }
             }
         }
-        // override / final / friend (类方法后) → 删除
-        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5), (b"friend", 6)] {
+        // override / final / friend / export (类方法后/模块导出) → 删除
+        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5), (b"friend", 6), (b"export", 6)] {
             if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
                 let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
@@ -6597,6 +6614,22 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                     i = j;
                     continue;
                 }
+            }
+        }
+        // M18: import 语句 (import module_name;) → 整句删除
+        if i + 6 <= len && &bytes[i..i + 6] == b"import" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 6 >= len || !is_ident_char(bytes[i + 6]);
+            if before_ok && after_ok {
+                let mut j = i + 6;
+                while j < len && bytes[j] != b';' && bytes[j] != b'\n' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b';' {
+                    j += 1;
+                }
+                i = j;
+                continue;
             }
         }
         result.push(bytes[i] as char);
@@ -6757,7 +6790,11 @@ impl Lower {
                     | "gid_t" | "mode_t" | "off64_t" | "ino_t" | "nlink_t"
                     | "blksize_t" | "blkcnt_t" | "fsblkcnt_t" | "fsfilcnt_t"
                     | "id_t" | "key_t" | "clock_t" | "suseconds_t"
-                    | "useconds_t" | "dev_t" => return n,
+                    | "useconds_t" | "dev_t"
+                    // M26/C++23: stdfloat 类型 (std::float32_t 等降级后名字)
+                    | "std_float16_t" | "std_float32_t" | "std_float64_t"
+                    | "std_float128_t" | "std_bfloat16_t"
+                    | "std_decimal32_t" | "std_decimal64_t" | "std_decimal128_t" => return n,
                     _ => {}
                 }
                 // M26: enum 类型已降级为 `typedef enum {...} ns_E;`, 类型引用
@@ -7581,7 +7618,10 @@ impl Lower {
                 if let CppDecl::Typedef { target, name } = d {
                     let is_self_ref = matches!(target, MangleType::Class(cn) if cn == name);
                     if !is_self_ref {
-                        self.typedef_aliases.insert(name.clone(), target.clone());
+                        // M26: 命名空间内的 typedef 使用限定名
+                        // (如 std::float32_t → std_float32_t)
+                        let qname = self.qualify_name(name);
+                        self.typedef_aliases.insert(qname, target.clone());
                     }
                 }
                 // M26: 普通声明扫描类型, 触发模板类实例化 (定义先于使用)
@@ -7696,14 +7736,37 @@ impl Lower {
         self.transitive_vbases = result;
     }
 
-    /// 多态类标记补全: 与既有 lower_class 的 vptr 规则一致
-    /// (`has_virt = 自有虚函数 || 有基类`), 保证布局模拟与实际 struct 一致.
+    /// 多态类标记补全: 继承多态基类的派生类也需要 vptr.
+    /// 只有自有虚函数或继承了多态基类的类才标记为多态.
     fn compute_polymorphic_flags(&mut self) {
         let keys: Vec<String> = self.class_bases.keys().cloned().collect();
-        for k in keys {
-            if let Some(bases) = self.class_bases.get(&k) {
-                if !bases.is_empty() {
-                    self.class_polymorphic.insert(k);
+        // 种子: 有虚基的类需要 vptr (虚 inheritance 意味着多态布局)
+        for k in &keys {
+            if let Some(vbs) = self.transitive_vbases.get(k) {
+                if !vbs.is_empty() {
+                    self.class_polymorphic.insert(k.clone());
+                }
+            }
+        }
+        // 多轮迭代直到收敛 (基类标记可能晚于派生类)
+        let mut changed = true;
+        let mut rounds = 0;
+        while changed && rounds < 32 {
+            changed = false;
+            rounds += 1;
+            for k in &keys {
+                if self.class_polymorphic.contains(k) {
+                    continue;
+                }
+                if let Some(bases) = self.class_bases.get(k) {
+                    for b in bases {
+                        let bk = self.cls_key(&b.name);
+                        if self.class_polymorphic.contains(&bk) {
+                            self.class_polymorphic.insert(k.clone());
+                            changed = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -8703,7 +8766,12 @@ impl Lower {
                 }
                 // 类体内定义的成员函数隐式 inline (Itanium ABI: weak linkage)
                 // 多 TU 包含相同类定义时不报 multiple definition
-                self.out.push_str("static inline ");
+                // M26: 模块导出模式下用 extern 链接, 供跨 TU import 使用
+                if self.module_collect {
+                    self.out.push_str("/* module export: external linkage */ ");
+                } else {
+                    self.out.push_str("static inline ");
+                }
                 // M17.0: volatile 成员函数 - 标记此函数; lower 端不区分 volatile
                 // (C 端 volatile 与 C++ volatile 语义在 ABI 上等价, 由 caller 决定
                 // this 访问的 volatile 属性).
@@ -8746,7 +8814,12 @@ impl Lower {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
                 // 类体内定义的构造函数隐式 inline (weak linkage)
-                self.out.push_str("static inline ");
+                // M26: 模块导出模式下用外部链接, 供跨 TU import 使用
+                if self.module_collect {
+                    self.out.push_str("/* module export: external linkage */ ");
+                } else {
+                    self.out.push_str("static inline ");
+                }
                 if *is_explicit {
                     // M17.0: explicit 标记不生成特殊代码 (C++ 端禁止隐式转换)
                     // 我们通过函数注释标记; C 端不强制 (没有隐式转换)
@@ -8770,7 +8843,12 @@ impl Lower {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
                 // 类体内定义的析构函数隐式 inline (weak linkage)
-                self.out.push_str("static inline ");
+                // M26: 模块导出模式下用外部链接
+                if self.module_collect {
+                    self.out.push_str("/* module export: external linkage */ ");
+                } else {
+                    self.out.push_str("static inline ");
+                }
                 self.current_class = Some(class_q);
                 self.emit_fn(&m, &MangleType::Void, &all_params, body);
                 let _ = is_virtual;
@@ -8834,7 +8912,12 @@ impl Lower {
                         vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
                     // 类体内定义的运算符隐式 inline (weak linkage)
-                    self.out.push_str("static inline ");
+                    // M26: 模块导出模式下用外部链接
+                    if self.module_collect {
+                        self.out.push_str("/* module export: external linkage */ ");
+                    } else {
+                        self.out.push_str("static inline ");
+                    }
                     // 设置 current_class, 让 body 内裸字段名 -> this->field
                     self.current_class = Some(class_q);
                     self.emit_fn(&m, ret, &all_params, body);
@@ -9207,16 +9290,19 @@ impl Lower {
                     // 跳过已硬编码的 typedef
                 } else {
                     let c_target = self.mangle_to_c_ns(target);
+                    // M26: 命名空间内 typedef 使用限定名
+                    // (如 std::float32_t → typedef float std_float32_t;)
+                    let qname = self.qualify_name(name);
                     // 跳过目标类型带 struct 前缀但实际不是类的情况
                     // (如 parser 误将 "signed short int" 解析为 Class)
                     let is_bad_struct = c_target.starts_with("struct ")
                         && !self.classes.contains(&c_target[7..].to_string())
                         && !self.typedef_aliases.contains_key(&c_target[7..].to_string());
                     // 跳过自引用 typedef (如 `typedef cpp_hashnode cpp_hashnode;`)
-                    // 其中 c_target 和 name 相同
-                    let is_self_ref_output = c_target == *name;
+                    // 其中 c_target 和 qname 相同
+                    let is_self_ref_output = c_target == qname;
                     if !is_bad_struct && !is_self_ref_output {
-                        self.out.push_str(&format!("typedef {} {};\n", c_target, name));
+                        self.out.push_str(&format!("typedef {} {};\n", c_target, qname));
                     }
                 }
             }

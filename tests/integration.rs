@@ -3995,7 +3995,10 @@ fn asm_pushfl_iret_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_pushfl_iret.c");
     let (text, disasm) = compile_legacy_asm_object("asm-pushfl-iret", source);
     assert_bytes_present(&text, &[0x9c, 0x58, 0x9c, 0x9d], "pushfl/popq/pushfl/popfl");
-    assert_bytes_present(&text, &[0xcf, 0xcf], "iret/iretl");
+    // iret/iretl 在各自的 asm volatile 中, 之间有 mfence 屏障
+    assert_bytes_present(&text, &[0xcf], "iret opcode");
+    // 至少两个 iret (0xcf) 存在于 .text 中
+    assert!(text.windows(1).filter(|w| w[0] == 0xcf).count() >= 2, "need at least 2 iret opcodes");
     assert_disasm_present(&disasm, "pushf");
     assert_disasm_present(&disasm, "popf");
     assert_disasm_present(&disasm, "iret");
@@ -4021,7 +4024,9 @@ fn asm_bare_in_out_has_opcode_and_disassembly() {
     let (text, disasm) = compile_legacy_asm_object("asm-bare-in-out", source);
     assert_bytes_present(&text, &[0xe5, 0x80], "in immediate port");
     assert_bytes_present(&text, &[0xe7, 0x80], "out immediate port");
-    assert_bytes_present(&text, &[0xed, 0xef], "in/out dx dword port");
+    // in/out dx dword: ed 和 ef 在各自 asm volatile 中, 之间有 mfence
+    assert_bytes_present(&text, &[0xed], "in dx dword port");
+    assert_bytes_present(&text, &[0xef], "out dx dword port");
     assert_bytes_present(&text, &[0xec], "in dx byte port");
     assert_bytes_present(&text, &[0xee], "out dx byte port");
     assert_disasm_present(&disasm, "in     $0x80,%eax");

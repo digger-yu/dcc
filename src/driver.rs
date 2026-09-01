@@ -1849,6 +1849,18 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                 || t.contains(" delete ")
                 // C++11: using type alias (using Name = Type;)
                 || t.contains("using ")
+                // M26: 协程关键字 (co_yield/co_await/co_return)
+                || t.contains("co_await")
+                || t.contains("co_yield")
+                || t.contains("co_return")
+                // M18/M26: 模块 export/import 关键字
+                || t.contains("export ")
+                || t.contains("import ")
+                // M26: 虚继承 (virtual 后跟基类说明)
+                || t.contains("virtual ")
+                // M27: 成员指针运算符 .* 和 ->*
+                || t.contains(".*")
+                || t.contains("->*")
         };
         has(&raw) || has(&pp_out.text)
     };
@@ -1870,9 +1882,12 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                 0.0
             };
             // 无错误时直接走 AST; 有错误时按成功率决策:
-            // >= 50% 声明解析成功 → AST lower + opaque 混合路径
-            // < 50% → 回退 strip-keywords
-            let use_ast = error_count == 0 || success_ratio >= 0.5;
+            // >= 20% 声明解析成功 → AST lower + opaque 混合路径
+            // < 20% → 回退 strip-keywords
+            // 阈值从 50% 降至 20%: 复杂标准库头文件 (<expected>, <print>)
+            // 含大量模板声明会拖低成功率, 但 AST lower + opaque 混合路径
+            // 的语义保真度仍远高于 strip-keywords.
+            let use_ast = error_count == 0 || success_ratio >= 0.2;
             if use_ast {
                 if error_count > 0 && cfg.verbose {
                     eprintln!(

@@ -1212,6 +1212,7 @@ impl Type {
                 Some(a) => a, // 字段级 aligned 覆盖自然对齐
                 None => f.ty.align(),
             };
+            let nat = nat.max(1); // 防止对齐为 0 导致后续 underflow
             match max_align {
                 Some(n) if n < nat => n,
                 _ => nat,

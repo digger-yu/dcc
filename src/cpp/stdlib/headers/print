@@ -96,11 +96,12 @@ namespace std {
     }
 
     // vprint_nonunicode / vprint_unicode (内部接口)
-    inline void vprint_nonunicode(FILE* f, const char* fmt, ...) {
-        va_list ap;
-        va_start(ap, fmt);
-        vfprintf(f, fmt, ap);
-        va_end(ap);
-    }
+    // dcc: 跳过发射, 使用 printf 直接降级
+    // inline void vprint_nonunicode(FILE* f, const char* fmt, ...) {
+    //     va_list ap;
+    //     va_start(ap, fmt);
+    //     vfprintf(f, fmt, ap);
+    //     va_end(ap);
+    // }
 
 }  // namespace std

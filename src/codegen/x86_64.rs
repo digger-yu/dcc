@@ -18950,8 +18950,16 @@ impl Codegen {
                 .collect::<Vec<_>>(),
         );
         // volatile asm: 完整屏障，防止优化器重排
+        // 若代码尾部已是 mfence (前一 volatile asm 的后屏障), 跳过冗余前屏障
         if volatile {
-            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+            let code_len = self.code.len();
+            let already_fenced = code_len >= 3
+                && self.code[code_len - 3] == 0x0F
+                && self.code[code_len - 2] == 0xAE
+                && self.code[code_len - 1] == 0xF0;
+            if !already_fenced {
+                self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+            }
         }
         // 记录 asm 块起始 PC (用于 DWARF 行号表)
         let asm_pc_start = self.code.len() as u64;
