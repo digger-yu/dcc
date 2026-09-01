@@ -75,6 +75,19 @@ fn trace_inline_decision(callee: &str, decision: &str, reason: &str) {
 /// -  speculative 内联深度上限 `INLINE_MAX_DEPTH` (8). 递归函数
 ///   通过 callee-name 检测阻止直接递归内联.
 pub fn optimize(module: &mut Module, level: u8) {
+    optimize_with_target(module, level, false, 0);
+}
+
+/// 带目标信息的优化入口。
+///
+/// `has_vnni`: 目标是否支持 VNNI 指令
+/// `vec_bits`: 向量寄存器位宽 (256/512)
+pub fn optimize_with_target(
+    module: &mut Module,
+    level: u8,
+    has_vnni: bool,
+    vec_bits: u32,
+) {
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     function_inline(module, level);
     if level == 0 {
@@ -90,7 +103,7 @@ pub fn optimize(module: &mut Module, level: u8) {
         fold_constant_branches(module);
         eliminate_unreachable(module);
         crate::ssa_gvn::run(module, level);
-        crate::loop_opt::run(module, level);
+        crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
         // M16: 跨函数 DCE (call graph reachability)
         cross_function_dce(module);
         // Qualifier-aware optimization: const/volatile/restrict

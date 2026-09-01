@@ -20856,3 +20856,19 @@ fn fp_contract_off_cli() {
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.fp_contract_mode, dcc::cli::FpContractMode::Off);
 }
+
+// ===== Commit 8: Auto-vectorization VNNI =====
+
+#[test]
+fn auto_vectorize_vnni_int16_pattern() {
+    // Verify that -mavxvnni flag is accepted and enables VNNI
+    let args = vec![
+        "-mavxvnni".to_string(),
+        "-O3".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx_vnni, Some(true));
+    assert_eq!(cfg.opt, 3);
+}

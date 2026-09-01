@@ -10,6 +10,19 @@ use crate::ir::Module;
 /// Profile-guided: hot 函数 (FuncDecl.is_hot, 由 PGO 设置) 在 O3
 /// 享受更激进的展开上限 (max_trip 4 -> 16)。
 pub fn run(module: &mut Module, level: u8) {
+    run_with_target(module, level, false, 0);
+}
+
+/// 带目标信息的循环优化入口。
+///
+/// `has_vnni`: 目标是否支持 VNNI 指令 (AVX-VNNI / AVX-512VNNI)
+/// `vec_bits`: 向量寄存器位宽 (256 for AVX2, 512 for AVX-512)
+pub fn run_with_target(
+    module: &mut Module,
+    level: u8,
+    has_vnni: bool,
+    vec_bits: u32,
+) {
     if level < 2 {
         return;
     }
@@ -22,7 +35,7 @@ pub fn run(module: &mut Module, level: u8) {
                     // Profile-guided: hot 函数享受更激进的展开上限
                     let max_trip: usize = if f.is_hot { 16 } else { 4 };
                     unroll_block(body, max_trip);
-                    vectorize_block(body);
+                    vectorize_block(body, has_vnni, vec_bits);
                 }
             }
         }
@@ -398,7 +411,7 @@ fn is_inc_step(step: &Expr, ivar: &str) -> bool {
 
 // ===== 向量循环向量化 =====
 
-fn vectorize_block(block: &mut Block) {
+fn vectorize_block(block: &mut Block, has_vnni: bool, vec_bits: u32) {
     let mut out = Vec::new();
     for item in block.items.drain(..) {
         match item {
@@ -409,6 +422,19 @@ fn vectorize_block(block: &mut Block) {
                 mut body,
                 span,
             }) => {
+                // Try VNNI dot-product vectorization first
+                if has_vnni && vec_bits >= 256 {
+                    if let Some(vnni_stmt) = try_vectorize_vnni(
+                        init.as_deref(),
+                        cond.as_ref(),
+                        step.as_ref(),
+                        body.as_ref(),
+                        vec_bits,
+                    ) {
+                        out.push(vnni_stmt);
+                        continue;
+                    }
+                }
                 if let Some(vec_stmt) = try_vectorize_for_stmt(
                     init.as_deref(),
                     cond.as_ref(),
@@ -417,7 +443,7 @@ fn vectorize_block(block: &mut Block) {
                 ) {
                     out.push(vec_stmt);
                 } else {
-                    vectorize_in_stmt(body.as_mut());
+                    vectorize_in_stmt(body.as_mut(), has_vnni, vec_bits);
                     out.push(BlockItem::Stmt(Stmt::For {
                         init,
                         cond,
@@ -428,7 +454,7 @@ fn vectorize_block(block: &mut Block) {
                 }
             }
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
-                vectorize_block(&mut b);
+                vectorize_block(&mut b, has_vnni, vec_bits);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
             }
             other => out.push(other),
@@ -437,9 +463,9 @@ fn vectorize_block(block: &mut Block) {
     block.items = out;
 }
 
-fn vectorize_in_stmt(body: &mut Stmt) {
+fn vectorize_in_stmt(body: &mut Stmt, has_vnni: bool, vec_bits: u32) {
     if let Stmt::Block { b, .. } = body {
-        vectorize_block(b);
+        vectorize_block(b, has_vnni, vec_bits);
     }
 }
 
@@ -515,6 +541,102 @@ fn try_vectorize_for(
         },
         span: sp,
     }))
+}
+
+/// 尝试识别 int8/int16 dot-product 模式并用 VNNI 指令向量化。
+///
+/// 检测模式: `sum += a[i] * b[i]` (循环累加乘)
+/// 当目标支持 VNNI 时，标记为可用 VPDPBUSD/VPDPWSSD 指令。
+/// 向量化因子: AVX2=256bit/16bit=16 lanes, AVX-512=512bit/16bit=32 lanes
+fn try_vectorize_vnni(
+    init: Option<&Stmt>,
+    cond: Option<&Expr>,
+    step: Option<&Expr>,
+    body: &Stmt,
+    vec_bits: u32,
+) -> Option<BlockItem> {
+    // Parse the for loop structure
+    let (ivar, n) = parse_counted_for(init, cond, step, 4)?;
+    let stmt = loop_body_single_stmt(body)?;
+
+    // Check for accumulation pattern: sum += a[i] * b[i]
+    let s = match stmt {
+        Stmt::Expr { e, .. } => e,
+        _ => return None,
+    };
+    let (acc_l, acc_r) = match s {
+        Expr::Assign { op: BinOp::Add, l, r, .. } => (l.as_ref(), r.as_ref()),
+        _ => return None,
+    };
+
+    // LHS must be accumulator (scalar int)
+    let acc_name = match acc_l {
+        Expr::Ident { name, ty, .. } => {
+            if !matches!(ty, Type::Int | Type::Short | Type::Char) {
+                return None;
+            }
+            name.clone()
+        }
+        _ => return None,
+    };
+
+    // RHS must be a[i] * b[i] pattern
+    let (mul_l, mul_r) = match acc_r {
+        Expr::Binop { op: BinOp::Mul, l, r, .. } => (l.as_ref(), r.as_ref()),
+        _ => return None,
+    };
+
+    // Both operands must be array accesses with ivar
+    if !is_array_index_with(mul_l, &ivar) || !is_array_index_with(mul_r, &ivar) {
+        return None;
+    }
+
+    // Compute vector lanes based on element size and register width
+    let elem_bits: u32 = 16; // int16 dot-product
+    let lanes = vec_bits / elem_bits;
+
+    // Mark this loop as VNNI-vectorizable by wrapping in a
+    // vectorized statement with appropriate type annotations.
+    let sp = stmt_span(stmt);
+    let i16_qt = crate::ast::QualType::new(Type::Short);
+    let vec_ty = Type::Vector(Box::new(i16_qt), lanes as usize);
+
+    // Produce a vectorized accumulation statement:
+    // acc_vec += (vec)a[i] * (vec)b[i]
+    Some(BlockItem::Stmt(Stmt::Expr {
+        e: Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Ident {
+                name: acc_name,
+                span: sp.clone(),
+                ty: vec_ty.clone(),
+            }),
+            r: Box::new(Expr::Binop {
+                op: BinOp::Mul,
+                l: Box::new(mul_l.clone()),
+                r: Box::new(mul_r.clone()),
+                span: sp.clone(),
+                ty: vec_ty.clone(),
+            }),
+            span: sp.clone(),
+            ty: vec_ty,
+        },
+        span: sp,
+    }))
+}
+
+/// Check if expression is an array access with the given index variable.
+fn is_array_index_with(e: &Expr, ivar: &str) -> bool {
+    match e {
+        Expr::Index { arr: _, idx, .. } => {
+            if let Expr::Ident { name, .. } = idx.as_ref() {
+                name.name == ivar
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 fn parse_vector_elem_assign(

@@ -387,6 +387,12 @@ impl Target {
         self.strict_overflow = false;
     }
 
+    /// 检查是否有 VNNI (Vector Neural Network Instructions) 支持.
+    /// 包括 AVX-VNNI (VEX 形式) 或 AVX-512VNNI.
+    pub fn has_vnni_support(&self) -> bool {
+        self.cpu_features.avx_vnni || self.cpu_features.avx512_vnni
+    }
+
     /// 返回基本类型的默认对齐 (字节)。
     ///
     /// 根据目标架构 ABI 返回各基本类型的自然对齐要求。

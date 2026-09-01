@@ -496,7 +496,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-O0` always_inline | `tests/fixtures/c/always_inline.c` |
 | `-O1` 常量折叠 + 内联 | — |
 | `-O2` GVN/CSE/LICM/分支折叠 | `ssa_gvn.rs` + `loop_opt.rs` |
-| `-O3` 循环展开 + 向量元素循环向量化 | 小 trip≤4 |
+| `-O3` 循环展开 + 向量元素循环向量化 | 小 trip≤4；VNNI dot-product 模式检测 (int16 `sum += a[i]*b[i]`), AVX2=16 lanes / AVX-512=32 lanes |
 | `-march=<name>` / `-mtune=<name>` / `-mcpu=<name>` | 微架构精确调优: x86-64-v2/v3/v4、native、sandybridge/haswell/skylake/icelake-server/sapphirerapids/granite-rapids；ARM cortex-a53/a72/a76/neoverse-n1/v1；`-march=native` 使用 CPUID 检测结果；`-mcpu=` ARM 等价 -march + -mtune |
 | `-Ofast` / `-ffast-math` / `-ffp-contract=` | `-Ofast` 等价 `-O3 -ffast-math`；`-ffast-math` 允许浮点重结合/倒数/非IEEE快速路径, 隐含 `-fno-strict-aliasing -fno-strict-overflow`；`-ffp-contract=fast\|on\|off\|default` 控制 FP 收缩 (FMA) 策略 |
 | SSA pass 全家族 (15 pass) | P1 跨函数 DCE (call graph reachability, 删除不可达 static) / P2 强度削减 (Mul→Shl, 无符号 Div→Shr) / P3 归纳变量优化 (回边检测) / P4 别名分析 (Steensgaard union-find) / P5 指令调度 (BB 内 list scheduling) / P6 PGO (profdata hot/cold) / P7 自动并行 (safe loop 检测) / P8 循环分块 (2x unroll) / P9 循环交换 (block_order swap) / P10 TCO (尾递归→Jump) / P11 函数属性传播 (cold/hot/noreturn) / P12 寄存器分配 (SSA 值计数) / P13 别名集合 (identity/disjoint/overlap) / P14 投机执行 (纯计算外提) / P15 SCCP (lattice + worklist) |

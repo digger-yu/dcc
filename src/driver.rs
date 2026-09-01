@@ -886,7 +886,25 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     diags.extend(ir_warnings);
     ir::validate(&module)
         .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
-    crate::opt::optimize(&mut module, cfg.opt);
+    // Compute target info for optimizer (VNNI vectorization etc.)
+    let opt_has_vnni = cfg.cpu_feature_overrides.avx_vnni == Some(true)
+        || cfg.march.as_deref().map_or(false, |m| {
+            matches!(m, "x86-64-v4" | "sapphirerapids" | "granite-rapids" | "icelake-server" | "icelake-client")
+        });
+    let opt_vec_bits: u32 = if cfg.cpu_feature_overrides.avx512f == Some(true)
+        || cfg.march.as_deref().map_or(false, |m| m == "x86-64-v4")
+    {
+        512
+    } else if cfg.cpu_feature_overrides.avx2 == Some(true)
+        || cfg.march.as_deref().map_or(false, |m| {
+            matches!(m, "x86-64-v3" | "x86-64-v4" | "haswell" | "skylake" | "skylake-avx512")
+        })
+    {
+        256
+    } else {
+        0
+    };
+    crate::opt::optimize_with_target(&mut module, cfg.opt, opt_has_vnni, opt_vec_bits);
     if cfg.opt > 0 {
         ir::resync(&mut module)
             .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
