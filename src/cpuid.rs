@@ -56,6 +56,14 @@ pub struct CpuFeatures {
     pub cet_ss: bool,     // CPUID leaf 7, ECX[bit 7]: CET_SS
     pub cet_ibt: bool,    // CPUID leaf 7, EDX[bit 20]: CET_IBT
 
+    // --- AVX10 (CPUID leaf 7 sub-leaf 1) ---
+    pub avx10_1: bool,    // AVX10.1 support: leaf 7 sub-1 EDX[bit 19]
+    pub avx10_256: bool,  // AVX10.1-256: leaf 7 sub-1 EBX[bit 17]
+    pub avx10_512: bool,  // AVX10.1-512: leaf 7 sub-1 EBX[bit 18]
+
+    // --- APX Foundation ---
+    pub apx_f: bool,      // CPUID leaf 7 sub-1 EDX[bit 21]
+
     // --- 其他 ---
     pub movbe: bool,      // CPUID leaf 1, ECX[bit 22]
     pub xsave: bool,      // CPUID leaf 1, ECX[bit 26]
@@ -82,6 +90,9 @@ pub struct CpuFeatureOverrides {
     pub cet_ss: Option<bool>,
     pub cet_ibt: Option<bool>,
     pub avx_vnni: Option<bool>,
+    pub avx10_1: Option<bool>,
+    pub avx10_512: Option<bool>,
+    pub apx_f: Option<bool>,
 }
 
 impl Default for CpuFeatures {
@@ -119,6 +130,10 @@ impl Default for CpuFeatures {
             avx512_4fmaps: false,
             cet_ss: false,
             cet_ibt: false,
+            avx10_1: false,
+            avx10_256: false,
+            avx10_512: false,
+            apx_f: false,
             movbe: false,
             xsave: false,
             osxsave: false,
@@ -176,6 +191,16 @@ impl CpuFeatures {
         self.avx512f
     }
 
+    /// AVX10 是否可用.
+    pub fn has_avx10(&self) -> bool {
+        self.avx10_1
+    }
+
+    /// APX Foundation 是否可用.
+    pub fn has_apx_f(&self) -> bool {
+        self.apx_f
+    }
+
     /// CET Shadow Stack 是否可用.
     pub fn has_cet_ss(&self) -> bool {
         self.cet_ss
@@ -223,6 +248,10 @@ impl CpuFeatures {
         if self.avx512_4fmaps { feats.push("avx5124fmaps"); }
         if self.cet_ss { feats.push("cet-ss"); }
         if self.cet_ibt { feats.push("ibt"); }
+        if self.avx10_1 { feats.push("avx10.1"); }
+        if self.avx10_256 { feats.push("avx10.1-256"); }
+        if self.avx10_512 { feats.push("avx10.1-512"); }
+        if self.apx_f { feats.push("apxf"); }
         if self.movbe { feats.push("movbe"); }
         feats
     }
@@ -305,6 +334,27 @@ fn detect_x86() -> CpuFeatures {
         // AVX-512 扩展 (EDX)
         feats.avx512_4vnniw = bit(edx7, 2) && feats.avx512f;
         feats.avx512_4fmaps = bit(edx7, 3) && feats.avx512f;
+
+        // Leaf 7 sub-leaf 1: AVX10 / APX
+        // __cpuid_count(eax=7, ecx=1) for sub-leaf 1
+        let max_subleaf = leaf7.eax; // EAX of leaf 7 = max sub-leaf
+        if max_subleaf >= 1 {
+            let leaf7_1 = unsafe { std::arch::x86_64::__cpuid_count(7, 1) };
+            let ebx7_1 = leaf7_1.ebx;
+            let edx7_1 = leaf7_1.edx;
+
+            // AVX10.1 support: EDX[bit 19]
+            let cpu_has_avx10 = bit(edx7_1, 19);
+            feats.avx10_1 = cpu_has_avx10 && feats.avx;
+            // AVX10.1-256: EBX[bit 17], requires AVX2
+            feats.avx10_256 = bit(ebx7_1, 17) && feats.avx10_1 && feats.avx2;
+            // AVX10.1-512: EBX[bit 18], requires AVX-512F
+            feats.avx10_512 =
+                bit(ebx7_1, 18) && feats.avx10_1 && feats.avx512f;
+
+            // APX Foundation: EDX[bit 21]
+            feats.apx_f = bit(edx7_1, 21);
+        }
     }
 
     feats
@@ -437,6 +487,41 @@ mod tests {
         };
         t.apply_cpu_feature_overrides(&overrides);
         assert!(t.cpu_features.avx_vnni);
+    }
+
+    #[test]
+    fn avx10_default_false() {
+        let f = CpuFeatures::default();
+        assert!(!f.avx10_1);
+        assert!(!f.avx10_256);
+        assert!(!f.avx10_512);
+        assert!(!f.has_avx10());
+    }
+
+    #[test]
+    fn apx_f_default_false() {
+        let f = CpuFeatures::default();
+        assert!(!f.apx_f);
+        assert!(!f.has_apx_f());
+    }
+
+    #[test]
+    fn avx10_override() {
+        let mut t = crate::target::Target::resolve(
+            &crate::cli::TargetTriple {
+                arch: crate::cli::Arch::X86_64,
+                vendor: "unknown".into(),
+                os: crate::cli::Os::Linux,
+                abi: crate::cli::Abi::Gnu,
+            },
+        );
+        let overrides = CpuFeatureOverrides {
+            avx: Some(true),
+            avx10_1: Some(true),
+            ..Default::default()
+        };
+        t.apply_cpu_feature_overrides(&overrides);
+        assert!(t.cpu_features.avx10_1);
     }
 
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]

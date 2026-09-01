@@ -1668,6 +1668,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 cpu_feature_overrides.avx_vnni = Some(true);
             }
             "-mno-avxvnni" => cpu_feature_overrides.avx_vnni = Some(false),
+            "-mavx10.1-256" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx2 = Some(true);
+                cpu_feature_overrides.avx10_1 = Some(true);
+            }
+            "-mno-avx10.1-256" => {
+                cpu_feature_overrides.avx10_1 = Some(false);
+                cpu_feature_overrides.avx10_512 = Some(false);
+            }
+            "-mavx10.1-512" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx512f = Some(true);
+                cpu_feature_overrides.avx10_1 = Some(true);
+                cpu_feature_overrides.avx10_512 = Some(true);
+            }
+            "-mno-avx10.1-512" => {
+                cpu_feature_overrides.avx10_512 = Some(false);
+            }
+            "-mapx" => cpu_feature_overrides.apx_f = Some(true),
+            "-mno-apx" => cpu_feature_overrides.apx_f = Some(false),
             "-mcmodel=kernel" => kernel_code_model = true,
             "-ftrivial-auto-var-init=zero" => auto_var_init_zero = true,
             "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => {

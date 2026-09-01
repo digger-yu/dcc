@@ -17716,6 +17716,52 @@ fn cpu_feature_cli_mno_avxvnni() {
 }
 
 #[test]
+fn cpu_feature_cli_avx10_256() {
+    let args = vec![
+        "-mavx10.1-256".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mavx10.1-256 should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx2, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx10_1, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_avx10_512() {
+    let args = vec![
+        "-mavx10.1-512".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mavx10.1-512 should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx512f, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx10_1, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx10_512, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_apx() {
+    let args = vec![
+        "-mapx".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mapx should parse");
+    assert_eq!(cfg.cpu_feature_overrides.apx_f, Some(true));
+
+    let args = vec![
+        "-mno-apx".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mno-apx should parse");
+    assert_eq!(cfg.cpu_feature_overrides.apx_f, Some(false));
+}
+
+#[test]
 fn cpu_feature_cli_default_none() {
     let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("default should parse");

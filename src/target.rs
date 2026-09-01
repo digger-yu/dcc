@@ -197,11 +197,27 @@ impl Target {
         if let Some(v) = overrides.avx_vnni {
             self.cpu_features.avx_vnni = v;
         }
+        if let Some(v) = overrides.avx10_1 {
+            self.cpu_features.avx10_1 = v;
+        }
+        if let Some(v) = overrides.avx10_512 {
+            self.cpu_features.avx10_512 = v;
+            // AVX10-512 implies AVX10.1
+            if v {
+                self.cpu_features.avx10_1 = true;
+            }
+        }
+        if let Some(v) = overrides.apx_f {
+            self.cpu_features.apx_f = v;
+        }
         // AVX2 依赖 AVX: 若 AVX 被禁用, AVX2 也必须禁用
         if !self.cpu_features.avx {
             self.cpu_features.avx2 = false;
             self.cpu_features.fma = false;
             self.cpu_features.avx_vnni = false;
+            self.cpu_features.avx10_1 = false;
+            self.cpu_features.avx10_256 = false;
+            self.cpu_features.avx10_512 = false;
         }
         // AVX-512 依赖 AVX: 若 AVX 被禁用, AVX-512 也必须禁用
         if !self.cpu_features.avx {
