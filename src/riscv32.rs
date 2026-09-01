@@ -170,7 +170,6 @@ impl RvEncoder {
 
 /// RISC-V compressed (C extension) instruction encoding
 pub mod compressed {
-    use super::RvInstruction;
 
     /// Encode C.NOP (16-bit)
     pub fn c_nop() -> u16 {

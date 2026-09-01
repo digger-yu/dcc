@@ -191,7 +191,7 @@ fn parse_memory_block(
 fn parse_sections_block(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     _content: &str,
-    script: &mut LinkerScript,
+    _script: &mut LinkerScript,
 ) -> Result<(), String> {
     skip_whitespace(chars);
     if chars.peek() != Some(&'{') {

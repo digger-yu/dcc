@@ -2101,7 +2101,7 @@ mod tests {
         // sym = 0x401004, place = 0x401000, A = 0
         // value = 0x401004 + 0 - 0x401000 = 4
         let mut layout = {
-            let mut l = Layout {
+            let l = Layout {
                 is_pie: false,
                 is_shared: false,
                 base_addr: 0x400000,
