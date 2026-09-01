@@ -162,9 +162,7 @@ Linux 7.1 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生
 
 ```bash
 # 本地 (内核树 ~/linux-7.1, dcc ~/dcc/target/release/dcc)
-python3 test_asm_offsets.py
-
-# 或手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
+# 手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
 cd ~/linux-7.1
 dcc -Wp,-MMD,... -S -o arch/x86/kernel/asm-offsets.s arch/x86/kernel/asm-offsets.c
 ```
@@ -197,9 +195,6 @@ for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操�
 | 局部遮蔽 libc 名 | `index`/`basename` 等不再 E0007 |
 | `typeof(_Generic(...))` | READ_ONCE 类宏；声明初始化 `sizeof(*v)` |
 | asm `#` 行内注释 | `jump_label.h` `jmp %l[l_yes] # objtool NOPs this` |
-
-辅助脚本：`test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
-`summarize_err.py`（解析/语义错误分类）。
 
 **Windows 同步注意**：scp 后须 `perl -pi -e 's/\x0d//g'` 去 CR；勿用 `sed 's/\r//g'`。
 
@@ -507,8 +502,7 @@ A: 通常是因为宏定义体中包含注释（如 `HZ CONFIG_HZ /* comment */`
 ### Q: 解析器报 "expected type" 错误
 
 A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查看已解析的部分，
-定位错误位置。`asm-offsets.c` 已于 2026-07-17 全链路通过；历史问题可用
-`summarize_err.py` 区分解析与语义错误。
+定位错误位置。`asm-offsets.c` 已于 2026-07-17 全链路通过。
 
 ## 8. 性能对比
 

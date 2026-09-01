@@ -17,6 +17,9 @@ Thumbs.db
 # WorkBuddy
 .workbuddy/
 
+# Qoder IDE
+.qoder/
+
 # Autotools / configure artifacts
 config.log
 config.status
@@ -39,13 +42,30 @@ initramfs/
 a.out
 core
 core.*
-build.log
+build*.log
 hello
 arith
 control
 call
 fib
 bad
+
+# PGO generated instrumentation files
+profile.pgort.c
+profile.profraw
+
+# Debug/temp scratch files in root
+[0-9]
+genmodes_debug*.c
+genmodes_fix.c
+gdb_*.txt
+test_*.c
+test_*.o
+test_7args*
+test_sortbuf.c
+test_clean.o
+test_ctor_simple.o
+dn_g.o
 
 # Test fixtures (.c files under tests/fixtures/ are tracked, but inline
 # `.s` asm fixtures for snapshot tests should also be tracked).

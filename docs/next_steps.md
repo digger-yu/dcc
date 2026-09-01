@@ -27,7 +27,6 @@
 
 - [x] **3. libiberty / fixincludes 回归锁定基线**
   - 验证：本地 cargo test `libiberty_combined_*` → libiberty **125/0/4**，fixincludes **6/0/1**
-  - 附加：`bash test_tr2.sh`、`bash test_v3_cache.sh`
 
 - [ ] **4. 内核全树首次 `make CC=dcc` 编译至首个失败点**
   - 验证：Linux 7.1 + `.config`；`make CC=dcc -k V=1 2>&1 | tee build.log`
@@ -65,7 +64,6 @@
   - 进展：脚本已用系统 vmlinuz 冒烟 **PASS**（2/2 配置）；dcc 自编译 bzImage 待步骤 6
   - 进展：`asm-offsets.c` **867→0 解析、0 语义、`.s` 已生成**（2026-07-17）
   - 进展：`-O2` **`goto found` 标签 DCE**、mini-asm `N:insn`/位操作指令（2026-07-17）
-  - 验收：`python3 scripts/test_asm_offsets.py`（本地 `~/linux-7.1` + dcc release）
   - 阻塞：全树 `make CC=dcc` 仍待步骤 4–6；本地 gcc-15 亦无法完成 7.1 全树
 
 ---
@@ -86,8 +84,8 @@
   - 目标：dcc warm < GCC warm（或记录差距与原因）
 
 - [ ] **14. 宏展开 / include 缓存回归**
-  - 验证：`test_tr2.sh`、`test_v3_cache.sh` 纳入 CI 或 `scripts/test_all.sh`
   - 目标：regex/TRANSLATE 类 bug 不因缓存版本回退
+  - 验证：通过 `cargo test` 集成测试覆盖，无需独立脚本
 
 ---
 

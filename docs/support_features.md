@@ -588,33 +588,3 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | Bootstrap 回归对比 | `src/bootstrap.rs`：字节级 / 语义级三层对比 |
 | `-ffile-prefix-map` / `-fmacro-prefix-map` | `-ffile-prefix-map=OLD=NEW` 重映射 DWARF 调试信息中的源文件路径；`-fmacro-prefix-map=OLD=NEW` 重映射 `__FILE__` 宏展开的路径前缀；支持多个 map 叠加，首次匹配生效 |
 | `-fno-*` 标志补全 | 内核 Makefile 常用 `-fno-*` 标志全部忽略但接受：`-fno-omit-frame-pointer` / `-fno-reorder-blocks` / `-fno-reorder-blocks-and-partition` / `-fno-stack-clash-protection` / `-fno-ssa-backprop` / `-fno-var-tracking` / `-fno-var-tracking-assignments` / `-fno-sched-interblock` / `-fno-sched-spec` / `-fno-schedule-insns` / `-fno-schedule-insns2` / `-fno-store-merging` / `-fno-thread-jumps` / `-fno-tree-loop-vectorize` / `-fno-tree-slp-vectorize` / `-fno-unroll-loops` / `-fno-peel-loops` / `-fno-gcse` / `-fno-crossjumping` / `-fno-aggressive-loop-optimizations` / `-fno-ipa-cp` / `-fno-ipa-icf` / `-fno-lto` / `-fno-eliminate-unused-debug-types` / `-fno-eliminate-unused-debug-symbols` / `-fno-builtin-wcslen` |
-
-## GCC-15.3.0 构建状态
-
-> 2026-08-31: 使用 dcc 作为唯一 C/C++ 编译器构建 gcc-15.3.0
-
-| 组件 | 状态 | 说明 |
-|------|------|------|
-| libiberty | ✓ | 静态库构建成功 |
-| genversion | ✓ | 链接并运行成功 |
-| genchecksum | ✓ | 链接并运行成功 |
-| genmodes | ✓ | 链接成功，基础功能正常 |
-| gengtype | ✗ | dcc C 前端无法解析降级后的 C 代码（gcc 可正常编译） |
-
-### 已修复问题
-
-1. **fix_gengtype_global_vars 误匹配**: 错误地将 `p->next = typedefs;` 等赋值语句识别为全局变量定义并添加 `extern`。修复：增加 `=`/`->`/`.` 检查排除赋值和成员访问。
-
-2. **staticize_std_functions 过度匹配**: 将 GCC 的 `_hwi` 函数（如 `abs_hwi`, `add_hwi`）错误地转为 `static inline`。修复：限制匹配模式仅为 `_ZN` 和 `std_` 前缀。
-
-3. **AST lower 阈值**: 调整 parser 错误阈值，错误数过多时回退到 strip-keywords 路径以保留更多函数定义。
-
-4. **重载构造函数命名冲突**: C++ 支持构造函数重载，但 C 不支持。多个构造函数被降级为相同的 `_ctor_ClassName`，导致 C 编译错误。修复：添加参数数量后缀 `_ctor_ClassName_N` 确保唯一命名。
-
-### 已知限制
-
-- gengtype 降级后的 C 代码仍有 46 个 gcc 编译错误，主要问题：
-  - AST lower 生成的 if/else 块缺少闭合花括号
-  - 控制流结构不完整（else 无匹配的 if，case 无匹配的 switch）
-  - 系统函数重复声明类型冲突（sigaction, stat, getrlimit 等）
-  - 这些是 C++ to C 降级的根本性问题，需要深度修改 AST lower 逻辑

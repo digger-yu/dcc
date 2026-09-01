@@ -71,14 +71,6 @@ fixincludes 与 libdecnumber（include-only 模块 SKIP）。
 | libiberty 链接 multiple definition | header `extern` + TU 定义重复进 symtab | 符号收集跳过 extern+定义重复 |
 | `ld -r --gc-sections` 失败 | bfd 要求 `-u` 根符号 | `lto::gc_sections_root` + `link.rs -u` |
 
-### 宏展开回归
-
-```bash
-bash test_tr2.sh            # 最小例
-bash test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
-python3 rootcause_sim.py
-```
-
 ## 与内核路径的关系
 
 - 内核路径：`docs/kernel_build_guide.md`、`docs/missing_features.md`
@@ -169,3 +161,33 @@ cd /root/gcc-15.3.0/build
 make all-libcody    # ✅ 成功
 make all-gcc        # 受阻于 libcpp
 ```
+
+## GCC-15.3.0 构建状态
+
+> 2026-08-31: 使用 dcc 作为唯一 C/C++ 编译器构建 gcc-15.3.0
+
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| libiberty | ✓ | 静态库构建成功 |
+| genversion | ✓ | 链接并运行成功 |
+| genchecksum | ✓ | 链接并运行成功 |
+| genmodes | ✓ | 链接成功，基础功能正常 |
+| gengtype | ✗ | dcc C 前端无法解析降级后的 C 代码（gcc 可正常编译） |
+
+### 已修复问题
+
+1. **fix_gengtype_global_vars 误匹配**: 错误地将 `p->next = typedefs;` 等赋值语句识别为全局变量定义并添加 `extern`。修复：增加 `=`/`->`/`.` 检查排除赋值和成员访问。
+
+2. **staticize_std_functions 过度匹配**: 将 GCC 的 `_hwi` 函数（如 `abs_hwi`, `add_hwi`）错误地转为 `static inline`。修复：限制匹配模式仅为 `_ZN` 和 `std_` 前缀。
+
+3. **AST lower 阈值**: 调整 parser 错误阈值，错误数过多时回退到 strip-keywords 路径以保留更多函数定义。
+
+4. **重载构造函数命名冲突**: C++ 支持构造函数重载，但 C 不支持。多个构造函数被降级为相同的 `_ctor_ClassName`，导致 C 编译错误。修复：添加参数数量后缀 `_ctor_ClassName_N` 确保唯一命名。
+
+### 已知限制
+
+- gengtype 降级后的 C 代码仍有 46 个 gcc 编译错误，主要问题：
+  - AST lower 生成的 if/else 块缺少闭合花括号
+  - 控制流结构不完整（else 无匹配的 if，case 无匹配的 switch）
+  - 系统函数重复声明类型冲突（sigaction, stat, getrlimit 等）
+  - 这些是 C++ to C 降级的根本性问题，需要深度修改 AST lower 逻辑
