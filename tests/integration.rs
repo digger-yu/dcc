@@ -17693,6 +17693,29 @@ fn cpu_feature_cli_cet() {
 }
 
 #[test]
+fn cpu_feature_cli_mavxvnni_implies_avx() {
+    let args = vec![
+        "-mavxvnni".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mavxvnni should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx_vnni, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_mno_avxvnni() {
+    let args = vec![
+        "-mno-avxvnni".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mno-avxvnni should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx_vnni, Some(false));
+}
+
+#[test]
 fn cpu_feature_cli_default_none() {
     let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("default should parse");

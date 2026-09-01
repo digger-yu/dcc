@@ -44,6 +44,10 @@ pub struct CpuFeatures {
     pub avx512_bitalg: bool,
     pub avx512_vpopcntdq: bool,
 
+    // --- AVX-VNNI (VEX form, non-512) ---
+    // CPUID leaf 7 sub-leaf 0, ECX[bit 4]
+    pub avx_vnni: bool,
+
     // --- CPUID leaf 7 sub-leaf 0, EDX ---
     pub avx512_4vnniw: bool,
     pub avx512_4fmaps: bool,
@@ -77,6 +81,7 @@ pub struct CpuFeatureOverrides {
     pub bmi2: Option<bool>,
     pub cet_ss: Option<bool>,
     pub cet_ibt: Option<bool>,
+    pub avx_vnni: Option<bool>,
 }
 
 impl Default for CpuFeatures {
@@ -107,6 +112,7 @@ impl Default for CpuFeatures {
             avx512_vbmi: false,
             avx512_vbmi2: false,
             avx512_vnni: false,
+            avx_vnni: false,
             avx512_bitalg: false,
             avx512_vpopcntdq: false,
             avx512_4vnniw: false,
@@ -160,6 +166,11 @@ impl CpuFeatures {
         self.avx2
     }
 
+    /// AVX-VNNI (VEX form, non-512) 是否可用.
+    pub fn has_avx_vnni(&self) -> bool {
+        self.avx_vnni
+    }
+
     /// AVX-512 Foundation 是否可用.
     pub fn has_avx512f(&self) -> bool {
         self.avx512f
@@ -205,6 +216,7 @@ impl CpuFeatures {
         if self.avx512_vbmi { feats.push("avx512vbmi"); }
         if self.avx512_vbmi2 { feats.push("avx512vbmi2"); }
         if self.avx512_vnni { feats.push("avx512vnni"); }
+        if self.avx_vnni { feats.push("avxvnni"); }
         if self.avx512_bitalg { feats.push("avx512bitalg"); }
         if self.avx512_vpopcntdq { feats.push("avx512vpopcntdq"); }
         if self.avx512_4vnniw { feats.push("avx5124vnniw"); }
@@ -285,6 +297,8 @@ fn detect_x86() -> CpuFeatures {
         feats.avx512_vbmi = bit(ecx7, 1) && feats.avx512f;
         feats.avx512_vbmi2 = bit(ecx7, 6) && feats.avx512f;
         feats.avx512_vnni = bit(ecx7, 11) && feats.avx512f;
+        // AVX-VNNI (VEX form): ECX[bit 4], requires AVX (not AVX-512)
+        feats.avx_vnni = bit(ecx7, 4) && feats.avx;
         feats.avx512_bitalg = bit(ecx7, 12) && feats.avx512f;
         feats.avx512_vpopcntdq = bit(ecx7, 14) && feats.avx512f;
 
@@ -346,6 +360,7 @@ mod tests {
         assert!(!f.cet_ibt);
         assert!(!f.sse3);
         assert!(!f.fma);
+        assert!(!f.avx_vnni);
     }
 
     #[test]
@@ -396,6 +411,32 @@ mod tests {
         assert!(bit(0b1000, 3));
         assert!(!bit(0b1000, 2));
         assert!(bit(0xFFFFFFFF, 31));
+    }
+
+    #[test]
+    fn avx_vnni_default_false() {
+        let f = CpuFeatures::default();
+        assert!(!f.avx_vnni);
+        assert!(!f.has_avx_vnni());
+    }
+
+    #[test]
+    fn avx_vnni_override() {
+        let mut t = crate::target::Target::resolve(
+            &crate::cli::TargetTriple {
+                arch: crate::cli::Arch::X86_64,
+                vendor: "unknown".into(),
+                os: crate::cli::Os::Linux,
+                abi: crate::cli::Abi::Gnu,
+            },
+        );
+        let overrides = CpuFeatureOverrides {
+            avx: Some(true),
+            avx_vnni: Some(true),
+            ..Default::default()
+        };
+        t.apply_cpu_feature_overrides(&overrides);
+        assert!(t.cpu_features.avx_vnni);
     }
 
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]

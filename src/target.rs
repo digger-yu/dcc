@@ -194,10 +194,14 @@ impl Target {
         if let Some(v) = overrides.cet_ibt {
             self.cpu_features.cet_ibt = v;
         }
+        if let Some(v) = overrides.avx_vnni {
+            self.cpu_features.avx_vnni = v;
+        }
         // AVX2 依赖 AVX: 若 AVX 被禁用, AVX2 也必须禁用
         if !self.cpu_features.avx {
             self.cpu_features.avx2 = false;
             self.cpu_features.fma = false;
+            self.cpu_features.avx_vnni = false;
         }
         // AVX-512 依赖 AVX: 若 AVX 被禁用, AVX-512 也必须禁用
         if !self.cpu_features.avx {
