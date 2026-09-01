@@ -408,6 +408,7 @@ mod tests {
             march: None,
             mtune: None,
             mcpu: None,
+            arm_instruction_mode: crate::cli::ArmInstructionMode::default(),
             fast_math: false,
             fp_contract_mode: crate::cli::FpContractMode::Default,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),

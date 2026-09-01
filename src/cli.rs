@@ -192,6 +192,8 @@ pub struct Config {
     pub mtune: Option<String>,
     /// -mcpu=<name>: ARM 等价于 -march + -mtune
     pub mcpu: Option<String>,
+    /// -mthumb/-marm: ARM 指令集模式 (默认 Arm)
+    pub arm_instruction_mode: ArmInstructionMode,
     /// -ffast-math: 激进浮点优化 (允许重结合/倒数/非IEEE)
     pub fast_math: bool,
     /// -ffp-contract=: FP 收缩模式
@@ -215,6 +217,16 @@ impl Default for FpContractMode {
     fn default() -> Self {
         FpContractMode::Default
     }
+}
+
+/// ARM 指令集模式 (-mthumb/-marm)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArmInstructionMode {
+    /// -marm: 32-bit ARM 指令集 (默认)
+    #[default]
+    Arm,
+    /// -mthumb: 16/32-bit Thumb-2 指令集
+    Thumb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -847,6 +859,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut march: Option<String> = None;
     let mut mtune: Option<String> = None;
     let mut mcpu: Option<String> = None;
+    let mut arm_instruction_mode = ArmInstructionMode::default();
     let mut fast_math = false;
     let mut fp_contract_mode = FpContractMode::Default;
 
@@ -1928,6 +1941,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-mcpu=") => {
                 mcpu = Some(a["-mcpu=".len()..].to_string());
             }
+            // ARM instruction mode selection
+            "-mthumb" => {
+                arm_instruction_mode = ArmInstructionMode::Thumb;
+            }
+            "-marm" => {
+                arm_instruction_mode = ArmInstructionMode::Arm;
+            }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
             | "-pedantic-errors"
@@ -2476,6 +2496,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             march: march.clone(),
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
+            arm_instruction_mode,
             fast_math,
             fp_contract_mode,
             ipa_sra: {
@@ -2591,6 +2612,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             march: march.clone(),
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
+            arm_instruction_mode,
             fast_math,
             fp_contract_mode,
             ipa_sra: {
@@ -3448,5 +3470,28 @@ BAR");
         let cfg = parse(&args).expect("-c -o - - should parse");
         assert_eq!(cfg.output, PathBuf::from("-"));
         assert!(cfg.output_explicit);
+    }
+
+    // === ARM instruction mode tests ===
+
+    #[test]
+    fn mthumb_sets_thumb_mode() {
+        let args = vec!["-c".to_string(), "-mthumb".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-mthumb should parse");
+        assert_eq!(cfg.arm_instruction_mode, super::ArmInstructionMode::Thumb);
+    }
+
+    #[test]
+    fn marm_sets_arm_mode() {
+        let args = vec!["-c".to_string(), "-marm".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-marm should parse");
+        assert_eq!(cfg.arm_instruction_mode, super::ArmInstructionMode::Arm);
+    }
+
+    #[test]
+    fn default_arm_mode_is_arm() {
+        let args = vec!["-c".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("default should parse");
+        assert_eq!(cfg.arm_instruction_mode, super::ArmInstructionMode::Arm);
     }
 }

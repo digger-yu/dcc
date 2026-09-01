@@ -86,6 +86,8 @@ pub struct Target {
     pub has_dsp: bool,
     /// ARM TrustZone-M 安全扩展可用
     pub has_trustzone: bool,
+    /// ARM 指令集模式 (-mthumb/-marm)
+    pub arm_instruction_mode: crate::cli::ArmInstructionMode,
     /// RISC-V M 扩展 (整数乘除法)
     pub riscv_has_m: bool,
     /// RISC-V A 扩展 (原子指令)
@@ -187,6 +189,7 @@ impl Target {
             has_fpu: false,
             has_dsp: false,
             has_trustzone: false,
+            arm_instruction_mode: crate::cli::ArmInstructionMode::default(),
             riscv_has_m: false,
             riscv_has_a: false,
             riscv_has_f: false,

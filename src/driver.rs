@@ -947,6 +947,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if let Some(ref tune_name) = cfg.mtune {
         target.mtune = Some(tune_name.clone());
     }
+    // ARM instruction mode (-mthumb/-marm)
+    target.arm_instruction_mode = cfg.arm_instruction_mode;
     if cfg.verbose && cfg.target.arch == crate::cli::Arch::X86_64 {
         let feats = target.cpu_features.to_feature_strings();
         if !feats.is_empty() {
