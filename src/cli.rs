@@ -186,6 +186,12 @@ pub struct Config {
     pub macro_backtrace_limit: usize,
     /// -trigraphs: 启用 C89 trigraph 替换 (??= ??( ??/ ??) ??' ??< ??! ??> ??-)
     pub trigraphs: bool,
+    /// -march=<name>: 目标架构微架构 (x86-64-v2/v3/v4/native 等)
+    pub march: Option<String>,
+    /// -mtune=<name>: 调度优化目标微架构
+    pub mtune: Option<String>,
+    /// -mcpu=<name>: ARM 等价于 -march + -mtune
+    pub mcpu: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -786,6 +792,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut macro_prefix_maps: Vec<(String, String)> = Vec::new();
     let mut macro_backtrace_limit: usize = 128;
     let mut trigraphs = false;
+    let mut march: Option<String> = None;
+    let mut mtune: Option<String> = None;
+    let mut mcpu: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -1839,6 +1848,16 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-trigraphs" => {
                 trigraphs = true;
             }
+            // -march=<name> / -mtune=<name> / -mcpu=<name>
+            a if a.starts_with("-march=") => {
+                march = Some(a["-march=".len()..].to_string());
+            }
+            a if a.starts_with("-mtune=") => {
+                mtune = Some(a["-mtune=".len()..].to_string());
+            }
+            a if a.starts_with("-mcpu=") => {
+                mcpu = Some(a["-mcpu=".len()..].to_string());
+            }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
             | "-pedantic-errors"
@@ -2384,6 +2403,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             macro_prefix_maps: macro_prefix_maps.clone(),
             macro_backtrace_limit,
             trigraphs,
+            march: march.clone(),
+            mtune: mtune.clone(),
+            mcpu: mcpu.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -2494,6 +2516,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             macro_prefix_maps: macro_prefix_maps.clone(),
             macro_backtrace_limit,
             trigraphs,
+            march: march.clone(),
+            mtune: mtune.clone(),
+            mcpu: mcpu.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

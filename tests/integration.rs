@@ -17791,6 +17791,71 @@ fn apx_egpr_reg_parse() {
 }
 
 #[test]
+fn march_cli_parsing() {
+    let args = vec![
+        "-march=x86-64-v3".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-march should parse");
+    assert_eq!(cfg.march.as_deref(), Some("x86-64-v3"));
+}
+
+#[test]
+fn mtune_cli_parsing() {
+    let args = vec![
+        "-mtune=native".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mtune should parse");
+    assert_eq!(cfg.mtune.as_deref(), Some("native"));
+}
+
+#[test]
+fn mcpu_cli_parsing() {
+    let args = vec![
+        "-mcpu=cortex-a53".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-mcpu should parse");
+    assert_eq!(cfg.mcpu.as_deref(), Some("cortex-a53"));
+}
+
+#[test]
+fn march_x86_64_v3_enables_avx2() {
+    let mut t = dcc::target::Target::resolve(&dcc::cli::TargetTriple {
+        arch: dcc::cli::Arch::X86_64,
+        vendor: "unknown".into(),
+        os: dcc::cli::Os::Linux,
+        abi: dcc::cli::Abi::Gnu,
+    });
+    t.apply_march("x86-64-v3");
+    assert!(t.cpu_features.avx);
+    assert!(t.cpu_features.avx2);
+    assert!(t.cpu_features.bmi1);
+    assert!(t.cpu_features.bmi2);
+    assert!(t.cpu_features.fma);
+    assert!(t.cpu_features.f16c);
+    assert!(t.cpu_features.sse4_2);
+    assert!(t.cpu_features.popcnt);
+}
+
+#[test]
+fn march_native_detects_features() {
+    let mut t = dcc::target::Target::resolve(&dcc::cli::TargetTriple {
+        arch: dcc::cli::Arch::X86_64,
+        vendor: "unknown".into(),
+        os: dcc::cli::Os::Linux,
+        abi: dcc::cli::Abi::Gnu,
+    });
+    t.apply_march("native");
+    // native should detect at least SSE
+    assert!(t.cpu_features.has_sse());
+}
+
+#[test]
 fn cpu_feature_cli_default_none() {
     let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("default should parse");

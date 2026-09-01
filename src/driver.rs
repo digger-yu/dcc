@@ -919,6 +919,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
     // CPU 指令集特性: 应用 CLI 显式覆盖 (在 CPUID 动态检测基础上)
     target.apply_cpu_feature_overrides(&cfg.cpu_feature_overrides);
+    // -march/-mcpu: 应用微架构特性组合
+    if let Some(ref arch_name) = cfg.march {
+        target.apply_march(arch_name);
+    }
+    if let Some(ref cpu_name) = cfg.mcpu {
+        target.apply_march(cpu_name);
+    }
+    if let Some(ref tune_name) = cfg.mtune {
+        target.mtune = Some(tune_name.clone());
+    }
     if cfg.verbose && cfg.target.arch == crate::cli::Arch::X86_64 {
         let feats = target.cpu_features.to_feature_strings();
         if !feats.is_empty() {

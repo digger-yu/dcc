@@ -67,6 +67,10 @@ pub struct Target {
     pub no_common: bool,
     /// CPU 指令集特性 (运行时检测)
     pub cpu_features: CpuFeatures,
+    /// -march=<name> 目标微架构
+    pub march: Option<String>,
+    /// -mtune=<name> 调度优化目标
+    pub mtune: Option<String>,
 }
 
 impl Target {
@@ -143,6 +147,8 @@ impl Target {
             } else {
                 CpuFeatures::default()
             },
+            march: None,
+            mtune: None,
         }
     }
 
@@ -225,6 +231,146 @@ impl Target {
             self.cpu_features.avx512dq = false;
             self.cpu_features.avx512bw = false;
             self.cpu_features.avx512vl = false;
+        }
+    }
+
+    /// 应用 -march=<name> 设置对应的 CPU 特性组合.
+    ///
+    /// 已知 x86-64 微架构级别:
+    /// - x86-64: 基线 (SSE2)
+    /// - x86-64-v2: + SSE4.2 + SSSE3 + POPCNT + CMPXCHG16B
+    /// - x86-64-v3: + AVX + AVX2 + BMI1 + BMI2 + FMA + F16C
+    /// - x86-64-v4: + AVX512F + AVX512BW + AVX512DQ + AVX512VL
+    /// - native: 使用 CPUID 检测结果
+    /// - 具体微架构名: sandybridge/haswell/skylake/等
+    pub fn apply_march(&mut self, arch_name: &str) {
+        self.march = Some(arch_name.to_string());
+        match arch_name {
+            "native" => {
+                // 使用 CPUID 检测结果, 不做覆盖
+                if self.arch == crate::cli::Arch::X86_64 {
+                    self.cpu_features = CpuFeatures::detect();
+                }
+            }
+            "x86-64" | "x86-64-v1" => {
+                // 基线: 不做任何额外启用
+            }
+            "x86-64-v2" => {
+                self.cpu_features.ssse3 = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+            }
+            "x86-64-v3" => {
+                // v2 + AVX family
+                self.cpu_features.ssse3 = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+            }
+            "x86-64-v4" => {
+                // v3 + AVX-512
+                self.cpu_features.ssse3 = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+                self.cpu_features.avx512f = true;
+                self.cpu_features.avx512bw = true;
+                self.cpu_features.avx512dq = true;
+                self.cpu_features.avx512vl = true;
+            }
+            // Intel micro-architectures
+            "sandybridge" => {
+                self.cpu_features.avx = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+            }
+            "haswell" => {
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+            }
+            "skylake" | "skylake-avx512" => {
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+                if arch_name == "skylake-avx512" {
+                    self.cpu_features.avx512f = true;
+                    self.cpu_features.avx512bw = true;
+                    self.cpu_features.avx512dq = true;
+                    self.cpu_features.avx512vl = true;
+                }
+            }
+            "icelake-server" | "icelake-client" => {
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+                self.cpu_features.avx512f = true;
+                self.cpu_features.avx512bw = true;
+                self.cpu_features.avx512dq = true;
+                self.cpu_features.avx512vl = true;
+                self.cpu_features.avx512_vnni = true;
+            }
+            "sapphirerapids" | "granite-rapids" => {
+                self.cpu_features.avx = true;
+                self.cpu_features.avx2 = true;
+                self.cpu_features.bmi1 = true;
+                self.cpu_features.bmi2 = true;
+                self.cpu_features.fma = true;
+                self.cpu_features.f16c = true;
+                self.cpu_features.sse4_1 = true;
+                self.cpu_features.sse4_2 = true;
+                self.cpu_features.popcnt = true;
+                self.cpu_features.avx512f = true;
+                self.cpu_features.avx512bw = true;
+                self.cpu_features.avx512dq = true;
+                self.cpu_features.avx512vl = true;
+                self.cpu_features.avx512_vnni = true;
+                self.cpu_features.avx_vnni = true;
+                self.cpu_features.avx10_1 = true;
+                self.cpu_features.apx_f = true;
+            }
+            // ARM micro-architectures (mcpu)
+            "cortex-a53" | "cortex-a72" | "cortex-a76" => {
+                // ARMv8.0 baseline
+            }
+            "neoverse-n1" | "neoverse-v1" => {
+                // ARMv8.2+ with crypto extensions
+            }
+            _ => {
+                // Unknown arch name: accept but no feature changes
+            }
         }
     }
 
