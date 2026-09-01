@@ -405,6 +405,9 @@ mod tests {
             macro_prefix_maps: vec![],
             macro_backtrace_limit: 128,
             trigraphs: false,
+            march: None,
+            mtune: None,
+            mcpu: None,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         };
