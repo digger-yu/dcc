@@ -86,6 +86,20 @@ pub struct Target {
     pub has_dsp: bool,
     /// ARM TrustZone-M 安全扩展可用
     pub has_trustzone: bool,
+    /// RISC-V M 扩展 (整数乘除法)
+    pub riscv_has_m: bool,
+    /// RISC-V A 扩展 (原子指令)
+    pub riscv_has_a: bool,
+    /// RISC-V F 扩展 (单精度浮点)
+    pub riscv_has_f: bool,
+    /// RISC-V D 扩展 (双精度浮点)
+    pub riscv_has_d: bool,
+    /// RISC-V C 扩展 (压缩指令)
+    pub riscv_has_c: bool,
+    /// RISC-V B 扩展 (位操作)
+    pub riscv_has_b: bool,
+    /// RISC-V V 扩展 (向量指令)
+    pub riscv_has_v: bool,
 }
 
 impl Target {
@@ -173,6 +187,13 @@ impl Target {
             has_fpu: false,
             has_dsp: false,
             has_trustzone: false,
+            riscv_has_m: false,
+            riscv_has_a: false,
+            riscv_has_f: false,
+            riscv_has_d: false,
+            riscv_has_c: false,
+            riscv_has_b: false,
+            riscv_has_v: false,
         }
     }
 
@@ -448,6 +469,26 @@ impl Target {
                 self.has_fpu = true;
                 self.has_dsp = true;
                 self.has_trustzone = true;
+            }
+            // RISC-V extension parsing (rv32/rv64 + extensions)
+            name if name.starts_with("rv32") || name.starts_with("rv64") => {
+                // Parse RISC-V ISA string: rv32/rv64 + extension letters
+                // Examples: rv32imc, rv32imac, rv32g, rv64gc
+                let ext_str = &name[4..]; // skip "rv32" or "rv64"
+                self.riscv_has_m = ext_str.contains('m');
+                self.riscv_has_a = ext_str.contains('a');
+                self.riscv_has_f = ext_str.contains('f');
+                self.riscv_has_d = ext_str.contains('d');
+                self.riscv_has_c = ext_str.contains('c');
+                self.riscv_has_b = ext_str.contains('b');
+                self.riscv_has_v = ext_str.contains('v');
+                // 'g' is shorthand for imafd (general)
+                if ext_str.contains('g') {
+                    self.riscv_has_m = true;
+                    self.riscv_has_a = true;
+                    self.riscv_has_f = true;
+                    self.riscv_has_d = true;
+                }
             }
             _ => {
                 // Unknown arch name: accept but no feature changes
@@ -924,5 +965,55 @@ mod tests {
         assert!(t.has_fpu);
         assert!(t.has_dsp);
         assert!(t.has_trustzone);
+    }
+
+    // === RISC-V extension parsing tests ===
+
+    #[test]
+    fn riscv32_imc_extensions() {
+        let mut t = Target::resolve(&trip(Arch::RiscV32, Os::Freestanding, Abi::Eabi));
+        t.apply_march("rv32imc");
+        assert!(t.riscv_has_m);
+        assert!(!t.riscv_has_a);
+        assert!(!t.riscv_has_f);
+        assert!(!t.riscv_has_d);
+        assert!(t.riscv_has_c);
+        assert!(!t.riscv_has_b);
+        assert!(!t.riscv_has_v);
+    }
+
+    #[test]
+    fn riscv32_imac_extensions() {
+        let mut t = Target::resolve(&trip(Arch::RiscV32, Os::Freestanding, Abi::Eabi));
+        t.apply_march("rv32imac");
+        assert!(t.riscv_has_m);
+        assert!(t.riscv_has_a);
+        assert!(!t.riscv_has_f);
+        assert!(!t.riscv_has_d);
+        assert!(t.riscv_has_c);
+    }
+
+    #[test]
+    fn riscv32_g_shorthand() {
+        let mut t = Target::resolve(&trip(Arch::RiscV32, Os::Freestanding, Abi::Eabi));
+        t.apply_march("rv32g");
+        // 'g' = imafd
+        assert!(t.riscv_has_m);
+        assert!(t.riscv_has_a);
+        assert!(t.riscv_has_f);
+        assert!(t.riscv_has_d);
+        assert!(!t.riscv_has_c);
+    }
+
+    #[test]
+    fn riscv64_gc_extensions() {
+        let mut t = Target::resolve(&trip(Arch::RiscV64, Os::Linux, Abi::Gnu));
+        t.apply_march("rv64gc");
+        // 'g' = imafd, plus 'c'
+        assert!(t.riscv_has_m);
+        assert!(t.riscv_has_a);
+        assert!(t.riscv_has_f);
+        assert!(t.riscv_has_d);
+        assert!(t.riscv_has_c);
     }
 }
