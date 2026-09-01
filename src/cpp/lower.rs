@@ -9223,6 +9223,16 @@ impl Lower {
             } => {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
+            CppDecl::Opaque(text) => {
+                // 无法解析的声明，原样输出到 C 代码中。
+                // 包裹在注释标记中便于调试追踪。
+                self.out.push_str("/* opaque decl start */\n");
+                self.out.push_str(text);
+                if !text.ends_with('\n') {
+                    self.out.push('\n');
+                }
+                self.out.push_str("/* opaque decl end */\n");
+            }
         }
     }
 
@@ -10163,6 +10173,17 @@ impl Lower {
             }
             CppStmt::Decl(d) => {
                 self.lower_decl(d);
+            }
+            CppStmt::OpaqueStmt(text) => {
+                // 无法解析的语句，原样输出到函数体中。
+                self.out.push_str(text);
+                // 确保语句以分号或花括号结尾
+                if !text.ends_with(';') && !text.ends_with('}') && !text.ends_with('\n') {
+                    self.out.push(';');
+                }
+                if !text.ends_with('\n') {
+                    self.out.push('\n');
+                }
             }
         }
     }

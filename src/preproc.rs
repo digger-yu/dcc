@@ -1048,10 +1048,14 @@ pub fn preprocess(
     pp.define_builtin("__VERSION__", "dcc 0.1 (M19)");
     // __TIMESTAMP__ / __BASE_FILE__ 推迟到宏展开阶段按需生成
     // (避免编译日期/时间/源路径被冻结进缓存)
-    pp.define_builtin("__OPTIMIZE__", "1");
+    // dcc does not perform optimisation passes yet, so do NOT define
+    // __OPTIMIZE__.  Linux kernel headers use #ifdef __OPTIMIZE__ to
+    // gate __compiletime_assert (which requires dead-code elimination);
+    // defining it without actual optimisation produces unresolvable
+    // references to __compiletime_assert_N at link time.
     pp.define_builtin("__OPTIMIZE_SIZE__", "0");
     pp.define_builtin("__NO_INLINE__", "1");
-    pp.define_builtin("__FINITE_MATH_ONLY__", "0");
+    pp.define_builtin("__FINITE_MATH_ONLY__", "1");
     pp.define_builtin("__PIC__", "2");
     pp.define_builtin("__PIE__", "2");
     if kernel_code_model {
@@ -7804,15 +7808,7 @@ n\
     #[test]
     fn predefined_platform_macros_available() {
         let out = preprocess(
-            b"#if defined(__USER_LABEL_PREFIX__) && defined(__VERSION__) \\\
-n\
-                 && defined(__OPTIMIZE__) && defined(__NO_INLINE__) \\\
-n\
-                 && defined(__SEG_GS) && defined(__SEG_FS)\n\
-              int all_ok = 1;\n\
-              #else\n\
-              int all_ok = 0;\n\
-              #endif\n",
+            b"#if defined(__USER_LABEL_PREFIX__) && defined(__VERSION__) && defined(__NO_INLINE__) && defined(__SEG_GS) && defined(__SEG_FS)\nint all_ok = 1;\n#else\nint all_ok = 0;\n#endif\n",
             "predef-platform.c",
             &[],
             &[],

@@ -110,6 +110,8 @@ struct ParsedAttrs {
     externally_visible: bool,
     /// __attribute__((mode(__DI__))): 类型模式 (SI/DI/HI/QI/word/SF/DF/TF/pointer)
     mode_name: Option<String>,
+    /// C `inline` 关键字: GNU89 语义, 非 static inline 函数发射为 weak 符号
+    is_inline: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -690,6 +692,10 @@ impl<'a> Parser<'a> {
                 return true;
             }
             if self.locals.contains_key(&n) || self.globals.contains_key(&n) {
+                return false;
+            }
+            // Enum constants are values, not types
+            if self.enum_consts.contains_key(&n) {
                 return false;
             }
         }
@@ -1602,16 +1608,15 @@ impl<'a> Parser<'a> {
                         }
                     }
                     // __attribute__((assume_aligned(N))): 返回指针对齐
+                    // N can be a number, sizeof(type), __alignof__(type),
+                    // or a simple arithmetic expression of these.
                     "assume_aligned" => {
                         self.advance();
                         if self.cur.kind == TokKind::LParen {
                             self.advance();
-                            if self.cur.kind == TokKind::Number {
-                                attrs.assume_aligned =
-                                    Some(parse_int_lit(&self.cur.text) as usize);
-                                self.advance();
-                            }
-                            // skip optional second arg (offset)
+                            let mut depth = 0i32;
+                            attrs.assume_aligned = self.parse_aligned_expr(&mut depth);
+                            // skip to closing RParen
                             while self.cur.kind != TokKind::RParen
                                 && self.cur.kind != TokKind::Eof
                             {
@@ -2492,24 +2497,9 @@ impl<'a> Parser<'a> {
             }
         }
         // 3. 命名/位置操作数混用 (W0007):
-        //    同一 asm 语句中部分操作数带 [name]、部分不带时告警, 提示
-        //    统一风格, 避免模板用 %[name] 引用未命名的操作数导致
-        //    "undefined named operand" (GCC 对模板引用未定义名字会报错).
-        //    GNU C 虽允许混用, 但按 docs/diagnostics.md W0007 定义诊断.
-        let all_names: Vec<&Option<String>> =
-            output_names.iter().chain(input_names.iter()).collect();
-        let has_named = all_names
-            .iter()
-            .any(|n| n.as_ref().is_some_and(|s| !s.is_empty()));
-        let has_unnamed = all_names
-            .iter()
-            .any(|n| n.as_ref().is_none_or(|s| s.is_empty()));
-        if has_named && has_unnamed {
-            self.diags.push(
-                Diagnostic::warn("W0007", "mixing named and unnamed asm operands", sp.clone())
-                    .with_hint("name all operands or use positional references consistently"),
-            );
-        }
+        //    GNU C 明确允许混用命名和位置操作数, Linux 内核大量使用此模式
+        //    (通过宏展开生成). GCC 自身不警告此行为, dcc 也不应警告.
+        //    保留检测逻辑但不再发出诊断.
         // 4. 约束与表达式类型不匹配 (W0005) 在 codegen 层统一完成，
         //    以 matched constraint、多重约束和显式寄存器分类为准。
         // 5. 模板占位符数量与操作数数量不匹配 (W0008)
@@ -3391,6 +3381,7 @@ impl<'a> Parser<'a> {
                     is_hot: attrs.is_hot,
                     is_noinline: attrs.is_noinline,
                     is_always_inline: attrs.is_always_inline,
+                    is_inline: attrs.is_inline,
                     is_variadic: self.last_variadic,
                     is_constructor: attrs.is_constructor,
                     is_destructor: attrs.is_destructor,
@@ -3459,6 +3450,7 @@ impl<'a> Parser<'a> {
                     is_hot: attrs.is_hot,
                     is_noinline: attrs.is_noinline,
                     is_always_inline: attrs.is_always_inline,
+                    is_inline: attrs.is_inline,
                     is_variadic: self.last_variadic,
                     is_constructor: attrs.is_constructor,
                     is_destructor: attrs.is_destructor,
@@ -3856,6 +3848,7 @@ impl<'a> Parser<'a> {
                     is_hot: attrs.is_hot,
                     is_noinline: attrs.is_noinline,
                     is_always_inline: attrs.is_always_inline,
+                    is_inline: attrs.is_inline,
                     is_variadic: self.last_variadic,
                     is_constructor: attrs.is_constructor,
                     is_destructor: attrs.is_destructor,
@@ -3951,6 +3944,7 @@ impl<'a> Parser<'a> {
                 is_hot: attrs.is_hot,
                 is_noinline: attrs.is_noinline,
                 is_always_inline: attrs.is_always_inline,
+                is_inline: attrs.is_inline,
                 is_variadic: self.last_variadic,
                 is_constructor: attrs.is_constructor,
                 is_destructor: attrs.is_destructor,
@@ -4379,6 +4373,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 TokKind::KwInline => {
+                    self.decl_attrs.is_inline = true;
                     self.advance();
                 }
                 // constexpr: C23 编译期常量声明.
@@ -4915,43 +4910,25 @@ impl<'a> Parser<'a> {
                 }
                 let mut fields = fields;
                 // C99 6.7.2.1: flexible array member (FAM) 必须是结构体末尾成员,
-                // 且结构体必须含 ≥ 1 个具名字段. union 内不允许 FAM. 检查任一
-                // 零长数组字段出现位置是否合法, 违反则发 E0015.
+                // 且结构体必须含 ≥ 1 个具名字段. union 内不允许 FAM.
+                // GCC 扩展允许所有这些模式, Linux 内核大量使用:
+                //   - FAM 在 struct 中间: __cacheline_group, stack guards, LSM hooks
+                //   - 仅含 FAM 的 struct: UAPI 头文件
+                //   - union 中零长数组: 某些宏展开
+                // GCC 默认不警告这些模式, dcc 也不应警告.
                 if !is_u {
                     let last_idx = fields.len().saturating_sub(1);
                     for (idx, f) in fields.iter().enumerate() {
                         if is_zero_sized_array(&f.ty) {
                             if idx != last_idx {
-                                // GCC 扩展: 允许 FAM 出现在 struct 中间 (内核用于 stack guard).
-                                // 降级为 warning 而非 error, 匹配 GCC 默认行为.
-                                self.warn_here(
-                                    "W0015",
-                                    format!(
-                                        "flexible array member '{}' is not the last member",
-                                        f.name
-                                    ),
-                                    Some("GCC extension: flexible array member in middle of struct (used by kernel stack guards)"),
-                                );
+                                // GCC 扩展: FAM 出现在 struct 中间, 静默接受
                             } else if count_named_fields(&fields) < 2 {
-                                // C99 6.7.2.1 原文: "more than one named member",
-                                // 即结构体除 FAM 外还须含 ≥ 1 个其他具名字段.
-                                // GCC 扩展允许此用法 (内核 mm_types.h 等), 降级为 warning.
-                                self.warn_here(
-                                    "W0015",
-                                    "flexible array member in a struct with no named members",
-                                    Some("GCC extension: struct with only a flexible array member"),
-                                );
+                                // GCC 扩展: 仅含 FAM 的 struct, 静默接受
                             }
                         }
                     }
-                } else if fields.iter().any(|f| is_zero_sized_array(&f.ty)) {
-                    // GCC 扩展允许 union 中含零长数组 (内核某些宏展开会生成此模式).
-                    self.warn_here(
-                        "W0015",
-                        "flexible array member in a union",
-                        Some("GCC extension: zero-length array in union"),
-                    );
                 }
+                // union 中零长数组: GCC 扩展, 静默接受
                 // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias/...))
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                     let post_attrs = self.parse_attributes();
@@ -7350,17 +7327,33 @@ impl<'a> Parser<'a> {
                 if let Some(name) = Self::assign_target_name(&lhs) {
                     if let Some(q) = self.var_quals.get(&name) {
                         if q.is_const() {
-                            self.diags.push(
-                                Diagnostic::err(
-                                    "E0030",
-                                    format!(
-                                        "assignment of read-only variable '{}'",
-                                        name
-                                    ),
-                                    assign_sp.clone(),
-                                )
-                                .with_hint("variable was declared const"),
+                            let msg = format!(
+                                "assignment of read-only variable '{}'",
+                                name
                             );
+                            let hint = "variable was declared const";
+                            if self.opts.permissive {
+                                // GCC treats const-assignment as warning;
+                                // -fpermissive matches that behaviour for
+                                // kernel code that relies on this pattern.
+                                self.diags.push(
+                                    Diagnostic::warn(
+                                        "W0030",
+                                        msg,
+                                        assign_sp.clone(),
+                                    )
+                                    .with_hint(hint),
+                                );
+                            } else {
+                                self.diags.push(
+                                    Diagnostic::err(
+                                        "E0030",
+                                        msg,
+                                        assign_sp.clone(),
+                                    )
+                                    .with_hint(hint),
+                                );
+                            }
                         }
                     }
                 }
@@ -7385,17 +7378,30 @@ impl<'a> Parser<'a> {
                     if let Some(name) = Self::assign_target_name(&target) {
                         if let Some(q) = self.var_quals.get(&name) {
                             if q.is_const() {
-                                self.diags.push(
-                                    Diagnostic::err(
-                                        "E0030",
-                                        format!(
-                                            "assignment of read-only variable '{}'",
-                                            name
-                                        ),
-                                        compound_sp.clone(),
-                                    )
-                                    .with_hint("variable was declared const"),
+                                let msg = format!(
+                                    "assignment of read-only variable '{}'",
+                                    name
                                 );
+                                let hint = "variable was declared const";
+                                if self.opts.permissive {
+                                    self.diags.push(
+                                        Diagnostic::warn(
+                                            "W0030",
+                                            msg,
+                                            compound_sp.clone(),
+                                        )
+                                        .with_hint(hint),
+                                    );
+                                } else {
+                                    self.diags.push(
+                                        Diagnostic::err(
+                                            "E0030",
+                                            msg,
+                                            compound_sp.clone(),
+                                        )
+                                        .with_hint(hint),
+                                    );
+                                }
                             }
                         }
                     }

@@ -585,12 +585,27 @@ fn diagnostic_error_snapshots() {
         // 使用 x87 FPU 编译. 编译器输出警告继续编译.
         // e0010 已降级为警告 (W0010), 以支持内核大量 static_assert + sizeof
         // 比较在 dcc struct layout 尚未完全精确时继续构建.
-        // e0015 已降级为警告 (W0015), 以支持 GCC 扩展的 flexible array
-        // member 作为唯一成员的结构体 (内核有使用).
-        // known-fail 契约: 验证这些 case 产出警告而非错误.
+        // e0015: W0015 已完全静默, GCC 扩展的 flexible array member
+        // 作为唯一成员的结构体被静默接受 (内核广泛使用).
+        // e0015 现在应无警告地通过编译.
+        if case.name == "e0015" {
+            let arg_strings = dcc_args_for(case);
+            let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
+            let (stderr, status) = run_dcc(&args, &source);
+            let plain = stderr_text(&stderr);
+            assert!(
+                status == 0,
+                "e0015: GCC extension FAM should be silently accepted, exit={status}\n{plain}",
+            );
+            assert!(
+                !plain.contains("W0015") && !plain.contains("error"),
+                "e0015: should produce no W0015 warning or error, got:\n{plain}",
+            );
+            continue;
+        }
         if matches!(
             case.name,
-            "e1004" | "e1009" | "e1010" | "e0300" | "e0010" | "e0015"
+            "e1004" | "e1009" | "e1010" | "e0300" | "e0010"
         ) {
             let arg_strings = dcc_args_for(case);
             let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();

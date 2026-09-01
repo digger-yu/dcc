@@ -16513,7 +16513,8 @@ int overflow_test(int x) {
     let _ = fs::remove_file(&obj_path);
 }
 
-/// Unknown -m*/-f* flags should emit warnings via stderr
+/// Unknown -m*/-f* flags should be silently accepted (GCC 兼容)
+/// Linux 内核 Makefile 使用大量 GCC 特有选项, dcc 安全忽略未知选项以避免噪音.
 #[test]
 #[cfg(unix)]
 fn unknown_flags_emit_warnings() {
@@ -16523,7 +16524,7 @@ fn unknown_flags_emit_warnings() {
     let obj_path = tmp.join("unknown_flags.o");
     fs::write(&src_path, src).unwrap();
 
-    // Unknown -m* flag should emit warning
+    // Unknown -m* flag should be silently accepted (GCC 兼容)
     let output = std::process::Command::new("./target/debug/dcc")
         .args(["-c", "-munknown-future-flag", "-o"])
         .arg(&obj_path)
@@ -16533,13 +16534,13 @@ fn unknown_flags_emit_warnings() {
     assert!(output.status.success(), "compile should succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ignoring unknown option '-munknown-future-flag'"),
-        "should warn about unknown -m flag, stderr: {}",
+        !stderr.contains("ignoring unknown option"),
+        "unknown -m flag should be silently accepted, stderr: {}",
         stderr
     );
     let _ = fs::remove_file(&obj_path);
 
-    // Unknown -f* flag should emit warning
+    // Unknown -f* flag should be silently accepted (GCC 兼容)
     let output = std::process::Command::new("./target/debug/dcc")
         .args(["-c", "-funknown-future-flag", "-o"])
         .arg(&obj_path)
@@ -16549,8 +16550,8 @@ fn unknown_flags_emit_warnings() {
     assert!(output.status.success(), "compile should succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ignoring unknown option '-funknown-future-flag'"),
-        "should warn about unknown -f flag, stderr: {}",
+        !stderr.contains("ignoring unknown option"),
+        "unknown -f flag should be silently accepted, stderr: {}",
         stderr
     );
     let _ = fs::remove_file(&obj_path);

@@ -367,13 +367,13 @@ fn check_format_type(
             effective_ty,
             Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar | Type::UChar
                 | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                | Type::Bool
+                | Type::Bool | Type::Enum(_, _, _)
         ),
         'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(
             effective_ty,
             Type::UInt | Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar
                 | Type::UChar | Type::ULong | Type::Long | Type::ULongLong | Type::LongLong
-                | Type::Bool
+                | Type::Bool | Type::Enum(_, _, _)
         ),
         'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             if spec.length == "L" {
@@ -387,10 +387,16 @@ fn check_format_type(
             effective_ty,
             Type::Int | Type::UInt | Type::Char | Type::SChar | Type::UChar
                 | Type::Short | Type::UShort | Type::Long | Type::ULong
+                | Type::Enum(_, _, _)
         ),
-        // %s accepts any pointer (char*)
-        's' => !matches!(effective_ty, Type::Ptr(_)),
-        'p' => !matches!(effective_ty, Type::Ptr(_)),
+        // %s accepts any pointer (char*) or array (decays to pointer)
+        's' => !matches!(effective_ty, Type::Ptr(_) | Type::Array(_, _)),
+        // %p accepts any pointer, array (decays to ptr), or function (decays to fn ptr).
+        // 内核 %p 扩展 (%pS/%pF/%pU 等) 也接受函数指针和各类指针.
+        'p' => !matches!(
+            effective_ty,
+            Type::Ptr(_) | Type::Array(_, _) | Type::Func(_, _)
+        ),
         'n' => !matches!(effective_ty, Type::Ptr(_)),
         _ => false,
     };
@@ -684,6 +690,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
+                is_inline: false,
                 is_variadic: true,
                 is_constructor: false,
                 is_destructor: false,
@@ -787,6 +794,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
+                is_inline: false,
                 is_variadic: true,
                 is_constructor: false,
                 is_destructor: false,

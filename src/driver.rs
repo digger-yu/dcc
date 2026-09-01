@@ -1819,19 +1819,29 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let (decls, c_src, module_bmf) = match parser.parse_top_level() {
         Ok(ref decls) if src_has_cpp => {
-            // M30.2: 允许有解析错误时仍走 AST lower 路径.
-            // 类/结构体成员解析已有容错恢复 (skip_to_member_end),
-            // 大部分声明仍可正确降级. 仅当错误数超过阈值时才回退
-            // 到 strip-keywords 模式.
+            // 基于成功率的降级决策:
+            // parser 容错恢复会将无法解析的声明保留为 Opaque 原文,
+            // 因此即使错误数较多, 只要大部分声明解析成功,
+            // AST lower + opaque 混合路径的语义保真度仍远高于
+            // strip-keywords 文本处理.
             let error_count = parser.diags.iter()
                 .filter(|d| matches!(d.sev, Severity::Error))
                 .count();
-            let use_ast = error_count <= 5 || (!decls.is_empty() && error_count <= 10);
+            let total_attempted = decls.len() + error_count;
+            let success_ratio = if total_attempted > 0 {
+                decls.len() as f64 / total_attempted as f64
+            } else {
+                0.0
+            };
+            // 无错误时直接走 AST; 有错误时按成功率决策:
+            // >= 50% 声明解析成功 → AST lower + opaque 混合路径
+            // < 50% → 回退 strip-keywords
+            let use_ast = error_count == 0 || success_ratio >= 0.5;
             if use_ast {
                 if error_count > 0 && cfg.verbose {
                     eprintln!(
-                        "dcc: C++ parser had {} errors, using AST lower anyway",
-                        error_count
+                        "dcc: C++ parser had {} errors ({}/{} decls ok, {:.0}% success), using AST lower + opaque",
+                        error_count, decls.len(), total_attempted, success_ratio * 100.0
                     );
                 }
             let mut search_dirs: Vec<PathBuf> = Vec::new();
@@ -1859,7 +1869,13 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             let module_bmf = lower.module_bmf();
             (Some(decls.clone()), lower.finish(), module_bmf)
             } else {
-                // 错误太多, 回退到 strip-keywords
+                // 成功率太低 (< 50%), 回退到 strip-keywords
+                if cfg.verbose {
+                    eprintln!(
+                        "dcc: C++ parser success ratio {:.0}% < 50%, falling back to strip-keywords",
+                        success_ratio * 100.0
+                    );
+                }
                 if std::env::var("DCC_CPP_DUMP_DIAGS").is_ok() {
                     for d in &parser.diags {
                         eprintln!("dcc-cpp-diag: {:?} {} @ {:?}", d.sev, d.msg, d.span);

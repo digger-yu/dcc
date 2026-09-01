@@ -2003,6 +2003,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
+                    is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,

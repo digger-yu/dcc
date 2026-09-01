@@ -1855,12 +1855,14 @@ impl Codegen {
         }
         // SHF_MERGE sections with SHF_STRINGS have entsize=1 (char)
         // SHF_MERGE sections without SHF_STRINGS have entsize=entry_size
+        // ELF requires sh_addralign to be 0 or a power of 2, so round up
+        // entsize (e.g. EXTABLE_SIZE=12) to the next power of 2.
         let align = if is_exec {
             16
         } else if is_merge && is_strings {
             1
         } else if is_merge && entsize > 0 {
-            entsize
+            entsize.next_power_of_two()
         } else {
             8
         };
@@ -1878,25 +1880,60 @@ impl Codegen {
 
     /// 解析 `.pushsection name, "flags"` 中的 flags (a/w/x/M/S 等)
     /// 返回 (is_writable, is_exec, is_merge, is_strings, entsize)
+    /// Handles both quoted section names (`.section ".name", "a"`)
+    /// and unquoted names (`.pushsection .name, "a"`).
     fn parse_pushsection_flags(line: &str) -> (bool, bool, bool, bool, u64) {
         let mut is_writable = false;
         let mut is_exec = false;
         let mut is_merge = false;
         let mut is_strings = false;
         let mut entsize: u64 = 0;
-        if let Some(q_start) = line.find('"') {
-            let after = &line[q_start + 1..];
-            if let Some(q_len) = after.find('"') {
-                let flags = &after[..q_len];
+        // Find the flags string: skip past the section name (which may be quoted)
+        // Strategy: find all quoted strings, the LAST one before @type is flags
+        let mut quote_positions: Vec<usize> = Vec::new();
+        let mut i = 0;
+        let bytes = line.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b'"' {
+                quote_positions.push(i);
+            }
+            i += 1;
+        }
+        // We need at least 2 quote positions for a flags string
+        if quote_positions.len() >= 4 {
+            // Two quoted strings: section name + flags
+            // Flags are in the second pair of quotes
+            let flags_start = quote_positions[2] + 1;
+            let flags_end = quote_positions[3];
+            if flags_start <= flags_end && flags_end <= line.len() {
+                let flags = &line[flags_start..flags_end];
                 is_writable = flags.contains('w') || flags.contains('W');
                 is_exec = flags.contains('x') || flags.contains('X');
                 is_merge = flags.contains('M');
                 is_strings = flags.contains('S');
             }
-            // 解析 entsize (最后一个逗号后的数字)
-            // .section .name, "flags", @type, entsize
-            let after_quote = &line[q_start + 1 + after.find('"').unwrap_or(0) + 1..];
-            let parts: Vec<&str> = after_quote.split(',').map(|s| s.trim()).collect();
+            // Parse entsize after the flags quotes
+            let after_flags = &line[flags_end + 1..];
+            let parts: Vec<&str> = after_flags.split(',').map(|s| s.trim()).collect();
+            if let Some(last) = parts.last() {
+                if let Ok(n) = last.parse::<u64>() {
+                    entsize = n;
+                }
+            }
+        } else if quote_positions.len() >= 2 {
+            // One quoted string: just the flags (section name is unquoted)
+            let flags_start = quote_positions[0] + 1;
+            let flags_end = quote_positions[1];
+            if flags_start <= flags_end && flags_end <= line.len() {
+                let flags = &line[flags_start..flags_end];
+                is_writable = flags.contains('w') || flags.contains('W');
+                is_exec = flags.contains('x') || flags.contains('X');
+                is_merge = flags.contains('M');
+                is_strings = flags.contains('S');
+            }
+            // Parse entsize after the flags quotes
+            let after_flags = &line[flags_end + 1..];
+            let parts: Vec<&str> = after_flags.split(',').map(|s| s.trim()).collect();
             if let Some(last) = parts.last() {
                 if let Ok(n) = last.parse::<u64>() {
                     entsize = n;
@@ -2054,7 +2091,34 @@ impl Codegen {
                     .data
                     .extend_from_slice(s.as_bytes());
             }
-            ".align" | ".balign" => {
+            // On x86/x86_64, GAS .align uses power-of-2 alignment
+            // (.align N means align to 2^N bytes), while .balign uses
+            // byte alignment (.balign N means align to N bytes).
+            // Only update section alignment for non-merge sections;
+            // merge sections (SHF_MERGE) must keep alignment consistent
+            // with entsize (e.g. __ex_table entsize=12).
+            ".align" => {
+                if let Ok(p) = args_str
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .parse::<u32>()
+                {
+                    let a = 1usize << p;
+                    if a > 0 {
+                        let len = self.extra_sections[sec_idx].data.len();
+                        let aligned = (len + a - 1) & !(a - 1);
+                        self.pad_custom_section_to(sec_idx, aligned);
+                        if self.extra_sections[sec_idx].flags & elf::SHF_MERGE == 0
+                            && (self.extra_sections[sec_idx].align as usize) < a
+                        {
+                            self.extra_sections[sec_idx].align = a as u64;
+                        }
+                    }
+                }
+            }
+            ".balign" => {
                 if let Ok(a) = args_str
                     .split(',')
                     .next()
@@ -2066,6 +2130,12 @@ impl Codegen {
                         let len = self.extra_sections[sec_idx].data.len();
                         let aligned = (len + a - 1) & !(a - 1);
                         self.pad_custom_section_to(sec_idx, aligned);
+                        if self.extra_sections[sec_idx].flags & elf::SHF_MERGE == 0 {
+                            let align_po2 = a.next_power_of_two();
+                            if (self.extra_sections[sec_idx].align as usize) < align_po2 {
+                                self.extra_sections[sec_idx].align = align_po2 as u64;
+                            }
+                        }
                     }
                 }
             }
@@ -2081,6 +2151,11 @@ impl Codegen {
                     let len = self.extra_sections[sec_idx].data.len();
                     let aligned = (len + a - 1) & !(a - 1);
                     self.pad_custom_section_to(sec_idx, aligned);
+                    if self.extra_sections[sec_idx].flags & elf::SHF_MERGE == 0
+                        && (self.extra_sections[sec_idx].align as usize) < a
+                    {
+                        self.extra_sections[sec_idx].align = a as u64;
+                    }
                 }
             }
             ".zero" => {
@@ -2970,7 +3045,15 @@ impl Codegen {
                         section: 1,
                         value: off,
                         size: sz,
-                        bind: if f.is_static { STB_LOCAL } else { STB_GLOBAL },
+                        bind: if f.is_static {
+                            STB_LOCAL
+                        } else if f.is_weak || f.is_inline {
+                            // GNU89 inline 语义: 非 static inline 函数发射为 weak 符号,
+                            // 避免多个编译单元包含同一头文件时产生多重定义
+                            STB_WEAK
+                        } else {
+                            STB_GLOBAL
+                        },
                         ty: sym_type,
                         visibility: Self::parse_visibility(&f.visibility),
                     });
@@ -3913,7 +3996,7 @@ impl Codegen {
                             section: sec_idx,
                             value: sym_value,
                             size: func_size,
-                            bind: if f.is_weak {
+                            bind: if f.is_weak || f.is_inline {
                                 STB_WEAK
                             } else if f.is_static {
                                 STB_LOCAL
@@ -3962,7 +4045,7 @@ impl Codegen {
                                 section: sec_idx,
                                 value: sym_value,
                                 size: func_size,
-                                bind: if func.is_weak {
+                                bind: if func.is_weak || func.is_inline {
                                     STB_WEAK
                                 } else if func.is_static {
                                     STB_LOCAL
@@ -18350,7 +18433,8 @@ impl Codegen {
                     .split(',')
                     .next()
                     .unwrap_or("")
-                    .trim();
+                    .trim()
+                    .trim_matches('"');
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
                     // 解析 flags ("ax" → 可执行, "aw" → 可写, "aMS" → merge/strings)
                     let (is_writable, is_exec, is_merge, is_strings, entsize) =
@@ -18382,7 +18466,8 @@ impl Codegen {
                     .split(',')
                     .next()
                     .unwrap_or("")
-                    .trim();
+                    .trim()
+                    .trim_matches('"');
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
                     let (is_writable, is_exec, is_merge, is_strings, entsize) =
                         Self::parse_pushsection_flags(trimmed);

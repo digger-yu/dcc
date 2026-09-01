@@ -322,6 +322,10 @@ pub enum CppDecl {
         underlying: Option<String>,
         variants: Vec<(String, Option<String>)>,
     },
+    /// 无法解析的声明，保留原始源文本，lower 时原样输出。
+    /// parser 容错恢复时，将跳过区域的原文保存于此，
+    /// 避免声明内容在降级过程中丢失。
+    Opaque(String),
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +412,10 @@ pub enum CppStmt {
     CoReturn(Option<CppExpr>),
     /// 空声明 `;` 已被调用方过滤
     Decl(CppDecl),
+    /// 无法解析的语句，保留原始源文本。
+    /// parse_body 容错恢复时，将跳过区域的原文保存于此，
+    /// 避免函数体内后续语句因单条错误全部丢失。
+    OpaqueStmt(String),
 }
 
 #[derive(Debug, Clone)]
@@ -608,6 +616,9 @@ pub struct CppParser<'a> {
     /// (`__anon_aggr_1`, `__anon_aggr_2`, ...) 避免同名导致构造函数/
     /// typeinfo/typedef 符号重复.
     anon_counter: u32,
+    /// 原始源文本引用, 用于容错恢复时提取被跳过区域的原文.
+    /// 与 lex.src 相同, 但 parser 级别直接访问更方便.
+    src: &'a [u8],
 }
 
 impl<'a> CppParser<'a> {
@@ -623,7 +634,23 @@ impl<'a> CppParser<'a> {
             deferred_gt: 0,
             typedef_alias: std::collections::HashMap::new(),
             anon_counter: 0,
+            src,
         }
+    }
+
+    /// 获取当前 lexer 的字节位置, 用于容错恢复时记录跳过区域起点.
+    fn capture_start(&self) -> usize {
+        self.lex.pos
+    }
+
+    /// 提取源文本 [start, end) 区间的原文, 用于 Opaque 声明.
+    fn capture_src_text(&self, start: usize, end: usize) -> String {
+        if start >= end || end > self.src.len() {
+            return String::new();
+        }
+        std::str::from_utf8(&self.src[start..end])
+            .unwrap_or("")
+            .to_string()
     }
 
     fn bump(&mut self) -> Option<CppTok> {
@@ -911,6 +938,8 @@ impl<'a> CppParser<'a> {
                 self.bump();
                 continue;
             }
+            // 记录 parse_decl 前的位置, 失败时用于捕获 Opaque 原文
+            let decl_start = self.capture_start();
             match self.parse_decl() {
                 Ok(d) => decls.push(d),
                 Err(e) => {
@@ -919,6 +948,11 @@ impl<'a> CppParser<'a> {
                     // 容错: 跳过无法解析的顶层构造, 到下一个 ';' 或 '}'
                     // 使 C++ 前端能处理包含复杂系统头文件的 GCC 构建
                     self.skip_to_next_toplevel();
+                    // 捕获跳过区域的原文, 保存为 Opaque 声明
+                    let text = self.capture_src_text(decl_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        decls.push(CppDecl::Opaque(text));
+                    }
                 }
             }
         }
@@ -1008,6 +1042,50 @@ impl<'a> CppParser<'a> {
                         depth -= 1;
                     }
                     self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    /// 跳过 token 直到语句边界 (`;` 或平衡括号后).
+    /// 用于 parse_body 容错恢复: 单条语句解析失败时, 跳过该语句
+    /// 继续解析后续语句, 保持花括号配对完整.
+    /// 与 skip_to_member_end 类似但不消耗结尾 token,
+    /// 且不跳过未平衡的 `}` (留给外层 parse_body 循环).
+    fn skip_to_stmt_boundary(&mut self) {
+        let mut depth = 0i32;
+        while let Some(tok) = &self.peek {
+            match tok {
+                // 分号且不在嵌套内 → 语句结束, 消耗分号
+                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                    self.bump();
+                    return;
+                }
+                // 花括号闭合且不在嵌套内 → 留给外层循环
+                CppTok::C(Tok { kind: TokKind::RBrace, .. }) if depth <= 0 => {
+                    return;
+                }
+                // 嵌套开始
+                CppTok::C(Tok { kind: TokKind::LBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::LParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                    depth += 1;
+                    self.bump();
+                }
+                // 嵌套结束
+                CppTok::C(Tok { kind: TokKind::RBrace, .. })
+                | CppTok::C(Tok { kind: TokKind::RParen, .. })
+                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                    if depth > 0 {
+                        depth -= 1;
+                        self.bump();
+                    } else {
+                        // 未平衡的 `}` → 不消耗, 留给外层
+                        return;
+                    }
                 }
                 _ => {
                     self.bump();
@@ -2332,6 +2410,8 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
+            // 记录成员解析前的位置, 失败时用于捕获 Opaque 原文
+            let member_start = self.capture_start();
             match self.parse_member_decl_with_class(&name) {
                 Ok(d) => members.push(d),
                 Err(e) => {
@@ -2339,6 +2419,11 @@ impl<'a> CppParser<'a> {
                     // `;` 或 `}` (与 parse_top_level 容错一致).
                     self.diags.push(e.to_diag(&self.file));
                     self.skip_to_member_end();
+                    // 捕获跳过区域的原文, 保存为 Opaque 成员
+                    let text = self.capture_src_text(member_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        members.push(CppDecl::Opaque(text));
+                    }
                 }
             }
         }
@@ -2426,11 +2511,18 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
+            // 记录成员解析前的位置, 失败时用于捕获 Opaque 原文
+            let member_start = self.capture_start();
             match self.parse_member_decl_with_class(&ctx_name) {
                 Ok(d) => members.push(d),
                 Err(e) => {
                     self.diags.push(e.to_diag(&self.file));
                     self.skip_to_member_end();
+                    // 捕获跳过区域的原文, 保存为 Opaque 成员
+                    let text = self.capture_src_text(member_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        members.push(CppDecl::Opaque(text));
+                    }
                 }
             }
         }
@@ -6368,7 +6460,21 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
-            stmts.push(self.parse_stmt()?);
+            // 容错: 单条语句解析失败时, 保留原文并继续解析后续语句,
+            // 而非让整个函数体因 `?` 传播而全部丢失.
+            let stmt_start = self.capture_start();
+            match self.parse_stmt() {
+                Ok(s) => stmts.push(s),
+                Err(e) => {
+                    self.diags.push(e.to_diag(&self.file));
+                    // 跳过到语句边界 (`;` 或平衡括号后), 保持花括号配对
+                    self.skip_to_stmt_boundary();
+                    let text = self.capture_src_text(stmt_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        stmts.push(CppStmt::OpaqueStmt(text));
+                    }
+                }
+            }
         }
         self.bump();
         Ok(CppBody {

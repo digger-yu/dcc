@@ -1723,6 +1723,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-fno-eliminate-unused-debug-types"
             | "-fno-eliminate-unused-debug-symbols"
             | "-fno-builtin-wcslen"
+            // GCC 内核扩展选项 - 接受但忽略 (Linux 内核 Makefile 常用)
+            | "-funsigned-char"
+            | "-fsigned-char"
+            | "-fno-PIE"
+            | "-fms-anonymous-structs"
+            | "-fno-jump-tables"
+            | "-fno-allow-store-data-races"
+            | "-fno-stack-check"
+            | "-fno-data-sections"
+            | "-fno-function-sections"
+            | "-foptimize-sibling-calls"
+            | "-fconserve-stack"
+            | "-fverbose-asm"
+            | "-fno-plt"
             | "-mno-mmx"
             | "-mno-80387"
             | "-mno-fp-ret-in-387"
@@ -1839,10 +1853,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     ));
                 }
             }
-            // 其余 -m* 忽略, 收集警告以便用户知晓
-            a if a.starts_with("-m") => {
-                cli_warnings.push(format!("ignoring unknown option '{}'", a));
-            }
+            // 其余 -m* 忽略 (GCC 机器相关选项, DCC 作为 x86-64 编译器安全忽略)
+            a if a.starts_with("-m") => {}
             // -fipa-sra: 启用/禁用跨过程标量替换
             "-fipa-sra" => ipa_sra.enabled = true,
             "-fno-ipa-sra" => ipa_sra.enabled = false,
@@ -1887,10 +1899,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     ));
                 }
             }
-            // -f* 其他选项 - 忽略, 收集警告以便用户知晓
-            a if a.starts_with("-f") => {
-                cli_warnings.push(format!("ignoring unknown option '{}'", a));
-            }
+            // -f* 其他选项 - 忽略 (GCC 选项数量庞大, 内核 Makefile 使用大量
+            // GCC 特有选项, 安全忽略以避免噪音)
+            a if a.starts_with("-f") => {}
             // -std=* 已经处理过了
             // -include, -isystem 等
             "-include" => {

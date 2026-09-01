@@ -110,6 +110,9 @@ pub struct FuncDecl {
     pub is_hot: bool,
     pub is_noinline: bool,
     pub is_always_inline: bool,
+    /// C `inline` 关键字 (GNU89 语义): 非 static inline 函数发射为 weak 符号
+    /// 避免多个编译单元包含同一头文件时产生多重定义
+    pub is_inline: bool,
     pub is_variadic: bool,
     // constructor/destructor/alias
     pub is_constructor: bool,

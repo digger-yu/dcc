@@ -448,6 +448,12 @@ fn validate_inline_asm_operand(
         return;
     }
     let ty = expr.ty();
+    // C 函数名在表达式中自动衰减为函数指针, 对 asm 约束检查也应如此.
+    // 内核 DEFINE_IDTENTRY_IRQ 等宏将函数名作为 'i' 约束操作数.
+    if let Type::Func(_, _) = ty {
+        // 函数类型衰减为指针后视为整数类 (指针)
+        return;
+    }
     if constraint_allows_type(constraint, &ty, is_output, is_inout, expr) {
         return;
     }
