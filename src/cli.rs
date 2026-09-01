@@ -89,6 +89,7 @@ pub struct Config {
     pub data_sections: bool,     // -fdata-sections (每个变量独立 section)
     pub gc_sections: bool,       // -Wl,--gc-sections (链接时垃圾回收未用 section)
     pub specs: Option<String>,   // -specs=nano.specs (Newlib-nano 规格文件)
+    pub output_format: crate::output_format::OutputFormat, // --output-format=binary/hex
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
@@ -823,6 +824,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut data_sections = false;
     let mut gc_sections = false;
     let mut specs: Option<String> = None;
+    let mut output_format = crate::output_format::OutputFormat::default();
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
     let mut m32 = false;
@@ -1359,6 +1361,21 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // Specs file for Newlib-nano
             a if a.starts_with("-specs=") => {
                 specs = Some(a["-specs=".len()..].to_string());
+            }
+            // Output format for bare-metal targets
+            a if a.starts_with("--output-format=") => {
+                let fmt = &a["--output-format=".len()..];
+                output_format = match fmt {
+                    "elf" => crate::output_format::OutputFormat::Elf,
+                    "binary" | "bin" => crate::output_format::OutputFormat::Binary,
+                    "ihex" | "hex" => crate::output_format::OutputFormat::IntelHex,
+                    _ => {
+                        return Err(CliError::new(&format!(
+                            "unknown output format '{}': expected elf, binary, or ihex",
+                            fmt
+                        )));
+                    }
+                };
             }
             a if a.starts_with("-fsanitize") => {}
             "-ftrapv" => trapv = true,
@@ -2503,6 +2520,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             data_sections,
             gc_sections,
             specs,
+            output_format,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
             as_options,
@@ -2624,6 +2642,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             data_sections,
             gc_sections,
             specs,
+            output_format,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
             as_options,
@@ -3677,5 +3696,35 @@ BAR");
         assert!(cfg.function_sections);
         assert!(!cfg.data_sections);
         assert!(!cfg.gc_sections); // not auto-enabled
+    }
+
+    // === Output format tests ===
+
+    #[test]
+    fn output_format_binary() {
+        let args = vec!["--output-format=binary".to_string(), "test.o".to_string()];
+        let cfg = parse(&args).expect("--output-format=binary should parse");
+        assert_eq!(cfg.output_format, crate::output_format::OutputFormat::Binary);
+    }
+
+    #[test]
+    fn output_format_ihex() {
+        let args = vec!["--output-format=ihex".to_string(), "test.o".to_string()];
+        let cfg = parse(&args).expect("--output-format=ihex should parse");
+        assert_eq!(cfg.output_format, crate::output_format::OutputFormat::IntelHex);
+    }
+
+    #[test]
+    fn output_format_hex_alias() {
+        let args = vec!["--output-format=hex".to_string(), "test.o".to_string()];
+        let cfg = parse(&args).expect("--output-format=hex should parse");
+        assert_eq!(cfg.output_format, crate::output_format::OutputFormat::IntelHex);
+    }
+
+    #[test]
+    fn default_output_format_is_elf() {
+        let args = vec!["-c".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("default should parse");
+        assert_eq!(cfg.output_format, crate::output_format::OutputFormat::Elf);
     }
 }

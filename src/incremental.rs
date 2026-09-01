@@ -356,6 +356,7 @@ mod tests {
             data_sections: false,
             gc_sections: false,
             specs: None,
+            output_format: crate::output_format::OutputFormat::default(),
             sanitizers: crate::sanitizer::SanitizerFlags::default(),
             input_lang: crate::cli::InputLang::C,
             as_options: vec![],
