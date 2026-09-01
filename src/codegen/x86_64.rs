@@ -3994,16 +3994,18 @@ impl Codegen {
                         Self::collect_nested_funcs(&body.items, &mut nested);
                     }
                     // 先处理顶层函数自身
-                    if let Some(&func_start) = self.labels.get(&f.name.name) {
+                    // Use resolved asm label name for label lookup
+                    let label_key = self.resolve_asm_label(&f.name.name).to_string();
+                    if let Some(&func_start) = self.labels.get(&label_key) {
                         let func_size =
                             self.func_sizes
-                                .get(&f.name.name)
+                                .get(&label_key)
                                 .copied()
                                 .unwrap_or_else(|| {
-                                    self.compute_func_size_fallback(&f.name.name, func_start)
+                                    self.compute_func_size_fallback(&label_key, func_start)
                                 });
                         let (sec_idx, sym_value) =
-                            if let Some(&(si, off)) = custom_func_offsets.get(&f.name.name) {
+                            if let Some(&(si, off)) = custom_func_offsets.get(&label_key) {
                                 (si, off)
                             } else {
                                 (1u16, func_start)
@@ -6218,7 +6220,9 @@ impl Codegen {
             if self.nested_funcs.contains_key(name) {
                 self.emit(&[0x4C, 0x89, 0xEA]); // mov r10, r13
             }
-            self.call_label(name);
+            // Resolve GNU asm label (e.g., __asm__("real_name")) for call sites
+            let resolved_name = self.resolve_asm_label(name).to_string();
+            self.call_label(&resolved_name);
         } else {
             self.load_rsp_qword(11, callee_stage.unwrap());
             if self.target.indirect_branch_thunk_extern {

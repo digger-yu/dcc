@@ -610,6 +610,16 @@ pub fn preprocess(
             pp.define_builtin("__ARM_NEON", "1");
         }
     }
+    // GCC 兼容宏
+    pp.define_builtin("__USER_LABEL_PREFIX__", "");
+    pp.define_builtin("__VERSION__", "\"13.2.0\"");
+    pp.define_builtin("__OPTIMIZE__", "1");
+    pp.define_builtin("__NO_INLINE__", "1");
+    // x86 段寄存器宏
+    if matches!(target.arch, Arch::X86_64) {
+        pp.define_builtin("__SEG_GS", "1");
+        pp.define_builtin("__SEG_FS", "1");
+    }
     // OS 宏
     match target.os {
         Os::Linux => {

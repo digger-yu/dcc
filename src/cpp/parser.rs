@@ -6488,12 +6488,18 @@ impl<'a> CppParser<'a> {
             // 容错: 单条语句解析失败时, 保留原文并继续解析后续语句,
             // 而非让整个函数体因 `?` 传播而全部丢失.
             let stmt_start = self.capture_start();
+            let pos_before = self.lex.pos;
             match self.parse_stmt() {
                 Ok(s) => stmts.push(s),
                 Err(e) => {
                     self.diags.push(e.to_diag(&self.file));
                     // 跳过到语句边界 (`;` 或平衡括号后), 保持花括号配对
                     self.skip_to_stmt_boundary();
+                    // 确保前进: 若 skip_to_stmt_boundary 未消耗任何 token
+                    // (例如 `)` 在 depth 0 时立即返回), 手动 bump 避免死循环.
+                    if self.lex.pos == pos_before {
+                        self.bump();
+                    }
                     let text = self.capture_src_text(stmt_start, self.lex.pos);
                     if !text.trim().is_empty() {
                         stmts.push(CppStmt::OpaqueStmt(text));

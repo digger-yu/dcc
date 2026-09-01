@@ -145,7 +145,6 @@ fn header_map_parses() {
 }
 
 #[test]
-#[ignore = "pre-existing: C++ parser hangs on functional header (template infinite backtracking)"]
 fn header_functional_parses() {
     let src =
         std::fs::read_to_string("src/cpp/stdlib/headers/functional").expect("read functional");
@@ -153,7 +152,6 @@ fn header_functional_parses() {
 }
 
 #[test]
-#[ignore = "pre-existing: blocked by functional header hang (see header_functional_parses)"]
 fn all_stdlib_headers_parse() {
     let headers = crate::cpp::stdlib::STD_HEADERS;
     for h in headers {
@@ -229,3 +227,4 @@ fn stdlib_iostream_cout_usage_parses() {
     });
     assert!(has_main, "expected main function");
 }
+
