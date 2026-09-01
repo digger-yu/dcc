@@ -38,3 +38,4 @@ pub mod ssa_gvn;
 pub mod ssa_passes;
 pub mod target;
 pub mod tokens;
+pub mod thumb;
