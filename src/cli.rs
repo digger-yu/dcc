@@ -412,6 +412,7 @@ impl TargetTriple {
 
     pub fn parse(s: &str) -> Result<Self, String> {
         // 形如: x86_64-unknown-linux-gnu, aarch64-linux-gnu, riscv64-linux-gnu
+        // bare-metal: arm-none-eabi, riscv32-unknown-elf, thumbv7m-none-eabihf
         let parts: Vec<&str> = s.split('-').collect();
         if parts.len() < 3 {
             return Err(format!("bad target: {}", s));
@@ -423,31 +424,53 @@ impl TargetTriple {
             "riscv32" => Arch::RiscV32,
             "mips64" => Arch::Mips64,
             "mips" => Arch::Mips,
-            "arm" | "armv7" => Arch::Arm,
+            "arm" | "armv7" | "thumbv7m" | "thumbv7em"
+            | "thumbv6m" | "thumbv8m" => Arch::Arm,
             other => return Err(format!("unknown arch: {}", other)),
         };
-        let os = match parts[parts.len() - 2] {
-            "linux" | "linux-gnu" | "linux-musl" => Os::Linux,
-            "freestanding" | "elf" => Os::Freestanding,
-            "windows" | "win32" => Os::Windows,
-            "darwin" | "apple" => Os::Macos,
-            other => return Err(format!("unknown os: {}", other)),
-        };
-        let abi = match parts[parts.len() - 1] {
-            "gnu" | "gnuabi99" | "gnuabi64" | "gnuabin32" | "gnueabi" | "gnueabihf" => Abi::Gnu,
-            "musl" => Abi::Musl,
-            "eabi" => Abi::Eabi,
-            "eabihf" => Abi::Eabihf,
-            "msvc" => Abi::Msvc,
-            "darwin" => Abi::Darwin,
-            // mips/o32/o64/n32 等扁平 abi 也归到 Gnu 桶里 (只解析不解码)
-            o32_or_o64 if o32_or_o64.starts_with("o") => Abi::Gnu,
-            other => return Err(format!("unknown abi: {}", other)),
-        };
-        let vendor = if parts.len() == 4 {
-            parts[1].to_string()
+        // Determine if this is a 3-part bare-metal triple
+        // (arch-vendor-abi, no OS component) vs 4-part standard triple.
+        // 3-part detection: last part is an ABI name (eabi/eabihf/elf)
+        // and second-to-last is a vendor (none/unknown).
+        let is_3part_bare_metal = parts.len() == 3 && matches!(
+            parts[2],
+            "eabi" | "eabihf" | "elf"
+        );
+        let (os, abi, vendor) = if is_3part_bare_metal {
+            // 3-part bare-metal: arch-vendor-abi (e.g. arm-none-eabi)
+            let vendor = parts[1].to_string();
+            let abi = match parts[2] {
+                "eabi" | "elf" => Abi::Eabi,
+                "eabihf" => Abi::Eabihf,
+                _ => unreachable!(),
+            };
+            (Os::Freestanding, abi, vendor)
         } else {
-            "unknown".into()
+            let os = match parts[parts.len() - 2] {
+                "linux" | "linux-gnu" | "linux-musl" => Os::Linux,
+                "freestanding" | "elf" | "none" => Os::Freestanding,
+                "windows" | "win32" => Os::Windows,
+                "darwin" | "apple" => Os::Macos,
+                other => return Err(format!("unknown os: {}", other)),
+            };
+            let abi = match parts[parts.len() - 1] {
+                "gnu" | "gnuabi99" | "gnuabi64" | "gnuabin32"
+                | "gnueabi" | "gnueabihf" => Abi::Gnu,
+                "musl" => Abi::Musl,
+                "eabi" | "elf" => Abi::Eabi,
+                "eabihf" => Abi::Eabihf,
+                "msvc" => Abi::Msvc,
+                "darwin" => Abi::Darwin,
+                // mips/o32/o64/n32 等扁平 abi 也归到 Gnu 桶里
+                o32_or_o64 if o32_or_o64.starts_with("o") => Abi::Gnu,
+                other => return Err(format!("unknown abi: {}", other)),
+            };
+            let vendor = if parts.len() >= 4 {
+                parts[1].to_string()
+            } else {
+                "unknown".into()
+            };
+            (os, abi, vendor)
         };
         Ok(Self {
             arch,
@@ -3038,6 +3061,54 @@ mod tests {
             TargetTriple::parse("armv7-unknown-linux-gnueabihf").expect("armv7 alias must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.vendor, "unknown");
+    }
+
+    #[test]
+    fn bare_metal_arm_none_eabi() {
+        let t = TargetTriple::parse("arm-none-eabi").expect("arm-none-eabi must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.vendor, "none");
+        assert_eq!(t.os, super::Os::Freestanding);
+        assert_eq!(t.abi, super::Abi::Eabi);
+    }
+
+    #[test]
+    fn bare_metal_arm_none_eabihf() {
+        let t =
+            TargetTriple::parse("arm-none-eabihf").expect("arm-none-eabihf must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.vendor, "none");
+        assert_eq!(t.os, super::Os::Freestanding);
+        assert_eq!(t.abi, super::Abi::Eabihf);
+    }
+
+    #[test]
+    fn bare_metal_riscv32_unknown_elf() {
+        let t = TargetTriple::parse("riscv32-unknown-elf")
+            .expect("riscv32-unknown-elf must parse");
+        assert_eq!(t.arch, Arch::RiscV32);
+        assert_eq!(t.vendor, "unknown");
+        assert_eq!(t.os, super::Os::Freestanding);
+        assert_eq!(t.abi, super::Abi::Eabi);
+    }
+
+    #[test]
+    fn bare_metal_thumbv7m_none_eabi() {
+        let t = TargetTriple::parse("thumbv7m-none-eabi")
+            .expect("thumbv7m-none-eabi must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.vendor, "none");
+        assert_eq!(t.os, super::Os::Freestanding);
+        assert_eq!(t.abi, super::Abi::Eabi);
+    }
+
+    #[test]
+    fn bare_metal_thumbv7em_none_eabihf() {
+        let t = TargetTriple::parse("thumbv7em-none-eabihf")
+            .expect("thumbv7em-none-eabihf must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.os, super::Os::Freestanding);
+        assert_eq!(t.abi, super::Abi::Eabihf);
     }
 
     #[test]

@@ -265,7 +265,7 @@ fn detect_x86() -> CpuFeatures {
     let mut feats = CpuFeatures::default();
 
     // Leaf 0: 获取最大基本 leaf
-    let leaf0 = unsafe { __cpuid(0) };
+    let leaf0 = __cpuid(0);
     let max_leaf = leaf0.eax;
 
     if max_leaf < 1 {
@@ -273,7 +273,7 @@ fn detect_x86() -> CpuFeatures {
     }
 
     // Leaf 1: 基础特性
-    let leaf1 = unsafe { __cpuid(1) };
+    let leaf1 = __cpuid(1);
     let ecx1 = leaf1.ecx;
     let _edx1 = leaf1.edx;
 
@@ -297,7 +297,7 @@ fn detect_x86() -> CpuFeatures {
 
     // Leaf 7 sub-leaf 0: 扩展特性
     if max_leaf >= 7 {
-        let leaf7 = unsafe { __cpuid(7) };
+        let leaf7 = __cpuid(7);
         let ebx7 = leaf7.ebx;
         let ecx7 = leaf7.ecx;
         let edx7 = leaf7.edx;
@@ -339,7 +339,7 @@ fn detect_x86() -> CpuFeatures {
         // __cpuid_count(eax=7, ecx=1) for sub-leaf 1
         let max_subleaf = leaf7.eax; // EAX of leaf 7 = max sub-leaf
         if max_subleaf >= 1 {
-            let leaf7_1 = unsafe { std::arch::x86_64::__cpuid_count(7, 1) };
+            let leaf7_1 = std::arch::x86_64::__cpuid_count(7, 1);
             let ebx7_1 = leaf7_1.ebx;
             let edx7_1 = leaf7_1.edx;
 

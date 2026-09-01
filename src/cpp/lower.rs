@@ -975,7 +975,7 @@ fn clean_struct_bodies(s: &str) -> String {
                     // 如果是构造函数（函数名等于 struct 名），转换为 _ctor 函数
                     if fn_name == struct_name {
                         // 提取参数列表
-                        let mut paren_end = paren_start + 1;
+                        let paren_end;
                         {
                             let mut d = 1i32;
                             let mut k = paren_start + 1;
@@ -1063,7 +1063,7 @@ fn clean_struct_bodies(s: &str) -> String {
                     }
 
                     // 提取参数列表
-                    let mut paren_end = paren_start + 1;
+                    let paren_end;
                     {
                         let mut d = 1i32;
                         let mut k = paren_start + 1;
@@ -1584,7 +1584,7 @@ fn convert_if_condition_decls(s: &str) -> String {
                 // Check if condition contains a variable declaration: Type var = expr
                 // Look for pattern: identifier identifier = 
                 // But skip comparison operators: !=, ==, <=, >=
-                let mut converted = false;
+                let converted = false;
                 if let Some(eq_pos) = cond_content.find('=') {
                     // Make sure this is not == (comparison)
                     // Check the character right after the '='
@@ -1704,7 +1704,6 @@ fn convert_if_condition_decls(s: &str) -> String {
                                     var_type, var_name, after_eq, var_name
                                 ));
                                 i = paren_end + 1;
-                                converted = true;
                                 continue;
                             }
                         }
@@ -3096,10 +3095,10 @@ fn replace_template_usages(s: &str) -> String {
                 // Try to find matching '>'
                 let mut depth = 1i32;
                 let mut k = j + 1;
-                let mut has_comma = false;
+                let mut _has_comma = false;
                 let _has_struct = false;
                 let mut has_comparison = false; // Track if content has ==, !=, <=, >=
-                let mut has_parens = false; // Track if content has ( )
+                let mut _has_parens = false; // Track if content has ( )
                 let mut has_semicolon = false;
                 let mut has_newline = false;
                 let start_k = k;
@@ -3118,8 +3117,8 @@ fn replace_template_usages(s: &str) -> String {
                     }
                     if bytes[k] == b'<' { depth += 1; }
                     else if bytes[k] == b'>' { depth -= 1; }
-                    else if bytes[k] == b',' && depth == 1 { has_comma = true; }
-                    else if bytes[k] == b'(' || bytes[k] == b')' { has_parens = true; }
+                    else if bytes[k] == b',' && depth == 1 { _has_comma = true; }
+                    else if bytes[k] == b'(' || bytes[k] == b')' { _has_parens = true; }
                     else if bytes[k] == b';' { has_semicolon = true; }
                     else if bytes[k] == b'\n' { has_newline = true; }
                     else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
