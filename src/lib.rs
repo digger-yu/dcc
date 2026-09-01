@@ -27,6 +27,7 @@ pub mod loop_opt;
 pub mod lto;
 pub mod mmap_io;
 pub mod opt;
+pub mod output_format;
 pub mod parser;
 pub mod preproc;
 pub mod profile;
