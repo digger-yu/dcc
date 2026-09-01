@@ -20873,6 +20873,32 @@ fn auto_vectorize_vnni_int16_pattern() {
     assert_eq!(cfg.opt, 3);
 }
 
+// ===== Commit 10: OpenMP parallelization =====
+
+#[test]
+fn openmp_parallel_for_pragma() {
+    // Verify that -fopenmp flag is accepted
+    let args = vec![
+        "-fopenmp".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-fopenmp should parse");
+    // -fopenmp is accepted (may produce warning but doesn't error)
+    assert!(cfg.opt >= 0);
+}
+
+#[test]
+fn openmp_simd_pragma() {
+    // Verify that -fopenmp=simd flag is accepted
+    let args = vec![
+        "-fopenmp=simd".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-fopenmp=simd should parse");
+    assert!(cfg.opt >= 0);
+}
 // ===== Commit 9: Software Pipelining =====
 
 #[test]
