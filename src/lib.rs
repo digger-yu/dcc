@@ -22,6 +22,7 @@ pub mod format_check;
 pub mod incremental;
 pub mod ipa_sra;
 pub mod ir;
+pub mod linker_script;
 pub mod link;
 pub mod loop_opt;
 pub mod lto;
