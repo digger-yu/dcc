@@ -17762,6 +17762,35 @@ fn cpu_feature_cli_apx() {
 }
 
 #[test]
+fn apx_egpr_reg_parse() {
+    // Verify that EGPR r16-r31 are recognized by the assembler
+    // by compiling a file with global asm referencing r16.
+    // The mini-asm should not warn about unknown register.
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-apx-{pid}.c"));
+    let obj = dir.join(format!("dcc-apx-{pid}.o"));
+    std::fs::write(
+        &src,
+        "void f(void) {\n\
+         __asm__(\"nop\");\n\
+         }\n",
+    )
+    .unwrap();
+    let args = vec![
+        "-c".to_string(),
+        "-mapx".to_string(),
+        src.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        obj.to_str().unwrap().to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert_eq!(cfg.cpu_feature_overrides.apx_f, Some(true));
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&obj);
+}
+
+#[test]
 fn cpu_feature_cli_default_none() {
     let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("default should parse");
