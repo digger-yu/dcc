@@ -352,6 +352,8 @@ mod tests {
             dwarf_version: 4,
             lto_enabled: false,
             function_sections: false,
+            data_sections: false,
+            specs: None,
             sanitizers: crate::sanitizer::SanitizerFlags::default(),
             input_lang: crate::cli::InputLang::C,
             as_options: vec![],

@@ -85,6 +85,8 @@ pub struct Config {
     pub dwarf_version: u8, // DWARF version: 4 or 5 (default 4)
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
+    pub data_sections: bool,     // -fdata-sections (每个变量独立 section)
+    pub specs: Option<String>,   // -specs=nano.specs (Newlib-nano 规格文件)
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
@@ -815,6 +817,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut lto_enabled = false;
     let mut function_sections = false;
     let mut no_function_sections = false;
+    let mut data_sections = false;
+    let mut specs: Option<String> = None;
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
     let mut m32 = false;
@@ -1340,6 +1344,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-flto=") => lto_enabled = true,
             "-ffunction-sections" => function_sections = true,
             "-fno-function-sections" => no_function_sections = true,
+            // Data sections for gc-sections
+            "-fdata-sections" => data_sections = true,
+            "-fno-data-sections" => data_sections = false,
+            // Specs file for Newlib-nano
+            a if a.starts_with("-specs=") => {
+                specs = Some(a["-specs=".len()..].to_string());
+            }
             a if a.starts_with("-fsanitize") => {}
             "-ftrapv" => trapv = true,
             "-fno-trapv" => trapv = false,
@@ -2473,6 +2484,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dwarf_version,
             lto_enabled,
             function_sections,
+            data_sections,
+            specs,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
             as_options,
@@ -2590,6 +2603,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dwarf_version,
             lto_enabled,
             function_sections,
+            data_sections,
+            specs,
             sanitizers: SanitizerFlags::from_args(args)?,
             input_lang,
             as_options,
@@ -3558,5 +3573,36 @@ BAR");
         let args = vec!["-c".to_string(), "test.c".to_string()];
         let cfg = parse(&args).expect("default should parse");
         assert_eq!(cfg.float_abi, super::FloatAbi::Soft);
+    }
+
+    // === Data sections and specs tests ===
+
+    #[test]
+    fn fdata_sections_enables_data_sections() {
+        let args = vec!["-c".to_string(), "-fdata-sections".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-fdata-sections should parse");
+        assert!(cfg.data_sections);
+    }
+
+    #[test]
+    fn fno_data_sections_disables_data_sections() {
+        let args = vec!["-c".to_string(), "-fdata-sections".to_string(), "-fno-data-sections".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-fno-data-sections should parse");
+        assert!(!cfg.data_sections);
+    }
+
+    #[test]
+    fn specs_nano_specs_parsed() {
+        let args = vec!["-c".to_string(), "-specs=nano.specs".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-specs=nano.specs should parse");
+        assert_eq!(cfg.specs.as_deref(), Some("nano.specs"));
+    }
+
+    #[test]
+    fn default_data_sections_is_false() {
+        let args = vec!["-c".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("default should parse");
+        assert!(!cfg.data_sections);
+        assert!(cfg.specs.is_none());
     }
 }
