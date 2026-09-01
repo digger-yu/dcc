@@ -194,6 +194,8 @@ pub struct Config {
     pub mcpu: Option<String>,
     /// -mthumb/-marm: ARM 指令集模式 (默认 Arm)
     pub arm_instruction_mode: ArmInstructionMode,
+    /// -mfloat-abi=: ARM/RISC-V 浮点 ABI 模式 (默认 Soft)
+    pub float_abi: FloatAbi,
     /// -ffast-math: 激进浮点优化 (允许重结合/倒数/非IEEE)
     pub fast_math: bool,
     /// -ffp-contract=: FP 收缩模式
@@ -227,6 +229,21 @@ pub enum ArmInstructionMode {
     Arm,
     /// -mthumb: 16/32-bit Thumb-2 指令集
     Thumb,
+}
+
+/// 浮点 ABI 模式 (-mfloat-abi=)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FloatAbi {
+    /// -mfloat-abi=soft: 纯软件浮点 (默认)
+    /// 浮点参数通过整数寄存器传递
+    #[default]
+    Soft,
+    /// -mfloat-abi=softfp: 软件浮点 ABI, 硬件浮点指令
+    /// 浮点参数通过整数寄存器传递, 但使用硬件 FPU
+    SoftFp,
+    /// -mfloat-abi=hard: 硬件浮点 ABI
+    /// 浮点参数通过浮点寄存器传递
+    Hard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -860,6 +877,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut mtune: Option<String> = None;
     let mut mcpu: Option<String> = None;
     let mut arm_instruction_mode = ArmInstructionMode::default();
+    let mut float_abi = FloatAbi::default();
     let mut fast_math = false;
     let mut fp_contract_mode = FpContractMode::Default;
 
@@ -1948,6 +1966,21 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-marm" => {
                 arm_instruction_mode = ArmInstructionMode::Arm;
             }
+            // Float ABI selection
+            a if a.starts_with("-mfloat-abi=") => {
+                let abi_str = &a["-mfloat-abi=".len()..];
+                float_abi = match abi_str {
+                    "soft" => FloatAbi::Soft,
+                    "softfp" => FloatAbi::SoftFp,
+                    "hard" => FloatAbi::Hard,
+                    _ => {
+                        return Err(CliError::new(&format!(
+                            "unknown float ABI '{}': expected soft, softfp, or hard",
+                            abi_str
+                        )));
+                    }
+                };
+            }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
             | "-pedantic-errors"
@@ -2497,6 +2530,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
             arm_instruction_mode,
+            float_abi,
             fast_math,
             fp_contract_mode,
             ipa_sra: {
@@ -2613,6 +2647,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
             arm_instruction_mode,
+            float_abi,
             fast_math,
             fp_contract_mode,
             ipa_sra: {
@@ -3493,5 +3528,35 @@ BAR");
         let args = vec!["-c".to_string(), "test.c".to_string()];
         let cfg = parse(&args).expect("default should parse");
         assert_eq!(cfg.arm_instruction_mode, super::ArmInstructionMode::Arm);
+    }
+
+    // === Float ABI tests ===
+
+    #[test]
+    fn mfloat_abi_soft() {
+        let args = vec!["-c".to_string(), "-mfloat-abi=soft".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-mfloat-abi=soft should parse");
+        assert_eq!(cfg.float_abi, super::FloatAbi::Soft);
+    }
+
+    #[test]
+    fn mfloat_abi_softfp() {
+        let args = vec!["-c".to_string(), "-mfloat-abi=softfp".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-mfloat-abi=softfp should parse");
+        assert_eq!(cfg.float_abi, super::FloatAbi::SoftFp);
+    }
+
+    #[test]
+    fn mfloat_abi_hard() {
+        let args = vec!["-c".to_string(), "-mfloat-abi=hard".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-mfloat-abi=hard should parse");
+        assert_eq!(cfg.float_abi, super::FloatAbi::Hard);
+    }
+
+    #[test]
+    fn default_float_abi_is_soft() {
+        let args = vec!["-c".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("default should parse");
+        assert_eq!(cfg.float_abi, super::FloatAbi::Soft);
     }
 }

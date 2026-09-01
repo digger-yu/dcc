@@ -88,6 +88,8 @@ pub struct Target {
     pub has_trustzone: bool,
     /// ARM 指令集模式 (-mthumb/-marm)
     pub arm_instruction_mode: crate::cli::ArmInstructionMode,
+    /// 浮点 ABI 模式 (-mfloat-abi=)
+    pub float_abi: crate::cli::FloatAbi,
     /// RISC-V M 扩展 (整数乘除法)
     pub riscv_has_m: bool,
     /// RISC-V A 扩展 (原子指令)
@@ -190,6 +192,7 @@ impl Target {
             has_dsp: false,
             has_trustzone: false,
             arm_instruction_mode: crate::cli::ArmInstructionMode::default(),
+            float_abi: crate::cli::FloatAbi::default(),
             riscv_has_m: false,
             riscv_has_a: false,
             riscv_has_f: false,

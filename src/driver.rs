@@ -949,6 +949,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     // ARM instruction mode (-mthumb/-marm)
     target.arm_instruction_mode = cfg.arm_instruction_mode;
+    // Float ABI mode (-mfloat-abi=)
+    target.float_abi = cfg.float_abi;
     if cfg.verbose && cfg.target.arch == crate::cli::Arch::X86_64 {
         let feats = target.cpu_features.to_feature_strings();
         if !feats.is_empty() {
