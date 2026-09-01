@@ -32,6 +32,7 @@ pub mod output_format;
 pub mod parser;
 pub mod preproc;
 pub mod profile;
+pub mod riscv32;
 pub mod sanitizer;
 pub mod ssa;
 pub mod ssa_gvn;
