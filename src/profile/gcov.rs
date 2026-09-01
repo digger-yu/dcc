@@ -320,7 +320,7 @@ pub fn instrument_program(prog: &mut Program, source_name: &str, cfg: &GcovConfi
         }
         let func = GcovFunction {
             name: f.name.name.clone(),
-            file: span.file.clone(),
+            file: span.file.to_string(),
             ident: 0,
             lineno: span.line,
             blocks,
@@ -1467,6 +1467,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,
@@ -1582,6 +1584,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,

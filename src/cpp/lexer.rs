@@ -13,6 +13,7 @@
 
 use crate::diagnostics::Span;
 use crate::tokens::{Tok, TokKind};
+use std::sync::Arc;
 
 /// C 关键字 → TokKind (M9 共享, 避免 C++ lexer 漏识别 return 等关键字)
 fn c_keyword_kind(s: &str) -> Option<TokKind> {
@@ -257,7 +258,7 @@ impl CppTok {
 #[derive(Clone)]
 pub struct CppLexer<'a> {
     pub src: &'a [u8],
-    pub file: String,
+    pub file: Arc<str>,
     pub pos: usize,
     pub line: u32,
     pub col: u32,
@@ -267,7 +268,7 @@ impl<'a> CppLexer<'a> {
     pub fn new(src: &'a [u8], file: &str) -> Self {
         Self {
             src,
-            file: file.to_string(),
+            file: Arc::from(file),
             pos: 0,
             line: 1,
             col: 1,

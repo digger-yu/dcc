@@ -176,6 +176,9 @@ pub struct FuncDecl {
     pub no_instrument: bool,
     /// __attribute__((malloc)): 返回指针不别名已有内存
     pub is_malloc: bool,
+    /// __attribute__((malloc (dealloc_fn, argno))): GCC11+ 释放函数提示
+    pub malloc_dealloc: Option<String>,
+    pub malloc_dealloc_argno: Option<u32>,
     /// __attribute__((alloc_size(N[,M]))): 分配大小参数索引
     pub alloc_size: Option<(u32, Option<u32>)>,
     /// __attribute__((assume_aligned(N))): 返回指针对齐至少 N 字节

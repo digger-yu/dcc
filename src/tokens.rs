@@ -1,9 +1,90 @@
 // src/tokens.rs - 词法分析
 // 第一性原理: 词法是"字符流"到"语义单元"的映射,不是"语法"。
 // suckless 准则: 词法状态机尽可能少。关键字/标识符/数字/字符串/符号,五大类。
-// 关键字采用完美 hash 识别 (这里用 if-else 链,简单优先;后续可换 phf)。
+// 关键字采用排序表 + 二分查找识别 (O(log N) 比较, 替代长 match 链)。
 
 use crate::diagnostics::Span;
+use std::sync::Arc;
+
+/// 关键字查找表 (按字符串排序, 供二分查找使用)
+const KEYWORD_TABLE: &[(&str, TokKind)] = &[
+    ("_Accum", TokKind::KwAccum),
+    ("_Alignof", TokKind::KwAlignof),
+    ("_Atomic", TokKind::KwAtomic),
+    ("_Bool", TokKind::KwBool),
+    ("_Complex", TokKind::KwComplex),
+    ("_Decimal128", TokKind::KwDecimal128),
+    ("_Decimal32", TokKind::KwDecimal32),
+    ("_Decimal64", TokKind::KwDecimal64),
+    ("_Fract", TokKind::KwFract),
+    ("_Imaginary", TokKind::KwImaginary),
+    ("__alignof", TokKind::KwAlignof),
+    ("__alignof__", TokKind::KwAlignof),
+    ("__complex", TokKind::KwComplex),
+    ("__complex__", TokKind::KwComplex),
+    ("__const__", TokKind::KwConst),
+    ("__imag", TokKind::KwImag),
+    ("__imag__", TokKind::KwImag),
+    ("__inline", TokKind::KwInline),
+    ("__inline__", TokKind::KwInline),
+    ("__int128", TokKind::KwInt128),
+    ("__int128_t", TokKind::KwInt128),
+    ("__real", TokKind::KwReal),
+    ("__real__", TokKind::KwReal),
+    ("__restrict", TokKind::KwRestrict),
+    ("__restrict__", TokKind::KwRestrict),
+    ("__signed__", TokKind::KwSigned),
+    ("__uint128_t", TokKind::KwUInt128),
+    ("__volatile__", TokKind::KwVolatile),
+    ("alignof", TokKind::KwAlignof),
+    ("auto", TokKind::KwAuto),
+    ("break", TokKind::KwBreak),
+    ("case", TokKind::KwCase),
+    ("char", TokKind::KwChar),
+    ("char16_t", TokKind::KwChar16),
+    ("char32_t", TokKind::KwChar32),
+    ("char8_t", TokKind::KwChar8),
+    ("const", TokKind::KwConst),
+    ("continue", TokKind::KwContinue),
+    ("decltype", TokKind::KwDecltype),
+    ("default", TokKind::KwDefault),
+    ("do", TokKind::KwDo),
+    ("double", TokKind::KwDouble),
+    ("else", TokKind::KwElse),
+    ("enum", TokKind::KwEnum),
+    ("extern", TokKind::KwExtern),
+    ("float", TokKind::KwFloat),
+    ("for", TokKind::KwFor),
+    ("goto", TokKind::KwGoto),
+    ("if", TokKind::KwIf),
+    ("inline", TokKind::KwInline),
+    ("int", TokKind::KwInt),
+    ("long", TokKind::KwLong),
+    ("register", TokKind::KwRegister),
+    ("restrict", TokKind::KwRestrict),
+    ("return", TokKind::KwReturn),
+    ("short", TokKind::KwShort),
+    ("signed", TokKind::KwSigned),
+    ("sizeof", TokKind::KwSizeof),
+    ("static", TokKind::KwStatic),
+    ("struct", TokKind::KwStruct),
+    ("switch", TokKind::KwSwitch),
+    ("typedef", TokKind::KwTypedef),
+    ("union", TokKind::KwUnion),
+    ("unsigned", TokKind::KwUnsigned),
+    ("void", TokKind::KwVoid),
+    ("volatile", TokKind::KwVolatile),
+    ("while", TokKind::KwWhile),
+];
+
+/// 关键字二分查找: O(log N) 次字符串比较, 替代长 match 链
+#[inline]
+fn keyword_lookup(text: &str) -> TokKind {
+    KEYWORD_TABLE
+        .binary_search_by_key(&text, |&(k, _)| k)
+        .map(|i| KEYWORD_TABLE[i].1)
+        .unwrap_or(TokKind::Ident)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tok {
@@ -136,7 +217,7 @@ pub enum TokKind {
 
 pub struct Lexer<'a> {
     pub src: &'a [u8],
-    pub file: String,
+    pub file: Arc<str>,
     pub pos: usize,
     pub line: u32,
     pub col: u32,
@@ -281,61 +362,7 @@ impl<'a> Lexer<'a> {
             let text = std::str::from_utf8(&self.src[start..self.pos])
                 .unwrap()
                 .to_string();
-            let kind = match text.as_str() {
-                "int" => TokKind::KwInt,
-                "char" => TokKind::KwChar,
-                "short" => TokKind::KwShort,
-                "long" => TokKind::KwLong,
-                "void" => TokKind::KwVoid,
-                "float" => TokKind::KwFloat,
-                "double" => TokKind::KwDouble,
-                "signed" | "__signed__" => TokKind::KwSigned,
-                "unsigned" => TokKind::KwUnsigned,
-                "struct" => TokKind::KwStruct,
-                "union" => TokKind::KwUnion,
-                "enum" => TokKind::KwEnum,
-                "typedef" => TokKind::KwTypedef,
-                "if" => TokKind::KwIf,
-                "else" => TokKind::KwElse,
-                "while" => TokKind::KwWhile,
-                "for" => TokKind::KwFor,
-                "do" => TokKind::KwDo,
-                "switch" => TokKind::KwSwitch,
-                "case" => TokKind::KwCase,
-                "default" => TokKind::KwDefault,
-                "break" => TokKind::KwBreak,
-                "continue" => TokKind::KwContinue,
-                "return" => TokKind::KwReturn,
-                "goto" => TokKind::KwGoto,
-                "static" => TokKind::KwStatic,
-                "extern" => TokKind::KwExtern,
-                "const" | "__const__" => TokKind::KwConst,
-                "volatile" | "__volatile__" => TokKind::KwVolatile,
-                "inline" | "__inline__" | "__inline" => TokKind::KwInline,
-                "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
-                "auto" => TokKind::KwAuto,
-                "register" => TokKind::KwRegister,
-                "sizeof" => TokKind::KwSizeof,
-                "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
-                "decltype" => TokKind::KwDecltype, // M17.0
-                "_Atomic" => TokKind::KwAtomic,
-                "_Bool" => TokKind::KwBool,
-                "char8_t" => TokKind::KwChar8,
-                "char16_t" => TokKind::KwChar16,
-                "char32_t" => TokKind::KwChar32,
-                "_Fract" => TokKind::KwFract,
-                "_Accum" => TokKind::KwAccum,
-                "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
-                "_Imaginary" | "__imaginary" => TokKind::KwImaginary,
-                "__real__" | "__real" => TokKind::KwReal,
-                "__imag__" | "__imag" => TokKind::KwImag,
-                "_Decimal32" => TokKind::KwDecimal32,
-                "_Decimal64" => TokKind::KwDecimal64,
-                "_Decimal128" => TokKind::KwDecimal128,
-                "__int128" | "__int128_t" => TokKind::KwInt128,
-                "__uint128_t" => TokKind::KwUInt128,
-                _ => TokKind::Ident,
-            };
+            let kind = keyword_lookup(&text);
             // L"..." wide string literal
             if text == "L" && self.peek() == Some(b'"') {
                 self.bump(); // consume opening '"'

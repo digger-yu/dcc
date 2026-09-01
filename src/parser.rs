@@ -90,6 +90,9 @@ struct ParsedAttrs {
     no_instrument: bool,
     /// __attribute__((malloc)): 返回指针不别名已有内存
     is_malloc: bool,
+    /// __attribute__((malloc (dealloc_fn, argno))): GCC11+ 释放函数提示
+    malloc_dealloc: Option<String>,
+    malloc_dealloc_argno: Option<u32>,
     /// __attribute__((alloc_size(N[,M]))): 参数 N(,M) 指定分配大小
     alloc_size: Option<(u32, Option<u32>)>,
     /// __attribute__((assume_aligned(N))): 返回指针对齐至少 N 字节
@@ -155,177 +158,35 @@ pub struct ParseOptions {
 
 impl ParsedAttrs {
     fn merge(&mut self, other: ParsedAttrs) {
-        if other.section.is_some() {
-            self.section = other.section;
-        }
-        if other.alignment.is_some() {
-            self.alignment = other.alignment;
-        }
-        if other.is_weak {
-            self.is_weak = true;
-        }
-        if other.visibility.is_some() {
-            self.visibility = other.visibility;
-        }
-        if other.is_unused {
-            self.is_unused = true;
-        }
-        if other.is_cold {
-            self.is_cold = true;
-        }
-        if other.is_hot {
-            self.is_hot = true;
-        }
-        if other.is_pure {
-            self.is_pure = true;
-        }
-        if other.is_const_attr {
-            self.is_const_attr = true;
-        }
-        if other.returns_twice {
-            self.returns_twice = true;
-        }
-        if other.no_instrument {
-            self.no_instrument = true;
-        }
-        if other.is_malloc {
-            self.is_malloc = true;
-        }
-        if other.alloc_size.is_some() {
-            self.alloc_size = other.alloc_size;
-        }
-        if other.assume_aligned.is_some() {
-            self.assume_aligned = other.assume_aligned;
-        }
-        if other.warn_unused_result {
-            self.warn_unused_result = true;
-        }
-        if other.is_sentinel {
-            self.is_sentinel = true;
-        }
-        if other.format_arg_idx.is_some() {
-            self.format_arg_idx = other.format_arg_idx;
-        }
-        if other.is_noinline {
-            self.is_noinline = true;
-        }
-        if other.is_always_inline {
-            self.is_always_inline = true;
-        }
-        if other.is_noreturn {
-            self.is_noreturn = true;
-        }
-        if other.register_name.is_some() {
-            self.register_name = other.register_name;
-        }
-        if other.cleanup_fn.is_some() {
-            self.cleanup_fn = other.cleanup_fn;
-        }
-        if other.is_constructor {
-            self.is_constructor = true;
-        }
-        if other.is_destructor {
-            self.is_destructor = true;
-        }
-        if other.alias_name.is_some() {
-            self.alias_name = other.alias_name;
-        }
-        if other.format_kind.is_some() {
-            self.format_kind = other.format_kind;
-        }
-        if other.format_string_idx.is_some() {
-            self.format_string_idx = other.format_string_idx;
-        }
-        if other.format_first_arg.is_some() {
-            self.format_first_arg = other.format_first_arg;
-        }
-        if !other.no_sanitize.is_empty() {
-            self.no_sanitize.extend(other.no_sanitize);
-        }
-        if !other.target_clones.is_empty() {
-            self.target_clones.extend(other.target_clones);
-        }
-        if other.copy_fn.is_some() {
-            self.copy_fn = other.copy_fn;
-        }
-        if other.returns_nonnull {
-            self.returns_nonnull = true;
-        }
-        if other.ctor_priority.is_some() {
-            self.ctor_priority = other.ctor_priority;
-        }
-        if other.dtor_priority.is_some() {
-            self.dtor_priority = other.dtor_priority;
-        }
-        if other.is_retain {
-            self.is_retain = true;
-        }
-        if other.is_used {
-            self.is_used = true;
-        }
-        if other.is_global {
-            self.is_global = true;
-        }
-        if other.is_device {
-            self.is_device = true;
-        }
-        if other.is_host {
-            self.is_host = true;
-        }
-        if other.is_flatten {
-            self.is_flatten = true;
-        }
-        if other.error_msg.is_some() {
-            self.error_msg = other.error_msg;
-        }
-        if other.warning_msg.is_some() {
-            self.warning_msg = other.warning_msg;
-        }
-        if other.deprecated_msg.is_some() {
-            self.deprecated_msg = other.deprecated_msg;
-        }
-        if other.ifunc_resolver.is_some() {
-            self.ifunc_resolver = other.ifunc_resolver;
-        }
-        if other.asm_output_template.is_some() {
-            self.asm_output_template = other.asm_output_template.clone();
-        }
-        if other.vector_size.is_some() {
-            self.vector_size = other.vector_size;
-        }
-        if other.is_naked {
-            self.is_naked = true;
-        }
-        if other.may_alias {
-            self.may_alias = true;
-        }
-        if other.is_packed {
-            self.is_packed = true;
-        }
-        if other.tls_model.is_some() {
-            self.tls_model = other.tls_model;
-        }
-        if other.asm_label.is_some() {
-            self.asm_label = other.asm_label;
-        }
-        if other.is_constexpr {
-            self.is_constexpr = true;
-        }
-        if other.is_fallthrough {
-            self.is_fallthrough = true;
-        }
-        if other.is_nodiscard {
-            self.is_nodiscard = true;
-        }
-        if other.transparent_union {
-            self.transparent_union = true;
-        }
-        if other.externally_visible {
-            self.externally_visible = true;
-        }
-        if other.mode_name.is_some() {
-            self.mode_name = other.mode_name;
-        }
+        /// 布尔属性: other 为 true 则置位 (永不清除)
+        macro_rules! mb { ($f:ident) => { if other.$f { self.$f = true; } } }
+        /// Option/String 属性: other 为 Some 则覆盖
+        macro_rules! mo { ($f:ident) => { if other.$f.is_some() { self.$f = other.$f; } } }
+        /// Vec 属性: other 非空则追加
+        macro_rules! mv { ($f:ident) => { if !other.$f.is_empty() { self.$f.extend(other.$f); } } }
+
+        mo!(section); mo!(alignment);
+        mb!(is_weak); mo!(visibility);
+        mb!(is_unused); mb!(is_cold); mb!(is_hot); mb!(is_noinline);
+        mb!(is_always_inline); mb!(is_noreturn); mb!(is_constructor); mb!(is_destructor);
+        mb!(returns_nonnull); mb!(is_retain); mb!(is_used); mb!(is_flatten);
+        mb!(is_global); mb!(is_device); mb!(is_host); mb!(is_naked);
+        mb!(may_alias); mb!(is_packed); mb!(is_constexpr); mb!(is_pure);
+        mb!(is_const_attr); mb!(returns_twice); mb!(no_instrument); mb!(is_malloc);
+        mb!(warn_unused_result); mb!(is_sentinel); mb!(is_fallthrough);
+        mb!(is_nodiscard); mb!(transparent_union); mb!(externally_visible);
+        // is_inline 不参与 merge: 仅由 C `inline` 关键字直接设置 (GNU89 语义),
+        // 不由 __attribute__ 合并传播, 否则改变 codegen 符号发射行为
+        mo!(register_name); mo!(cleanup_fn); mo!(alias_name);
+        mo!(format_kind); mo!(format_string_idx); mo!(format_first_arg);
+        mo!(copy_fn); mo!(error_msg); mo!(warning_msg); mo!(deprecated_msg);
+        mo!(ifunc_resolver); mo!(tls_model); mo!(asm_label);
+        mo!(mode_name);
+        mo!(asm_output_template);
+        mo!(alloc_size); mo!(malloc_dealloc); mo!(malloc_dealloc_argno);
+        mo!(assume_aligned); mo!(ctor_priority); mo!(dtor_priority);
+        mo!(format_arg_idx); mo!(vector_size);
+        mv!(no_sanitize); mv!(target_clones);
     }
 }
 
@@ -340,6 +201,78 @@ struct StorageClass {
 /// 枚举定义表项: (常量名, 值) 列表 + C23 可选底层类型
 type EnumDef = (Arc<Vec<(String, i64)>>, Option<Box<QualType>>);
 
+/// 分层作用域链: 替代每次块边界 clone 整个 HashMap 的高开销方案.
+/// 进入块时 push 空层, 退出时 pop; 查找从内向外搜索.
+struct ScopeChain {
+    scopes: Vec<HashMap<String, Type>>,
+}
+
+impl ScopeChain {
+    fn new() -> Self {
+        Self { scopes: vec![HashMap::new()] }
+    }
+    fn insert(&mut self, key: String, val: Type) {
+        self.scopes.last_mut().unwrap().insert(key, val);
+    }
+    fn get(&self, key: &str) -> Option<&Type> {
+        self.scopes.iter().rev().find_map(|s| s.get(key))
+    }
+    fn contains_key(&self, key: &str) -> bool {
+        self.scopes.iter().rev().any(|s| s.contains_key(key))
+    }
+    /// 检查名字是否存在于外层作用域 (不含当前最内层)
+    fn exists_in_outer_scopes(&self, key: &str) -> bool {
+        if self.scopes.len() < 2 { return false; }
+        self.scopes[..self.scopes.len()-1].iter().any(|s| s.contains_key(key))
+    }
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+    fn pop_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+    fn clear(&mut self) {
+        self.scopes.clear();
+        self.scopes.push(HashMap::new());
+    }
+    fn all_keys(&self) -> HashSet<String> {
+        let mut set = HashSet::new();
+        for s in &self.scopes {
+            for k in s.keys() {
+                set.insert(k.clone());
+            }
+        }
+        set
+    }
+    fn retain_globals(&mut self, globals: &HashMap<String, Type>) {
+        for scope in &mut self.scopes {
+            scope.retain(|k, _| globals.contains_key(k));
+        }
+    }
+    fn load_globals(&mut self, globals: &HashMap<String, Type>) {
+        self.scopes.clear();
+        self.scopes.push(globals.clone());
+    }
+    fn snapshot(&self) -> Vec<HashMap<String, Type>> {
+        self.scopes.clone()
+    }
+    fn restore(&mut self, snapshot: Vec<HashMap<String, Type>>) {
+        self.scopes = snapshot;
+    }
+    /// 将所有层合并为单个 HashMap (内层覆盖外层)
+    fn flatten(&self) -> HashMap<String, Type> {
+        let mut map = HashMap::new();
+        for scope in &self.scopes {
+            for (k, v) in scope {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+}
+
 pub struct Parser<'a> {
     lex: Lexer<'a>,
     cur: Tok,
@@ -350,7 +283,7 @@ pub struct Parser<'a> {
     struct_defs: HashMap<String, (Arc<Vec<Field>>, bool, usize)>,
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
-    locals: HashMap<String, Type>,             // 变量名 → 类型 (函数内会清除)
+    locals: ScopeChain,                      // 分层作用域链 (替代单 HashMap + clone)
     var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const检查用)
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
     nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
@@ -392,7 +325,7 @@ impl<'a> Parser<'a> {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             enum_consts: HashMap::new(),
-            locals: HashMap::new(),
+            locals: ScopeChain::new(),
             var_quals: HashMap::new(),
             globals: HashMap::new(),
             nodiscard_fns: HashSet::new(),
@@ -1578,10 +1511,34 @@ impl<'a> Parser<'a> {
                     "noclone" | "noipa" | "nocf_check" => {
                         self.advance();
                     }
-                    // __attribute__((malloc)): 返回指针不别名已有内存
+                    // __attribute__((malloc)) 或 __attribute__((malloc (dealloc, argno))):
+                    // 返回指针不别名已有内存; GCC11+ 支持带释放函数参数
                     "malloc" => {
                         attrs.is_malloc = true;
                         self.advance();
+                        // 解析可选的 (dealloc_fn, argno) 参数
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance(); // (
+                            // 第一个参数: 释放函数名 (标识符)
+                            if self.cur.kind == TokKind::Ident
+                                || self.cur.kind == TokKind::Star // 容错
+                            {
+                                attrs.malloc_dealloc = Some(self.cur.text.clone());
+                                self.advance();
+                            }
+                            // 第二个参数: 参数序号 (数字)
+                            if self.cur.kind == TokKind::Comma {
+                                self.advance(); // ,
+                                if self.cur.kind == TokKind::Number {
+                                    attrs.malloc_dealloc_argno =
+                                        Some(parse_int_lit(&self.cur.text) as u32);
+                                    self.advance();
+                                }
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance(); // )
+                            }
+                        }
                     }
                     // __attribute__((alloc_size(N[,M]))): 分配大小参数索引
                     "alloc_size" => {
@@ -3305,11 +3262,11 @@ impl<'a> Parser<'a> {
             // 检测是否是嵌套函数 (在外层函数体内)
             let is_nested_func = self.in_function;
             let parent_locals = if is_nested_func {
-                let mut parent_locals = self.locals.clone();
-                parent_locals.insert(name_for_decl.name.clone(), func_ty.clone());
-                parent_locals
+                let mut snap = self.locals.snapshot();
+                snap.last_mut().unwrap().insert(name_for_decl.name.clone(), func_ty.clone());
+                snap
             } else {
-                HashMap::new()
+                vec![]
             };
             if !is_nested_func {
                 self.globals.insert(name_for_decl.name.clone(), func_ty);
@@ -3318,7 +3275,7 @@ impl<'a> Parser<'a> {
             if !is_nested_func {
                 self.locals.clear();
             } else {
-                self.locals = self.globals.clone();
+                self.locals.load_globals(&self.globals);
             }
             self.in_function = true;
             let saved_func = self.current_function.replace(name_for_decl.name.clone());
@@ -3342,17 +3299,32 @@ impl<'a> Parser<'a> {
             };
             // 恢复外层函数的 in_function 状态
             if is_nested_func {
-                let child_locals = self.locals.clone();
-                self.locals = parent_locals.clone();
+                // 将嵌套函数体内的 locals 展平为单 HashMap (供 collect_upvars 使用)
+                let child_flat = {
+                    let mut m = HashMap::new();
+                    for scope in &self.locals.scopes {
+                        for (k, v) in scope { m.insert(k.clone(), v.clone()); }
+                    }
+                    m
+                };
+                self.locals.restore(parent_locals.clone());
                 self.in_function = true;
-                // 检测嵌套函数捕获的外层变量 — child_locals 仅在此处使用
+                // 将 parent_locals 展平
+                let parent_flat = {
+                    let mut m = HashMap::new();
+                    for scope in &parent_locals {
+                        for (k, v) in scope { m.insert(k.clone(), v.clone()); }
+                    }
+                    m
+                };
+                // 检测嵌套函数捕获的外层变量
                 let upvars = {
                     let mut captured = Vec::new();
                     if let Some(ref b) = body {
                         Self::collect_upvars(
                             &b.items,
-                            &child_locals,
-                            &parent_locals,
+                            &child_flat,
+                            &parent_flat,
                             &mut captured,
                         );
                     }
@@ -3415,6 +3387,8 @@ impl<'a> Parser<'a> {
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
                     is_malloc: attrs.is_malloc,
+                    malloc_dealloc: attrs.malloc_dealloc.clone(),
+                    malloc_dealloc_argno: attrs.malloc_dealloc_argno,
                     alloc_size: attrs.alloc_size,
                     assume_aligned: attrs.assume_aligned,
                     warn_unused_result: attrs.warn_unused_result,
@@ -3425,7 +3399,7 @@ impl<'a> Parser<'a> {
                 })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
-                self.locals.retain(|k, _| self.globals.contains_key(k));
+                self.locals.retain_globals(&self.globals);
                 self.in_function = false;
                 // 恢复外层 current_function
                 self.current_function = saved_func;
@@ -3484,6 +3458,8 @@ impl<'a> Parser<'a> {
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
                     is_malloc: attrs.is_malloc,
+                    malloc_dealloc: attrs.malloc_dealloc.clone(),
+                    malloc_dealloc_argno: attrs.malloc_dealloc_argno,
                     alloc_size: attrs.alloc_size,
                     assume_aligned: attrs.assume_aligned,
                     warn_unused_result: attrs.warn_unused_result,
@@ -3805,7 +3781,7 @@ impl<'a> Parser<'a> {
                 );
                 attrs.merge(self.parse_attributes());
                 self.skip_asm_label();
-                self.locals = self.globals.clone();
+                self.locals.load_globals(&self.globals);
                 self.in_function = true;
                 let saved_func = self.current_function.replace(name.name.clone());
                 for p in &outer_params {
@@ -3827,7 +3803,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 attrs.merge(self.parse_attributes());
-                self.locals = self.globals.clone();
+                self.locals.load_globals(&self.globals);
                 self.in_function = false;
                 self.current_function = saved_func;
                 let sp = name.span.clone();
@@ -3882,6 +3858,8 @@ impl<'a> Parser<'a> {
                     returns_twice: attrs.returns_twice,
                     no_instrument: attrs.no_instrument,
                     is_malloc: attrs.is_malloc,
+                    malloc_dealloc: attrs.malloc_dealloc.clone(),
+                    malloc_dealloc_argno: attrs.malloc_dealloc_argno,
                     alloc_size: attrs.alloc_size,
                     assume_aligned: attrs.assume_aligned,
                     warn_unused_result: attrs.warn_unused_result,
@@ -3904,7 +3882,7 @@ impl<'a> Parser<'a> {
             }
             let body = if self.cur.kind == TokKind::LBrace {
                 self.advance();
-                self.locals = self.globals.clone();
+                self.locals.load_globals(&self.globals);
                 self.in_function = true;
                 let saved_func = self.current_function.replace(name.name.clone());
                 for p in &inner_params {
@@ -3916,7 +3894,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") {
                     return None;
                 }
-                self.locals = self.globals.clone();
+                self.locals.load_globals(&self.globals);
                 self.in_function = false;
                 self.current_function = saved_func;
                 Some(b)
@@ -3978,6 +3956,8 @@ impl<'a> Parser<'a> {
                 returns_twice: attrs.returns_twice,
                 no_instrument: attrs.no_instrument,
                 is_malloc: attrs.is_malloc,
+                malloc_dealloc: attrs.malloc_dealloc.clone(),
+                malloc_dealloc_argno: attrs.malloc_dealloc_argno,
                 alloc_size: attrs.alloc_size,
                 assume_aligned: attrs.assume_aligned,
                 warn_unused_result: attrs.warn_unused_result,
@@ -6437,19 +6417,13 @@ impl<'a> Parser<'a> {
                     None => { self.advance(); }
                 }
             } else if self.is_decl_start() {
-                // 记录声明前的变量集，用于检测遮蔽
-                let pre_decl_locals: std::collections::HashSet<String> = if self.in_function {
-                    self.locals.keys().cloned().collect()
-                } else {
-                    std::collections::HashSet::new()
-                };
                 match self.parse_decl() {
                     Some(ds) => {
                         for d in ds {
-                            // 嵌套块遮蔽: 如果声明的变量名在 parse_decl 前已存在,
+                            // 嵌套块遮蔽: 如果声明的变量名在外层作用域已存在,
                             // 重命名为内部唯一名以避免 codegen var_map 冲突。
                             let (d, new_mapping) = if self.in_function {
-                                self.rename_shadow_var(d, &pre_decl_locals)
+                                self.rename_shadow_var(d)
                             } else {
                                 (d, None)
                             };
@@ -6489,17 +6463,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// 嵌套块遮蔽重命名: 如果变量名在 parse_decl 前已存在于外层作用域,
+    /// 嵌套块遮蔽重命名: 如果变量名在外层作用域已存在,
     /// 生成唯一内部名。返回 (可能重命名后的声明, 新增映射)。
     fn rename_shadow_var(
         &mut self,
         decl: Decl,
-        pre_decl_locals: &std::collections::HashSet<String>,
     ) -> (Decl, Option<(String, String)>) {
         if let Decl::Var(ref v) = decl {
             let name = &v.name.name;
-            // 检查名字是否在 parse_decl 前就存在 (即被遮蔽)
-            if pre_decl_locals.contains(name) {
+            // 检查名字是否在外层作用域中存在 (即被遮蔽)
+            if self.locals.exists_in_outer_scopes(name) {
                 // 生成唯一名
                 let new_name = format!("{}__dcc_shadow_{}", name, self.shadow_counter);
                 self.shadow_counter += 1;
@@ -6865,11 +6838,11 @@ impl<'a> Parser<'a> {
             }
             TokKind::LBrace => {
                 self.advance();
-                // C11 6.2.1: 嵌套块引入新作用域，保存/恢复 locals
-                // 使内层遮蔽 (shadow) 不影响外层变量的 codegen。
-                let saved_locals = self.locals.clone();
+                // C11 6.2.1: 嵌套块引入新作用域
+                // 使用 push/pop 代替 clone/restore, 消除 O(vars) 克隆
+                self.locals.push_scope();
                 let b = self.parse_block();
-                self.locals = saved_locals;
+                self.locals.pop_scope();
                 if !self.expect(TokKind::RBrace, "'}'") {
                     return None;
                 }
@@ -8371,8 +8344,8 @@ impl<'a> Parser<'a> {
                             if !self.expect(TokKind::RParen, "')'") {
                                 return None;
                             }
-                            let file_str = self.cur.span.file.clone();
-                            let mut data = file_str.into_bytes();
+                            let file_str = &*self.cur.span.file;
+                            let mut data = file_str.as_bytes().to_vec();
                             data.push(0);
                             e = Expr::String {
                                 data,

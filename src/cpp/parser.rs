@@ -21,6 +21,7 @@ use crate::cpp::mangle::{MangleType, NestedName, Operator};
 use crate::cpp::template_depth::MAX_TEMPLATE_DEPTH;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Tok, TokKind};
+use std::sync::Arc;
 
 /// 解析错误
 #[derive(Debug, Clone)]
@@ -39,7 +40,7 @@ pub enum CppParseError {
 impl CppParseError {
     pub fn to_diag(&self, file: &str) -> Diagnostic {
         let mut span = self.span();
-        span.file = file.to_string();
+        span.file = Arc::from(file);
         match self {
             Self::Unexpected(want, got, _) => {
                 Diagnostic::err("C0001", format!("expected {}, got '{}'", want, got), span)
@@ -604,7 +605,7 @@ pub struct SpecKinds {
 pub struct CppParser<'a> {
     pub lex: CppLexer<'a>,
     pub peek: Option<CppTok>,
-    pub file: String,
+    pub file: Arc<str>,
     pub diags: Vec<Diagnostic>,
     /// 解析期间记下的 lambda (M8: lower 时分配闭包类型名)
     pub lambdas: Vec<LambdaExpr>,
@@ -630,7 +631,7 @@ impl<'a> CppParser<'a> {
         Self {
             lex,
             peek,
-            file: file.to_string(),
+            file: Arc::from(file),
             diags: vec![],
             lambdas: vec![],
             deferred_gt: 0,

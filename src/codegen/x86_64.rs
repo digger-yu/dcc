@@ -1462,7 +1462,7 @@ impl Codegen {
         let fallback_file = if span.file.is_empty() {
             self.source_name.clone()
         } else {
-            span.file.clone()
+            span.file.to_string()
         };
         let line = span.line;
         if line == 0 || self.line_map.is_empty() {
@@ -13987,7 +13987,7 @@ impl Codegen {
                 } else {
                     self.gen_expr(&Expr::AddrOf {
                         e: Box::new(arg.clone()),
-                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        span: Span { file: std::sync::Arc::from(""), line: 0, col: 0, len: 0 },
                         ty: Type::Ptr(Box::new(arg.ty().into())),
                     }, 0);
                 }
@@ -14017,7 +14017,7 @@ impl Codegen {
                 } else {
                     self.gen_expr(&Expr::AddrOf {
                         e: Box::new(var_arg.clone()),
-                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        span: Span { file: std::sync::Arc::from(""), line: 0, col: 0, len: 0 },
                         ty: Type::Ptr(Box::new(var_arg.ty().into())),
                     }, 0);
                 }
@@ -14053,7 +14053,7 @@ impl Codegen {
                 } else {
                     self.gen_expr(&Expr::AddrOf {
                         e: Box::new(var_arg.clone()),
-                        span: Span { file: String::new(), line: 0, col: 0, len: 0 },
+                        span: Span { file: std::sync::Arc::from(""), line: 0, col: 0, len: 0 },
                         ty: Type::Ptr(Box::new(var_arg.ty().into())),
                     }, 0);
                 }

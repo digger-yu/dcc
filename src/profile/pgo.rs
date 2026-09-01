@@ -811,7 +811,7 @@ fn collect_runtime_sites(prog: &Program) -> Vec<PgoSite> {
             if f.body.is_some() {
                 sites.push(PgoSite {
                     func: f.name.name.clone(),
-                    file: f.span.file.clone(),
+                    file: f.span.file.to_string(),
                     line: f.span.line,
                 });
             }
@@ -1182,6 +1182,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,
@@ -1297,6 +1299,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,
@@ -1419,6 +1423,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,
@@ -1625,6 +1631,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,

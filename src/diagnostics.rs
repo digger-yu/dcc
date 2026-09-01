@@ -15,10 +15,11 @@
 //   * Auto:   仅当 stderr 是 TTY 时输出 (use std::io::IsTerminal)
 
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
-    pub file: String,
+    pub file: Arc<str>,
     pub line: u32, // 1-based
     pub col: u32,  // 1-based
     pub len: u32,  // 字节长度,1-based
@@ -712,7 +713,7 @@ fn dedup_diags(diags: &[Diagnostic]) -> Vec<Diagnostic> {
     for d in diags {
         let key = (
             d.code,
-            d.span.file.as_str(),
+            d.span.file.as_ref(),
             d.span.line,
             d.span.col,
             d.span.len,
@@ -775,10 +776,11 @@ pub fn enrich_diags(
         if d.span.line == 0 {
             continue;
         }
-        if !file_cache.contains_key(&d.span.file) {
+        let file_str: &str = &d.span.file;
+        if !file_cache.contains_key(file_str) {
             let tried_paths = [
-                base_dir.map(|b| b.join(&d.span.file)),
-                Some(std::path::PathBuf::from(&d.span.file)),
+                base_dir.map(|b| b.join(file_str)),
+                Some(std::path::PathBuf::from(file_str)),
             ];
             let mut found: Option<Vec<String>> = None;
             for p in tried_paths.into_iter().flatten() {
@@ -787,9 +789,9 @@ pub fn enrich_diags(
                     break;
                 }
             }
-            file_cache.insert(d.span.file.clone(), found.unwrap_or_default());
+            file_cache.insert(file_str.to_string(), found.unwrap_or_default());
         }
-        let lines_vec = file_cache.get(&d.span.file).unwrap();
+        let lines_vec = file_cache.get(file_str).unwrap();
         let total = lines_vec.len();
         if total == 0 {
             // 磁盘源文件不可得 (stdin / 预处理输出): 回退到 main_lines,

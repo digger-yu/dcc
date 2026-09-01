@@ -430,6 +430,8 @@ mod tests {
             returns_twice: false,
             no_instrument: false,
             is_malloc: false,
+            malloc_dealloc: None,
+            malloc_dealloc_argno: None,
             alloc_size: None,
             assume_aligned: None,
             warn_unused_result: false,

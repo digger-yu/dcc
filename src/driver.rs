@@ -3089,7 +3089,7 @@ fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
     if let Some(ls) = idx.checked_sub(1).and_then(|i| line_map.get(i)) {
         // 严格命中: line 落在 [out_start, out_start + count) 内
         if line < ls.out_start + ls.count {
-            span.file = ls.file.clone();
+            span.file = std::sync::Arc::from(ls.file.as_str());
             span.line = ls.src_start + (line - ls.out_start);
             return;
         }
@@ -3097,13 +3097,13 @@ fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
         // 仍回填文件归属, 但保留原始行号: 让下游 enrich_diags 根据
         // 磁盘文件实际行数决定是否需要 clamp, 避免此处过度截断导致
         // 简单文件的 EOF 诊断行号回退 (e0002 回归).
-        span.file = ls.file.clone();
+        span.file = std::sync::Arc::from(ls.file.as_str());
         return;
     }
     // line 小于 line_map[0].out_start: 预处理输出起始的预写入行,
     // 尝试用第一个区间的文件 (通常是首个 -include 头).
     if let Some(first) = line_map.first() {
-        span.file = first.file.clone();
+        span.file = std::sync::Arc::from(first.file.as_str());
         span.line = first.src_start.max(1);
     }
 }
@@ -3207,7 +3207,7 @@ fn collect_offload_section(
                 section.add_entry(OffloadEntry {
                     kind,
                     func: f.name.name.clone(),
-                    file: sp.file.clone(),
+                    file: sp.file.to_string(),
                     line: sp.line,
                     col: sp.col,
                     device_triple: triple.clone(),
@@ -3233,7 +3233,7 @@ fn collect_offload_section(
                 remap_span(&mut sp, line_map);
                 let mut end_sp = body.span.clone();
                 remap_span(&mut end_sp, line_map);
-                Some((f.name.name.clone(), sp.file, sp.line, end_sp.line))
+                Some((f.name.name.clone(), sp.file.to_string(), sp.line, end_sp.line))
             })
             .collect();
         let triples: Vec<String> = if offload.target_triples.is_empty() {

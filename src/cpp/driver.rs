@@ -134,7 +134,7 @@ pub fn compile_cpp(
     }
     if !out.status.success() {
         let mut span = crate::diagnostics::Span::point(file, 0, 0);
-        span.file = file.to_string();
+        span.file = std::sync::Arc::from(file);
         return Err(CppError::Diagnostics(vec![
             crate::diagnostics::Diagnostic::err(
                 "C0100",
