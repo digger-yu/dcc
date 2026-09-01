@@ -43,6 +43,7 @@ pub struct Config {
     pub output: PathBuf,       // 默认 a.out
     pub output_explicit: bool, // -o 是否由用户显式指定
     pub opt: u8,               // 0..3
+    pub size_opt: bool,        // -Os: 尺寸优化模式
     pub std: StdMode,
     pub target: TargetTriple,
     pub freestanding: bool,
@@ -776,6 +777,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut output = PathBuf::from("a.out");
     let mut output_explicit = false;
     let mut opt: u8 = 0;
+    let mut size_opt = false;
     let mut std = StdMode::Gnu23; // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
     let mut target = TargetTriple::host();
     let mut freestanding = false;
@@ -897,7 +899,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 opt = 3;
                 fast_math = true;
             }
-            "-Os" => opt = 2, // 体积优化合并到 O2
+            "-Os" => {
+                opt = 2; // -Os 基于 O2
+                size_opt = true; // 启用尺寸优化模式
+            }
             "-o" => {
                 i += 1;
                 output = PathBuf::from(
@@ -2444,6 +2449,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             output,
             output_explicit,
             opt,
+            size_opt,
             std,
             target,
             freestanding,
@@ -2563,6 +2569,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             output,
             output_explicit,
             opt,
+            size_opt,
             std,
             target,
             freestanding,
@@ -3604,5 +3611,23 @@ BAR");
         let cfg = parse(&args).expect("default should parse");
         assert!(!cfg.data_sections);
         assert!(cfg.specs.is_none());
+    }
+
+    // === Size optimization tests ===
+
+    #[test]
+    fn os_enables_size_opt() {
+        let args = vec!["-c".to_string(), "-Os".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-Os should parse");
+        assert!(cfg.size_opt);
+        assert_eq!(cfg.opt, 2); // -Os is based on O2
+    }
+
+    #[test]
+    fn default_size_opt_is_false() {
+        let args = vec!["-c".to_string(), "-O2".to_string(), "test.c".to_string()];
+        let cfg = parse(&args).expect("-O2 should parse");
+        assert!(!cfg.size_opt);
+        assert_eq!(cfg.opt, 2);
     }
 }

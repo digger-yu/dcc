@@ -312,6 +312,7 @@ mod tests {
             output: output_path.to_path_buf(),
             output_explicit: true,
             opt: 0,
+            size_opt: false,
             std: crate::cli::StdMode::Gnu23,
             target: crate::cli::TargetTriple::host(),
             freestanding: false,
