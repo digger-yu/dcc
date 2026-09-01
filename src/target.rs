@@ -75,6 +75,17 @@ pub struct Target {
     pub fast_math: bool,
     /// -ffp-contract=: FP 收缩模式
     pub fp_contract_mode: crate::cli::FpContractMode,
+    /// ARM 架构版本 ("armv6-m", "armv7-m", "armv7e-m", "armv8-m.base",
+    /// "armv8-m.main", "armv8.1-m.main")
+    pub arm_arch_version: Option<String>,
+    /// ARM Thumb-2 指令集可用
+    pub has_thumb2: bool,
+    /// ARM 硬件 FPU 可用 (VFPv4/FPv5)
+    pub has_fpu: bool,
+    /// ARM DSP/SIMD 指令可用 (ARMv7E-M Helium)
+    pub has_dsp: bool,
+    /// ARM TrustZone-M 安全扩展可用
+    pub has_trustzone: bool,
 }
 
 impl Target {
@@ -157,6 +168,11 @@ impl Target {
             mtune: None,
             fast_math: false,
             fp_contract_mode: crate::cli::FpContractMode::Default,
+            arm_arch_version: None,
+            has_thumb2: false,
+            has_fpu: false,
+            has_dsp: false,
+            has_trustzone: false,
         }
     }
 
@@ -371,10 +387,67 @@ impl Target {
             }
             // ARM micro-architectures (mcpu)
             "cortex-a53" | "cortex-a72" | "cortex-a76" => {
-                // ARMv8.0 baseline
+                // ARMv8.0 A-profile baseline
             }
             "neoverse-n1" | "neoverse-v1" => {
                 // ARMv8.2+ with crypto extensions
+            }
+            // ARM Cortex-M embedded cores (bare-metal)
+            "cortex-m0" | "cortex-m0plus" | "cortex-m1" => {
+                // ARMv6-M: Thumb-1 only, no Thumb-2, soft-float
+                self.arm_arch_version = Some("armv6-m".to_string());
+                self.has_thumb2 = false;
+                self.has_fpu = false;
+                self.has_dsp = false;
+                self.has_trustzone = false;
+            }
+            "cortex-m3" => {
+                // ARMv7-M: Thumb-2, soft-float, no DSP
+                self.arm_arch_version = Some("armv7-m".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = false;
+                self.has_dsp = false;
+                self.has_trustzone = false;
+            }
+            "cortex-m4" => {
+                // ARMv7E-M: Thumb-2, optional single-precision FP, DSP
+                self.arm_arch_version = Some("armv7e-m".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = true; // optional, enabled by default
+                self.has_dsp = true;
+                self.has_trustzone = false;
+            }
+            "cortex-m7" => {
+                // ARMv7E-M: Thumb-2, optional single/double FP, DSP
+                self.arm_arch_version = Some("armv7e-m".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = true;
+                self.has_dsp = true;
+                self.has_trustzone = false;
+            }
+            "cortex-m23" => {
+                // ARMv8-M Baseline: Thumb-1/2, TrustZone
+                self.arm_arch_version = Some("armv8-m.base".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = false;
+                self.has_dsp = false;
+                self.has_trustzone = true;
+            }
+            "cortex-m33" => {
+                // ARMv8-M Mainline: Thumb-2, FP, DSP, TrustZone
+                self.arm_arch_version = Some("armv8-m.main".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = true;
+                self.has_dsp = true;
+                self.has_trustzone = true;
+            }
+            "cortex-m55" => {
+                // ARMv8.1-M: Helium DSP, FP, TrustZone
+                self.arm_arch_version = Some("armv8.1-m.main".to_string());
+                self.has_thumb2 = true;
+                self.has_fpu = true;
+                self.has_dsp = true;
+                self.has_trustzone = true;
             }
             _ => {
                 // Unknown arch name: accept but no feature changes
@@ -795,5 +868,61 @@ mod tests {
         assert!(!aarch64.sse, "aarch64 should not have SSE");
         let mips = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
         assert!(!mips.sse, "mips should not have SSE");
+    }
+
+    // === Cortex-M CPU recognition tests ===
+
+    #[test]
+    fn cortex_m0_armv6m_no_thumb2_no_fpu() {
+        let mut t = Target::resolve(&trip(Arch::Arm, Os::Freestanding, Abi::Eabi));
+        t.apply_march("cortex-m0");
+        assert_eq!(t.arm_arch_version.as_deref(), Some("armv6-m"));
+        assert!(!t.has_thumb2);
+        assert!(!t.has_fpu);
+        assert!(!t.has_dsp);
+        assert!(!t.has_trustzone);
+    }
+
+    #[test]
+    fn cortex_m3_armv7m_thumb2_no_fpu() {
+        let mut t = Target::resolve(&trip(Arch::Arm, Os::Freestanding, Abi::Eabi));
+        t.apply_march("cortex-m3");
+        assert_eq!(t.arm_arch_version.as_deref(), Some("armv7-m"));
+        assert!(t.has_thumb2);
+        assert!(!t.has_fpu);
+        assert!(!t.has_dsp);
+    }
+
+    #[test]
+    fn cortex_m4_armv7em_thumb2_fpu_dsp() {
+        let mut t = Target::resolve(&trip(Arch::Arm, Os::Freestanding, Abi::Eabi));
+        t.apply_march("cortex-m4");
+        assert_eq!(t.arm_arch_version.as_deref(), Some("armv7e-m"));
+        assert!(t.has_thumb2);
+        assert!(t.has_fpu);
+        assert!(t.has_dsp);
+        assert!(!t.has_trustzone);
+    }
+
+    #[test]
+    fn cortex_m33_armv8m_main_trustzone() {
+        let mut t = Target::resolve(&trip(Arch::Arm, Os::Freestanding, Abi::Eabi));
+        t.apply_march("cortex-m33");
+        assert_eq!(t.arm_arch_version.as_deref(), Some("armv8-m.main"));
+        assert!(t.has_thumb2);
+        assert!(t.has_fpu);
+        assert!(t.has_dsp);
+        assert!(t.has_trustzone);
+    }
+
+    #[test]
+    fn cortex_m55_armv81m_helium() {
+        let mut t = Target::resolve(&trip(Arch::Arm, Os::Freestanding, Abi::Eabi));
+        t.apply_march("cortex-m55");
+        assert_eq!(t.arm_arch_version.as_deref(), Some("armv8.1-m.main"));
+        assert!(t.has_thumb2);
+        assert!(t.has_fpu);
+        assert!(t.has_dsp);
+        assert!(t.has_trustzone);
     }
 }
