@@ -71,6 +71,10 @@ pub struct Target {
     pub march: Option<String>,
     /// -mtune=<name> 调度优化目标
     pub mtune: Option<String>,
+    /// -ffast-math: 激进浮点优化
+    pub fast_math: bool,
+    /// -ffp-contract=: FP 收缩模式
+    pub fp_contract_mode: crate::cli::FpContractMode,
 }
 
 impl Target {
@@ -149,6 +153,8 @@ impl Target {
             },
             march: None,
             mtune: None,
+            fast_math: false,
+            fp_contract_mode: crate::cli::FpContractMode::Default,
         }
     }
 
@@ -372,6 +378,13 @@ impl Target {
                 // Unknown arch name: accept but no feature changes
             }
         }
+    }
+
+    /// 应用 -ffast-math: 关闭严格别名/溢出, 启用激进浮点优化.
+    pub fn apply_fast_math(&mut self) {
+        self.fast_math = true;
+        self.strict_aliasing = false;
+        self.strict_overflow = false;
     }
 
     /// 返回基本类型的默认对齐 (字节)。

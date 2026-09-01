@@ -192,6 +192,29 @@ pub struct Config {
     pub mtune: Option<String>,
     /// -mcpu=<name>: ARM 等价于 -march + -mtune
     pub mcpu: Option<String>,
+    /// -ffast-math: 激进浮点优化 (允许重结合/倒数/非IEEE)
+    pub fast_math: bool,
+    /// -ffp-contract=: FP 收缩模式
+    pub fp_contract_mode: FpContractMode,
+}
+
+/// -ffp-contract= 模式: FP 收缩 (fma) 策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpContractMode {
+    /// -ffp-contract=fast: 允许任意 FP 收缩
+    Fast,
+    /// -ffp-contract=on: 仅收缩源码中显式表达的 FMA
+    On,
+    /// -ffp-contract=off: 禁止 FP 收缩
+    Off,
+    /// 默认: 与 on 相同 (C 标准)
+    Default,
+}
+
+impl Default for FpContractMode {
+    fn default() -> Self {
+        FpContractMode::Default
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -795,6 +818,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut march: Option<String> = None;
     let mut mtune: Option<String> = None;
     let mut mcpu: Option<String> = None;
+    let mut fast_math = false;
+    let mut fp_contract_mode = FpContractMode::Default;
 
     let mut i = 0;
     while i < args.len() {
@@ -804,6 +829,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-O1" => opt = 1,
             "-O2" => opt = 2,
             "-O3" => opt = 3,
+            "-Ofast" => {
+                opt = 3;
+                fast_math = true;
+            }
             "-Os" => opt = 2, // 体积优化合并到 O2
             "-o" => {
                 i += 1;
@@ -1800,6 +1829,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // Optimizer semantics flags
             "-fno-strict-aliasing" => strict_aliasing = false,
             "-fno-strict-overflow" => strict_overflow = false,
+            // Fast math
+            "-ffast-math" => {
+                fast_math = true;
+                strict_aliasing = false;
+                strict_overflow = false;
+            }
+            "-fno-fast-math" => fast_math = false,
+            // FP contraction mode
+            "-ffp-contract=fast" => fp_contract_mode = FpContractMode::Fast,
+            "-ffp-contract=on" => fp_contract_mode = FpContractMode::On,
+            "-ffp-contract=off" => fp_contract_mode = FpContractMode::Off,
+            "-ffp-contract=default" => fp_contract_mode = FpContractMode::Default,
             // wchar_t size
             "-fshort-wchar" => short_wchar = true,
             // Common symbol handling
@@ -2406,6 +2447,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             march: march.clone(),
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
+            fast_math,
+            fp_contract_mode,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -2519,6 +2562,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             march: march.clone(),
             mtune: mtune.clone(),
             mcpu: mcpu.clone(),
+            fast_math,
+            fp_contract_mode,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

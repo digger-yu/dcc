@@ -951,6 +951,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -fno-strict-overflow: 优化器当前不假设有符号溢出为 UB, 常量折叠
     // 使用 wrapping 算术. 标志存储于 target 供未来优化 pass 参考.
     target.strict_overflow = cfg.strict_overflow;
+    // -ffast-math: 激进浮点优化
+    target.fast_math = cfg.fast_math;
+    // -ffp-contract=: FP 收缩模式
+    target.fp_contract_mode = cfg.fp_contract_mode;
     target.short_wchar = cfg.short_wchar;
     // -fno-common: codegen 已将未初始化全局变量直接放入 .bss (而非
     // COMMON 段). 链接器 resolve.rs 处理跨 TU tentative definition 合并.

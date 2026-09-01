@@ -20795,3 +20795,64 @@ fn aarch64_sve_asm_basic() {
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&obj);
 }
+
+// ===== Commit 7: -Ofast / -ffast-math / -ffp-contract =====
+
+#[test]
+fn ofast_implies_o3_fast_math() {
+    let args = vec![
+        "-Ofast".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-Ofast should parse");
+    assert_eq!(cfg.opt, 3);
+    assert!(cfg.fast_math);
+}
+
+#[test]
+fn ffast_math_cli() {
+    let args = vec![
+        "-ffast-math".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-ffast-math should parse");
+    assert!(cfg.fast_math);
+    assert!(!cfg.strict_aliasing);
+    assert!(!cfg.strict_overflow);
+}
+
+#[test]
+fn fno_fast_math_cli() {
+    let args = vec![
+        "-ffast-math".to_string(),
+        "-fno-fast-math".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert!(!cfg.fast_math);
+}
+
+#[test]
+fn fp_contract_fast_cli() {
+    let args = vec![
+        "-ffp-contract=fast".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("-ffp-contract=fast should parse");
+    assert_eq!(cfg.fp_contract_mode, dcc::cli::FpContractMode::Fast);
+}
+
+#[test]
+fn fp_contract_off_cli() {
+    let args = vec![
+        "-ffp-contract=off".to_string(),
+        "-c".to_string(),
+        "input.c".to_string(),
+    ];
+    let cfg = dcc::cli::parse(&args).expect("should parse");
+    assert_eq!(cfg.fp_contract_mode, dcc::cli::FpContractMode::Off);
+}
