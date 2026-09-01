@@ -2633,7 +2633,7 @@ impl AliasCtx {
                 if let Some(child) = expr.children.first() {
                     if let ExprKind::Local(name) = &child.kind {
                         // 记录指针变量
-                        if let ExprKind::Local(ptr_name) = &expr.children.first().unwrap().kind {
+                        if let ExprKind::Local(_ptr_name) = &expr.children.first().unwrap().kind {
                             // 这里 expr 是 Address，其子节点是被取地址的变量
                             // 我们需要记录哪个指针指向哪个变量
                         }

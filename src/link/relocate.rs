@@ -1541,7 +1541,7 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
                 | R_AARCH64_TLSLE_ADD_TPREL_LO12
                 | R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
         ),
-        ArchKind::RiscV64 => matches!(
+        ArchKind::RiscV64 | ArchKind::RiscV32 => matches!(
             rel_type,
             R_RISCV_64
                 | R_RISCV_32
@@ -1659,6 +1659,15 @@ fn relocation_patch_width(arch: ArchKind, rel_type: u32) -> usize {
             _ => 4,
         },
         ArchKind::Arm => 4,
+        ArchKind::RiscV32 => match rel_type {
+            R_RISCV_32 | R_RISCV_32_PCREL | R_RISCV_JAL | R_RISCV_BRANCH
+            | R_RISCV_CALL | R_RISCV_CALL_PLT => 4,
+            R_RISCV_SET6 | R_RISCV_SUB6 => 1,
+            R_RISCV_SET8 | R_RISCV_SUB8 => 1,
+            R_RISCV_SET16 | R_RISCV_SUB16 => 2,
+            R_RISCV_SET32 | R_RISCV_SUB32 => 4,
+            _ => 4,
+        },
     }
 }
 

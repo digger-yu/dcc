@@ -111,6 +111,8 @@ pub struct TemplateParam {
     /// Some(Bool)). None = 类型形参. 种类仅用于解析/默认值求值,
     /// 实例化管道统一用 MangleType::NonType 表示值.
     pub non_type: Option<MangleType>,
+    /// C++11 参数包 (typename... Args). 解析时容忍, lower 时忽略 `...`.
+    pub is_pack: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1167,6 +1169,14 @@ impl<'a> CppParser<'a> {
             self.bump();
             return self.parse_decl();
         }
+        // C++20: `constinit` / `consteval` / `constexpr` 说明符
+        // dcc 降级时剥离这些关键字, 解析时直接跳过后按普通声明解析.
+        for kw in &[CppKw::Constinit, CppKw::Consteval, CppKw::Constexpr] {
+            if self.at(*kw) {
+                self.bump();
+                return self.parse_decl();
+            }
+        }
         // M30.2: `__extension__` GNU 前缀 - 无语义, 跳过后按普通声明
         // 解析 (`__extension__ typedef struct {...} lldiv_t;` 等).
         if let Some(CppTok::C(Tok {
@@ -1528,6 +1538,18 @@ impl<'a> CppParser<'a> {
             if has_kw {
                 self.bump();
             }
+            // C++11 参数包: `typename... Args` / `class... Args`
+            let is_pack = has_kw
+                && matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ellipsis,
+                        ..
+                    }))
+                );
+            if is_pack {
+                self.bump(); // consume `...`
+            }
             // M18.x: `typename = enable_if_t<...>` 匿名默认形参 (SFINAE 惯用法),
             // 形参名缺省时生成内部占位名.
             if has_kw
@@ -1546,6 +1568,7 @@ impl<'a> CppParser<'a> {
                     name: anon,
                     default,
                     non_type: None,
+                    is_pack: false,
                 });
                 if matches!(
                     &self.peek,
@@ -1601,6 +1624,7 @@ impl<'a> CppParser<'a> {
                 name,
                 default,
                 non_type,
+                is_pack,
             });
             if matches!(
                 &self.peek,
@@ -4952,7 +4976,7 @@ impl<'a> CppParser<'a> {
                 let nm = self.expect_ident()?;
                 let cls = parts.pop().unwrap_or(nm.clone());
                 let _params = self.parse_param_list()?;
-                let spec = self.skip_specifiers();
+                let _spec = self.skip_specifiers();
                 let body = if matches!(
                     &self.peek,
                     Some(CppTok::C(Tok {
@@ -10358,6 +10382,86 @@ mod tests {
                 assert_eq!(name, "int_alias");
             }
             _ => panic!("expected Typedef, got {:?}", d[0]),
+        }
+    }
+
+    #[test]
+    fn parse_top_level_produces_opaque_on_failure() {
+        // 混合可解析/不可解析的顶层声明:
+        // 不可解析的声明应产生 CppDecl::Opaque, 后续声明正常解析.
+        let src = b"int good_fn() { return 0; }\n\
+                     @@@ invalid tokens here ;;;\n\
+                     int another_good_fn() { return 1; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        // 应有至少 3 个声明: good_fn, Opaque, another_good_fn
+        assert!(decls.len() >= 3, "expected >= 3 decls, got {}: {:?}", decls.len(), decls.iter().map(|d| match d { CppDecl::Opaque(_) => "Opaque", CppDecl::FreeFn { name, .. } => name.as_str(), _ => "other" }).collect::<Vec<_>>());
+        // 第一个应为 FreeFn
+        assert!(matches!(&decls[0], CppDecl::FreeFn { name, .. } if name == "good_fn"));
+        // 中间应有 Opaque
+        let has_opaque = decls.iter().any(|d| matches!(d, CppDecl::Opaque(_)));
+        assert!(has_opaque, "expected at least one Opaque decl");
+        // 最后一个应为 FreeFn
+        assert!(matches!(decls.last(), Some(CppDecl::FreeFn { name, .. }) if name == "another_good_fn"));
+    }
+
+    #[test]
+    fn parse_body_resilient_preserves_subsequent_stmts() {
+        // 函数体内含不可解析的语句时, 后续语句应保留而非整个函数体丢失.
+        // parse_body 容错后应继续解析后续语句.
+        let src = b"class Foo {\n\
+        public:\n\
+            int method() {\n\
+                int x = 1;\n\
+                return x;\n\
+            }\n\
+        };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        // 应解析出 class Foo
+        assert!(!decls.is_empty());
+        match &decls[0] {
+            CppDecl::Class(c) => {
+                assert_eq!(c.name, "Foo");
+                // method 应有函数体
+                let has_method = c.members.iter().any(|m| {
+                    matches!(m, CppDecl::MemberFn { name, .. } if name == "method")
+                });
+                assert!(has_method, "expected method member fn");
+            }
+            _ => panic!("expected Class, got {:?}", decls[0]),
+        }
+        // parser 不应有错误 (这个源文件完全可解析)
+        let errors = p.diags.iter().filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error)).count();
+        assert_eq!(errors, 0, "expected no parse errors, got {}: {:?}", errors,
+            p.diags.iter().map(|d| &d.msg).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn parse_class_member_produces_opaque_on_failure() {
+        // 类成员中含不可解析构造时, 应产生 Opaque 成员,
+        // 后续成员正常解析.
+        let src = b"struct Bar {\n\
+            int x;\n\
+            @@@ invalid member ;\n\
+            int y;\n\
+        };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        assert!(!decls.is_empty());
+        match &decls[0] {
+            CppDecl::Class(c) => {
+                assert_eq!(c.name, "Bar");
+                // 应有 Opaque 成员
+                let has_opaque = c.members.iter().any(|m| matches!(m, CppDecl::Opaque(_)));
+                assert!(has_opaque, "expected Opaque member in struct Bar");
+                // x 和 y 应正常解析
+                let has_x = c.members.iter().any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "x"));
+                let has_y = c.members.iter().any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "y"));
+                assert!(has_x, "expected member x");
+                assert!(has_y, "expected member y");
+            }
+            _ => panic!("expected Class, got {:?}", decls[0]),
         }
     }
 }

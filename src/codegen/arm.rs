@@ -1162,7 +1162,7 @@ impl ArmCodegen {
                 self.code.extend_from_slice(&inst.to_le_bytes());
             }
             // 结构体成员访问
-            Expr::Member { expr, field, ty: _, is_arrow, .. } => {
+            Expr::Member { expr, field: _, ty: _, is_arrow, .. } => {
                 self.gen_expr_from_ast(expr);
                 // r0 现在是结构体地址 (或值)
                 // 简化: 加载第一个成员 (偏移 0)
@@ -2442,7 +2442,7 @@ impl ArmCodegen {
     fn load_float_s0(&mut self, val: f32) {
         // 将浮点字面量写入 rodata 并加载到 s0
         let bits = val.to_bits() as u64;
-        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+        let _offset = if let Some(&off) = self.float_pool.get(&bits) {
             off
         } else {
             let off = self.rodata.len() as u64;
@@ -2464,7 +2464,7 @@ impl ArmCodegen {
     /// 加载双精度浮点字面量到 d0
     fn load_float_d0(&mut self, val: f64) {
         let bits = val.to_bits();
-        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+        let _offset = if let Some(&off) = self.float_pool.get(&bits) {
             off
         } else {
             let off = self.rodata.len() as u64;

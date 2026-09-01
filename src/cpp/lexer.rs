@@ -114,6 +114,7 @@ pub enum CppKw {
     // C++20 杂项
     Char8T,
     ConstevalAuto,
+    Constinit,  // C++20: constinit 说明符
 }
 
 impl CppKw {
@@ -165,6 +166,7 @@ impl CppKw {
             "import" => Self::Import,
             "export" => Self::Export,
             "char8_t" => Self::Char8T,
+            "constinit" => Self::Constinit,
             _ => return None,
         })
     }
@@ -219,6 +221,7 @@ impl CppKw {
             Self::Export => "export",
             Self::Char8T => "char8_t",
             Self::ConstevalAuto => "consteval",
+            Self::Constinit => "constinit",
         }
     }
 }

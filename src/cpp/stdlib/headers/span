@@ -10,7 +10,9 @@ namespace std {
 
     static const size_t dynamic_extent = (size_t)-1;
 
-    template <typename T, size_t Extent = dynamic_extent>
+    // dcc 简化: 移除默认模板参数 (size_t Extent = dynamic_extent)
+    // 因为 dcc parser 不支持非类型模板参数默认值引用其他标识符
+    template <typename T>
     class span {
     public:
         typedef T element_type;
@@ -50,14 +52,14 @@ namespace std {
         int empty() const { return size_ == 0; }
 
         // Subviews
-        span<T, dynamic_extent> first(size_t count) const {
-            return span<T, dynamic_extent>(data_, count);
+        span<T> first(size_t count) const {
+            return span<T>(data_, count);
         }
-        span<T, dynamic_extent> last(size_t count) const {
-            return span<T, dynamic_extent>(data_ + size_ - count, count);
+        span<T> last(size_t count) const {
+            return span<T>(data_ + size_ - count, count);
         }
-        span<T, dynamic_extent> subspan(size_t offset, size_t count) const {
-            return span<T, dynamic_extent>(data_ + offset, count);
+        span<T> subspan(size_t offset, size_t count) const {
+            return span<T>(data_ + offset, count);
         }
 
     private:

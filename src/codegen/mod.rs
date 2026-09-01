@@ -1211,6 +1211,7 @@ fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
         Arch::X86_64 => elf::R_X86_64_64,
         Arch::AArch64 => elf::R_AARCH64_ABS64,
         Arch::RiscV64 => elf::R_RISCV_64,
+        Arch::RiscV32 => elf::R_RISCV_32,
         Arch::Mips64 => elf::R_MIPS_64,
         Arch::Mips => elf::R_MIPS_32,
         Arch::Arm => elf::R_ARM_ABS32,
@@ -2058,6 +2059,15 @@ pub fn emit(
                 }
             }
             cg.build_output()
+        }
+        crate::cli::Arch::RiscV32 => {
+            // Phase 7: Full RV32 codegen backend
+            return Err(vec![crate::diagnostics::Diagnostic::err(
+                "E0399",
+                "RISC-V 32-bit (riscv32) codegen backend is not yet implemented; \
+                 use -c to emit preprocessed output or target riscv64 instead",
+                crate::diagnostics::Span::point("<target>", 0, 0),
+            )]);
         }
         a => {
             panic!("{}", a.backend_missing_msg());

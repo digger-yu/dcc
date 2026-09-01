@@ -302,7 +302,7 @@ fn remove_struct_inheritance(s: &str) -> String {
         if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
         if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') { let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
         // 检测 struct 或 class 关键字
-        if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class"))
+        if match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class")
         {
             let kw_len = if match_word_at(bytes, i, "struct") { 6 } else { 5 };
             // 输出关键字
@@ -606,7 +606,7 @@ fn clean_struct_bodies(s: &str) -> String {
                 result.push('}');
                 i += 1;
                 // 检查后面是否有 typedef 名称 (如果有, 不添加分号)
-                let mut j = skip_ws(bytes, i);
+                let j = skip_ws(bytes, i);
                 if j < len && is_ident_char(bytes[j]) {
                     // 后面有标识符, 可能是 typedef 名称, 不添加分号
                 } else if i < len && bytes[i] == b';' {
@@ -839,7 +839,7 @@ fn clean_struct_bodies(s: &str) -> String {
             // 先检测标识符后跟 '<'
             if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
                 let (ident, ident_end) = read_ident(bytes, i);
-                let mut j = skip_ws(bytes, ident_end);
+                let j = skip_ws(bytes, ident_end);
                 if j < len && bytes[j] == b'<' && ident != "enum" && ident != "return"
                     && ident != "if" && ident != "while" && ident != "for"
                 {
@@ -1355,7 +1355,7 @@ fn convert_ref_params(s: &str) -> String {
             let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
             if is_ident_char(prev_char) || prev_char == b'*' || prev_char == b'>' {
                 // 检查后面是标识符开始或空白+标识符 (参数名)
-                let mut j = skip_ws(bytes, i + 1);
+                let j = skip_ws(bytes, i + 1);
                 if j < len && (is_ident_char(bytes[j]) || bytes[j] == b'*') {
                     // 这是引用参数, 替换 & 为 *
                     result.push('*');
@@ -1441,7 +1441,7 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
                     && (kend == 6 || !is_ident_char(rbytes[kend-7]))
             };
             // 检查后面是否是 struct 定义的开始 ({ 或 ; 或 :)
-            let mut j = skip_ws(bytes, i + name_len);
+            let j = skip_ws(bytes, i + name_len);
             let is_struct_def = j < len && (bytes[j] == b'{' || bytes[j] == b';' || bytes[j] == b':');
             // 检查后面是否是函数调用 (NAME()
             let is_func_call = j < len && bytes[j] == b'(';
@@ -1502,7 +1502,7 @@ fn add_struct_prefix_to_types(s: &str) -> String {
             // 跳过可能的属性宏 (如 GTY(...), __attribute__(...), 等)
             // 属性宏格式: IDENT(...) 或 IDENT((...))
             while j < len && is_ident_char(bytes[j]) {
-                let (ident, ident_end) = read_ident(bytes, j);
+                let (_ident, ident_end) = read_ident(bytes, j);
                 let k = skip_ws(bytes, ident_end);
                 // 检查后面是否是 '('
                 if k < len && bytes[k] == b'(' {
@@ -1567,7 +1567,7 @@ fn convert_if_condition_decls(s: &str) -> String {
         
         // Look for "if ("
         if match_word_at(bytes, i, "if") {
-            let if_start = i;
+            let _if_start = i;
             let after_if = skip_ws(bytes, i + 2);
             if after_if < len && bytes[after_if] == b'(' {
                 // Find the matching ')'
@@ -1914,7 +1914,7 @@ fn replace_brace_init(s: &str) -> String {
         while j < len {
             if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "class") {
                 let kw_len = if match_word_at(bytes, j, "struct") { 6 } else { 5 };
-                let mut k = skip_ws(bytes, j + kw_len);
+                let k = skip_ws(bytes, j + kw_len);
                 if k < len && is_ident_char(bytes[k]) {
                     let (name, _) = read_ident(bytes, k);
                     if !name.is_empty() { known_types.push(name); }
@@ -1935,7 +1935,7 @@ fn replace_brace_init(s: &str) -> String {
         for ty in &known_types {
             if match_word_at(bytes, i, ty) {
                 let ty_len = ty.len();
-                let mut j = skip_ws(bytes, i + ty_len);
+                let j = skip_ws(bytes, i + ty_len);
                 if j < len && is_ident_char(bytes[j]) {
                     let (var_name, var_end) = read_ident(bytes, j);
                     let k = skip_ws(bytes, var_end);
@@ -2136,7 +2136,7 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 let is_ref_decl = if is_ident_char(prev_char) {
                     // 向前找到标识符起始位置
                     let rbytes = result.as_bytes();
-                    let mut id_end = rbytes.len();
+                    let id_end = rbytes.len();
                     let mut id_start = id_end;
                     while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
                     let prev_ident = &result[id_start..id_end];
@@ -2166,7 +2166,7 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 };
                 if is_ref_decl {
                     // 检查后面是标识符开始或空白+标识符
-                    let mut j = skip_ws(bytes, i + 1);
+                    let j = skip_ws(bytes, i + 1);
                     if j < len && (is_ident_char(bytes[j]) || bytes[j] == b'*') {
                         // 这是引用参数, 替换 & 为 *
                         result.push('*');
@@ -2196,7 +2196,7 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 // '&' 紧跟标识符: 仅当该标识符是已知类型名
                 // (Type& x / Type& fn()), 位与 `a & b` 的 a 不是类型
                 let rbytes = result.as_bytes();
-                let mut id_end = rbytes.len();
+                let id_end = rbytes.len();
                 let mut id_start = id_end;
                 while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
                 let prev_ident = &result[id_start..id_end];
@@ -2918,7 +2918,7 @@ fn convert_direct_initialization(s: &str) -> String {
             let mut j = i;
             while j > 0 && (bytes[j-1] == b' ' || bytes[j-1] == b'\t' || bytes[j-1] == b'\n') { j -= 1; }
             if j > 0 && is_ident_char(bytes[j-1]) {
-                let mut id_end = j;
+                let id_end = j;
                 let mut id_start = j;
                 while id_start > 0 && is_ident_char(bytes[id_start-1]) { id_start -= 1; }
                 // 检查标识符前面是否有类型名或 *
@@ -3097,7 +3097,7 @@ fn replace_template_usages(s: &str) -> String {
                 let mut depth = 1i32;
                 let mut k = j + 1;
                 let mut has_comma = false;
-                let mut has_struct = false;
+                let _has_struct = false;
                 let mut has_comparison = false; // Track if content has ==, !=, <=, >=
                 let mut has_parens = false; // Track if content has ( )
                 let mut has_semicolon = false;
@@ -3577,10 +3577,10 @@ fn replace_destructors(s: &str) -> String {
         // 查找 ~ 字符
         if bytes[i] == b'~' {
             // 检查前面是 '::' (析构函数定义)
-            let mut before = i;
+            let before = i;
             if before >= 2 && bytes[before-1] == b':' && bytes[before-2] == b':' {
                 // 找到类名
-                let mut class_end = before - 2;
+                let class_end = before - 2;
                 let mut class_start = class_end;
                 while class_start > 0 && is_ident_char(bytes[class_start - 1]) {
                     class_start -= 1;
@@ -3618,7 +3618,7 @@ fn replace_constructors(s: &str) -> String {
         // 查找 ClassName::ClassName 模式 (类名与函数名相同)
         if bytes[i] == b':' && i + 1 < len && bytes[i+1] == b':' {
             // 前面是类名
-            let mut class_end = i;
+            let class_end = i;
             let mut class_start = class_end;
             while class_start > 0 && is_ident_char(bytes[class_start - 1]) {
                 class_start -= 1;
@@ -3630,7 +3630,7 @@ fn replace_constructors(s: &str) -> String {
                 continue;
             }
             // :: 后面应该是相同的类名 (构造函数)
-            let mut j = i + 2;
+            let j = i + 2;
             let mut name_end = j;
             while name_end < len && is_ident_char(bytes[name_end]) {
                 name_end += 1;
@@ -3813,7 +3813,7 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
                         j += 1;
                     }
                 }
-                let replacement = format!("void _ctor_{}", name);
+                let _replacement = format!("void _ctor_{}", name);
                 // Count parameters to disambiguate overloaded constructors
                 let params_str = &result[after..after_params];
                 let param_count = if params_str.trim().is_empty() || params_str.trim() == "void" {
@@ -4389,7 +4389,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
             if after_ident < len && bytes[after_ident] == b'(' {
                 // Check if this is a bare call to another member function of the same class
                 let target_full = format!("{}_{}", current_class, ident);
-                let is_same_class_call = member_fns.iter().any(|(c, m, f)| c == &current_class && m == &ident);
+                let is_same_class_call = member_fns.iter().any(|(c, m, _f)| c == &current_class && m == &ident);
                 // Also check if it's a call to a function that doesn't exist as a standalone function
                 // (i.e., it's a member function that needs this_ prefix)
                 if is_same_class_call {
@@ -5821,7 +5821,7 @@ fn convert_direct_init(s: &str) -> String {
             result.push('*');
             i += 1;
             // Skip whitespace
-            let ws_start = i;
+            let _ws_start = i;
             while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
                 result.push(bytes[i] as char);
                 i += 1;
@@ -6464,17 +6464,23 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                 continue;
             }
         }
-        // 检查 constexpr
-        if i + 9 <= len && &bytes[i..i + 9] == b"constexpr" {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + 9 >= len || !is_ident_char(bytes[i + 9]);
-            if before_ok && after_ok {
-                let mut j = i + 9;
-                while j < len && bytes[j] == b' ' {
-                    j += 1;
+        // 检查 constexpr / consteval / constinit
+        for &(kw, kw_len) in &[
+            (b"constexpr" as &[u8], 9usize),
+            (b"consteval", 9),
+            (b"constinit", 9),
+        ] {
+            if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
+                if before_ok && after_ok {
+                    let mut j = i + kw_len;
+                    while j < len && bytes[j] == b' ' {
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
                 }
-                i = j;
-                continue;
             }
         }
         // decltype(expr) → void* (C 后端不接受 decltype)
@@ -6576,8 +6582,8 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                 }
             }
         }
-        // override / final (类方法后) → 删除
-        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5)] {
+        // override / final / friend (类方法后) → 删除
+        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5), (b"friend", 6)] {
             if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
                 let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
@@ -12209,5 +12215,35 @@ mod tests {
         assert!(s.contains("typedef int int_alias"), "{}", s);
         // Should NOT contain 'using' keyword
         assert!(!s.contains("using int_alias"), "{}", s);
+    }
+
+    #[test]
+    fn lower_opaque_decl_outputs_raw_text() {
+        // CppDecl::Opaque 应原样输出到 C 代码中, 包裹在注释标记中.
+        let opaque_text = "__attribute__((visibility(\"default\"))) void custom_fn() {}";
+        let decls = vec![CppDecl::Opaque(opaque_text.to_string())];
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应包含 opaque 标记注释
+        assert!(s.contains("/* opaque decl start */"), "{}", s);
+        assert!(s.contains("/* opaque decl end */"), "{}", s);
+        // 应包含原始文本
+        assert!(s.contains(opaque_text), "{}", s);
+    }
+
+    #[test]
+    fn lower_opaque_stmt_outputs_raw_text() {
+        // 含 CppStmt::OpaqueStmt 的函数体应原样输出语句.
+        // 用混合源: 正常函数 + opaque 语句通过 parser 容错产生.
+        let src = b"void f() { int x = 1; @@@ bad stuff; return x; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 正常语句应保留
+        assert!(s.contains("int x = 1"), "{}", s);
+        assert!(s.contains("return x"), "{}", s);
     }
 }

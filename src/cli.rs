@@ -319,6 +319,7 @@ pub enum Arch {
     X86_64,
     AArch64,
     RiscV64,
+    RiscV32,
     Mips64,
     Mips,
     Arm,
@@ -340,6 +341,8 @@ impl Arch {
             | Arch::Mips64
             | Arch::Mips
             | Arch::Arm => true,
+            // RiscV32 backend is implemented in Phase 7
+            Arch::RiscV32 => true,
         }
     }
 
@@ -347,7 +350,7 @@ impl Arch {
     pub fn backend_missing_msg(self) -> String {
         format!(
             "target arch {:?} is parsed but has no codegen backend \
-             (supported backends: x86_64, aarch64, riscv64, mips, mips64, arm)",
+             (supported backends: x86_64, aarch64, riscv64, riscv32, mips, mips64, arm)",
             self
         )
     }
@@ -417,6 +420,7 @@ impl TargetTriple {
             "x86_64" | "amd64" => Arch::X86_64,
             "aarch64" | "arm64" => Arch::AArch64,
             "riscv64" => Arch::RiscV64,
+            "riscv32" => Arch::RiscV32,
             "mips64" => Arch::Mips64,
             "mips" => Arch::Mips,
             "arm" | "armv7" => Arch::Arm,
@@ -474,6 +478,7 @@ impl TargetTriple {
             Arch::X86_64 => "x86_64",
             Arch::AArch64 => "aarch64",
             Arch::RiscV64 => "riscv64",
+            Arch::RiscV32 => "riscv32",
             Arch::Arm => "armhf",
             // musl 官方仓库在 mips 上游未提供, 返回 None 保持保守
             Arch::Mips | Arch::Mips64 => return None,
@@ -487,6 +492,7 @@ pub fn arch_name(a: Arch) -> &'static str {
         Arch::X86_64 => "x86_64",
         Arch::AArch64 => "aarch64",
         Arch::RiscV64 => "riscv64",
+        Arch::RiscV32 => "riscv32",
         Arch::Mips64 => "mips64",
         Arch::Mips => "mips",
         Arch::Arm => "arm",
@@ -3039,6 +3045,7 @@ mod tests {
         assert!(Arch::X86_64.has_backend());
         assert!(Arch::AArch64.has_backend());
         assert!(Arch::RiscV64.has_backend());
+        assert!(Arch::RiscV32.has_backend());
         assert!(Arch::Mips.has_backend());
         assert!(Arch::Mips64.has_backend());
         assert!(Arch::Arm.has_backend());

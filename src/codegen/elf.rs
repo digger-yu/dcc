@@ -1467,7 +1467,7 @@ pub fn build_elf_rel_x86_64(
     // [7+N..7+N+G] COMDAT group sections (SHT_GROUP)
     for (i, group) in comdat_groups.iter().enumerate() {
         // Section name: .group.<signature>
-        let group_name = format!(".group.{}", group.signature);
+        let _group_name = format!(".group.{}", group.signature);
         let name_off = shstrtab_comdat_name_offset(extra_sections, comdat_groups, i);
         // sh_info: index of the signature symbol in .symtab
         // For simplicity, we use 0 (no signature symbol)
@@ -2112,10 +2112,10 @@ fn build_elf32_rel_generic(
     extra_sections: &[ElfSection],
 ) -> Vec<u8> {
     let is_be = ei_data == ELFDATA2MSB;
-    let mut ew_u16 = |v: u16| -> [u8; 2] {
+    let ew_u16 = |v: u16| -> [u8; 2] {
         if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
     };
-    let mut ew_u32 = |v: u32| -> [u8; 4] {
+    let ew_u32 = |v: u32| -> [u8; 4] {
         if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
     };
     let mut shstr = vec![0u8];

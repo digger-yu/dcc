@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::elf::{
-    SHF_ALLOC, SHF_EXECINSTR, SHF_GROUP, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
     SHT_NOBITS, SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
     STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };

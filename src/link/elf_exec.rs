@@ -12,7 +12,7 @@
 use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use super::link_opts;
 use crate::codegen::elf::{
-    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, GRP_COMDAT, PF_R, PF_W, PF_X,
+    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
     PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_GROUP, SHT_NOBITS, SHT_PROGBITS,
     SHT_STRTAB, SHT_SYMTAB,
 };
@@ -435,7 +435,7 @@ pub fn write_elf_internal(
     // sh_link must point to the .symtab section.
     // .symtab is at index: 1 (NULL) + N (user) + G (comdat) + 1 (.gnu.hash)
     let symtab_shdr_idx = (1 + layout.sections.len() + comdat_groups.len() + 1) as u32;
-    for (i, (sh_name, flags, member_indices)) in comdat_groups.iter().enumerate() {
+    for (i, (sh_name, _flags, member_indices)) in comdat_groups.iter().enumerate() {
         let data_size = (4 + member_indices.len() * 4) as u64;
         write_shdr(
             out,

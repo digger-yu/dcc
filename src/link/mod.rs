@@ -835,7 +835,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
             code
         }
-        ArchKind::RiscV64 => {
+        ArchKind::RiscV64 | ArchKind::RiscV32 => {
             // addi a0,x0,0; addi a1,x0,0; addi a2,x0,0;
             // jal ra,main; addi a7,x0,93; ecall
             let mut code = vec![
@@ -904,6 +904,36 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             let offset = ((main_vaddr.wrapping_sub(call_next)) as i64 / 4) as i32;
             let bl_insn = 0x0b000000u32 | ((offset as u32) & 0x00FFFFFF);
             code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
+            code
+        }
+        ArchKind::RiscV32 => {
+            // addi a0,x0,0; addi a1,x0,0; addi a2,x0,0;
+            // jal ra,main; addi a7,x0,93; ecall
+            let mut code = vec![
+                0x13, 0x05, 0x00, 0x00, // addi a0, x0, 0
+                0x93, 0x05, 0x00, 0x00, // addi a1, x0, 0
+                0x13, 0x06, 0x00, 0x00, // addi a2, x0, 0
+                0, 0, 0, 0, // jal ra, main (placeholder)
+                0x93, 0x08, 0xd0, 0x05, // addi a7, x0, 93
+                0x73, 0x00, 0x00, 0x00, // ecall
+            ];
+            // jal at offset 12, 4 bytes
+            let call_next = start_vaddr + 12 + 4;
+            let offset = ((main_vaddr.wrapping_sub(call_next)) as i64 / 4) as i32;
+            let imm = offset as u32;
+            // RISC-V JAL rd=ra(x1) encoding:
+            // imm[20|10:1|11|19:12] rd=00001 1101111
+            let mut jal_insn = 0x6fu32;
+            jal_insn |= 1 << 7; // rd = ra = x1
+            let bit20 = (imm >> 20) & 1;
+            let bits10_5 = (imm >> 5) & 0x3f;
+            let bit11 = (imm >> 11) & 1;
+            let bits19_12 = (imm >> 12) & 0xff;
+            jal_insn |= bit20 << 31;
+            jal_insn |= bits10_5 << 25;
+            jal_insn |= bit11 << 20;
+            jal_insn |= bits19_12 << 12;
+            code[12..16].copy_from_slice(&jal_insn.to_le_bytes());
             code
         }
     };

@@ -594,7 +594,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // Offloading: 收集 OpenMP target/simd + CUDA/HIP 限定符函数为
     // offload entries, 构造 `.dcc.offload` 节内容。校验错误/警告均带
     // 精确源位置 (经 line_map 映射回源文件)。
-    let (mut offload_section, mut offload_diags) = collect_offload_section(
+    let (offload_section, mut offload_diags) = collect_offload_section(
         &prog,
         &cfg.profile.offload,
         &pp_out.openmp_pragmas,
@@ -2159,6 +2159,7 @@ fn arch_from_target(t: &crate::cli::TargetTriple) -> crate::debug::ArchKind {
         crate::cli::Arch::X86_64 => ArchKind::X86_64,
         crate::cli::Arch::AArch64 => ArchKind::AArch64,
         crate::cli::Arch::RiscV64 => ArchKind::RiscV64,
+        crate::cli::Arch::RiscV32 => ArchKind::RiscV32,
         crate::cli::Arch::Mips64 => ArchKind::Mips64,
         crate::cli::Arch::Mips => ArchKind::Mips,
         crate::cli::Arch::Arm => ArchKind::Arm,
@@ -2171,6 +2172,7 @@ fn dynamic_linker_path(arch: crate::debug::ArchKind) -> String {
         crate::debug::ArchKind::X86_64 => "/lib64/ld-linux-x86-64.so.2",
         crate::debug::ArchKind::AArch64 => "/lib/ld-linux-aarch64.so.1",
         crate::debug::ArchKind::RiscV64 => "/lib/ld-linux-riscv64-lp64d.so.1",
+        crate::debug::ArchKind::RiscV32 => "", // bare-metal, no dynamic linker
         crate::debug::ArchKind::Mips64 => "/lib/ld-linux-mipsn8.so.1",
         crate::debug::ArchKind::Mips => "/lib/ld-linux-mipsel.so.1",
         crate::debug::ArchKind::Arm => "/lib/ld-linux-armhf.so.3",

@@ -301,7 +301,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             // __imag__ expr: 提取虚部
             match eval_full(e)? {
                 ConstValue::Float(f) => {
-                    if let Expr::ComplexLit { real, imag, .. } = e.as_ref() {
+                    if let Expr::ComplexLit { real: _, imag, .. } = e.as_ref() {
                         Ok(ConstValue::Float(*imag))
                     } else {
                         // 标量的 __imag__ 返回 0

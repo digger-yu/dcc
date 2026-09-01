@@ -6696,10 +6696,10 @@ impl<'a> Parser<'a> {
     fn is_attribute_stmt(&self) -> bool {
         // 保存状态
         let saved_pos = self.lex.pos;
-        let saved_line = self.lex.line;
-        let saved_col = self.lex.col;
-        let saved_cur = self.cur.clone();
-        let saved_peek = self.peek.clone();
+        let _saved_line = self.lex.line;
+        let _saved_col = self.lex.col;
+        let _saved_cur = self.cur.clone();
+        let _saved_peek = self.peek.clone();
         // 需要可变副本来前瞻; 使用 unsafe 不可取,
         // 改为简单启发式: 检查 __attribute__ 后面的 token
         // 如果是 __attribute__((...)); 则 RParen 深度归零后下一个是 `;`

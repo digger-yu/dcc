@@ -83,6 +83,7 @@ impl Target {
             Arch::X86_64 => (8, 8, 4, 8, Endian::Little, CalleeSave::SysV),
             Arch::AArch64 => (8, 8, 4, 8, Endian::Little, CalleeSave::AAPCS64),
             Arch::RiscV64 => (8, 8, 4, 8, Endian::Little, CalleeSave::SysV),
+            Arch::RiscV32 => (4, 4, 4, 8, Endian::Little, CalleeSave::SysV),
             Arch::Mips64 => (8, 8, 4, 8, Endian::Big, CalleeSave::AAPCS),
             Arch::Mips => (4, 4, 4, 8, Endian::Big, CalleeSave::AAPCS),
             Arch::Arm => (4, 4, 4, 8, Endian::Little, CalleeSave::AAPCS),
@@ -104,6 +105,7 @@ impl Target {
                 Arch::X86_64 => (8, 4, 8, 8, 8, 16),
                 Arch::AArch64 => (8, 4, 8, 8, 8, 16),
                 Arch::RiscV64 => (8, 4, 8, 8, 8, 16),
+                Arch::RiscV32 => (4, 4, 4, 8, 8, 8),
                 Arch::Mips64 => (8, 4, 8, 8, 8, 16),
                 Arch::Mips => (4, 4, 4, 8, 8, 8),
                 Arch::Arm => (4, 4, 4, 8, 8, 8),
@@ -496,6 +498,21 @@ mod tests {
     }
 
     #[test]
+    fn riscv32_ilp32_little_endian_sysv() {
+        let t = Target::resolve(&trip(Arch::RiscV32, Os::Freestanding, Abi::Eabi));
+        assert_eq!(t.arch, Arch::RiscV32);
+        assert_eq!(t.ptr_size, 4);
+        assert_eq!(t.long_size, 4);
+        assert_eq!(t.int_size, 4);
+        assert_eq!(t.llong_size, 8);
+        assert_eq!(t.endian, Endian::Little);
+        assert_eq!(t.callee_save, CalleeSave::SysV);
+        assert!(t.arch.has_backend());
+        assert!(t.is_ilp32());
+        assert!(!t.is_lp64());
+    }
+
+    #[test]
     fn mips_parse_only_4byte_ptr_big_endian_aapcs() {
         // mips 有 triple 解析和 codegen 后端
         let t = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
@@ -640,6 +657,19 @@ mod tests {
         assert_eq!(t.llong_align, 8);
         assert_eq!(t.double_align, 8);
         assert_eq!(t.long_double_align, 16);
+    }
+
+    #[test]
+    fn riscv32_ilp32_alignment_table() {
+        let t = Target::resolve(&trip(Arch::RiscV32, Os::Freestanding, Abi::Eabi));
+        // ILP32: long/ptr = 4, long long/double = 8, long double = 8
+        assert_eq!(t.ptr_align, 4);
+        assert_eq!(t.int_align, 4);
+        assert_eq!(t.long_align, 4);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 8);
+        assert_eq!(t.max_align(), 8);
     }
 
     #[test]

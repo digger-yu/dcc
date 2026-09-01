@@ -37,6 +37,7 @@ pub enum ArchKind {
     X86_64,
     AArch64,
     RiscV64,
+    RiscV32,
     Mips,
     Mips64,
     Arm,
@@ -49,6 +50,7 @@ impl ArchKind {
             ArchKind::X86_64 => 16,                  // %rip
             ArchKind::AArch64 => 30,                 // PC (R30)
             ArchKind::RiscV64 => 1,                  // ra (x1)
+            ArchKind::RiscV32 => 1,                  // ra (x1)
             ArchKind::Mips | ArchKind::Mips64 => 31, // $ra
             ArchKind::Arm => 14,                     // R14 (lr)
         }
@@ -59,6 +61,7 @@ impl ArchKind {
             ArchKind::X86_64 => 6,                   // x86_64 CIE 用 rsp-relative CFA
             ArchKind::AArch64 => 29,                 // FP (X29)
             ArchKind::RiscV64 => 8,                  // s0/fp (x8)
+            ArchKind::RiscV32 => 8,                  // s0/fp (x8)
             ArchKind::Mips | ArchKind::Mips64 => 30, // $fp
             ArchKind::Arm => 11,                     // R11 (fp)
         }
@@ -67,7 +70,7 @@ impl ArchKind {
     pub fn address_size(self) -> u8 {
         match self {
             ArchKind::X86_64 | ArchKind::AArch64 | ArchKind::RiscV64 | ArchKind::Mips64 => 8,
-            ArchKind::Mips | ArchKind::Arm => 4,
+            ArchKind::Mips | ArchKind::Arm | ArchKind::RiscV32 => 4,
         }
     }
     /// EH 帧 CIE augmentation 字符串
@@ -81,6 +84,7 @@ impl ArchKind {
             ArchKind::X86_64
             | ArchKind::AArch64
             | ArchKind::RiscV64
+            | ArchKind::RiscV32
             | ArchKind::Mips
             | ArchKind::Mips64
             | ArchKind::Arm => "zR",
@@ -92,6 +96,7 @@ impl ArchKind {
             ArchKind::X86_64 => 7,                   // rsp
             ArchKind::AArch64 => 31,                 // sp
             ArchKind::RiscV64 => 2,                  // sp
+            ArchKind::RiscV32 => 2,                  // sp
             ArchKind::Mips | ArchKind::Mips64 => 29, // $sp
             ArchKind::Arm => 13,                     // sp (R13)
         }
@@ -2614,7 +2619,7 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
     // BPF CO-RE 需要 VAR + DATASEC 来映射全局变量到 .bss/.data/.rodata
     let mut bss_vars: Vec<u32> = Vec::new();
     let mut data_vars: Vec<u32> = Vec::new();
-    let mut rodata_vars: Vec<u32> = Vec::new();
+    let rodata_vars: Vec<u32> = Vec::new();
 
     for g in &cu.globals {
         let ty_id = encoder.lookup_name(&g.ty.name).unwrap_or(0);

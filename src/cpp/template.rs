@@ -311,7 +311,7 @@ impl TemplateRegistry {
                 let pat = pat.trim();
                 let pat_key = pat.replace('*', "").trim().to_string();
                 // 检查/记录形参绑定; 同名二次出现时实参必须一致
-                let mut bind_check = |bindings: &mut Vec<(String, MangleType)>,
+                let bind_check = |bindings: &mut Vec<(String, MangleType)>,
                                       name: &str,
                                       arg_ty: &MangleType,
                                       all_match: &mut bool| {
@@ -1001,6 +1001,7 @@ mod tests {
                     name: "T".to_string(),
                     default: None,
                     non_type: None,
+                    is_pack: false,
                 }],
             },
             &None,
@@ -1063,11 +1064,13 @@ mod tests {
                     name: "T".to_string(),
                     default: None,
                     non_type: None,
+                    is_pack: false,
                 },
                 crate::cpp::parser::TemplateParam {
                     name: "U".to_string(),
                     default: None,
                     non_type: None,
+                    is_pack: false,
                 },
             ],
         };
@@ -1100,6 +1103,7 @@ mod tests {
                 name: "T".to_string(),
                 default: Some(MangleType::Int),
                 non_type: None,
+                is_pack: false,
             }],
         };
         reg.register(&targs, &None, &inner);
@@ -1127,6 +1131,7 @@ mod tests {
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
+                is_pack: false,
             }],
         };
         reg.register(&targs, &Some("sizeof(T) <= 4".to_string()), &inner);

@@ -1231,7 +1231,7 @@ impl MipsCodegen {
                     }
                 }
             }
-            Expr::ComplexLit { real, imag, .. } => {
+            Expr::ComplexLit { real, imag: _, .. } => {
                 // 简化: 返回实部
                 self.emit_load_imm(2, *real as i32);
             }
@@ -2071,7 +2071,7 @@ impl MipsCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::B));
         // BC1F: opcode=010001 (17), rt=0 (BC1F), offset=0 placeholder
-        let inst: u32 = (0b010001 << 26);
+        let inst: u32 = 0b010001 << 26;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -2130,7 +2130,7 @@ impl MipsCodegen {
     /// 加载单精度浮点字面量到 $f0
     fn load_float_f0(&mut self, val: f32) {
         let bits = val.to_bits() as u64;
-        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+        let _offset = if let Some(&off) = self.float_pool.get(&bits) {
             off
         } else {
             let off = self.rodata.len() as u64;
@@ -2150,7 +2150,7 @@ impl MipsCodegen {
     /// 加载双精度浮点字面量到 $f0/$f2
     fn load_float_d0(&mut self, val: f64) {
         let bits = val.to_bits();
-        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+        let _offset = if let Some(&off) = self.float_pool.get(&bits) {
             off
         } else {
             let off = self.rodata.len() as u64;

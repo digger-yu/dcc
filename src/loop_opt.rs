@@ -556,7 +556,7 @@ fn try_vectorize_vnni(
     vec_bits: u32,
 ) -> Option<BlockItem> {
     // Parse the for loop structure
-    let (ivar, n) = parse_counted_for(init, cond, step, 4)?;
+    let (ivar, _n) = parse_counted_for(init, cond, step, 4)?;
     let stmt = loop_body_single_stmt(body)?;
 
     // Check for accumulation pattern: sum += a[i] * b[i]

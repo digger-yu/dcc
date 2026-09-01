@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BinOp, Block, BlockItem, Decl, Expr, Field, FuncDecl, Ident, Param, Program, QualifierFlags,
+    BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, Param, Program, QualifierFlags,
     Stmt, Type,
 };
 use crate::diagnostics::Span;

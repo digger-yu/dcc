@@ -15,9 +15,8 @@ namespace std {
 
         constexpr strong_ordering(int v) : value(v) {}
 
-        constexpr int operator<=>(strong_ordering other) const {
-            return value - other.value;
-        }
+        // C++20 operator<=> 降级为 int 比较 (dcc 不支持 spaceship 运算符)
+        // constexpr int operator<=>(strong_ordering other) const { return value - other.value; }
 
         friend constexpr int operator==(strong_ordering a, strong_ordering b) {
             return a.value == b.value;
@@ -103,8 +102,10 @@ namespace std {
     // compare_three_way function object
     struct compare_three_way {
         template <typename T, typename U>
-        auto operator()(const T& t, const U& u) const {
-            return t <=> u;
+        int operator()(const T& t, const U& u) const {
+            if (t < u) return -1;
+            if (u < t) return 1;
+            return 0;
         }
     };
 

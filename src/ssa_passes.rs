@@ -1966,7 +1966,7 @@ pub fn software_pipelining(func: &mut Function) -> bool {
     }
 
     let mut modified = false;
-    for (header, latch) in &loop_info {
+    for (header, _latch) in &loop_info {
         // Conservative: only pipeline simple single-BB loops
         // with no memory operations
         let header_bb = match func.blocks.get(header) {

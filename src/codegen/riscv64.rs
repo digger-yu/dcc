@@ -3208,14 +3208,14 @@ impl Riscv64Codegen {
             let loop_end = self.pos();
             let offset = loop_start as i64 - loop_end as i64;
             let off = offset as u32;
-            let bne = (((off >> 12) & 1) << 31
+            let bne = ((off >> 12) & 1) << 31
                 | ((off >> 5) & 0x3f) << 25
                 | (0u32) << 20
                 | (5u32) << 15
                 | ((off >> 1) & 0xf) << 8
                 | ((off >> 11) & 1) << 7
                 | (1u32) << 12
-                | 0x63);
+                | 0x63;
             self.emit(&bne.to_le_bytes());
         }
     }

@@ -1316,7 +1316,7 @@ fn init_node_count(init: &crate::ast::InitItem) -> usize {
 /// Returns the estimated node count of the inlined result.
 /// Lower is better; values above `INLINE_COST_THRESHOLD` indicate
 /// the inlining would likely increase code size.
-fn estimate_inline_cost(f: &FuncDecl, body: &Block, args: &[Expr]) -> usize {
+fn estimate_inline_cost(_f: &FuncDecl, body: &Block, args: &[Expr]) -> usize {
     // Base cost: all nodes in the function body
     let body_cost: usize = body.items.iter().map(item_node_count).sum();
     // Argument duplication cost: each argument is substituted for every

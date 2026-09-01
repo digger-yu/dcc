@@ -582,6 +582,11 @@ pub fn preprocess(
             pp.define_builtin("__riscv_xlen", "64");
             pp.define_builtin("__riscv_integer_extension", "64");
         }
+        Arch::RiscV32 => {
+            pp.define_builtin("__riscv", "1");
+            pp.define_builtin("__riscv_xlen", "32");
+            pp.define_builtin("__riscv_integer_extension", "32");
+        }
         Arch::Mips64 => {
             pp.define_builtin("__mips__", "1");
             pp.define_builtin("__mips64", "1");
