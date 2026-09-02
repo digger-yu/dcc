@@ -14,9 +14,10 @@
 - [7. 内建函数](#7-内建函数)
 - [8. 不支持的功能](#8-不支持的功能)
 - [9. 路线图](#9-路线图)
-- [10. 交叉编译](#10-交叉编译)
-- [11. 限制与已知问题](#11-限制与已知问题)
-- [12. 引用文档](#12-引用文档)
+- [10. 测试与质量](#10-测试与质量)
+- [11. 交叉编译](#11-交叉编译)
+- [12. 限制与已知问题](#12-限制与已知问题)
+- [13. 引用文档](#13-引用文档)
 
 ## 1. 概述
 
@@ -352,7 +353,38 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 - 自举完成 + 字节级差为 0（CI 锁定）；GCC cc1/cc1plus 全树编译（需本地 ~5G 磁盘）。
 - AArch64 / RISC-V profile runtime helper；真实 GPU CI 覆盖。
 
-## 10. 交叉编译
+## 10. 测试与质量
+
+### 单元测试与集成测试
+
+```bash
+cargo test --lib          # 1332 单元测试
+cargo test --test integration  # 765 集成测试
+```
+
+### GCC Torture Test
+
+dcc 通过 GCC torture test suite 验证 C 语言标准的兼容性。测试集包含 1697 个 execute 测试和 2016 个 compile 测试。
+
+**当前通过率 (execute tests):**
+
+| 指标 | 数量 | 百分比 |
+|------|------|--------|
+| 通过 | 1073 | 63.2% |
+| 编译失败 | 62 | 3.7% |
+| 运行时失败 | 488 | 28.8% |
+| 超时 | 73 | 4.3% |
+
+运行 torture test:
+
+```bash
+bash scripts/setup_torture.sh  # 下载测试集
+cargo test --release torture   # 运行完整测试
+```
+
+跳过列表: `tests/torture_skip.txt` 包含已知无法修复的测试（多文件测试、缺失 libc 函数等）。
+
+## 11. 交叉编译
 
 详细见 [`docs/cross_compile.md`](./docs/cross_compile.md)。
 
@@ -367,7 +399,7 @@ OS 接受 `linux` / `linux-musl` / `freestanding` / `windows` / `darwin`；
 ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 工具链命名：`<arch>-<vendor>-<os>-<abi>-dcc` 与 `…-dcc-cc` 别名。
 
-## 11. 限制与已知问题
+## 12. 限制与已知问题
 
 | 范围 | 限制 | 跟踪 |
 |------|------|------|
@@ -377,7 +409,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 | C++ | `obj.*ptr_to_member` 多文件链接可能触发重复定义 | lower.rs#L1653 生成完整函数定义，但每个 TU 都会 emit |
 | 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | Windows 无等效工具链 |
 
-## 12. 引用文档
+## 13. 引用文档
 
 | 文档 | 简介 |
 |------|------|
