@@ -1117,12 +1117,17 @@ fn is_static_initializer(expr: &Expr) -> bool {
         }
         // 地址算术: 指针 + 整数 / 整数 + 指针 / 指针 - 整数
         // 也覆盖 (unsigned long)&var + sizeof(var) - const 等内核模式
-        Expr::Binop {
-            op: BinOp::Add | BinOp::Sub,
-            l,
-            r,
-            ..
-        } => is_static_initializer(l) && is_static_initializer(r),
+        // 扩展: 也接受位运算/移位/比较等 (GCC 允许地址常量的这些运算)
+        Expr::Binop { l, r, .. } => {
+            // 优先尝试 const_eval (纯整数常量)
+            if const_eval::eval(expr).is_ok() {
+                return true;
+            }
+            // 地址算术 / 位运算 / 比较: 两边都是静态初始化器时允许
+            is_static_initializer(l) && is_static_initializer(r)
+        }
+        // 逗号表达式: 右边必须是静态初始化器
+        Expr::Comma { r, .. } => is_static_initializer(r),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             inits.iter().all(|item| {
                 match item {
