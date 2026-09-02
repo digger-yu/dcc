@@ -2004,10 +2004,11 @@ impl<'a> Parser<'a> {
                 TokKind::Ident
                     if matches!(
                         self.cur.text.as_str(),
-                        "__volatile__" | "__const__" | "__inline__" | "__inline" | "inline"
+                        "__volatile__" | "__volatile" | "__const__" | "__const" | "__inline__" | "__inline" | "inline"
                     ) =>
                 {
-                    if self.cur.text == "__volatile__" || self.cur.text == "__const__" {
+                    if self.cur.text == "__volatile__" || self.cur.text == "__volatile"
+                        || self.cur.text == "__const__" || self.cur.text == "__const" {
                         is_volatile = true;
                     }
                     self.advance();
@@ -3219,8 +3220,7 @@ impl<'a> Parser<'a> {
             }
             // K&R 风格函数: 参数后跟类型声明, 然后是函数体
             let mut is_old_style = false;
-            let params = if !params.is_empty()
-                && params.iter().all(|p| p.ty == Type::Int)
+            let params = if (params.is_empty() || params.iter().all(|p| p.ty == Type::Int))
                 && self.cur.kind != TokKind::LBrace
                 && self.cur.kind != TokKind::Semi
                 && self.is_type_start()
@@ -4139,7 +4139,7 @@ impl<'a> Parser<'a> {
             TokKind::Star => true,
             TokKind::Ident => !matches!(
                 self.peek.text.as_str(),
-                "__attribute__" | "__asm__" | "__asm" | "asm" | "__volatile__" | "__const__"
+                "__attribute__" | "__asm__" | "__asm" | "asm" | "__volatile__" | "__volatile" | "__const__" | "__const"
             ),
             _ => false,
         }
@@ -4542,7 +4542,9 @@ impl<'a> Parser<'a> {
                 // __const__/__volatile__/__restrict__/__restrict: GNU 扩展拼写, 同 const/volatile/restrict
                 TokKind::Ident
                     if self.cur.text == "__const__"
+                        || self.cur.text == "__const"
                         || self.cur.text == "__volatile__"
+                        || self.cur.text == "__volatile"
                         || self.cur.text == "__restrict__"
                         || self.cur.text == "__restrict" =>
                 {
@@ -5472,7 +5474,9 @@ impl<'a> Parser<'a> {
                 "__restrict__"
                     | "__restrict"
                     | "__const__"
+                    | "__const"
                     | "__volatile__"
+                    | "__volatile"
                     | "__attribute__"
                     | "_ms_restrict"
                     | "_restrict"
@@ -5494,10 +5498,10 @@ impl<'a> Parser<'a> {
                     TokKind::KwVolatile => self.decl_quals |= QualifierFlags::VOLATILE,
                     TokKind::KwAtomic => self.decl_quals |= QualifierFlags::ATOMIC,
                     TokKind::KwRestrict => self.decl_quals |= QualifierFlags::RESTRICT,
-                    TokKind::Ident if self.cur.text == "__const__" => {
+                    TokKind::Ident if self.cur.text == "__const__" || self.cur.text == "__const" => {
                         self.decl_quals |= QualifierFlags::CONST
                     }
-                    TokKind::Ident if self.cur.text == "__volatile__" => {
+                    TokKind::Ident if self.cur.text == "__volatile__" || self.cur.text == "__volatile" => {
                         self.decl_quals |= QualifierFlags::VOLATILE
                     }
                     TokKind::Ident if self.cur.text == "__restrict__"
@@ -6126,7 +6130,11 @@ impl<'a> Parser<'a> {
         }
         // K&R 风格函数: 参数只有标识符, 没有类型 (如 func(a, b, c))
         // 检测: 当前是 Ident 且不是类型起始 (不是 typedef/typeof 等)
-        if self.cur.kind == TokKind::Ident && !self.is_type_start() {
+        // 且不是已知的 typedef 名 (避免参数名与 typedef 同名时误判)
+        if self.cur.kind == TokKind::Ident
+            && !self.is_type_start()
+            && !self.typedefs.contains_key(&self.cur.text)
+        {
             let mut kr_names = vec![];
             while self.cur.kind == TokKind::Ident {
                 kr_names.push(self.cur.text.clone());
