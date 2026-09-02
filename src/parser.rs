@@ -9190,6 +9190,22 @@ impl<'a> Parser<'a> {
                     Self::collect_upvars(&c.body.items, local_vars, parent_locals, out);
                 }
             }
+            Stmt::GotoIndirect { expr, .. } => {
+                Self::collect_upvars_expr(expr, local_vars, parent_locals, out);
+            }
+            Stmt::Label { stmt, .. } => {
+                Self::collect_upvars_stmt(stmt, local_vars, parent_locals, out);
+            }
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => {
+                for o in outputs {
+                    Self::collect_upvars_expr(o, local_vars, parent_locals, out);
+                }
+                for i in inputs {
+                    Self::collect_upvars_expr(i, local_vars, parent_locals, out);
+                }
+            }
             _ => {}
         }
     }
@@ -9245,6 +9261,44 @@ impl<'a> Parser<'a> {
             }
             Expr::StmtExpr { block, .. } => {
                 Self::collect_upvars(&block.items, local_vars, parent_locals, out)
+            }
+            Expr::VaArg { ap, .. } => {
+                Self::collect_upvars_expr(ap, local_vars, parent_locals, out);
+            }
+            Expr::AsmExpr {
+                outputs, inputs, ..
+            } => {
+                for o in outputs {
+                    Self::collect_upvars_expr(o, local_vars, parent_locals, out);
+                }
+                for i in inputs {
+                    Self::collect_upvars_expr(i, local_vars, parent_locals, out);
+                }
+            }
+            Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+                Self::collect_upvars_expr(e, local_vars, parent_locals, out);
+            }
+            Expr::Comma { l, r, .. } => {
+                Self::collect_upvars_expr(l, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(r, local_vars, parent_locals, out);
+            }
+            Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+                for init in inits {
+                    match init {
+                        InitItem::Expr(e) => {
+                            Self::collect_upvars_expr(e, local_vars, parent_locals, out);
+                        }
+                        InitItem::Designated { value, .. } => {
+                            Self::collect_upvars_expr(value, local_vars, parent_locals, out);
+                        }
+                    }
+                }
+            }
+            Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. }
+            | Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. } => {
+                Self::collect_upvars_expr(e, local_vars, parent_locals, out);
             }
             _ => {}
         }
