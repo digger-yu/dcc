@@ -728,7 +728,7 @@ fn libdecnumber_combined_tu_compiles() {
     }
     let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_stub");
     let combined =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_combined.c");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_stub/libdecnumber_combined.c");
     let dir = std::env::temp_dir();
     let object = dir.join(format!("dcc-libdecnumber-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -6296,19 +6296,19 @@ fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
 /// kernel object corpus: 固化真实 Linux arch/x86/kernel .o 样本.
 #[test]
 fn kernel_object_corpus_arch_x86_kernel() {
-    assert_kernel_corpus_object("arch/x86/kernel/io_delay.o", "native_io_delay");
+    assert_kernel_corpus_object("io_delay.o", "native_io_delay");
 }
 
 /// kernel object corpus: 固化真实 Linux kernel/sched .o 样本.
 #[test]
 fn kernel_object_corpus_kernel_sched() {
-    assert_kernel_corpus_object("kernel/sched/fair.o", "pick_next_task_fair");
+    assert_kernel_corpus_object("fair.o", "pick_next_task_fair");
 }
 
 /// kernel object corpus: 固化真实 Linux lib/ .o 样本.
 #[test]
 fn kernel_object_corpus_lib() {
-    assert_kernel_corpus_object("lib/clz_ctz.o", "__clzdi2");
+    assert_kernel_corpus_object("clz_ctz.o", "__clzdi2");
 }
 
 // ---------- objtool known failures xfail ----------

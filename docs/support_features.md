@@ -21,7 +21,7 @@
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约；2026-08-27 实际验证：`qemu-system-x86_64` 加载 dcc 编译的 Linux 7.1 bzImage，串口启动日志正常（需启用 `CONFIG_SERIAL_8250_CONSOLE`） |
 | Linux vmlinux 完整 ELF 内核映像 | dcc 编译 Linux 7.1 全树生成 16MB vmlinux (ET_EXEC x86-64)；零 objtool 错误；`__ex_table` 异常表、`.fixup` 修复代码、嵌套 `.pushsection`/`.popsection` 完整支持；vdso64.so.dbg 正确生成 |
-| Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/arch/x86/kernel/io_delay.o`、`kernel/sched/fair.o`、`lib/clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
+| Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/io_delay.o`、`fair.o`、`clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
 | CI/examples 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `examples/*/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 examples 引用并要求文件存在 |
 
 ## Sanitizer 插桩

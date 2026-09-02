@@ -22,7 +22,7 @@
  * 编译:
  *   dcc -c -I $GCC_SRC/libdecnumber -I $GCC_SRC/include \
  *       -DHAVE_CONFIG_H -o libdecnumber_combined.o \
- *       tools/libdecnumber_combined.c
+ *       tools/libdecnumber_stub/libdecnumber_combined.c
  *
  * 限制 (M7):
  *   - 不实现 decPacked.c (decimal128 packed 编码), decPacked 留 SKIP
