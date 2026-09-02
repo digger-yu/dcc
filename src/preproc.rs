@@ -5140,6 +5140,32 @@ impl Preprocessor {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
+                
+                // 宽/Unicode 字面量前缀: L'x'/L"x"/u'x'/U"x"/u8"x" 等
+                // 前缀与引号之间不允许空白; 若匹配则整体输出, 不做参数替换
+                if (ident == "L" || ident == "u" || ident == "U" || ident == "u8")
+                    && i < len && (chars[i] == '\'' || chars[i] == '"')
+                {
+                    let quote = chars[i];
+                    result.push_str(&ident);
+                    result.push(quote);
+                    i += 1; // skip opening quote
+                    while i < len && chars[i] != quote {
+                        if chars[i] == '\\' && i + 1 < len {
+                            result.push(chars[i]);
+                            i += 1;
+                        }
+                        if chars[i] == '\n' { break; }
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < len && chars[i] == quote {
+                        result.push(quote);
+                        i += 1;
+                    }
+                    continue;
+                }
+                
                 if let Some(idx) = params.iter().position(|p| p == &ident) {
                     if let Some(arg) = args.get(idx) {
                         result.push_str(arg);
