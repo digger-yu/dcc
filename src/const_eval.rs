@@ -3,7 +3,8 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Expr, Stmt, Type, UnOp};
+use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, Stmt, Type, UnOp};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstEvalError {
@@ -421,24 +422,114 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
     if items.is_empty() {
         return Ok(ConstValue::Int(0));
     }
+    // Track variable bindings from declarations within the block
+    let mut env: HashMap<String, ConstValue> = HashMap::new();
     // 求值所有非末尾语句 (必须是可折叠的常量表达式或无副作用声明)
     for item in &items[..items.len() - 1] {
         match item {
             BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                 // 中间语句: 必须是可求值的常量表达式 (结果丢弃)
-                eval(e)?;
+                eval_with_env(e, &env)?;
             }
-            BlockItem::Decl(_) => {
-                // 声明: 常量上下文中允许 (如 const int x = 5;)
-                // 暂不跟踪变量绑定, 仅接受不影响后续求值
+            BlockItem::Decl(Decl::Var(v)) => {
+                // Track variable binding: evaluate init and store in env
+                if let Some(init) = &v.init {
+                    let val = eval_with_env(init, &env)?;
+                    env.insert(v.name.name.clone(), val);
+                }
             }
             _ => return Err(ConstEvalError::NotConstant),
         }
     }
     // 最后一个语句的值即为语句表达式的值
     match items.last().unwrap() {
-        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_full(e),
+        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_with_env(e, &env),
         _ => Err(ConstEvalError::NotConstant),
+    }
+}
+
+/// Like eval_full but with a variable environment for looking up
+/// identifiers bound within statement expressions.
+fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<ConstValue, ConstEvalError> {
+    // Check if this is a simple identifier lookup in the env
+    if let Expr::Ident { name, .. } = expr {
+        if let Some(val) = env.get(&name.name) {
+            return Ok(val.clone());
+        }
+    }
+    // For binary/unary ops, recursively evaluate children with env
+    // then apply the same operation logic as eval_full
+    match expr {
+        Expr::Binop { op, l, r, .. } => {
+            let lv = eval_with_env(l, env)?;
+            let rv = eval_with_env(r, env)?;
+            match op {
+                BinOp::Add => add_values(lv, rv),
+                BinOp::Sub => sub_values(lv, rv),
+                BinOp::Mul => mul_values(lv, rv),
+                BinOp::Div => div_values(lv, rv),
+                BinOp::Mod => mod_values(lv, rv),
+                BinOp::And => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a & b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Or => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a | b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Xor => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a ^ b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Shl => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => {
+                        Ok(ConstValue::Int(a.wrapping_shl(b as u32)))
+                    }
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Shr => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => {
+                        Ok(ConstValue::Int(a.wrapping_shr(b as u32)))
+                    }
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Lt => cmp_values(lv, rv, |a, b| (a < b) as i128),
+                BinOp::Gt => cmp_values(lv, rv, |a, b| (a > b) as i128),
+                BinOp::Le => cmp_values(lv, rv, |a, b| (a <= b) as i128),
+                BinOp::Ge => cmp_values(lv, rv, |a, b| (a >= b) as i128),
+                BinOp::EqEq => cmp_values(lv, rv, |a, b| (a == b) as i128),
+                BinOp::Ne => cmp_values(lv, rv, |a, b| (a != b) as i128),
+                BinOp::AndAnd => {
+                    Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 { 0 }
+                        else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
+                }
+                BinOp::OrOr => {
+                    Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) != 0 { 1 }
+                        else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
+                }
+            }
+        }
+        Expr::Unary { op, e, .. } => {
+            let v = eval_with_env(e, env)?;
+            match op {
+                UnOp::Neg => match v {
+                    ConstValue::Int(i) => i.checked_neg().map(ConstValue::Int).ok_or(ConstEvalError::Overflow),
+                    ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                UnOp::Not => match v {
+                    ConstValue::Int(i) => Ok(ConstValue::Int((i == 0) as i128)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                UnOp::BitNot => match v {
+                    ConstValue::Int(i) => Ok(ConstValue::Int(!i)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                UnOp::Plus => Ok(v),
+            }
+        }
+        Expr::Cast { e, .. } => eval_with_env(e, env),
+        _ => eval_full(expr),
     }
 }
 
