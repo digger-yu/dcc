@@ -15892,6 +15892,55 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_abort: 转发到 libc abort()
+            "__builtin_abort" => {
+                self.emit(&[0x54]); // push rsp
+                self.call_label("abort");
+                self.emit(&[0x5c]); // pop rsp
+                true
+            }
+            // __builtin_exit: 转发到 libc exit()
+            "__builtin_exit" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = status
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("exit");
+                self.emit(&[0x5c]); // pop rsp
+                true
+            }
+            // __builtin_copysign: 转发到 libc copysign()
+            // SysV ABI: xmm0 = magnitude, xmm1 = sign
+            "__builtin_copysign" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 加载 magnitude 到 xmm0
+                self.gen_expr(&args[0], 0); // xmm0 = magnitude
+                // 备份 magnitude 到 xmm2
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
+                // 加载 sign 到 xmm0
+                self.gen_expr(&args[1], 0); // xmm0 = sign
+                // 移动到 xmm1
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
+                // 恢复 magnitude 到 xmm0
+                self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
+                // 调用 libc copysign
+                self.emit(&[0x54]); // push rsp
+                self.call_label("copysign");
+                self.emit(&[0x5c]); // pop rsp
+                // 结果在 xmm0, 如果需要则移动到 dst
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_va_arg_pack: 返回 0 (简化实现)
+            "__builtin_va_arg_pack" => {
+                self.mov_imm(dst, 0);
+                true
+            }
             _ => false,
         }
     }

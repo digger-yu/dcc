@@ -6654,6 +6654,11 @@ impl Preprocessor {
                 | "__builtin_putc"
                 | "__builtin_putchar"
                 | "__builtin_puts"
+                // abort/exit/copysign/va_arg_pack (GCC torture test)
+                | "__builtin_abort"
+                | "__builtin_exit"
+                | "__builtin_copysign"
+                | "__builtin_va_arg_pack"
         )
     }
 
