@@ -854,6 +854,17 @@ impl<'a> CppParser<'a> {
         result
     }
 
+    /// 一次性收集 lexer 剩余所有 token 到 Vec (O(n) 而非 O(n²)).
+    /// 用于需要多次顺序扫描的场景 (如模板实参检测).
+    fn collect_remaining_tokens(&self) -> Vec<CppTok> {
+        let mut clone = self.lex.clone();
+        let mut tokens = Vec::new();
+        while let Some(tok) = clone.next_tok() {
+            tokens.push(tok);
+        }
+        tokens
+    }
+
     /// `<` 在 ident 后是否像模板实参 `T<U>` 而非比较 `a < b`.
     /// 向前扫描:
     /// - 跨过嵌套 `<`/`>` (Shr=`>>` 视为两层 `>`)
@@ -861,14 +872,18 @@ impl<'a> CppParser<'a> {
     /// - 遇到合法类型 token (ident / C 类型关键字 / `*` / `&` / `,` / `const`)
     ///   不直接判否; 只有破坏 C++ 表达式的 token 才判否
     fn looks_like_template_args_after_lt(&self) -> bool {
+        // 一次性收集剩余 token, 避免 peek_token_at 的 O(n²) 复杂度
+        let tokens = self.collect_remaining_tokens();
         let mut depth: i32 = 1;
-        let mut i = 1usize; // self.peek 已是 `<`
+        let mut i = 0usize; // tokens[0] 对应 peek_token_at(1)
         loop {
-            match self.peek_token_at(i) {
-                None => return false,
-                Some(CppTok::C(Tok {
+            if i >= tokens.len() {
+                return false;
+            }
+            match &tokens[i] {
+                CppTok::C(Tok {
                     kind: TokKind::Lt, ..
-                })) => {
+                }) => {
                     depth += 1;
                     // 嵌套深度超过限制: 提前判定为模板实参,
                     // 由 parse_mangle_type_depth 报深度错误 (防 O(n^2) 扫描挂起)
@@ -877,18 +892,18 @@ impl<'a> CppParser<'a> {
                     }
                     i += 1;
                 }
-                Some(CppTok::C(Tok {
+                CppTok::C(Tok {
                     kind: TokKind::Gt, ..
-                })) => {
+                }) => {
                     depth -= 1;
                     if depth == 0 {
                         return true;
                     }
                     i += 1;
                 }
-                Some(CppTok::C(Tok {
+                CppTok::C(Tok {
                     kind: TokKind::Shr, ..
-                })) => {
+                }) => {
                     // `>>` 当两层 `>`
                     depth -= 1;
                     if depth == 0 {
@@ -902,21 +917,20 @@ impl<'a> CppParser<'a> {
                 }
                 // 仅在 depth==1 遇到语句/表达式终结符才判否
                 // 逗号在 depth==1 是模板实参分隔符, 合法
-                Some(CppTok::C(Tok {
+                CppTok::C(Tok {
                     kind:
                         TokKind::Semi
                         | TokKind::RParen
                         | TokKind::LBrace
-                        | TokKind::RBrace
-                        | TokKind::Semi,
+                        | TokKind::RBrace,
                     ..
-                })) if depth == 1 => {
+                }) if depth == 1 => {
                     return false;
                 }
-                Some(CppTok::C(Tok {
+                CppTok::C(Tok {
                     kind: TokKind::Assign | TokKind::Question | TokKind::Colon,
                     ..
-                })) if depth == 1 => {
+                }) if depth == 1 => {
                     // `a < b ? c : d` / `a < b = c` 是表达式
                     return false;
                 }
