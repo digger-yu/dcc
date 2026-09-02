@@ -3313,8 +3313,13 @@ impl<'a> Parser<'a> {
                 }
                 Some(b)
             } else {
-                if !self.expect(TokKind::Semi, "';' or '{'") {
-                    return None;
+                // 函数声明 (无 body): 期待 ';' 或 ',' (多声明符如 void f(), g();)
+                if self.cur.kind == TokKind::Semi {
+                    self.advance();
+                } else if self.cur.kind != TokKind::Comma {
+                    if !self.expect(TokKind::Semi, "';' or '{'") {
+                        return None;
+                    }
                 }
                 None
             };
