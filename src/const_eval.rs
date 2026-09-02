@@ -940,6 +940,16 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             }
         }
         Expr::Deref { e, .. } => object_size_of(e, mode),
+        // Transparent wrappers: cast and address-of do not change object size
+        Expr::Cast { e, .. } => object_size_of(e, mode),
+        Expr::AddrOf { e, .. } => object_size_of(e, mode),
+        // Compound literal: size is the type size
+        Expr::CompoundLit { ty, .. } => Some(ty.size() as i128),
+        // Pointer arithmetic: (ptr + offset) retains base object size
+        // Only when the left operand is actually a pointer type
+        Expr::Binop { op: BinOp::Add, l, .. } if matches!(l.ty(), Type::Ptr(_)) => {
+            object_size_of(l, mode)
+        }
         _ => None,
     }
 }
