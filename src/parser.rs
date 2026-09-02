@@ -8713,6 +8713,32 @@ impl<'a> Parser<'a> {
                         self.note_implicit_function_call(name);
                     }
                     let call_ty = self.call_result_type(&callee_expr);
+                    // Warn for unknown __builtin_* return types
+                    if let Expr::Ident { name, .. } = &callee_expr {
+                        if name.name.starts_with("__builtin_")
+                            && !matches!(
+                                callee_expr.ty(),
+                                Type::Func(_, _) | Type::Ptr(_)
+                            )
+                            && !matches!(
+                                name.name.as_str(),
+                                "__builtin_fma"
+                                    | "__builtin_fmaf"
+                                    | "__builtin_fmal"
+                            )
+                        {
+                            self.warn_here(
+                                "W1015",
+                                format!(
+                                    "return type of '{}' is not known; assuming int",
+                                    name.name
+                                ),
+                                Some(
+                                    "declare the builtin before use or check the name spelling",
+                                ),
+                            );
+                        }
+                    }
                     e = Expr::Call {
                         callee: Box::new(callee_expr),
                         args,
