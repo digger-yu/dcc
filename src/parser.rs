@@ -8343,10 +8343,15 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RBrace, "'}'") {
                         return None;
                     }
-                    return Some(Expr::CompoundLit {
+                    let compound = Expr::CompoundLit {
                         ty,
                         inits,
-                        span: sp,
+                        span: sp.clone(),
+                    };
+                    // 复合字面量后可跟后缀运算符: (int[]){0,1,2}[i]
+                    return Some(match self.parse_postfix_suffix(compound, sp) {
+                        Some(e) => e,
+                        None => return None,
                     });
                 }
                 let e = self.parse_unary()?;
