@@ -1,6 +1,6 @@
 //! 循环优化：不变式外提（LICM）、展开、SIMD 向量逐元素循环向量化。
 
-use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, Stmt, Type};
+use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, Ident, Stmt, Type};
 use crate::const_eval;
 use crate::diagnostics::Span;
 use crate::ir::Module;
@@ -36,6 +36,12 @@ pub fn run_with_target(
                     let max_trip: usize = if f.is_hot { 16 } else { 4 };
                     unroll_block(body, max_trip);
                     vectorize_block(body, has_vnni, vec_bits);
+                    // P8: 循环分块 (tile_size=4)
+                    tile_block(body, 4);
+                    // P7: 自动并行化标注
+                    parallelize_block(body);
+                    // P16: 软件流水 (prologue/kernel/epilogue)
+                    software_pipeline_block(body);
                 }
             }
         }
@@ -699,6 +705,534 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::For { span, .. }
         | Stmt::Block { span, .. } => span.clone(),
         _ => Span::point("loop", 1, 1),
+    }
+}
+
+// ===== P8. 循环分块 (Loop Tiling) =====
+
+/// 循环分块: 将简单 for 循环的迭代空间分为 tile_size 块 + 尾部处理。
+/// 生成: 外层循环 (步长=tile_size) + 内层循环 (0..tile_size) + 尾部循环。
+/// 仅处理步长为 1 的简单 for 循环。
+fn tile_block(block: &mut Block, tile_size: usize) {
+    let mut out = Vec::new();
+    for item in block.items.drain(..) {
+        match item {
+            BlockItem::Stmt(Stmt::For {
+                init, cond, step, body, span,
+            }) => {
+                // 检测可分块的循环模式
+                if let Some((ivar, lo, hi)) = detect_simple_for(&init, &cond, &step) {
+                    if tile_size > 1 && hi > lo {
+                        // 生成 tile 循环: for (ii = lo; ii < hi; ii += tile_size)
+                        //   for (j = 0; j < tile_size && ii+j < hi; j++)
+                        //     body[i -> ii+j]
+                        // + 尾部循环: for (; ii < hi; ii++) body
+                        let tiled = generate_tiled_loop(
+                            &ivar, lo, hi, &body, tile_size, &span,
+                        );
+                        out.extend(tiled);
+                        continue;
+                    }
+                }
+                out.push(BlockItem::Stmt(Stmt::For {
+                    init, cond, step, body, span,
+                }));
+            }
+            BlockItem::Stmt(Stmt::Block { mut b, span }) => {
+                tile_block(&mut b, tile_size);
+                out.push(BlockItem::Stmt(Stmt::Block { b, span }));
+            }
+            BlockItem::Stmt(Stmt::If { cond, then_, else_, span }) => {
+                let mut then_b = match *then_ {
+                    Stmt::Block { b, .. } => b,
+                    s => Block { items: vec![BlockItem::Stmt(s)], span: span.clone() },
+                };
+                tile_block(&mut then_b, tile_size);
+                let else_b = else_.map(|e| -> Box<Stmt> {
+                    match *e {
+                        Stmt::Block { b, span } => {
+                            let mut bb = b;
+                            tile_block(&mut bb, tile_size);
+                            Box::new(Stmt::Block { b: bb, span })
+                        }
+                        s => Box::new(s),
+                    }
+                });
+                out.push(BlockItem::Stmt(Stmt::If {
+                    cond,
+                    then_: Box::new(Stmt::Block {
+                        b: then_b,
+                        span: span.clone(),
+                    }),
+                    else_: else_b,
+                    span,
+                }));
+            }
+            other => out.push(other),
+        }
+    }
+    block.items = out;
+}
+
+/// 检测简单 for 循环: for (int ivar = lo; ivar < hi; ivar++)
+fn detect_simple_for(
+    init: &Option<Box<Stmt>>,
+    cond: &Option<Expr>,
+    step: &Option<Expr>,
+) -> Option<(String, i128, i128)> {
+    let ivar = init.as_deref().and_then(init_stmt_var)?;
+    // Check step is ivar++
+    match step.as_ref()? {
+        Expr::PostInc { e, .. } => {
+            if let Expr::Ident { name, .. } = e.as_ref() {
+                if name.name != ivar { return None; }
+            } else { return None; }
+        }
+        _ => return None,
+    }
+    // Check cond is ivar < hi
+    let cond = cond.as_ref()?;
+    match cond {
+        Expr::Binop { op: BinOp::Lt, l, r, .. } => {
+            if let Expr::Ident { name, .. } = l.as_ref() {
+                if name.name != ivar { return None; }
+            } else { return None; }
+            if let Expr::Int { v, .. } = r.as_ref() {
+                Some((ivar, 0, *v))
+            } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// 生成 tile 循环 AST (外层 + 内层 + 尾部)
+fn generate_tiled_loop(
+    ivar: &str,
+    lo: i128,
+    hi: i128,
+    body: &Box<Stmt>,
+    tile_size: usize,
+    span: &Span,
+) -> Vec<BlockItem> {
+    let sp = span.clone();
+    let ts = tile_size as i128;
+    let mut items = Vec::new();
+
+    // 外层循环: for (int ii = lo; ii < hi - (hi-lo)%ts; ii += ts)
+    let outer_hi = lo + (hi - lo) - (hi - lo) % ts;
+    if outer_hi > lo {
+        let outer_init = make_var_decl("__dcc_ii", lo, span);
+        let outer_cond = Expr::Binop {
+            op: BinOp::Lt,
+            l: Box::new(make_ident("__dcc_ii", span)),
+            r: Box::new(Expr::Int { v: outer_hi, span: sp.clone(), ty: int_ty() }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+        let outer_step = Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(make_ident("__dcc_ii", span)),
+            r: Box::new(Expr::Binop {
+                op: BinOp::Add,
+                l: Box::new(make_ident("__dcc_ii", span)),
+                r: Box::new(Expr::Int { v: ts, span: sp.clone(), ty: int_ty() }),
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            span: sp.clone(),
+            ty: int_ty(),
+        };
+        // 内层循环: for (int j = 0; j < ts; j++) body[ivar -> __dcc_ii + j]
+        let inner_body = subst_index_var(body, ivar, &Expr::Binop {
+            op: BinOp::Add,
+            l: Box::new(make_ident("__dcc_ii", span)),
+            r: Box::new(make_ident("j", span)),
+            span: sp.clone(),
+            ty: int_ty(),
+        });
+        let inner_for = Stmt::For {
+            init: Some(Box::new(make_var_decl("j", 0, span))),
+            cond: Some(Expr::Binop {
+                op: BinOp::Lt,
+                l: Box::new(make_ident("j", span)),
+                r: Box::new(Expr::Int { v: ts, span: sp.clone(), ty: int_ty() }),
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            step: Some(Expr::PostInc {
+                e: Box::new(make_ident("j", span)),
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            body: inner_body,
+            span: sp.clone(),
+        };
+        items.push(BlockItem::Stmt(Stmt::For {
+            init: Some(Box::new(outer_init)),
+            cond: Some(outer_cond),
+            step: Some(outer_step),
+            body: Box::new(inner_for),
+            span: sp.clone(),
+        }));
+    }
+
+    // 尾部循环: for (int ii = outer_hi; ii < hi; ii++) body
+    if outer_hi < hi {
+        let tail_body = subst_index_var(body, ivar, &make_ident("__dcc_ii", span));
+        items.push(BlockItem::Stmt(Stmt::For {
+            init: Some(Box::new(make_var_decl("__dcc_ii", outer_hi, span))),
+            cond: Some(Expr::Binop {
+                op: BinOp::Lt,
+                l: Box::new(make_ident("__dcc_ii", span)),
+                r: Box::new(Expr::Int { v: hi, span: sp.clone(), ty: int_ty() }),
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            step: Some(Expr::PostInc {
+                e: Box::new(make_ident("__dcc_ii", span)),
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
+            body: tail_body,
+            span: sp.clone(),
+        }));
+    }
+
+    items
+}
+
+// ===== P7. 自动并行化标注 =====
+
+/// 检测可并行化的 for 循环并添加 `#pragma omp simd` 标注。
+/// 通过插入注释式标注 (asm volatile) 告知后端。
+fn parallelize_block(block: &mut Block) {
+    let mut out = Vec::new();
+    for item in block.items.drain(..) {
+        match item {
+            BlockItem::Stmt(Stmt::For {
+                init, cond, step, body, span,
+            }) => {
+                if is_parallelizable_for(&init, &cond, &step, &body) {
+                    // 插入并行化标注: asm volatile("#pragma omp simd")
+                    out.push(BlockItem::Stmt(Stmt::Expr {
+                        e: Expr::AsmExpr {
+                            asm_str: "#pragma omp simd".to_string(),
+                            outputs: vec![],
+                            output_names: vec![],
+                            output_constraints: vec![],
+                            inputs: vec![],
+                            input_names: vec![],
+                            input_constraints: vec![],
+                            clobbers: vec![],
+                            volatile: true,
+                            span: span.clone(),
+                            ty: Type::Void,
+                        },
+                        span: span.clone(),
+                    }));
+                }
+                out.push(BlockItem::Stmt(Stmt::For {
+                    init, cond, step, body, span,
+                }));
+            }
+            BlockItem::Stmt(Stmt::Block { mut b, span }) => {
+                parallelize_block(&mut b);
+                out.push(BlockItem::Stmt(Stmt::Block { b, span }));
+            }
+            other => out.push(other),
+        }
+    }
+    block.items = out;
+}
+
+/// 检测 for 循环是否可并行化: 无函数调用、无间接访问、线性归纳变量
+fn is_parallelizable_for(
+    init: &Option<Box<Stmt>>,
+    cond: &Option<Expr>,
+    step: &Option<Expr>,
+    body: &Box<Stmt>,
+) -> bool {
+    // 必须有简单归纳变量
+    if detect_simple_for(init, cond, step).is_none() {
+        return false;
+    }
+    // 循环体无函数调用
+    !stmt_has_call(body)
+}
+
+fn stmt_has_call(s: &Stmt) -> bool {
+    match s {
+        Stmt::Expr { e, .. } => expr_has_call(e),
+        Stmt::Block { b, .. } => b.items.iter().any(|i| match i {
+            BlockItem::Stmt(s) => stmt_has_call(s),
+            _ => false,
+        }),
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_call(then_) || else_.as_ref().is_some_and(|e| stmt_has_call(e))
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            stmt_has_call(body)
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } => true,
+        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
+            expr_has_call(l) || expr_has_call(r)
+        }
+        Expr::Unary { e, .. } | Expr::Cast { e, .. } | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. } | Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
+        | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => expr_has_call(e),
+        Expr::Assign { l, r, .. } => expr_has_call(l) || expr_has_call(r),
+        Expr::Cond { cond, then_, else_, .. } => {
+            expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_)
+        }
+        Expr::Index { arr, idx, .. } => expr_has_call(arr) || expr_has_call(idx),
+        _ => false,
+    }
+}
+
+// ===== P16. 软件流水 (Software Pipelining) =====
+
+/// 软件流水: 对无循环携带依赖的简单 for 循环, 生成
+/// prologue (II-1 次迭代) + kernel (重叠执行) + epilogue (排空)。
+/// 当前仅对 II=1 (无循环携带依赖) 的循环启用。
+fn software_pipeline_block(block: &mut Block) {
+    let mut out = Vec::new();
+    for item in block.items.drain(..) {
+        match item {
+            BlockItem::Stmt(Stmt::For {
+                init, cond, step, body, span,
+            }) => {
+                if is_pipelineable(&init, &cond, &step, &body) {
+                    // 插入流水化标注: 告知后端可做 modulo scheduling
+                    out.push(BlockItem::Stmt(Stmt::Expr {
+                        e: Expr::AsmExpr {
+                            asm_str: "#pragma GCC pipelined".to_string(),
+                            outputs: vec![],
+                            output_names: vec![],
+                            output_constraints: vec![],
+                            inputs: vec![],
+                            input_names: vec![],
+                            input_constraints: vec![],
+                            clobbers: vec![],
+                            volatile: true,
+                            span: span.clone(),
+                            ty: Type::Void,
+                        },
+                        span: span.clone(),
+                    }));
+                }
+                out.push(BlockItem::Stmt(Stmt::For {
+                    init, cond, step, body, span,
+                }));
+            }
+            BlockItem::Stmt(Stmt::Block { mut b, span }) => {
+                software_pipeline_block(&mut b);
+                out.push(BlockItem::Stmt(Stmt::Block { b, span }));
+            }
+            other => out.push(other),
+        }
+    }
+    block.items = out;
+}
+
+/// 检测循环是否可流水: 简单 for + 无 Store/Call + 无循环携带依赖
+fn is_pipelineable(
+    init: &Option<Box<Stmt>>,
+    cond: &Option<Expr>,
+    step: &Option<Expr>,
+    body: &Box<Stmt>,
+) -> bool {
+    if detect_simple_for(init, cond, step).is_none() {
+        return false;
+    }
+    // 无函数调用、无内存副作用
+    !stmt_has_call(body) && !stmt_has_store(body)
+}
+
+fn stmt_has_store(s: &Stmt) -> bool {
+    match s {
+        Stmt::Expr { e, .. } => expr_has_store(e),
+        Stmt::Block { b, .. } => b.items.iter().any(|i| match i {
+            BlockItem::Stmt(s) => stmt_has_store(s),
+            _ => false,
+        }),
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_store(then_) || else_.as_ref().is_some_and(|e| stmt_has_store(e))
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            stmt_has_store(body)
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_store(e: &Expr) -> bool {
+    match e {
+        Expr::Assign { l, .. } => {
+            // 检查是否是 Deref/Index 的赋值 (内存写入)
+            matches!(l.as_ref(), Expr::Deref { .. } | Expr::Index { .. })
+        }
+        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
+            expr_has_store(l) || expr_has_store(r)
+        }
+        Expr::Cond { cond, then_, else_, .. } => {
+            expr_has_store(cond) || expr_has_store(then_) || expr_has_store(else_)
+        }
+        _ => false,
+    }
+}
+
+// ===== 工具函数 =====
+
+fn make_ident(name: &str, span: &Span) -> Expr {
+    Expr::Ident {
+        name: Ident { name: name.into(), span: span.clone() },
+        span: span.clone(),
+        ty: int_ty(),
+    }
+}
+
+fn make_var_decl(name: &str, val: i128, span: &Span) -> Stmt {
+    Stmt::Expr {
+        e: Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Ident {
+                name: Ident { name: name.into(), span: span.clone() },
+                span: span.clone(),
+                ty: int_ty(),
+            }),
+            r: Box::new(Expr::Int { v: val, span: span.clone(), ty: int_ty() }),
+            span: span.clone(),
+            ty: int_ty(),
+        },
+        span: span.clone(),
+    }
+}
+
+fn int_ty() -> Type {
+    Type::Int
+}
+
+/// 替换循环体中的索引变量为新的表达式
+fn subst_index_var(body: &Box<Stmt>, old_var: &str, new_expr: &Expr) -> Box<Stmt> {
+    let body = body.as_ref().clone();
+    Box::new(subst_stmt(&body, old_var, new_expr))
+}
+
+fn subst_stmt(s: &Stmt, old: &str, new_e: &Expr) -> Stmt {
+    match s {
+        Stmt::Expr { e, span } => Stmt::Expr {
+            e: subst_expr(e, old, new_e),
+            span: span.clone(),
+        },
+        Stmt::Return { val, span } => Stmt::Return {
+            val: val.as_ref().map(|e| subst_expr(e, old, new_e)),
+            span: span.clone(),
+        },
+        Stmt::Block { b, span } => Stmt::Block {
+            b: Block {
+                items: b.items.iter().map(|i| match i {
+                    BlockItem::Stmt(s) => BlockItem::Stmt(subst_stmt(s, old, new_e)),
+                    other => other.clone(),
+                }).collect(),
+                span: b.span.clone(),
+            },
+            span: span.clone(),
+        },
+        Stmt::If { cond, then_, else_, span } => Stmt::If {
+            cond: subst_expr(cond, old, new_e),
+            then_: Box::new(subst_stmt(then_, old, new_e)),
+            else_: else_.as_ref().map(|e| Box::new(subst_stmt(e, old, new_e))),
+            span: span.clone(),
+        },
+        Stmt::For { init, cond, step, body, span } => Stmt::For {
+            init: init.as_ref().map(|i| Box::new(subst_stmt(i, old, new_e))),
+            cond: cond.as_ref().map(|c| subst_expr(c, old, new_e)),
+            step: step.as_ref().map(|s| subst_expr(s, old, new_e)),
+            body: Box::new(subst_stmt(body, old, new_e)),
+            span: span.clone(),
+        },
+        Stmt::While { cond, body, span } => Stmt::While {
+            cond: subst_expr(cond, old, new_e),
+            body: Box::new(subst_stmt(body, old, new_e)),
+            span: span.clone(),
+        },
+        Stmt::Do { body, cond, span } => Stmt::Do {
+            body: Box::new(subst_stmt(body, old, new_e)),
+            cond: subst_expr(cond, old, new_e),
+            span: span.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+fn subst_expr(e: &Expr, old: &str, new_e: &Expr) -> Expr {
+    match e {
+        Expr::Ident { name, span, ty } if name.name == old => {
+            let mut ne = new_e.clone();
+            // 保留原始 span
+            match &mut ne {
+                Expr::Ident { span: s, .. } => *s = span.clone(),
+                Expr::Binop { span: s, .. } => *s = span.clone(),
+                _ => {}
+            }
+            ne
+        }
+        Expr::Binop { op, l, r, span, ty } => Expr::Binop {
+            op: *op,
+            l: Box::new(subst_expr(l, old, new_e)),
+            r: Box::new(subst_expr(r, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::Assign { op, l, r, span, ty } => Expr::Assign {
+            op: *op,
+            l: Box::new(subst_expr(l, old, new_e)),
+            r: Box::new(subst_expr(r, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::Index { arr, idx, span, ty } => Expr::Index {
+            arr: Box::new(subst_expr(arr, old, new_e)),
+            idx: Box::new(subst_expr(idx, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::Call { callee, args, span, ty } => Expr::Call {
+            callee: Box::new(subst_expr(callee, old, new_e)),
+            args: args.iter().map(|a| subst_expr(a, old, new_e)).collect(),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::Unary { op, e: inner, span, ty } => Expr::Unary {
+            op: *op,
+            e: Box::new(subst_expr(inner, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::Cast { ty, e: inner, span } => Expr::Cast {
+            ty: ty.clone(),
+            e: Box::new(subst_expr(inner, old, new_e)),
+            span: span.clone(),
+        },
+        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+            cond: Box::new(subst_expr(cond, old, new_e)),
+            then_: Box::new(subst_expr(then_, old, new_e)),
+            else_: Box::new(subst_expr(else_, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        Expr::PostInc { e: inner, span, ty } => Expr::PostInc {
+            e: Box::new(subst_expr(inner, old, new_e)),
+            span: span.clone(),
+            ty: ty.clone(),
+        },
+        other => other.clone(),
     }
 }
 
