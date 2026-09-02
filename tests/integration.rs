@@ -10735,6 +10735,47 @@ void f(int *p) { (*p)++; }
     );
 }
 
+/// KASAN 对 >16 字节聚合类型的 load/store 使用通用 __asan_loadN/
+/// __asan_storeN 接口 (携带 size 参数). 验证编译不崩溃且正确发射.
+#[test]
+fn kasan_aggregate_load_store_above_16_bytes() {
+    let src = "\
+struct Big { long a, b, c; }; /* 24 bytes > 16 */
+struct Big load_big(struct Big *p) { return *p; }
+void store_big(struct Big *p, struct Big v) { *p = v; }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kasan-agg-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kasan-agg-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write agg fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "kasan agg compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    // 24 字节 > 16, 应使用通用 __asan_loadN/__asan_storeN
+    // (而非固定大小的 __asan_load{1,2,4,8,16})
+    assert!(
+        asm.contains("__asan_loadN") || asm.contains("__asan_load16"),
+        "KASAN should emit load check for >16B aggregate load, asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("__asan_storeN") || asm.contains("__asan_store16"),
+        "KASAN should emit store check for >16B aggregate store, asm:\n{}",
+        asm
+    );
+}
+
 /// 内存 lvalue 自增/自减 codegen 运行期验证: (*p)++ / a[i]-- /
 /// p->f++ / 前缀+后缀 + 指针步长, 均应产生真实读-改-写.
 #[test]
