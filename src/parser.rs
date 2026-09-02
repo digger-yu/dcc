@@ -4322,6 +4322,7 @@ impl<'a> Parser<'a> {
         // 传递给第二个 loop 处理. 这样 `unsigned const char`
         // 和单独的 `unsigned` 都能正确解析.
         let mut pre_unsigned = false;
+        let mut pre_signed = false;
         // 重置当前声明说明符的限定符和地址空间 (每次新的类型解析开始时清空)
         self.spec_quals = QualifierFlags::NONE;
         self.decl_quals = QualifierFlags::NONE;
@@ -4492,6 +4493,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 TokKind::KwSigned => {
+                    pre_signed = true;
                     self.advance();
                 }
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
@@ -4833,6 +4835,11 @@ impl<'a> Parser<'a> {
         // 若后面是类型关键字 (如 `unsigned const char`), 不返回, 让第二个 loop 处理.
         if pre_unsigned && !self.is_peek_type_start_after_unsigned() {
             is_unsigned = true;
+        }
+        // pre_signed: 第一个 loop 中看到了 signed, 若后面不是类型关键字
+        // (如 `signed x`), 则 signed 等价于 int, 立即返回.
+        if pre_signed && !self.is_peek_type_start_after_unsigned() {
+            base = Some(Type::Int); // signed alone = signed int
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
