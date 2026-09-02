@@ -607,9 +607,13 @@ fn mod_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError
             .checked_rem(b)
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
-        (ConstValue::Float(_), ConstValue::Float(_)) => {
-            // GCC 语义: a % b = a - trunc(a/b) * b, 但 C 中浮点取模不在我们范围
-            Err(ConstEvalError::NotConstant)
+        (ConstValue::Float(a), ConstValue::Float(b)) => {
+            // C fmod semantics: a - trunc(a/b) * b
+            // Rust f64 % f64 matches C fmod()
+            if b == 0.0 {
+                return Err(ConstEvalError::DivisionByZero);
+            }
+            Ok(ConstValue::Float(a % b))
         }
         _ => Err(ConstEvalError::NotConstant),
     }
