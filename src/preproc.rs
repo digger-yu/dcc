@@ -983,9 +983,13 @@ pub fn preprocess(
     pp.define_builtin("__INTMAX_MIN__", "(-__INTMAX_MAX__ - 1)");
     // intptr_t / uintptr_t 极限
     if is_lp64 {
+        pp.define_builtin("__INTPTR_TYPE__", "long int");
+        pp.define_builtin("__UINTPTR_TYPE__", "long unsigned int");
         pp.define_builtin("__INTPTR_MAX__", "9223372036854775807L");
         pp.define_builtin("__UINTPTR_MAX__", "18446744073709551615UL");
     } else {
+        pp.define_builtin("__INTPTR_TYPE__", "int");
+        pp.define_builtin("__UINTPTR_TYPE__", "unsigned int");
         pp.define_builtin("__INTPTR_MAX__", "2147483647");
         pp.define_builtin("__UINTPTR_MAX__", "4294967295U");
     }
