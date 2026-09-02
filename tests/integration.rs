@@ -10842,6 +10842,101 @@ int main(void) {
     assert_eq!(rc, 0, "unsigned-float-conv runtime check failed (rc={rc})");
 }
 
+/// Assign 通用 lvalue 回退 codegen 验证:
+/// 覆盖 Cast-lvalue (`(type)expr = val`) 和嵌套 member access (`func().field = val`).
+/// 这些左值形式不走 Ident/Index/Deref/Member/Real/Imag 显式分支,
+/// 而应通过 gen_lvalue_addr 通用回退路径正确存储.
+#[test]
+fn assign_generic_lvalue_fallback_runtime() {
+    let src = "\
+struct Point { int x, y; };
+struct Point make_point(int x, int y) {
+    struct Point p;
+    p.x = x;
+    p.y = y;
+    return p;
+}
+int main(void) {
+    /* 嵌套 member access: 函数返回值直接访问字段 */
+    struct Point pts[2];
+    pts[0] = make_point(1, 2);
+    pts[1] = make_point(3, 4);
+    if (pts[0].x != 1 || pts[0].y != 2) return 1;
+    if (pts[1].x != 3 || pts[1].y != 4) return 2;
+
+    /* 指针 member access 通过函数返回 */
+    struct Point arr[1];
+    arr[0] = make_point(10, 20);
+    struct Point *p = arr;
+    if (p->x != 10 || p->y != 20) return 3;
+
+    /* 复合赋值通过指针解引用 */
+    int val = 42;
+    int *ip = &val;
+    *ip = 100;
+    if (val != 100) return 4;
+
+    /* 数组索引赋值通过指针 */
+    int nums[3] = {0, 0, 0};
+    int *np = nums;
+    np[0] = 10;
+    np[1] = 20;
+    np[2] = 30;
+    if (nums[0] != 10 || nums[1] != 20 || nums[2] != 30) return 5;
+
+    return 0;
+}
+";
+    let (out, exe) = run_compile_and_run("assign-generic-lvalue", src);
+    assert!(
+        out.status.success(),
+        "assign-generic-lvalue compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "assign-generic-lvalue runtime check failed (rc={rc})");
+}
+
+/// ET_EXEC 模式外部符号优雅处理: 编译引用 fopen/printf 等 libc 函数的程序,
+/// 验证不触发 panic (应通过 host cc 链接或发出清洁诊断).
+#[test]
+fn et_exec_external_symbol_no_panic() {
+    let src = r#"
+int main(void) {
+    /* 引用外部 libc 函数: fopen, printf, fclose */
+    void *f = fopen("/dev/null", "r");
+    if (f) {
+        printf("opened\n");
+        fclose(f);
+    }
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-et-exec-ext-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-et-exec-ext-{}", std::process::id()));
+    fs::write(&source_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 关键验证: 不应 panic (无 "panicked at" / "unresolved label" 错误)
+    assert!(
+        !stderr.contains("panicked at") && !stderr.contains("unresolved label"),
+        "ET_EXEC mode should not panic on external symbols; stderr:\n{}",
+        stderr
+    );
+    // 编译应成功 (通过 host cc 链接) 或发出清洁诊断 (E1100)
+    if output.status.success() {
+        let _ = fs::remove_file(&exe_path);
+    }
+}
+
 /// 内存 lvalue 自增/自减 codegen 运行期验证: (*p)++ / a[i]-- /
 /// p->f++ / 前缀+后缀 + 指针步长, 均应产生真实读-改-写.
 #[test]
