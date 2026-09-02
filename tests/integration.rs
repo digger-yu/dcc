@@ -7377,10 +7377,16 @@ fn permissive_unknown_typedef_warns() {
 
 #[test]
 fn implicit_function_decl_is_error_by_default() {
-    let output = run_syntax_test(
-        "implicit-func-strict",
-        "int main(void) { return missing_func(1); }\n",
-    );
+    // C23 严格模式下隐式函数声明是错误
+    let src = "int main(void) { return missing_func(1); }\n";
+    let path = std::env::temp_dir().join(format!("dcc-implicit-func-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=c23", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "implicit function should fail");
     assert!(stderr.contains("E0017"), "expected E0017: {stderr}");
@@ -7392,12 +7398,13 @@ fn implicit_function_decl_is_error_by_default() {
 
 #[test]
 fn implicit_function_decl_error_ignores_wno_in_modern_std() {
+    // C23 严格模式下即使 -Wno- 也仍然报错
     let src = "int main(void) { return missing_func(1); }\n";
     let path = std::env::temp_dir().join(format!("dcc-wno-func-{}.c", std::process::id()));
     fs::write(&path, src).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "-std=gnu23",
+            "-std=c23",
             "-Wno-implicit-function-declaration",
             "-fsyntax-only",
         ])

@@ -136,6 +136,9 @@ pub struct ParseOptions {
     pub is_c23: bool,
     /// C89/GNU89 或 `-fpermissive`: 允许隐式函数声明降级为 int。
     pub allow_implicit_function_decl: bool,
+    /// GNU 模式或 `-fpermissive`: 允许隐式 int 返回类型
+    /// (如 `foo(x) { ... }` 等价于 `int foo(x) { ... }`).
+    pub allow_implicit_int: bool,
     /// `-Wimplicit-declaration`: 未声明函数调用警告
     pub warn_implicit_decl: bool,
     /// `-fcuda`: 启用 CUDA 函数限定符 (__global__/__device__/__host__)
@@ -5188,7 +5191,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 return Some(self.finish_type(Type::Named(name), specifiers_only));
             }
-            if specifiers_only && self.has_storage_without_base(&base) && self.peek_decl_context() {
+            if specifiers_only && self.peek_decl_context()
+                && base.is_none()
+                && (self.has_storage_without_base(&base)
+                    || self.opts.permissive
+                    || self.opts.allow_implicit_int)
+            {
                 self.warn_here(
                     "W0001",
                     "type defaults to 'int' in declaration without a type specifier",

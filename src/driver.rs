@@ -531,6 +531,17 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 | crate::cli::StdMode::Gnu99
                 | crate::cli::StdMode::Gnu11
                 | crate::cli::StdMode::Gnu17
+                | crate::cli::StdMode::Gnu23
+        );
+    // GNU 模式允许隐式 int 返回类型 (C89 遗留特性, GCC 始终保留)
+    let allow_implicit_int = cfg.permissive
+        || matches!(
+            cfg.std,
+            crate::cli::StdMode::Gnu89
+                | crate::cli::StdMode::Gnu99
+                | crate::cli::StdMode::Gnu11
+                | crate::cli::StdMode::Gnu17
+                | crate::cli::StdMode::Gnu23
         );
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
@@ -546,6 +557,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23
             ),
             allow_implicit_function_decl,
+            allow_implicit_int,
             warn_implicit_decl: cfg.warn_implicit_decl,
             cuda: cfg.profile.offload.cuda,
             hip: cfg.profile.offload.hip,
