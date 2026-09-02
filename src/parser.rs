@@ -7685,8 +7685,11 @@ impl<'a> Parser<'a> {
     fn assign_target_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident { name, .. } => Some(name.name.clone()),
-            // For compound assignment targets like *p = x, we can't easily
-            // determine const-ness without full type analysis
+            // Penetrate through deref, member, and index chains
+            // to find the base variable name for const-ness checks
+            Expr::Deref { e, .. } => Self::assign_target_name(e),
+            Expr::Member { expr, .. } => Self::assign_target_name(expr),
+            Expr::Index { arr, .. } => Self::assign_target_name(arr),
             _ => None,
         }
     }
