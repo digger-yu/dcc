@@ -2193,12 +2193,15 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
             i = skip_ws(bytes, i + 7);
             continue;
         }
-        // namespace XXX { ... } → 删除 namespace XXX 和匹配的 }
+        // namespace XXX { ... } → 删除 namespace XXX 和匹配的 },
+        // 并为内部顶层符号添加命名空间前缀 (避免不同命名空间同名符号冲突)
         if match_word_at(bytes, i, "namespace") {
             let mut j = skip_ws(bytes, i + 9);
-            // 跳过 namespace 名 (如果有)
+            // 提取 namespace 名 (如果有)
+            let mut ns_name = String::new();
             if j < len && is_ident_char(bytes[j]) {
-                let (_, name_end) = read_ident(bytes, j);
+                let (name, name_end) = read_ident(bytes, j);
+                ns_name = name;
                 j = skip_ws(bytes, name_end);
             }
             // 如果后面是 '{', 跳过整个 namespace 块
@@ -2211,8 +2214,13 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                     else if bytes[k] == b'}' { depth -= 1; }
                     k += 1;
                 }
-                // 输出 namespace 块的内容 (不含 namespace 关键字和 { })
-                result.push_str(&s[j+1..k-1]);
+                let content = &s[j+1..k-1];
+                if !ns_name.is_empty() {
+                    // 为内容中的顶层标识符添加命名空间前缀
+                    result.push_str(&prefix_ns_identifiers(content, &ns_name));
+                } else {
+                    result.push_str(content);
+                }
                 i = k;
                 continue;
             }
@@ -6463,6 +6471,181 @@ fn convert_vector_member_calls(s: &str) -> String {
                 i = j;
                 continue;
             }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// 为 namespace 块内的顶层标识符添加命名空间前缀。
+///
+/// 扫描 `content` (namespace 块 `{` `}` 之间的文本), 在 brace depth 0
+/// 处出现的函数名、类名、结构体名、枚举名、typedef 名前添加
+/// `{ns_prefix}_` 前缀, 以避免不同命名空间同名符号冲突。
+///
+/// 嵌套 namespace 块递归处理, 前缀叠加 (如 `A_B_`)。
+/// 不修改 C/C++ 关键字、字符串字面量、注释中的文本。
+fn prefix_ns_identifiers(content: &str, ns_name: &str) -> String {
+    let prefix = format!("{}_", ns_name);
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(content.len() + 64);
+    let mut i = 0;
+    let mut brace_depth: i32 = 0;
+
+    // C/C++ 关键字集合 — 这些标识符不加前缀
+    static KEYWORDS: &[&str] = &[
+        "auto", "break", "case", "char", "const", "continue", "default", "do",
+        "double", "else", "enum", "extern", "float", "for", "goto", "if",
+        "int", "long", "register", "return", "short", "signed", "sizeof",
+        "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+        "volatile", "while", "class", "namespace", "template", "typename",
+        "using", "virtual", "public", "private", "protected", "new", "delete",
+        "try", "catch", "throw", "operator", "this", "const_cast",
+        "static_cast", "dynamic_cast", "reinterpret_cast", "nullptr",
+        "bool", "true", "false", "constexpr", "noexcept", "explicit",
+        "inline", "friend", "override", "final", "decltype", "static_assert",
+        "alignas", "alignof", "thread_local", "char16_t", "char32_t",
+        "wchar_t", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t",
+        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "ifdef", "ifndef", "endif", "define", "include", "pragma",
+        "undef", "elif", "error", "warning",
+    ];
+
+    fn is_keyword(s: &str) -> bool {
+        KEYWORDS.binary_search(&s).is_ok()
+    }
+
+    while i < len {
+        // 跳过字符串字面量
+        if bytes[i] == b'"' {
+            result.push('"');
+            i += 1;
+            while i < len && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                }
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < len {
+                result.push('"');
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过字符字面量
+        if bytes[i] == b'\'' {
+            result.push('\'');
+            i += 1;
+            while i < len && bytes[i] != b'\'' {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                }
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < len {
+                result.push('\'');
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过行注释
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过块注释
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            result.push('/');
+            result.push('*');
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            if i + 1 < len {
+                result.push('*');
+                result.push('/');
+                i += 2;
+            }
+            continue;
+        }
+        // 跟踪 brace depth
+        if bytes[i] == b'{' {
+            brace_depth += 1;
+            result.push('{');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'}' {
+            brace_depth -= 1;
+            result.push('}');
+            i += 1;
+            continue;
+        }
+        // 在 brace depth 0 检测嵌套 namespace
+        if brace_depth == 0 && i + 9 <= len && &bytes[i..i + 9] == b"namespace" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 9 >= len || !is_ident_char(bytes[i + 9]);
+            if before_ok && after_ok {
+                let mut j = skip_ws(bytes, i + 9);
+                let mut inner_ns = String::new();
+                if j < len && is_ident_char(bytes[j]) {
+                    let (name, name_end) = read_ident(bytes, j);
+                    inner_ns = name;
+                    j = skip_ws(bytes, name_end);
+                }
+                if j < len && bytes[j] == b'{' {
+                    let mut depth = 1i32;
+                    let mut k = j + 1;
+                    while k < len && depth > 0 {
+                        if bytes[k] == b'{' { depth += 1; }
+                        else if bytes[k] == b'}' { depth -= 1; }
+                        k += 1;
+                    }
+                    let inner_content = &content[j + 1..k - 1];
+                    if !inner_ns.is_empty() {
+                        let combined = format!("{}_{}", ns_name, inner_ns);
+                        result.push_str(&prefix_ns_identifiers(inner_content, &combined));
+                    } else {
+                        result.push_str(&prefix_ns_identifiers(inner_content, ns_name));
+                    }
+                    i = k;
+                    continue;
+                }
+            }
+        }
+        // 在 brace depth 0 处检测标识符并加前缀
+        if brace_depth == 0 && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            let (ident, ident_end) = read_ident(bytes, i);
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            if before_ok && !is_keyword(&ident) && !ident.starts_with('_') {
+                // 检查后面是否跟 '(' (函数) 或 '{' (类/结构体) 或 ';' (变量/typedef)
+                let after = skip_ws(bytes, ident_end);
+                let is_decl = after < len && (
+                    bytes[after] == b'(' || bytes[after] == b'{' ||
+                    bytes[after] == b';' || bytes[after] == b',' ||
+                    bytes[after] == b'=' || bytes[after] == b':' ||
+                    bytes[after] == b'[' || bytes[after] == b')' ||
+                    bytes[after] == b'>'
+                );
+                // 只对看起来像声明位置的标识符加前缀
+                // 前面应有类型关键字或 '}' 或文件开头
+                if is_decl {
+                    result.push_str(&prefix);
+                }
+            }
+            result.push_str(&ident);
+            i = ident_end;
+            continue;
         }
         result.push(bytes[i] as char);
         i += 1;

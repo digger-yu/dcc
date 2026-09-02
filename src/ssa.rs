@@ -117,6 +117,9 @@ pub enum InstKind {
         volatile: bool,
         ty: Type,
     },
+    /// 保留原始变量声明 (含初始化式)。用于 SSA 无法表示的初始化式
+    /// (如复合字面量 `{1, 2, 3, 4}`)。重建时直接输出原始 Decl::Var。
+    PreservedDecl { var: crate::ast::VarDecl },
 }
 
 #[derive(Debug, Clone)]
@@ -1148,7 +1151,26 @@ impl Builder {
             match item {
                 BlockItem::Stmt(s) => self.lower_stmt(s),
                 BlockItem::Decl(Decl::Var(v)) => {
-                    if let Some(init) = &v.init {
+                    // 检查初始化式是否包含 SSA 无法表示的模式 (复合字面量/初始化列表)
+                    let has_complex_init = v.init.as_ref().is_some_and(|init| {
+                        matches!(init, Expr::CompoundLit { .. } | Expr::InitList { .. })
+                    });
+                    if has_complex_init {
+                        // 保留原始声明,不做 SSA 化
+                        self.emit(Inst {
+                            dest: None,
+                            kind: InstKind::PreservedDecl { var: v.clone() },
+                            span: v.span.clone(),
+                        });
+                        // 仍然定义变量以便后续使用
+                        let v_0 = SsaVar {
+                            base: v.name.name.clone(),
+                            version: self.next_version(&v.name.name),
+                            ty: v.ty.clone(),
+                            span: v.span.clone(),
+                        };
+                        self.define(v_0);
+                    } else if let Some(init) = &v.init {
                         let v_0 = SsaVar {
                             base: v.name.name.clone(),
                             version: self.next_version(&v.name.name),
@@ -1587,8 +1609,22 @@ pub fn rebuild_block(func: &Function) -> Block {
 
     // 1. 只声明原始局部变量 (不声明 SSA 临时变量)
     let param_names: HashSet<String> = func.params.iter().map(|p| p.base.clone()).collect();
+    // 收集已通过 PreservedDecl 保留原始声明的变量名
+    let preserved_vars: HashSet<String> = func
+        .blocks
+        .values()
+        .flat_map(|bb| bb.insts.iter())
+        .filter_map(|inst| match &inst.kind {
+            InstKind::PreservedDecl { var } => Some(var.name.name.clone()),
+            _ => None,
+        })
+        .collect();
     for name in &func.original_locals {
         if param_names.contains(name) {
+            continue;
+        }
+        // 已通过 PreservedDecl 保留原始声明, 跳过自动声明
+        if preserved_vars.contains(name) {
             continue;
         }
         // 找到该变量的类型
@@ -1782,6 +1818,11 @@ fn rebuild_bb(
     for inst in &bb.insts {
         // 跳过 SSA pass 插入的 hint/metadata 指令
         if is_pass_hint_inst(&inst.kind) {
+            continue;
+        }
+        // PreservedDecl: 直接输出原始变量声明
+        if let InstKind::PreservedDecl { var } = &inst.kind {
+            out.push(BlockItem::Decl(Decl::Var(var.clone())));
             continue;
         }
         if let Some(d) = &inst.dest {
@@ -2102,6 +2143,11 @@ fn emit_rebuild_inst(
     subst: &HashMap<String, Option<Expr>>,
     _func: &Function,
 ) {
+    // PreservedDecl: 直接输出原始变量声明 (跳过 SSA 化)
+    if let InstKind::PreservedDecl { var } = &inst.kind {
+        out.push(BlockItem::Decl(Decl::Var(var.clone())));
+        return;
+    }
     if let Some(d) = &inst.dest {
         env.insert(d.name(), d.clone());
         let ssa_name = d.name();
@@ -2376,6 +2422,10 @@ fn inst_to_expr_resolved(
                 span: sp.clone(),
                 ty: ty.clone(),
             }
+        }
+        InstKind::PreservedDecl { .. } => {
+            // Handled before inst_to_expr_resolved is called
+            Expr::Int { v: 0, span: sp.clone(), ty: Type::Int }
         }
     }
 }
@@ -2723,6 +2773,10 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             span: sp.clone(),
             ty: ty.clone(),
         },
+        InstKind::PreservedDecl { .. } => {
+            // Handled separately in rebuild; should not reach here
+            Expr::Int { v: 0, span: sp.clone(), ty: Type::Int }
+        }
     }
 }
 

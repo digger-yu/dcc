@@ -131,8 +131,10 @@ pub fn optimize_with_full_target(
 
 /// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
-/// SSA builder 支持 phi 节点, 但 SSA→AST 重建对含循环函数的条件更新
-/// 尚未完全正确, 因此含循环的函数仍走 AST pass 路径。
+/// SSA builder 通过 insert_loop_phis 为循环回边插入 phi 节点,
+/// rebuild_cycle 将循环 CFG 重建为 while 循环 AST。
+/// 注意: rebuild_cycle 对含循环函数的重建尚不完全正确,
+/// 因此含循环的函数仍走 AST pass 路径。
 fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
@@ -428,6 +430,7 @@ fn check_expr_for_const_stores(
 
 /// 检测函数体是否包含循环 (while/for/do-while)。
 /// 含循环的函数暂时跳过 SSA pass, 走 AST 层优化。
+/// rebuild_cycle 对循环 CFG 的重建尚不完全正确。
 fn func_has_loop(f: &FuncDecl) -> bool {
     f.body.as_ref().is_some_and(block_has_loop)
 }
@@ -451,12 +454,11 @@ fn stmt_has_loop(s: &Stmt) -> bool {
 }
 
 /// 检测函数是否包含 SSA→AST 重建当前无法正确处理的模式:
-///   - 数组类型声明 (int a[4])
-///   - 取址操作 (&x)
-///   - 指针解引用 (*p)
-///   - 数组索引 (a[i])
+///   - asm goto (非结构化控制流)
+///   - 数组类型带初始化式 (SSA 无法表示复合字面量)
 ///
-/// 这些模式涉及地址计算, SSA 重建可能产生错误的地址/栈操作.
+/// 取址/解引用/索引已由 SSA 指令集 (AddrOf/Load/Store/IndexLoad/IndexStore)
+/// 完整支持, 不再跳过。
 fn func_has_unsafe_ssa_pattern(f: &FuncDecl) -> bool {
     f.body.as_ref().is_some_and(block_has_unsafe_ssa_pattern)
 }
@@ -464,9 +466,9 @@ fn func_has_unsafe_ssa_pattern(f: &FuncDecl) -> bool {
 fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
     b.items.iter().any(|item| match item {
         BlockItem::Decl(Decl::Var(v)) => {
-            // 数组类型声明
+            // 数组类型带初始化式 (复合字面量 SSA 无法表示)
             matches!(v.ty, crate::ast::Type::Array(_, _))
-                || v.init.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
+                && v.init.as_ref().is_some()
         }
         BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
         _ => false,
@@ -475,70 +477,31 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
 
 fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
     match s {
-        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => expr_has_unsafe_ssa_pattern(e),
         // asm goto 包含无法 SSA 化的非结构化控制流
         Stmt::AsmGoto { .. } => true,
         Stmt::If {
-            cond, then_, else_, ..
+            then_, else_, ..
         } => {
-            expr_has_unsafe_ssa_pattern(cond)
-                || stmt_has_unsafe_ssa_pattern(then_)
+            stmt_has_unsafe_ssa_pattern(then_)
                 || else_
                     .as_ref()
                     .is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
         }
         Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b),
-        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
-            expr_has_unsafe_ssa_pattern(cond) || stmt_has_unsafe_ssa_pattern(body)
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            stmt_has_unsafe_ssa_pattern(body)
         }
         Stmt::For {
             init,
-            cond,
-            step,
             body,
             ..
         } => {
             init.as_ref()
                 .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
-                || cond.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
-                || step.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
                 || stmt_has_unsafe_ssa_pattern(body)
         }
-        Stmt::Switch { expr, cases, .. } => {
-            expr_has_unsafe_ssa_pattern(expr)
-                || cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body))
-        }
-        _ => false,
-    }
-}
-
-fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
-    match e {
-        Expr::AddrOf { .. } | Expr::Deref { .. } | Expr::Index { .. } => true,
-        // Inline asm 已显式表示为 SSA 节点
-        Expr::AsmExpr { .. } => false,
-        Expr::Binop { l, r, .. } => {
-            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
-        }
-        Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_unsafe_ssa_pattern(e),
-        Expr::Cond {
-            cond,
-            then_,
-            else_,
-            ..
-        } => {
-            expr_has_unsafe_ssa_pattern(cond)
-                || expr_has_unsafe_ssa_pattern(then_)
-                || expr_has_unsafe_ssa_pattern(else_)
-        }
-        Expr::Call { callee, args, .. } => {
-            expr_has_unsafe_ssa_pattern(callee) || args.iter().any(expr_has_unsafe_ssa_pattern)
-        }
-        Expr::Assign { l, r, .. } => {
-            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
-        }
-        Expr::Comma { l, r, .. } => {
-            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+        Stmt::Switch { cases, .. } => {
+            cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body))
         }
         _ => false,
     }
