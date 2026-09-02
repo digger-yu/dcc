@@ -918,7 +918,31 @@ impl Lowering {
                     .items
                     .iter()
                     .filter_map(|item| match item {
-                        BlockItem::Stmt(Stmt::Expr { e, .. }) => Some(self.lower_expr(e)),
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                            Some(self.lower_expr(e))
+                        }
+                        BlockItem::Decl(Decl::Var(v)) => {
+                            // Preserve local variable initializers
+                            v.init.as_ref().map(|e| self.lower_expr(e))
+                        }
+                        BlockItem::Stmt(other) => {
+                            // Lower other statements and collect their
+                            // expressions (e.g. conditions, nested flows)
+                            let typed = self.lower_stmt(other);
+                            if typed.expressions.is_empty() {
+                                None
+                            } else {
+                                // Wrap nested stmt as a control-flow child
+                                Some(TypedExpr {
+                                    ty: ValueType::Void,
+                                    kind: ExprKind::ControlFlow,
+                                    children: typed.expressions,
+                                    span: typed.span,
+                                    literal: None,
+                                    quals: QualifierFlags::NONE,
+                                })
+                            }
+                        }
                         _ => None,
                     })
                     .collect(),
