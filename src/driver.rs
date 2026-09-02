@@ -904,7 +904,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     } else {
         0
     };
-    crate::opt::optimize_with_target(&mut module, cfg.opt, opt_has_vnni, opt_vec_bits);
+    crate::opt::optimize_with_full_target(
+        &mut module,
+        cfg.opt,
+        opt_has_vnni,
+        opt_vec_bits,
+        cfg.strict_aliasing,
+    );
     if cfg.opt > 0 {
         ir::resync(&mut module)
             .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;

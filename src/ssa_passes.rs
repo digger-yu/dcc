@@ -27,7 +27,16 @@ use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, S
 use crate::ssa::{Function, Inst, InstKind, Operand, Terminator};
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
+///
+/// `strict_aliasing`: 当 true 时, 别名分析可按类型区分不同指针类型的
+/// 别名关系 (C 标准: 不同类型指针不别名, 除 char*)。当 false 时
+/// (-fno-strict-aliasing), 所有指针合并到同一 alias set (保守)。
 pub fn run(func: &mut Function, level: u8) {
+    run_with_opts(func, level, true);
+}
+
+/// 带完整选项的 pipeline 入口。
+pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     if level < 2 {
         return;
     }
@@ -37,7 +46,7 @@ pub fn run(func: &mut Function, level: u8) {
     tail_call_optimization(func);
     loop_interchange(func);
     loop_tiling(func);
-    alias_analysis(func);
+    alias_analysis_with_strict(func, strict_aliasing);
     alias_set(func);
     speculative_execution(func);
     function_attribute_propagation(func);
@@ -313,6 +322,37 @@ fn find_induction_vars(func: &Function) -> HashSet<String> {
 // P4. 别名分析 (Steensgaard union-find, 字段不敏感)
 // =====================================================================
 
+/// 别名分析入口: 默认 strict_aliasing=true (C 标准语义)。
+pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
+    alias_analysis_with_strict(func, true)
+}
+
+/// 带 strict-aliasing 选项的别名分析。
+///
+/// 当 `strict_aliasing=false` (-fno-strict-aliasing) 时, 所有指针变量
+/// 合并到同一 alias set (最保守的别名假设), 因为 C 标准允许通过类型
+/// 强转访问不同类型的数据。
+///
+/// 当 `strict_aliasing=true` 时, 使用 Steensgaard union-find 分析,
+/// 按指针实际指向的对象分配 alias set, 但仍是类型不敏感的
+/// (field-insensitive)。
+pub fn alias_analysis_with_strict(
+    func: &Function,
+    strict_aliasing: bool,
+) -> HashMap<String, usize> {
+    let mut sets = alias_analysis_inner(func);
+    if !strict_aliasing {
+        // -fno-strict-aliasing: 所有指针合并到同一 alias set
+        let unified_id = 0;
+        for v in sets.values_mut() {
+            *v = unified_id;
+        }
+    }
+    sets
+}
+
+/// Steensgaard union-find 别名分析核心实现。
+
 /// 给每个 SSA 指针变量分配一个 alias set 编号 (Steensgaard 风格):
 ///   p = &x  => set(p) = set(x)
 ///   p = q   => union(set(p), set(q))
@@ -321,7 +361,7 @@ fn find_induction_vars(func: &Function) -> HashSet<String> {
 ///
 /// C99 restrict 语义: 标记为 restrict 的函数参数保证不与其他指针别名。
 /// 分析时将 restrict 参数放入独立的 alias set, 不与其它指针合并。
-pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
+fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
     let mut sets: HashMap<String, usize> = HashMap::new();
     let mut parents: HashMap<usize, usize> = HashMap::new();
     let mut next_id = 0usize;

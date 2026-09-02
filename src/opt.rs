@@ -88,6 +88,20 @@ pub fn optimize_with_target(
     has_vnni: bool,
     vec_bits: u32,
 ) {
+    // Default: strict_aliasing=true (C standard semantics)
+    optimize_with_full_target(module, level, has_vnni, vec_bits, true);
+}
+
+/// 带完整目标信息的优化入口。
+///
+/// `strict_aliasing`: -fno-strict-aliasing 时为 false, 别名分析合并所有指针
+pub fn optimize_with_full_target(
+    module: &mut Module,
+    level: u8,
+    has_vnni: bool,
+    vec_bits: u32,
+    strict_aliasing: bool,
+) {
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     function_inline(module, level);
     if level == 0 {
@@ -111,7 +125,7 @@ pub fn optimize_with_target(
     }
     if level >= 2 {
         // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
-        run_ssa_passes(module, level);
+        run_ssa_passes(module, level, strict_aliasing);
     }
 }
 
@@ -119,7 +133,7 @@ pub fn optimize_with_target(
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
 /// SSA builder 支持 phi 节点, 但 SSA→AST 重建对含循环函数的条件更新
 /// 尚未完全正确, 因此含循环的函数仍走 AST pass 路径。
-fn run_ssa_passes(module: &mut Module, level: u8) {
+fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
     // propagate constants through volatile accesses.
@@ -149,7 +163,7 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
                 continue;
             }
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
-                crate::ssa_passes::run(&mut ssa, level);
+                crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
                 *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
                 modified = true;
             }
