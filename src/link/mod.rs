@@ -741,12 +741,21 @@ pub fn link_with_lto(
         })
         .collect();
     // 2. 跨 TU 优化
-    let _dead_fns = run_cross_tu_lto(&mut modules);
+    let dead_fns = run_cross_tu_lto(&mut modules);
     // 3. 链接（简化：LTO 暂只做 DCE，后续可加 inlining 后 codegen）
     let bytes = link_multi_tu(inputs, output, cfg)?;
-    // 4. TODO: 剥离被 LTO DCE 删除的函数符号
-    // 目前 LTO DCE 只在 IR 层面删除，实际链接仍使用原始目标文件
-    // 完整实现需要重新从优化后的 bitcode 生成目标文件
+    // 4. 报告被 LTO DCE 删除的函数
+    // 完整实现需要从优化后的 bitcode 重新生成目标文件, 然后链接。
+    // 当前架构下 LTO DCE 仅在 bitcode 层面删除, 实际链接仍使用原始
+    // 目标文件。被删除的函数符号在 -r LTO 路径 (inject_lto_section)
+    // 中已正确从符号表剥离。
+    if cfg.verbose && !dead_fns.is_empty() {
+        eprintln!(
+            "dcc-link: LTO DCE: {} function(s) dead \
+             (symbol stripping requires -r mode)",
+            dead_fns.len()
+        );
+    }
     Ok(bytes)
 }
 
