@@ -8048,7 +8048,80 @@ impl Codegen {
                         // cvtsd2ss xmm0, xmm0 (F2 0F 5A C0)
                         self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
                     }
-                    // 其他情况: 不转换
+                    // unsigned int (<=32bit) → float/double:
+                    // 零扩展到 64 位后值一定落在 signed int64 正半轴,
+                    // 可直接用 cvtsi2ss/cvtsi2sd (与 signed 路径相同指令).
+                    (
+                        src @ (Type::Bool | Type::UChar | Type::UShort | Type::UInt),
+                        Type::Float,
+                    ) => {
+                        // 零扩展: 截断到源宽度, 高 32 位自动清零
+                        self.emit_zero_extend(dst, src);
+                        // cvtsi2ss xmm0, dst (F3 REX.W 0F 2A /r)
+                        // 需要 REX.W: UInt 零扩展后值可能 > INT32_MAX,
+                        // 必须以 64 位有符号解释.
+                        let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
+                        self.emit(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+                    }
+                    (
+                        src @ (Type::Bool | Type::UChar | Type::UShort | Type::UInt),
+                        Type::Double | Type::LongDouble,
+                    ) => {
+                        self.emit_zero_extend(dst, src);
+                        // cvtsi2sd xmm0, dst (F2 REX.W 0F 2A /r)
+                        let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
+                        self.emit(&[0xF2, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+                    }
+                    // unsigned long/longlong → float/double:
+                    // 64 位无符号值可能超过 signed int64 范围.
+                    // 策略: 检查符号位, 正数直接 cvtsi2ss/sd;
+                    // 负数 (bit63=1) 先 shr 1, 转换后乘 2.0.
+                    (Type::ULong | Type::ULongLong, Type::Float) => {
+                        self.emit_ulong_to_float(dst, false);
+                    }
+                    (Type::ULong | Type::ULongLong, Type::Double | Type::LongDouble) => {
+                        self.emit_ulong_to_float(dst, true);
+                    }
+                    // float/double → unsigned int (<=32bit):
+                    // 先用 cvttss2si/cvttsd2si 转到 signed int64,
+                    // 负值 (float<0) 钳位到 0, 然后截断到目标宽度.
+                    (Type::Float, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
+                        // cvttss2si dst, xmm0 (REX.W 64 位结果)
+                        let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
+                        self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                        // 负值钳位到 0: 先 zero_reg=0 (xor 会破坏 flags),
+                        // 再 test dst, dst 设置 SF, 最后 cmovs 选择.
+                        let zero_reg = if dst == 0 { 2 } else { 0 };
+                        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
+                        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex_cmov, 0x0F, 0x48, 0xC0 | ((dst & 7) << 3) | (zero_reg & 7)]);
+                        // 截断到目标宽度
+                        self.emit_truncate_to_unsigned(dst, ty);
+                    }
+                    (Type::Double | Type::LongDouble, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
+                        // cvttsd2si dst, xmm0 (REX.W 64 位结果)
+                        let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
+                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                        let zero_reg = if dst == 0 { 2 } else { 0 };
+                        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
+                        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex_cmov, 0x0F, 0x48, 0xC0 | ((dst & 7) << 3) | (zero_reg & 7)]);
+                        self.emit_truncate_to_unsigned(dst, ty);
+                    }
+                    // float/double → ulong/ulonglong:
+                    // cvttss2si/cvttsd2si 结果若为非负即正确;
+                    // 若为负 (说明原值 > INT64_MAX), 加 2^64 校正.
+                    (Type::Float, Type::ULong | Type::ULongLong) => {
+                        self.emit_float_to_ulong(dst, false);
+                    }
+                    (Type::Double | Type::LongDouble, Type::ULong | Type::ULongLong) => {
+                        self.emit_float_to_ulong(dst, true);
+                    }
+                    // 其他情况: 不转换 (同类型/指针/聚合等无需转换)
                     _ => {}
                 }
             }
@@ -8654,6 +8727,146 @@ impl Codegen {
             rex |= 0x01;
         }
         self.emit(&[0x66, rex, 0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]);
+    }
+
+    /// 零扩展无符号整数值到 64 位 (用于 unsigned→float 转换).
+    /// dst 寄存器含源值, 高位可能含垃圾位.
+    /// - Bool/UChar: and dst, 0xFF
+    /// - UShort:     and dst, 0xFFFF
+    /// - UInt:       mov dst32, dst32 (32 位写自动清零高 32 位)
+    fn emit_zero_extend(&mut self, dst: u8, src_ty: &Type) {
+        let (mask, is_32bit) = match src_ty {
+            Type::Bool | Type::UChar => (0xFFu32, false),
+            Type::UShort => (0xFFFFu32, false),
+            Type::UInt => (0, true), // 用 32 位 mov
+            _ => return,
+        };
+        if is_32bit {
+            // mov dst32, dst32: 89 /r (32 位操作数自动零扩展高 32 位)
+            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        } else {
+            // and dst, imm32: REX.W 81 /4 id
+            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
+            self.emit(&mask.to_le_bytes());
+        }
+    }
+
+    /// 截断 64 位有符号整数到无符号目标宽度 (用于 float→unsigned 转换).
+    /// 与 emit_zero_extend 逻辑相同, 但目标类型不同.
+    fn emit_truncate_to_unsigned(&mut self, dst: u8, target_ty: &Type) {
+        let (mask, is_32bit) = match target_ty {
+            Type::Bool | Type::UChar => (0xFFu32, false),
+            Type::UShort => (0xFFFFu32, false),
+            Type::UInt => (0, true),
+            _ => return,
+        };
+        if is_32bit {
+            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        } else {
+            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
+            self.emit(&mask.to_le_bytes());
+        }
+    }
+
+    /// 无符号 64 位整数 (在 dst) → float/double (结果在 xmm0).
+    /// 算法: 检查符号位.
+    ///   bit63=0 → cvtsi2ss/sd 直接转换;
+    ///   bit63=1 → shr 1, 转换, 再乘 2.0.
+    fn emit_ulong_to_float(&mut self, dst: u8, is_double: bool) {
+        let l_pos = self.fresh_label();
+        let l_done = self.fresh_label();
+
+        // test dst, dst
+        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        // jns .pos (bit63=0 → 正数, 直接转换)
+        self.jmp_rel32(&l_pos, JumpKind::Jns);
+
+        // --- bit63=1: 值 >= 2^63 ---
+        // shr dst, 1: 无符号除以 2 (清除 bit63)
+        let shr_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+        self.emit(&[shr_rex, 0xD1, 0xE8 | (dst & 7)]);
+        // cvtsi2ss/sd xmm0, dst (REX.W 64 位操作数)
+        let cvt_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+        if is_double {
+            self.emit(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+            // addsd xmm0, xmm0: 乘 2.0
+            self.emit(&[0xF2, 0x0F, 0x58, 0xC0]);
+        } else {
+            self.emit(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+            // addss xmm0, xmm0: 乘 2.0
+            self.emit(&[0xF3, 0x0F, 0x58, 0xC0]);
+        }
+        self.jmp_rel32(&l_done, JumpKind::Jmp);
+
+        // --- .pos: 正数路径 ---
+        self.label(&l_pos);
+        if is_double {
+            self.emit(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+        } else {
+            self.emit(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
+        }
+
+        self.label(&l_done);
+    }
+
+    /// float/double (在 xmm0) → 无符号 64 位整数 (结果在 dst).
+    /// 算法: cvttss2si/cvttsd2si 得到有符号结果.
+    ///   非负 → 正确;
+    ///   负 (溢出, 原值 > INT64_MAX) → 减 2^63, 重转, 加 2^63 校正.
+    fn emit_float_to_ulong(&mut self, dst: u8, is_double: bool) {
+        let l_done = self.fresh_label();
+        let scratch = if dst == 0 { 2 } else { 0 }; // rdx or rax
+
+        // cvttss2si/cvttsd2si dst, xmm0 (REX.W 64 位结果)
+        let cvt_rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+        if is_double {
+            self.emit(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+        } else {
+            self.emit(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+        }
+        // test dst, dst
+        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        // jns .done (非负 → 正确)
+        self.jmp_rel32(&l_done, JumpKind::Jns);
+
+        // --- 溢出路径: 原值 > INT64_MAX ---
+        // 加载 2^63 浮点常量到 scratch, 移入 xmm1
+        if is_double {
+            // 2^63 as double = 0x43E0000000000000
+            self.mov_imm(scratch, 0x43E0000000000000i128);
+        } else {
+            // 2^63 as float = 0x4F000000
+            self.mov_imm(scratch, 0x4F000000i128);
+        }
+        // movq xmm1, scratch
+        self.emit_movq_gp_to_xmm(1, scratch);
+        // subss/subsd xmm0, xmm1
+        if is_double {
+            self.emit(&[0xF2, 0x0F, 0x5C, 0xC1]);
+        } else {
+            self.emit(&[0xF3, 0x0F, 0x5C, 0xC1]);
+        }
+        // cvttss2si/cvttsd2si dst, xmm0 (余数, 现在 fits in int64)
+        if is_double {
+            self.emit(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+        } else {
+            self.emit(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+        }
+        // 加 2^63 整数校正
+        self.mov_imm(scratch, 0x8000000000000000u64 as i128);
+        // add dst, scratch: 01 /r (dst = r/m, scratch = reg)
+        let add_rex = 0x48
+            | if scratch >= 8 { 0x04 } else { 0 }
+            | if dst >= 8 { 0x01 } else { 0 };
+        self.emit(&[add_rex, 0x01, 0xC0 | ((scratch & 7) << 3) | (dst & 7)]);
+
+        self.label(&l_done);
     }
 
     fn copy_r13_bytes(&mut self, src_off: i32, dst_off: i32, size: usize) {

@@ -10776,6 +10776,72 @@ void store_big(struct Big *p, struct Big v) { *p = v; }
     );
 }
 
+/// 无符号整数 ↔ 浮点转换 codegen 运行期验证.
+/// 覆盖:
+///   - unsigned int (<=32bit) → float/double (零扩展 + cvtsi2ss/sd)
+///   - unsigned long (64bit) → float/double (shr+convert+double 算法)
+///   - float/double → unsigned int (<=32bit) (cvttss2si + 负值钳位 + 截断)
+///   - float/double → unsigned long (cvttss2si + 2^64 校正)
+#[test]
+fn unsigned_float_conversion_runtime() {
+    let src = "\
+int main(void) {
+    /* unsigned int → float/double */
+    unsigned int u = 4000000000u; /* > INT32_MAX */
+    float f = (float)u;
+    double d = (double)u;
+    if (f < 3.9e9f || f > 4.1e9f) return 1;
+    if (d < 3.9e9 || d > 4.1e9) return 2;
+
+    /* unsigned long → double */
+    unsigned long ul = 13835058055282163712ul; /* ~1.38e19, > INT64_MAX */
+    double d2 = (double)ul;
+    if (d2 < 1.3e19 || d2 > 1.5e19) return 3;
+
+    /* float → unsigned int */
+    float f2 = 300.7f;
+    unsigned int u2 = (unsigned int)f2;
+    if (u2 != 300) return 4;
+
+    /* double → unsigned int */
+    double d3 = 65000.9;
+    unsigned int u3 = (unsigned int)d3;
+    if (u3 != 65000) return 5;
+
+    /* negative float → unsigned int (clamp to 0) */
+    float f3 = -1.5f;
+    unsigned int u4 = (unsigned int)f3;
+    if (u4 != 0) return 6;
+
+    /* double → unsigned long (value > INT64_MAX) */
+    double d4 = 1.0e19;
+    unsigned long ul2 = (unsigned long)d4;
+    if (ul2 < 9000000000000000000ul) return 7;
+
+    /* small unsigned → float */
+    unsigned char uc = 200;
+    float f4 = (float)uc;
+    if (f4 < 199.0f || f4 > 201.0f) return 8;
+
+    /* unsigned short → double */
+    unsigned short us = 60000;
+    double d5 = (double)us;
+    if (d5 < 59999.0 || d5 > 60001.0) return 9;
+
+    return 0;
+}
+";
+    let (out, exe) = run_compile_and_run("unsigned-float-conv", src);
+    assert!(
+        out.status.success(),
+        "unsigned-float-conv compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "unsigned-float-conv runtime check failed (rc={rc})");
+}
+
 /// 内存 lvalue 自增/自减 codegen 运行期验证: (*p)++ / a[i]-- /
 /// p->f++ / 前缀+后缀 + 指针步长, 均应产生真实读-改-写.
 #[test]
