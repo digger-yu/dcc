@@ -138,6 +138,8 @@ pub struct LinkConfig {
     /// --whole-archive 强制提取的静态库列表
     /// 这些库的所有成员都会被提取, 而不仅是解析未定义符号的成员
     pub whole_archive_libs: Vec<String>,
+    /// LTO DCE 识别的死函数符号，链接时从符号表和节中剥离
+    pub dead_symbols: Vec<String>,
 }
 
 /// build-id 风格
@@ -199,6 +201,7 @@ impl Default for LinkConfig {
             linker_script: None,
             output_format: OutputFormat::Elf,
             whole_archive_libs: vec![],
+            dead_symbols: vec![],
         }
     }
 }
@@ -577,6 +580,30 @@ pub fn link_from_bundle(
     if cfg.output_kind == OutputKind::Relocatable && cfg.lto {
         inject_lto_section_from_bundle(&mut layout, bundle, cfg.verbose);
     }
+    // 4.6 LTO DCE 死函数符号剥离 (非 -r 路径)
+    // -r 路径在 inject_lto_section_from_bundle 中已处理。
+    if !cfg.dead_symbols.is_empty() {
+        let dead_set: std::collections::HashSet<&str> =
+            cfg.dead_symbols.iter().map(|s| s.as_str()).collect();
+        // 剥离死函数符号
+        layout.symbols.retain(|sym| !dead_set.contains(sym.name.as_str()));
+        // 移除死函数对应的 .text.{fn} 节及其 SECTION 符号
+        let dead_section_names: std::collections::HashSet<String> =
+            dead_set.iter().map(|name| format!(".text.{}", name)).collect();
+        layout.symbols.retain(|sym| {
+            !(sym.ty == crate::codegen::elf::STT_SECTION
+                && dead_section_names.contains(sym.name.as_str()))
+        });
+        layout.sections.retain(|sec| {
+            !dead_section_names.contains(sec.name.as_str())
+        });
+        if cfg.verbose {
+            eprintln!(
+                "dcc-link: LTO DCE: {} dead function(s) stripped from symbol table",
+                dead_set.len()
+            );
+        }
+    }
     // 5. 输出 (按格式和架构分发)
     let bytes = if cfg.output_format == OutputFormat::Pe {
         // PE output (Windows)
@@ -742,17 +769,14 @@ pub fn link_with_lto(
         .collect();
     // 2. 跨 TU 优化
     let dead_fns = run_cross_tu_lto(&mut modules);
-    // 3. 链接（简化：LTO 暂只做 DCE，后续可加 inlining 后 codegen）
-    let bytes = link_multi_tu(inputs, output, cfg)?;
+    // 3. 链接，将死函数符号通过 cfg 传递给链接器剥离
+    let mut link_cfg = cfg.clone();
+    link_cfg.dead_symbols = dead_fns.clone();
+    let bytes = link_multi_tu(inputs, output, &link_cfg)?;
     // 4. 报告被 LTO DCE 删除的函数
-    // 完整实现需要从优化后的 bitcode 重新生成目标文件, 然后链接。
-    // 当前架构下 LTO DCE 仅在 bitcode 层面删除, 实际链接仍使用原始
-    // 目标文件。被删除的函数符号在 -r LTO 路径 (inject_lto_section)
-    // 中已正确从符号表剥离。
     if cfg.verbose && !dead_fns.is_empty() {
         eprintln!(
-            "dcc-link: LTO DCE: {} function(s) dead \
-             (symbol stripping requires -r mode)",
+            "dcc-link: LTO DCE: {} function(s) dead, stripped from output",
             dead_fns.len()
         );
     }

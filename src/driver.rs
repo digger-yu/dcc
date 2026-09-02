@@ -2397,6 +2397,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             link::OutputFormat::Elf
         },
         whole_archive_libs: cfg.whole_archive_libs.clone(),
+        dead_symbols: vec![],
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
@@ -2443,10 +2444,15 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
 
         if !bc_modules.is_empty() {
             // Run cross-TU optimization passes
-            link::lto_bitcode::run_cross_tu_lto(&mut bc_modules);
-            if cfg.verbose {
-                eprintln!("dcc: cross-TU LTO optimization complete");
+            let dead_fns = link::lto_bitcode::run_cross_tu_lto(&mut bc_modules);
+            if cfg.verbose && !dead_fns.is_empty() {
+                eprintln!(
+                    "dcc: cross-TU LTO optimization complete, {} dead function(s)",
+                    dead_fns.len()
+                );
             }
+            // P7: 将死函数符号传递给链接器，在最终 ELF 中剥离
+            link_cfg.dead_symbols = dead_fns;
         }
 
         // Link with optimized bitcode (currently just calls link_multi_tu)
