@@ -618,7 +618,21 @@ impl Lowering {
                 Box::new(self.lower_type(&inner.base, span)),
                 match size {
                     ast::ArraySize::Const(n) => Some(*n),
-                    _ => None,
+                    ast::ArraySize::Var(expr) => {
+                        // VLA: try constant evaluation for compile-time
+                        // determinable sizes (e.g. int a[2 * 3])
+                        match const_eval::eval(expr) {
+                            Ok(n) if n >= 0 => Some(n as usize),
+                            _ => {
+                                self.diagnostics.push(Diagnostic::warn(
+                                    "W1012",
+                                    "variable-length array size not determinable at compile time",
+                                    span.clone(),
+                                ));
+                                None
+                            }
+                        }
+                    }
                 },
             ),
             Type::Struct(name, _, _) => ValueType::Aggregate {
