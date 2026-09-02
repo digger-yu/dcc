@@ -2460,7 +2460,23 @@ impl Codegen {
                     });
                     continue;
                 }
-                panic!("unresolved label: {}", p.target);
+                // ET_EXEC 模式下未解析的符号: 发出诊断错误而非 panic.
+                // 外部符号 (如 libc 函数) 应由 driver 层的 needs_host_cc_link
+                // 委托 host cc 链接; 若到达此处说明绕过了 host cc 回退.
+                self.diagnostics.push(crate::diagnostics::Diagnostic {
+                    sev: crate::diagnostics::Severity::Error,
+                    code: "E1100",
+                    msg: format!(
+                        "unresolved symbol '{}': ET_EXEC mode cannot \
+                         resolve external symbols; use -c for relocatable \
+                         output or link with host cc",
+                        p.target
+                    ),
+                    span: crate::diagnostics::Span::point("<link>", 0, 0),
+                    hint: Some("compile with -c or use host cc for linking".into()),
+                    source_line: None,
+                });
+                continue;
             };
             let off = p.disp_offset as usize;
             if p.is_push_imm {
@@ -3054,6 +3070,21 @@ impl Codegen {
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() {
+                    // 外部函数声明: 注册为 undefined 符号 (SHN_UNDEF).
+                    // 使 resolve() 能识别已知外部符号并发出诊断而非 panic.
+                    let resolved_name =
+                        self.resolve_asm_label(&f.name.name).to_string();
+                    if !self.sym_index.contains_key(&resolved_name) {
+                        self.symbols.push(ElfSym {
+                            name: resolved_name,
+                            section: SHN_UNDEF,
+                            value: 0,
+                            size: 0,
+                            bind: STB_GLOBAL,
+                            ty: STT_FUNC,
+                            visibility: STV_DEFAULT,
+                        });
+                    }
                     continue;
                 }
                 if let Some(&off) = self.labels.get(&f.name.name) {
