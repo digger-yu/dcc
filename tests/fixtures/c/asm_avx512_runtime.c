@@ -117,7 +117,22 @@ float test_evex_vmovdqu32(float s) {
     return r;
 }
 
+/* ---- CPU feature detection ---- */
+
+/* Check if AVX-512F is supported via CPUID */
+static int has_avx512f(void) {
+    unsigned int eax, ebx, ecx, edx;
+    /* CPUID leaf 7, sub-leaf 0: EBX bit 16 = AVX-512F */
+    __asm__ volatile ("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(7), "c"(0));
+    return (ebx >> 16) & 1;
+}
+
 int main(void) {
+    /* Skip gracefully if CPU lacks AVX-512 */
+    if (!has_avx512f()) return 0;
+
     /* SSE scalar tests */
     if (test_sse_addsd(3.0, 4.0) != 7.0) return 1;
     if (test_sse_mulsd(3.0, 4.0) != 12.0) return 2;

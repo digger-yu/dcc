@@ -130,10 +130,20 @@ int test_lar(void) {
 }
 
 /* rdpkru/wrpkru */
+static int has_pku(void) {
+    unsigned int eax, ebx, ecx, edx;
+    /* CPUID leaf 7, sub-leaf 0: ECX bit 3 = PKU */
+    __asm__ volatile ("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(7), "c"(0));
+    return (ecx >> 3) & 1;
+}
+
 int test_pkru(void) {
+    if (!has_pku()) return 1;  /* skip if PKU not supported */
     unsigned int eax, edx;
     asm volatile("rdpkru" : "=a"(eax), "=d"(edx) : "c"(0));
-    return 1;  /* just verify it encodes */
+    return 1;
 }
 
 /* clflush */

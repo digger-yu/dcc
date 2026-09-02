@@ -16422,7 +16422,7 @@ int test_func(int x) { return x + 1; }
     let src_path = tmp.join("ftrace_pg.c");
     let obj_path = tmp.join("ftrace_pg.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-pg", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16445,7 +16445,7 @@ int test_func(int x) { return x + 1; }
     let src_path = tmp.join("ftrace_fentry.c");
     let obj_path = tmp.join("ftrace_fentry.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-mfentry", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16463,7 +16463,7 @@ int test_func(int x) { return x + 1; }
     let src_path = tmp.join("ftrace_record.c");
     let obj_path = tmp.join("ftrace_record.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-mrecord-mcount", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16501,7 +16501,7 @@ int func(void) {
     let src_path = tmp.join("stack_guard_gs.c");
     let obj_path = tmp.join("stack_guard_gs.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "-c",
             "-fstack-protector",
@@ -16540,7 +16540,7 @@ int small_frame(void) {
     let src_path = tmp.join("stack_clash.c");
     let obj_path = tmp.join("stack_clash.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-fstack-clash-protection", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16588,7 +16588,7 @@ int large_frame(void) {
             "stack_clash_{}.o",
             triple.split('-').next().unwrap()
         ));
-        let output = std::process::Command::new("./target/debug/dcc")
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", triple, "-c", "-fstack-clash-protection", "-o"])
             .arg(&obj_path)
             .arg(&src_path)
@@ -16630,7 +16630,7 @@ int check(void) { return sizeof(wchar_t); }
     let src_path = tmp.join("short_wchar.c");
     let obj_path = tmp.join("short_wchar.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-fshort-wchar", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16657,7 +16657,7 @@ int get_global(void) { return global_var; }
     let src_path = tmp.join("no_common.c");
     let obj_path = tmp.join("no_common.o");
     fs::write(&src_path, src).unwrap();
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-fno-common", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16691,7 +16691,7 @@ int overflow_test(int x) {
     let obj_path = tmp.join("strict_flags.o");
     fs::write(&src_path, src).unwrap();
     // Test -fno-strict-aliasing
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-fno-strict-aliasing", "-O2", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16705,7 +16705,7 @@ int overflow_test(int x) {
     let _ = fs::remove_file(&obj_path);
 
     // Test -fno-strict-overflow
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-fno-strict-overflow", "-O2", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16732,7 +16732,7 @@ fn unknown_flags_emit_warnings() {
     fs::write(&src_path, src).unwrap();
 
     // Unknown -m* flag should be silently accepted (GCC 兼容)
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-munknown-future-flag", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16748,7 +16748,7 @@ fn unknown_flags_emit_warnings() {
     let _ = fs::remove_file(&obj_path);
 
     // Unknown -f* flag should be silently accepted (GCC 兼容)
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-funknown-future-flag", "-o"])
         .arg(&obj_path)
         .arg(&src_path)
@@ -16764,7 +16764,7 @@ fn unknown_flags_emit_warnings() {
     let _ = fs::remove_file(&obj_path);
 
     // Known no-op flags should NOT emit warnings
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "-c",
             "-fno-plt",
@@ -16787,7 +16787,7 @@ fn unknown_flags_emit_warnings() {
     let _ = fs::remove_file(&obj_path);
 
     // Non-default values should emit warnings
-    let output = std::process::Command::new("./target/debug/dcc")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "-c",
             "-mpreferred-stack-boundary=4",
