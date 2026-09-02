@@ -7482,6 +7482,61 @@ impl Codegen {
                         // 非 lvalue (如 __imag__ (a+b)): 不可赋值, 仅求值右操作数
                         self.gen_expr(r, 0);
                     }
+                } else {
+                    // 通用 lvalue 回退: 用于 Cast-lvalue 或未来
+                    // 新增的 lvalue 形式 (如复合表达式解引用).
+                    // 通过 gen_lvalue_addr 计算目标地址, 再按类型
+                    // 宽度发射 store 指令. 避免未匹配任何分支时
+                    // 赋值静默变成 no-op.
+                    let assign_sz = assign_l_ty.size();
+                    let is_float_ty = matches!(
+                        assign_l_ty,
+                        Type::Float | Type::Double | Type::LongDouble
+                    );
+                    let is_aggregate = matches!(
+                        assign_l_ty,
+                        Type::Struct(_, _, _)
+                            | Type::Union(_, _, _)
+                            | Type::Array(_, _)
+                    ) && assign_sz > 8;
+                    if is_aggregate {
+                        // 聚合类型 (>8B): 取地址 + rep movsb 拷贝
+                        if self.gen_lvalue_addr(lv, 0) {
+                            self.push(0); // 保存目标地址
+                            self.gen_expr(r, 0);
+                            // 源地址: gen_expr 对聚合类型结果在帧临时区
+                            let src_off = -self.frame_size + 8;
+                            self.emit_lea_r13(6, src_off); // rsi = src
+                            self.pop(7); // rdi = dst
+                            self.emit(&[0xFC]); // cld
+                            self.mov_imm(2, assign_sz as i128); // rcx = size
+                            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                        } else {
+                            self.gen_expr(r, 0);
+                        }
+                    } else if self.gen_lvalue_addr(lv, 0) {
+                        self.push(0); // 保存目标地址
+                        self.gen_expr(r, 0); // rax = val (浮点: xmm0)
+                        self.pop(1); // rcx = 目标地址
+                        if is_float_ty {
+                            self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
+                            if matches!(assign_l_ty, Type::Float) {
+                                self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                            } else {
+                                self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                            }
+                        } else {
+                            match assign_sz {
+                                1 => self.emit(&[0x88, 0x01]),        // mov [rcx], al
+                                2 => self.emit(&[0x66, 0x89, 0x01]),  // mov [rcx], ax
+                                4 => self.emit(&[0x89, 0x01]),        // mov [rcx], eax
+                                _ => self.emit(&[0x48, 0x89, 0x01]),  // mov [rcx], rax
+                            }
+                        }
+                    } else {
+                        // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS
+                        self.gen_expr(r, 0);
+                    }
                 }
             }
             Expr::Unary { op, e, .. } => {
