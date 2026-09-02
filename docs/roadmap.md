@@ -101,7 +101,9 @@
   表，其他 TU 引用按 `Symbol` 名查表替换 `Const`；非字面量初始化
   （如 `addr-of`）保守跳过。
 - **LTO 跨 TU 全局优化**: DCE 删未引用函数/全局；DAE 删 `global` 中
-  无 reader 的 `store` 副作用（保留初始 `init` 表达式）。
+  无 reader 的 `store` 副作用（保留初始 `init` 表达式）；死函数符号
+  从最终 ELF 符号表和 `.text.{fn}` 节中剥离（`dead_symbols` 通路
+  贯穿 `link_with_lto` / driver LTO 路径 → `link_from_bundle`）。
 - **.gnu.hash TIE 压缩**: ELF 64-bit 格式 — `nbuckets` (4 字节) +
   `symoffset` (4) + `bloom_size` (4) + `bloom_shift` (4) +
   `bloom[bloom_size]` (8 字节/元素) + `buckets[nbuckets]` (4) +

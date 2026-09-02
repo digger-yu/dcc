@@ -812,11 +812,11 @@ struct Function  { name, params, ret_ty, entry, blocks, block_order,
 | P1 | 跨函数 DCE | `cross_function_dce` | 从 `main` + extern 出发做 call graph BFS，删除不可达 internal static 函数 |
 | P2 | 强度削减 | `strength_reduction` | `i * 2^N` → `i << N`，`i / 2^N` → `i >> N` |
 | P3 | 归纳变量优化 (IVOP) | `ivop` | 标记 induction × constant 模式，给 strength_reduction 接续使用 |
-| P4 | 别名分析 | `alias_analysis` | Steensgaard 风格 union-find（field-insensitive），返回 SSA 名 → set id 映射 |
+| P4 | 别名分析 | `alias_analysis_with_strict` | Steensgaard 风格 union-find（field-insensitive），支持 strict-aliasing 类型区分：`strict_aliasing=true` 时按类型标签分裂不兼容 alias set，`false` 时所有指针合并到同一 set |
 | P5 | 指令调度 | `instruction_scheduling` | 局部 list scheduling：pure 运算按 dest 名字典序集中到 BB 顶端 |
 | P6 | PGO 框架 | `pgo` / `load_profile` | 读 `<func>.dcc.profdata`（text 格式 `bb <name> <count>`），给 hot/cold BB 插入 `__dcc_*_hint` Store |
-| P7 | 自动并行化 | `auto_parallelization` | 识别 `for.body.*` 名字 + 无 Call / 无非 induction Store 的 BB，emit `__dcc_parallel_hint` |
-| P8 | 循环分块 | `loop_tiling` | 检测小循环体（≤4 inst），复制最后一条 pure 指令作为第二个 tile |
+| P7 | 自动并行化 | `auto_parallelization` | 检测可并行 for 循环（线性归纳变量、无间接访问、无函数调用），插入 `#pragma omp simd` asm volatile 标注 |
+| P8 | 循环分块 | `loop_tiling` | 将简单 for 循环分为 tile_size=4 块：外层循环(步长=tile_size) + 内层循环(0..tile_size) + 尾部循环处理余数 |
 | P9 | 循环交换 | `loop_interchange` | 检测 `*.i.*` + `*.j.*` 嵌套，在 entry 插入 `__dcc_loop_interchanged` hint |
 | P10 | 尾部调用优化 (TCO) | `tail_call_optimization` | 检测 exit BB 含对自身的 `Call`，告知 codegen 可改 jump |
 | P11 | 函数属性传播 | `function_attribute_propagation` | `is_cold` 函数 entry 加 `__dcc_section_cold` Store 提示；`is_noreturn` 传播到 codegen 触发函数末尾 `ud2` 插入 |
@@ -837,8 +837,8 @@ AST→SSA→pass→AST 重建，再走原有的 `resync` 流程。
 
 ### 已知限制（与 suckless 定位一致）
 
-- `auto_parallelization` 仅发 hint 提示，真正的 SIMD 代码生成由后端
-  决定（暂未在 codegen 消费该 hint）。
+- `auto_parallelization` 插入 `#pragma omp simd` 标注，后端可据此
+  生成 SIMD 代码。当前为标注模式，真实 SIMD 代码生成由后端决定。
 - `register_allocation` 是 hint-only，物理寄存器仍由 codegen 的
   硬编码 GP/XMM 池负责。
 - `instruction_scheduling` 是 BB 内 list scheduling，未做跨 BB 调度。

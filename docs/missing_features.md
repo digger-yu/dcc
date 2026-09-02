@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-28 — 基于当前源码、测试与脚本审计
+> 最后更新：2026-09-02 — 基于当前源码、测试与脚本审计
 >
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
@@ -14,7 +14,7 @@
 | `-falign-jumps=N` / `-falign-loops=N` (N>1) | DCC 不执行代码段对齐；`=1` 等价于不对齐，静默接受；其他值发出警告 |
 | `-mpreferred-stack-boundary=N` (N≠2) | DCC 不调整栈对齐；`=2` 为内核默认，静默接受；其他值发出警告 |
 | `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
-| 优化器 `-fno-strict-aliasing` / `-fno-strict-overflow` | 当前优化器已保守处理（不做 TBAA、不假设有符号溢出 UB），但未显式检查 target 标志；未来添加激进优化时需实现标志检查 |
+| 优化器 `-fno-strict-aliasing` | 已实现：`-fno-strict-aliasing` 时别名分析合并所有指针到同一 alias set (保守)；默认 `-fstrict-aliasing` 按类型标签区分 alias set (C 标准语义) |
 
 
 ## 链接器 / 对象文件限制
