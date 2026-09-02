@@ -334,8 +334,7 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
 /// 强转访问不同类型的数据。
 ///
 /// 当 `strict_aliasing=true` 时, 使用 Steensgaard union-find 分析,
-/// 按指针实际指向的对象分配 alias set, 但仍是类型不敏感的
-/// (field-insensitive)。
+/// 按类型标签区分 alias set: 不同类型 (非 char*/void*) 的指针不合并。
 pub fn alias_analysis_with_strict(
     func: &Function,
     strict_aliasing: bool,
@@ -347,8 +346,75 @@ pub fn alias_analysis_with_strict(
         for v in sets.values_mut() {
             *v = unified_id;
         }
+    } else {
+        // strict-aliasing: 按类型标签分离不兼容的指针
+        // 收集每个 SSA 变量的类型
+        let mut type_map: HashMap<String, crate::ast::Type> = HashMap::new();
+        for b in func.blocks.values() {
+            for inst in &b.insts {
+                if let Some(d) = &inst.dest {
+                    type_map.insert(d.name(), d.ty.clone());
+                }
+            }
+        }
+        // 检测类型不兼容的 alias set 并分裂
+        // 如果两个变量在同一 alias set 但类型不兼容, 分配不同 set
+        let mut type_class: HashMap<usize, Vec<(String, crate::ast::Type)>> = HashMap::new();
+        for (name, &set_id) in &sets {
+            if let Some(ty) = type_map.get(name) {
+                type_class.entry(set_id).or_default().push((name.clone(), ty.clone()));
+            }
+        }
+        let mut next_set = sets.values().copied().max().unwrap_or(0) + 1;
+        for (_set_id, members) in &type_class {
+            if members.len() <= 1 { continue; }
+            // 按类型分组
+            let mut groups: Vec<(crate::ast::Type, Vec<String>)> = Vec::new();
+            for (name, ty) in members {
+                let mut found = false;
+                for (gty, gnames) in &mut groups {
+                    if types_alias_compatible(gty, ty) {
+                        gnames.push(name.clone());
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    groups.push((ty.clone(), vec![name.clone()]));
+                }
+            }
+            // 第一组保持原 set_id, 其余分配新 set
+            for (_, gnames) in groups.iter().skip(1) {
+                let new_id = next_set;
+                next_set += 1;
+                for name in gnames {
+                    sets.insert(name.clone(), new_id);
+                }
+            }
+        }
     }
     sets
+}
+
+/// 判断两个类型是否可能别名 (C strict-aliasing 规则).
+/// 不同类型不别名, 除:
+/// - char* 可以别名任何类型
+/// - void* 可以别名任何类型
+/// - 相同类型当然别名
+fn types_alias_compatible(a: &crate::ast::Type, b: &crate::ast::Type) -> bool {
+    use crate::ast::Type;
+    if a == b { return true; }
+    // char* / void* 可以别名任何类型
+    match (a, b) {
+        (Type::Ptr(aq), Type::Ptr(bq)) => {
+            match (&aq.base, &bq.base) {
+                (Type::Void, _) | (_, Type::Void) => true,
+                (Type::Char, _) | (_, Type::Char) => true,
+                _ => aq.base == bq.base,
+            }
+        }
+        _ => true, // 非指针类型不区分
+    }
 }
 
 /// Steensgaard union-find 别名分析核心实现。
