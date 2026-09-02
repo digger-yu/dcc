@@ -99,8 +99,30 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             // 用于全局/静态初始化器，如 `const T *p = &global.field;`
             Expr::Member { expr, field, is_arrow, .. } => {
                 if *is_arrow {
-                    // arrow 形式 `ptr->field` 需要先解引用指针，暂不支持
-                    return Err(ConstEvalError::NotConstant);
+                    // Arrow form: ptr->field is (*ptr).field
+                    // Evaluate the pointer as an address constant
+                    let base_addr = match eval_full(expr)? {
+                        ConstValue::Addr { name, offset } => (name, offset),
+                        _ => return Err(ConstEvalError::NotConstant),
+                    };
+                    // Look up field in the pointee struct/union
+                    let pointee_ty = expr.ty();
+                    let struct_ty = match &pointee_ty {
+                        Type::Ptr(inner) => inner.base.clone(),
+                        _ => return Err(ConstEvalError::NotConstant),
+                    };
+                    let field_offset = match &struct_ty {
+                        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                            crate::ast::find_field(fields, &field.name)
+                                .map(|(f, extra_off)| f.offset + extra_off)
+                                .ok_or(ConstEvalError::NotConstant)?
+                        }
+                        _ => return Err(ConstEvalError::NotConstant),
+                    };
+                    return Ok(ConstValue::Addr {
+                        name: base_addr.0,
+                        offset: base_addr.1 + field_offset as i128,
+                    });
                 }
                 // 递归求基地址: 必须是 &ident.field1.field2... 形式
                 let base_addr = match eval_full(&Expr::AddrOf {
