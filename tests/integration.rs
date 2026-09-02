@@ -726,9 +726,9 @@ fn libdecnumber_combined_tu_compiles() {
     if !gcc_src.join("libdecnumber").exists() {
         return;
     }
-    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_stub");
+    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools");
     let combined =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_stub/libdecnumber_combined.c");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_combined.c");
     let dir = std::env::temp_dir();
     let object = dir.join(format!("dcc-libdecnumber-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))

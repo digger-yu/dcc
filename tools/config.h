@@ -2,7 +2,7 @@
  * The real autotools-generated config.h is not produced without running
  * configure on the libdecnumber subdir; we only need a handful of
  * feature macros.  This file lives next to libdecnumber_combined.c
- * and is reachable via -I tools/libdecnumber_stub.
+ * and is reachable via -I tools.
  */
 #ifndef DCC_LIBDECNUMBER_CONFIG_H
 #define DCC_LIBDECNUMBER_CONFIG_H

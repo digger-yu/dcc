@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/setup_torture.sh — 下载 GCC C Torture Suite 到 third_party/gcc-torture
+# scripts/setup_torture.sh — 下载 GCC C Torture Suite 到 tests/gcc-torture
 #
 # 使用 git sparse-checkout 仅拉取 gcc.c-torture 目录（~5000 个 C 正确性测试）。
 # 幂等: 已存在则跳过，传 --force 强制重新拉取。
@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TORTURE_DIR="$REPO_ROOT/third_party/gcc-torture"
+TORTURE_DIR="$REPO_ROOT/tests/gcc-torture"
 GCC_URL="https://gcc.gnu.org/git/gcc.git"
 
 # ── 参数处理 ──
@@ -31,7 +31,7 @@ SUITE_DIR="$TORTURE_DIR/gcc/testsuite/gcc.c-torture"
 if [[ -d "$SUITE_DIR/execute" && -n "$(ls -A "$SUITE_DIR/execute" 2>/dev/null)" ]]; then
     if $force; then
         echo "== 强制重新拉取 GCC C Torture Suite =="
-        rm -rf "$REPO_ROOT/third_party"
+        rm -rf "$TORTURE_DIR"
     elif $update; then
         echo "== 更新 GCC C Torture Suite =="
         cd "$TORTURE_DIR"
@@ -49,8 +49,8 @@ if [[ -d "$SUITE_DIR/execute" && -n "$(ls -A "$SUITE_DIR/execute" 2>/dev/null)" 
 fi
 
 # ── 清理残留 ──
-rm -rf "$REPO_ROOT/third_party"
-mkdir -p "$REPO_ROOT/third_party"
+rm -rf "$TORTURE_DIR"
+mkdir -p "$(dirname "$TORTURE_DIR")"
 
 echo "== 下载 GCC C Torture Suite (sparse clone) =="
 echo "   来源: $GCC_URL"

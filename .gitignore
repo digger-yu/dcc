@@ -20,8 +20,8 @@ Thumbs.db
 # Qoder IDE
 .qoder/
 
-# Third-party test suites (populated by scripts/setup_torture.sh)
-third_party/
+# GCC C Torture Suite (populated by scripts/setup_torture.sh)
+tests/gcc-torture/
 
 # Autotools / configure artifacts
 config.log

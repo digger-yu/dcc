@@ -22,6 +22,13 @@
 | `test_kernel_features.sh` | 内核特性示例 |
 | `build_fixdep_dcc.sh` / `gen_elfconfig_h.sh` | 工具链辅助 |
 
+## GCC Torture Suite
+
+| 脚本 | 用途 |
+|------|------|
+| `setup_torture.sh` | 下载 GCC C Torture Suite 到 tests/gcc-torture/ |
+| `torture_test.sh` | 运行 torture 测试 (compile/execute/all) |
+
 ## GCC libiberty
 
 GCC libiberty 探测由本地 `cargo test --test integration` 驱动，详见

@@ -378,8 +378,8 @@ dcc 通过 GCC torture test suite 验证 C 语言标准的兼容性。测试集�
 运行 torture test:
 
 ```bash
-bash scripts/setup_torture.sh  # 下载测试集
-cargo test --release torture   # 运行完整测试
+bash scripts/setup_torture.sh     # 下载测试集
+bash scripts/torture_test.sh all  # 运行全部测试
 ```
 
 跳过列表: `tests/torture_skip.txt` 包含已知无法修复的测试（多文件测试、缺失 libc 函数等）。

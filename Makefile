@@ -20,8 +20,8 @@ test-all: test
 torture-setup:
 	bash scripts/setup_torture.sh
 
-torture: torture-setup build
-	cargo test --release -- torture
+torture: build torture-setup
+	bash scripts/torture_test.sh all
 
 kernel-full-build: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" KERNEL_DIR="$(KERNEL_DIR)" JOBS="$(JOBS)" LOG="$(LOG)" bash scripts/kernel_full_build.sh
