@@ -108,6 +108,10 @@ pub struct Global {
 pub struct Module {
     pub functions: Vec<Function>,
     pub globals: Vec<Global>,
+    /// Type definitions (StructDef, UnionDef, EnumDef, Typedef) and
+    /// GlobalAsm declarations that do not produce IR but must be
+    /// preserved for the backend (debug info, codegen, etc.).
+    pub type_defs: Vec<ast::Decl>,
     source: ast::Program,
 }
 
@@ -132,6 +136,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
     };
     let mut functions = Vec::new();
     let mut globals = Vec::new();
+    let mut type_defs = Vec::new();
     for decl in &source.decls {
         match decl {
             Decl::Func(f) => {
@@ -171,7 +176,19 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     is_tls: v.is_thread_local,
                 });
             }
-            _ => {}
+            // Type definitions and global asm do not produce IR nodes
+            // but are preserved in `type_defs` for the backend.
+            Decl::StructDef(_)
+            | Decl::UnionDef(_)
+            | Decl::EnumDef(_)
+            | Decl::Typedef { .. } => {
+                type_defs.push(decl.clone());
+            }
+            Decl::GlobalAsm { .. } => {
+                // Global asm has side effects (emitted into the output);
+                // preserved in type_defs for codegen to process from AST.
+                type_defs.push(decl.clone());
+            }
         }
     }
     // Separate errors from warnings: only errors are fatal.
@@ -189,6 +206,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
             Module {
                 functions,
                 globals,
+                type_defs,
                 source,
             },
             warnings,
@@ -231,6 +249,7 @@ pub fn resync(module: &mut Module) -> Result<(), Vec<Diagnostic>> {
     let (fresh, _warnings) = lower(module.source().clone())?;
     module.functions = fresh.functions;
     module.globals = fresh.globals;
+    module.type_defs = fresh.type_defs;
     Ok(())
 }
 
