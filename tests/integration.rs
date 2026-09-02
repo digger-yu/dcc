@@ -20245,7 +20245,14 @@ int main(void) { return 0; }
 #[test]
 fn c23_stdc_version_value() {
     let src = include_str!("fixtures/c/c23_stdc_version.c");
-    let output = run_syntax_test("c23-stdc-version", src);
+    let path = std::env::temp_dir().join(format!("dcc-c23-stdc-version-{}.c", std::process::id()));
+    fs::write(&path, src).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=c23", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(path);
     assert!(
         output.status.success(),
         "__STDC_VERSION__ should be 202312L. stderr: {}",
@@ -20575,7 +20582,7 @@ int lg = stdc_log2_floor_ui(256);
     )
     .expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-E"])
+        .args(["-std=c23", "-E"])
         .arg(&src_path)
         .output()
         .expect("run dcc");

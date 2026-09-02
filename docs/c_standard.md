@@ -1,6 +1,6 @@
 # DCC C 标准支持
 
-DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描述
+DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process/programming-language.rst）。下列条目描述
 当前已实现的语法和代码生成子集；未特别说明时，不代表与 GCC 完全兼容。
 
 ## C89 / C90 (ANSI C)
@@ -59,7 +59,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__STDC_ENDIAN_*` — ✅ 已实装 (预定义宏: `__STDC_ENDIAN_BIG__`/`__STDC_ENDIAN_LITTLE__`/`__STDC_ENDIAN_NATIVE__`)
 - `#elifdef` / `#elifndef` — ✅ 已实装 (预处理器条件编译)
 - `%b` / `%B` printf 二进制格式 — ✅ 已实装 (格式检查与运行时行为)
-- `-std=gnu23` / `-std=c23` — ✅ 已实装 (Driver 选项, 默认 `gnu23`)
+- `-std=gnu23` / `-std=c23` — ✅ 已实装 (Driver 选项, 默认 `gnu11`)
 
 ## GNU 扩展
 

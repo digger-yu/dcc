@@ -33,15 +33,16 @@
 - **决策**: 全局
 - **代价**: 增量更新要谨慎, 但 -50% 编译时间值得
 
-## ADR-004: 默认 gnu23, 不默认 c11
+## ADR-004: 默认 gnu11, 不默认 gnu23
 
 - **问题**: 默认哪个 C 标准?
 - **第一性原理**:
-  - 现代 Linux 内核用 gnu11
-  - 但 -std=gnu23 是 GCC 15 默认
-  - 跟 GCC 默认一致, 用户迁移成本最低
-- **决策**: gnu23
-- **代价**: 严格 C89 代码可能需要显式 -std=c89
+  - Linux 内核 (自 4.13 起至 7.1) 使用 `-std=gnu11`
+    (见 `Documentation/process/programming-language.rst`)
+  - dcc 的首要目标是编译 Linux 内核, 默认标准应与之一致
+  - GCC 15 默认 gnu23, 但内核尚未迁移到 gnu23
+- **决策**: gnu11
+- **代价**: 纯 C23 代码需要显式 `-std=gnu23`
 
 ## ADR-005: suckless 风格 - 零 crate 依赖
 

@@ -780,7 +780,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut output_explicit = false;
     let mut opt: u8 = 0;
     let mut size_opt = false;
-    let mut std = StdMode::Gnu23; // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
+    let mut std = StdMode::Gnu11; // 默认 gnu11, 与 Linux 7.1 内核一致 (Documentation/process/programming-language.rst)
     let mut target = TargetTriple::host();
     let mut freestanding = false;
     let mut permissive = false;

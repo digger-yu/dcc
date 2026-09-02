@@ -124,7 +124,8 @@
 
 ### 3.1 C
 
-默认 `-std=gnu23`，与 GCC 15 一致。
+默认 `-std=gnu11`。Linux 内核 (自 4.13 起至 7.1) 使用 `-std=gnu11`
+(见 `Documentation/process/programming-language.rst`)，dcc 默认与之对齐。
 
 | 标准 | 状态 | 覆盖 |
 |------|------|------|
@@ -380,7 +381,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 
 | 文档 | 简介 |
 |------|------|
-| [`docs/adr.md`](./docs/adr.md) | 8 条架构决策（Rust / AST-as-IR / 全局类型表 / gnu23 / 零 crate 依赖 / mmap / 跨平台优先 / LTO gc-sections） |
+| [`docs/adr.md`](./docs/adr.md) | 8 条架构决策（Rust / AST-as-IR / 全局类型表 / gnu11 / 零 crate 依赖 / mmap / 跨平台优先 / LTO gc-sections） |
 | [`docs/architecture.md`](./docs/architecture.md) | 整体架构 + 性能优化表 + x86-64/AArch64/RISC-V 后端 + 链接器管线 + C++ 降级 + SSA/GVN + 性能分析子系统 |
 | [`docs/c_standard.md`](./docs/c_standard.md) | C89–C23 + GNU 扩展支持矩阵 + 重要选项表 + Linux 内核编译示例 |
 | [`docs/ci_guide.md`](./docs/ci_guide.md) | 推送与触发 CI + 失败处理 + e2e 失败定位 |
