@@ -1156,19 +1156,65 @@ pub fn build_elf_rel_x86_64(
     // 构建 .shstrtab (节名字符串表)
     let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections, comdat_groups);
 
-    // 构建 .strtab (符号名字符串表)
-    let (strtab, sym_name_offsets) = build_strtab(symbols);
+    // ELF 规范要求: .symtab 中所有 STB_LOCAL 符号必须出现在 GLOBAL/WEAK 之前
+    // 按 bind 排序: STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
+    // 保留第一个 null 符号不动 (index 0)
+    // 同时构建 old→new 索引映射, 用于重定位符号索引重排
+    let mut sorted_symbols = symbols.to_vec();
+    let mut sym_index_map: Vec<u32> = (0..symbols.len() as u32).collect();
+    if sorted_symbols.len() > 1 {
+        // 带原始索引的排序
+        let null_sym = sorted_symbols.remove(0);
+        let mut indexed: Vec<(usize, ElfSym)> = sorted_symbols
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| (i + 1, s)) // +1 因为 null 符号被移除
+            .collect();
+        indexed.sort_by_key(|(_, s)| s.bind);
+        // 构建映射: old_index → new_index
+        for (new_idx, (old_idx, _)) in indexed.iter().enumerate() {
+            sym_index_map[*old_idx] = (new_idx + 1) as u32; // +1 因为 null 符号在 index 0
+        }
+        sorted_symbols = indexed.into_iter().map(|(_, s)| s).collect();
+        sorted_symbols.insert(0, null_sym);
+    }
 
-    // 对符号排序: 先 LOCAL 再 GLOBAL (ELF 要求 symtab 中 local 在前)
-    // 同时构建 .symtab 二进制
-    let symtab_data = build_symtab(symbols, &sym_name_offsets);
+    // 重定位符号索引重排
+    let remap_relocs = |relocs: &[ElfRela]| -> Vec<ElfRela> {
+        relocs
+            .iter()
+            .map(|r| {
+                let mut r2 = r.clone();
+                if (r2.sym_index as usize) < sym_index_map.len() {
+                    r2.sym_index = sym_index_map[r2.sym_index as usize];
+                }
+                r2
+            })
+            .collect()
+    };
+    let relocated_relocations = remap_relocs(relocations);
+    let relocated_data_relocations = remap_relocs(data_relocations);
+    let relocated_extra_rela_sections: Vec<ExtraRelaSection> = extra_rela_sections
+        .iter()
+        .map(|ers| {
+            let mut ers2 = ers.clone();
+            ers2.relocations = remap_relocs(&ers.relocations);
+            ers2
+        })
+        .collect();
+
+    // 构建 .strtab (符号名字符串表)
+    let (strtab, sym_name_offsets) = build_strtab(&sorted_symbols);
+
+    // 构建 .symtab 二进制
+    let symtab_data = build_symtab(&sorted_symbols, &sym_name_offsets);
 
     // 构建 .rela.text
-    let rela_data = build_rela(relocations);
+    let rela_data = build_rela(&relocated_relocations);
     // 构建 .rela.data
-    let rela_data_data = build_rela(data_relocations);
+    let rela_data_data = build_rela(&relocated_data_relocations);
     // 构建额外 .rela 节
-    let extra_rela_data: Vec<Vec<u8>> = extra_rela_sections
+    let extra_rela_data: Vec<Vec<u8>> = relocated_extra_rela_sections
         .iter()
         .map(|ers| build_rela(&ers.relocations))
         .collect();

@@ -175,8 +175,11 @@ impl ParsedAttrs {
         mb!(is_const_attr); mb!(returns_twice); mb!(no_instrument); mb!(is_malloc);
         mb!(warn_unused_result); mb!(is_sentinel); mb!(is_fallthrough);
         mb!(is_nodiscard); mb!(transparent_union); mb!(externally_visible);
-        // is_inline 不参与 merge: 仅由 C `inline` 关键字直接设置 (GNU89 语义),
-        // 不由 __attribute__ 合并传播, 否则改变 codegen 符号发射行为
+        // is_inline: 由 C `inline` 关键字在 parse_type_mode 中设置,
+        // 需要从 decl_attrs 合并 (但不从 __attribute__ 传播).
+        // merge_attrs(leading_attrs, decl_attrs) 中 decl_attrs 是 second arg,
+        // 所以这里合并 is_inline 是安全的.
+        mb!(is_inline);
         mo!(register_name); mo!(cleanup_fn); mo!(alias_name);
         mo!(format_kind); mo!(format_string_idx); mo!(format_first_arg);
         mo!(copy_fn); mo!(error_msg); mo!(warning_msg); mo!(deprecated_msg);

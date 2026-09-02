@@ -128,6 +128,7 @@ pub struct Codegen {
     pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转: 通用 code relocation
     pending_func_addr_rels: Vec<(u64, String)>, // 函数地址取址 (GOTPCREL)
     defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
+    error_attr_fns: HashSet<String>,       // __attribute__((error)) 函数名 (调用时发射 ud2)
     pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
     pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
     pub data_section: Vec<u8>,             // .data 节 (已初始化全局变量)
@@ -1265,6 +1266,7 @@ struct ParallelEmitCtx {
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
     func_param_types: HashMap<String, Vec<Type>>,
     defined_funcs: HashSet<String>,
+    error_attr_fns: HashSet<String>,
     global_reg_bindings: HashMap<String, u8>,
     rodata: Vec<u8>,
     string_pool: HashMap<Vec<u8>, u64>,
@@ -1332,6 +1334,7 @@ impl Codegen {
             pending_code_rels: vec![],
             pending_func_addr_rels: vec![],
             defined_funcs: HashSet::new(),
+            error_attr_fns: HashSet::new(),
             pending_data_rels: vec![],
             pending_sib_data_rels: vec![],
             data_section: vec![],
@@ -2735,6 +2738,10 @@ impl Codegen {
                 if let Some(body) = &f.body {
                     Self::check_attr_diagnostics(&body.items, &diag_fns, &f.name.name);
                 }
+                // 记录 __attribute__((error)) 函数名, 调用时发射 ud2
+                if f.error_msg.is_some() {
+                    self.error_attr_fns.insert(f.name.name.clone());
+                }
             }
         }
         // 预扫描: 记录哪些函数是可变参数的
@@ -3077,6 +3084,13 @@ impl Codegen {
                 }
             }
         }
+        // ELF 规范要求: 所有 LOCAL 符号必须出现在 GLOBAL/WEAK 符号之前
+        // 按 bind 排序: STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
+        // 保留第一个 null 符号不动 (index 0)
+        let null_sym = self.symbols[0].clone();
+        self.symbols.remove(0);
+        self.symbols.sort_by_key(|s| s.bind);
+        self.symbols.insert(0, null_sym);
         for (i, sym) in self.symbols.iter().enumerate() {
             if !sym.name.is_empty() {
                 self.sym_index.insert(sym.name.clone(), i as u32);
@@ -4855,6 +4869,13 @@ impl Codegen {
                     if copy_fn_names.contains(&f.name.name) {
                         return None;
                     }
+                    // __attribute__((error("..."))) 函数: 仅用于编译期断言
+                    // (如内核 __compiletime_assert_*), 不应发射函数体.
+                    // 即使 parser 误给了 body (块内 extern 声明被误解析为定义),
+                    // 也必须跳过, 否则多个 TU 会产生多重定义.
+                    if f.error_msg.is_some() {
+                        return None;
+                    }
                     if f.body.is_some() {
                         Some(f.clone())
                     } else {
@@ -4903,6 +4924,7 @@ impl Codegen {
             nested_funcs: self.nested_funcs.clone(),
             func_param_types: self.func_param_types.clone(),
             defined_funcs: self.defined_funcs.clone(),
+            error_attr_fns: self.error_attr_fns.clone(),
             global_reg_bindings: self.global_reg_bindings.clone(),
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
@@ -4936,6 +4958,7 @@ impl Codegen {
         cg.nested_funcs = ctx.nested_funcs;
         cg.func_param_types = ctx.func_param_types;
         cg.defined_funcs = ctx.defined_funcs;
+        cg.error_attr_fns = ctx.error_attr_fns;
         cg.global_reg_bindings = ctx.global_reg_bindings;
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
@@ -6358,22 +6381,36 @@ impl Codegen {
             Stmt::If {
                 cond, then_, else_, ..
             } => {
-                self.gen_expr(cond, 0);
-                self.emit(&[0x85, 0xc0]);
-                let le = self.fresh_label();
-                let lend = self.fresh_label();
-                self.jmp_rel32(&le, JumpKind::Je);
-                self.gen_stmt(then_);
-                // Skip dead jmp when then-body ends with return
-                let then_ends_ret = Self::stmt_ends_with_return(then_);
-                if !then_ends_ret {
-                    self.jmp_rel32(&lend, JumpKind::Jmp);
+                // 常量条件优化: if (1) 只生成 then, if (0) 只生成 else
+                // 这对 __compiletime_assert 等内核宏至关重要:
+                // 条件为真时不应生成对 __compiletime_assert_N 的调用
+                if let Ok(cv) = const_eval::eval(cond) {
+                    if cv != 0 {
+                        // condition is true
+                        self.gen_stmt(then_);
+                    } else if let Some(el) = else_ {
+                        // condition is false
+                        self.gen_stmt(el);
+                    }
+                    // else: condition is false and no else branch → skip entirely
+                } else {
+                    self.gen_expr(cond, 0);
+                    self.emit(&[0x85, 0xc0]);
+                    let le = self.fresh_label();
+                    let lend = self.fresh_label();
+                    self.jmp_rel32(&le, JumpKind::Je);
+                    self.gen_stmt(then_);
+                    // Skip dead jmp when then-body ends with return
+                    let then_ends_ret = Self::stmt_ends_with_return(then_);
+                    if !then_ends_ret {
+                        self.jmp_rel32(&lend, JumpKind::Jmp);
+                    }
+                    self.label(&le);
+                    if let Some(el) = else_ {
+                        self.gen_stmt(el);
+                    }
+                    self.label(&lend);
                 }
-                self.label(&le);
-                if let Some(el) = else_ {
-                    self.gen_stmt(el);
-                }
-                self.label(&lend);
             }
             Stmt::While { cond, body, .. } => {
                 let ls = self.fresh_label();
@@ -7659,6 +7696,12 @@ impl Codegen {
                         }
                     } else if name_name.starts_with("__builtin_") {
                         self.gen_unknown_builtin_fallback(&name_name, ty, dst, sret_off);
+                    } else if self.error_attr_fns.contains(&name_name) {
+                        // __attribute__((error("..."))) 函数: 编译期断言失败时
+                        // 理论上不应到达此处 (常量折叠应消除调用).
+                        // 作为安全网, 发射 ud2 (unreachable) 避免生成对外部
+                        // 未定义函数的调用, 防止链接失败.
+                        self.emit(&[0x0f, 0x0b]); // ud2
                     } else {
                         self.emit_sysv_call(Some(&name_name), None, args, sret_off);
                         if let Some(off) = sret_off {
@@ -11159,7 +11202,12 @@ impl Codegen {
                     self.mov(dst, 0);
                 }
             }
-            _ => panic!("binop: {:?}", op),
+            // AndAnd/OrOr 由 gen_expr 短路求值处理, 不应到达此处.
+            // 使用显式匹配而非通配符, 确保新增 BinOp 变体时编译器
+            // 报 non-exhaustive match 错误 (而非运行时 panic).
+            BinOp::AndAnd | BinOp::OrOr => {
+                unreachable!("logical ops are lowered via short-circuit in gen_expr")
+            }
         }
     }
 
