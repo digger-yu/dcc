@@ -2411,6 +2411,34 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.linker_entry.is_some() {
         link_cfg.entry = cfg.linker_entry.clone().unwrap();
     }
+    // P9: 自动检测系统 libc 并将其导出符号加入 allowed_undef,
+    // 减少内置链接器对 host cc 的依赖。
+    if matches!(
+        output_kind,
+        link::OutputKind::Executable | link::OutputKind::PIE
+    ) {
+        if let Ok(libc_info) = link::dso_cache::resolve_and_load(
+            &mut link_cfg.dso_cache,
+            "c",
+            &link_cfg.lib_search_paths,
+            None,
+        ) {
+            let extra: Vec<String> = libc_info
+                .dyn_symbols
+                .keys()
+                .filter(|s| !link_cfg.allowed_undef.contains(s))
+                .cloned()
+                .collect();
+            if cfg.verbose && !extra.is_empty() {
+                eprintln!(
+                    "dcc-link: auto-resolved {} libc symbols from {}",
+                    extra.len(),
+                    libc_info.path.display()
+                );
+            }
+            link_cfg.allowed_undef.extend(extra);
+        }
+    }
     let bytes = if cfg.linker_lto {
         // LTO path: read .dcc.lto sections from input .o files,
         // deserialize bitcode, run cross-TU optimization, then link
