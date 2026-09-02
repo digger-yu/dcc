@@ -1433,10 +1433,11 @@ impl<'a> Parser<'a> {
                         self.advance(); // vector_size
                         if self.cur.kind == TokKind::LParen {
                             self.advance(); // (
-                            if self.cur.kind == TokKind::Number {
-                                let v: usize = parse_int_lit(&self.cur.text) as usize;
-                                attrs.vector_size = Some(v);
-                                self.advance();
+                            // 支持常量表达式: vector_size(8 * sizeof(int))
+                            if let Some(e) = self.parse_expr_bp(2) {
+                                if let Ok(v) = crate::const_eval::eval(&e) {
+                                    attrs.vector_size = Some(v as usize);
+                                }
                             }
                             if self.cur.kind == TokKind::RParen {
                                 self.advance();
@@ -1449,7 +1450,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                     // __attribute__((may_alias)): 类型属性，禁用 TBAA
-                    "may_alias" => {
+                    "may_alias" | "__may_alias__" => {
                         attrs.may_alias = true;
                         self.advance();
                     }
@@ -2868,13 +2869,56 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            if !self.expect(TokKind::Semi, "';'") {
-                return None;
-            }
+            let base_ty = ty.clone();
             if !self.register_typedef(&name, ty.clone()) {
                 return None;
             }
-            return Some(vec![Decl::Typedef { name, ty, span: sp }]);
+            let mut all_decls = vec![Decl::Typedef { name, ty, span: sp }];
+            // 支持多声明符 typedef: typedef int foo, *bar, baz();
+            while self.cur.kind == TokKind::Comma {
+                self.advance();
+                // 解析额外指针后缀
+                let mut decl_ty = base_ty.clone();
+                decl_ty = self.parse_ptr_suffix(decl_ty);
+                // 解析数组后缀
+                while self.cur.kind == TokKind::LBracket {
+                    self.advance();
+                    let arr_size = if self.cur.kind != TokKind::RBracket {
+                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict | TokKind::KwStatic) {
+                            self.advance();
+                        }
+                        if self.cur.kind == TokKind::RBracket {
+                            ArraySize::Const(0)
+                        } else {
+                            let e = self.parse_expr()?;
+                            if let Ok(v) = crate::const_eval::eval(&e) {
+                                ArraySize::Const(v.max(0) as usize)
+                            } else {
+                                match &e {
+                                    Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                                    _ => ArraySize::Var(Box::new(e)),
+                                }
+                            }
+                        }
+                    } else {
+                        ArraySize::Const(0)
+                    };
+                    if !self.expect(TokKind::RBracket, "']'") {
+                        return None;
+                    }
+                    decl_ty = Type::Array(Box::new(decl_ty.into()), arr_size);
+                }
+                let next_name = self.parse_typedef_name()?;
+                let next_sp = next_name.span.clone();
+                if !self.register_typedef(&next_name, decl_ty.clone()) {
+                    return None;
+                }
+                all_decls.push(Decl::Typedef { name: next_name, ty: decl_ty, span: next_sp });
+            }
+            if !self.expect(TokKind::Semi, "';'") {
+                return None;
+            }
+            return Some(all_decls);
         }
         // struct/union/enum 定义或声明
         if matches!(
@@ -3237,10 +3281,15 @@ impl<'a> Parser<'a> {
                     if self.cur.kind == TokKind::Ident {
                         let name = self.cur.text.clone();
                         self.advance();
+                        // 解析数组后缀 (如 char *argv[])
+                        let mut decl_ty = base_ty.clone();
+                        if self.cur.kind == TokKind::LBracket {
+                            decl_ty = self.parse_array_suffix(decl_ty);
+                        }
                         for p in &mut kr_params {
                             if let Some(n) = &p.name {
                                 if n.name == name {
-                                    p.ty = base_ty.clone();
+                                    p.ty = decl_ty.clone();
                                 }
                             }
                         }
@@ -5648,10 +5697,12 @@ impl<'a> Parser<'a> {
             self.advance(); // vector_size
             if self.cur.kind == TokKind::LParen {
                 self.advance(); // (
-                let size = if self.cur.kind == TokKind::Number {
-                    let v: usize = self.cur.text.parse().unwrap_or(16);
-                    self.advance();
-                    v
+                let size = if let Some(e) = self.parse_expr_bp(2) {
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        v as usize
+                    } else {
+                        16
+                    }
                 } else {
                     16
                 };
@@ -6262,6 +6313,14 @@ impl<'a> Parser<'a> {
                         wrapped = Type::Ptr(Box::new(wrapped.into()));
                     }
                     ty = wrapped;
+                } else if self.cur.kind == TokKind::LBracket {
+                    // 指向数组的指针: int (*a)[2]
+                    // 解析数组后缀并包裹指针
+                    let mut wrapped: Type = ty;
+                    for _ in 0..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    ty = self.parse_array_suffix(wrapped);
                 } else {
                     // 无后续 (params): 只是多级指针, 不是函数指针
                     let mut wrapped: Type = ty;
@@ -8174,6 +8233,19 @@ impl<'a> Parser<'a> {
                             }
                             let value = self.parse_expr_bp(2)?;
                             InitItem::Designated { designator, value }
+                        } else if self.cur.kind == TokKind::Ident
+                            && self.peek.kind == TokKind::Colon
+                        {
+                            // GNU 旧式指定初始化器: field: value (等价于 .field = value)
+                            let field_name = self.cur.text.clone();
+                            let field_span = self.cur.span.clone();
+                            self.advance(); // ident
+                            self.advance(); // :
+                            let value = self.parse_expr_bp(2)?;
+                            InitItem::Designated {
+                                designator: Designator::Field(Ident { name: field_name, span: field_span }),
+                                value,
+                            }
                         } else {
                             let e = self.parse_expr_bp(2)?;
                             InitItem::Expr(e)
@@ -9129,6 +9201,19 @@ impl<'a> Parser<'a> {
                                     }
                                     let value = self.parse_expr_bp(2)?;
                                     InitItem::Designated { designator, value }
+                                } else if self.cur.kind == TokKind::Ident
+                                    && self.peek.kind == TokKind::Colon
+                                {
+                                    // GNU 旧式指定初始化器: field: value
+                                    let field_name = self.cur.text.clone();
+                                    let field_span = self.cur.span.clone();
+                                    self.advance(); // ident
+                                    self.advance(); // :
+                                    let value = self.parse_expr_bp(2)?;
+                                    InitItem::Designated {
+                                        designator: Designator::Field(Ident { name: field_name, span: field_span }),
+                                        value,
+                                    }
                                 } else {
                                     let e = self.parse_expr_bp(2)?;
                                     InitItem::Expr(e)
@@ -9174,6 +9259,19 @@ impl<'a> Parser<'a> {
                             }
                             let value = self.parse_expr_bp(2)?;
                             InitItem::Designated { designator, value }
+                        } else if self.cur.kind == TokKind::Ident
+                            && self.peek.kind == TokKind::Colon
+                        {
+                            // GNU 旧式指定初始化器: field: value
+                            let field_name = self.cur.text.clone();
+                            let field_span = self.cur.span.clone();
+                            self.advance(); // ident
+                            self.advance(); // :
+                            let value = self.parse_expr_bp(2)?;
+                            InitItem::Designated {
+                                designator: Designator::Field(Ident { name: field_name, span: field_span }),
+                                value,
+                            }
                         } else {
                             // 普通初始化值
                             let e = self.parse_expr_bp(2)?;
