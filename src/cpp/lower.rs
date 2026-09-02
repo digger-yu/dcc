@@ -147,6 +147,111 @@ pub struct Lower {
     pub typedef_aliases: std::collections::HashMap<String, MangleType>,
 }
 
+// === 特性提交检查清单 ===
+// 添加新 C++ 特性测试 fixture 时, 需同步更新:
+// 1. 本列表 (CPP_FEATURE_KEYWORDS) — 添加新关键字/构造模式
+// 2. strip_cpp_keywords — 如需特殊剥离逻辑 (如 import 整句删除)
+// 3. 命名空间 typedef — 确认 qualify_name 覆盖
+
+/// C++ 特性关键字/构造模式 — 单一数据源.
+/// `src_has_cpp` (driver.rs) 用于路由检测,
+/// `strip_cpp_keywords` (本文件) 用于 strip 路径的关键字剥离.
+///
+/// 条目分两类:
+/// - 含空格/特殊字符的模式 (如 `"class "`, `"::"`, `".*"`):
+///   检测用 `contains`, 不做词边界检查
+/// - 纯字母标识符 (如 `"template"`, `"noexcept"`):
+///   检测用词边界检查 (`has_cpp_feature`)
+pub const CPP_FEATURE_KEYWORDS: &[&str] = &[
+    // 基础 C++ 关键字
+    "class ",
+    "template",
+    "namespace ",
+    "try {",
+    "throw ",
+    // 作用域/访问/操作符
+    "::",
+    "operator",
+    "public:",
+    "private:",
+    "protected:",
+    " new ",
+    " delete ",
+    // C++11 using 类型别名
+    "using ",
+    // 协程关键字
+    "co_await",
+    "co_yield",
+    "co_return",
+    // 模块关键字
+    "export ",
+    "import ",
+    // 虚继承
+    "virtual ",
+    // 成员指针运算符
+    ".*",
+    "->*",
+];
+
+/// strip 路径额外需要剥离的关键字 (词边界匹配, 直接删除或特殊处理).
+/// 这些关键字在 GCC 扩展 / C++ 源中常见, strip 路径需统一处理.
+pub const CPP_STRIP_KEYWORDS: &[&str] = &[
+    "noexcept",
+    "constexpr",
+    "consteval",
+    "constinit",
+    "decltype",
+    "nullptr",
+    "static_cast",
+    "dynamic_cast",
+    "const_cast",
+    "reinterpret_cast",
+    "override",
+    "final",
+    "friend",
+    "export",
+];
+
+/// 检查文本是否包含 C++ 特性 (用于 `src_has_cpp` 路由检测).
+/// 对纯字母关键字做词边界检查, 对含特殊字符的模式用 `contains`.
+pub fn has_cpp_feature(text: &str) -> bool {
+    CPP_FEATURE_KEYWORDS
+        .iter()
+        .any(|kw| has_cpp_pattern(text, kw))
+}
+
+/// 检查文本是否包含指定模式.
+/// 纯字母关键字做词边界检查; 其他模式用 `contains`.
+pub fn has_cpp_pattern(text: &str, pattern: &str) -> bool {
+    let is_pure_ident = pattern.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if is_pure_ident {
+        has_cpp_word(text, pattern)
+    } else {
+        text.contains(pattern)
+    }
+}
+
+/// 检查文本是否包含指定关键字 (词边界检查).
+/// 关键字前后必须是非标识符字符 (或文本边界).
+pub fn has_cpp_word(text: &str, word: &str) -> bool {
+    let wb = word.as_bytes();
+    let tb = text.as_bytes();
+    let wl = wb.len();
+    if wl == 0 || tb.len() < wl {
+        return false;
+    }
+    for i in 0..=(tb.len() - wl) {
+        if &tb[i..i + wl] == wb {
+            let before_ok = i == 0 || !is_ident_char(tb[i - 1]);
+            let after_ok = i + wl >= tb.len() || !is_ident_char(tb[i + wl]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
 pub fn is_c_keyword(s: &str) -> bool {
     matches!(
@@ -6483,13 +6588,12 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                 continue;
             }
         }
-        // 检查 constexpr / consteval / constinit
-        for &(kw, kw_len) in &[
-            (b"constexpr" as &[u8], 9usize),
-            (b"consteval", 9),
-            (b"constinit", 9),
-        ] {
-            if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
+        // 检查 constexpr / consteval / constinit (引用 CPP_STRIP_KEYWORDS)
+        for &kw in CPP_STRIP_KEYWORDS {
+            if kw.len() != 9 { continue; } // constexpr/consteval/constinit 均 9 字节
+            let kw_b = kw.as_bytes();
+            let kw_len = kw.len();
+            if i + kw_len <= len && &bytes[i..i + kw_len] == kw_b {
                 let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
                 if before_ok && after_ok {
@@ -6601,9 +6705,12 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                 }
             }
         }
-        // override / final / friend / export (类方法后/模块导出) → 删除
-        for &(kw, kw_len) in &[(b"override" as &[u8], 8usize), (b"final", 5), (b"friend", 6), (b"export", 6)] {
-            if i + kw_len <= len && &bytes[i..i + kw_len] == kw {
+        // override / final / friend / export (引用 CPP_STRIP_KEYWORDS)
+        for &kw in &["override", "final", "friend", "export"] {
+            // 上述关键字均在 CPP_STRIP_KEYWORDS 中注册
+            let kw_b = kw.as_bytes();
+            let kw_len = kw.len();
+            if i + kw_len <= len && &bytes[i..i + kw_len] == kw_b {
                 let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 let after_ok = i + kw_len >= len || !is_ident_char(bytes[i + kw_len]);
                 if before_ok && after_ok {

@@ -1833,35 +1833,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     //    `::` 拼成 `_` 而不剩 const / 注入 this, 产出非法 C.
     let src_has_cpp = {
         let raw = String::from_utf8_lossy(&src);
-        let has = |t: &str| {
-            t.contains("class ")
-                || t.contains("template")
-                || t.contains("namespace ")
-                || t.contains("try {")
-                || t.contains("throw ")
-                // M30.2: C 不存在的作用域运算符 / 访问说明符 / 操作符重载
-                || t.contains("::")
-                || t.contains("operator")
-                || t.contains("public:")
-                || t.contains("private:")
-                || t.contains("protected:")
-                || t.contains(" new ")
-                || t.contains(" delete ")
-                // C++11: using type alias (using Name = Type;)
-                || t.contains("using ")
-                // M26: 协程关键字 (co_yield/co_await/co_return)
-                || t.contains("co_await")
-                || t.contains("co_yield")
-                || t.contains("co_return")
-                // M18/M26: 模块 export/import 关键字
-                || t.contains("export ")
-                || t.contains("import ")
-                // M26: 虚继承 (virtual 后跟基类说明)
-                || t.contains("virtual ")
-                // M27: 成员指针运算符 .* 和 ->*
-                || t.contains(".*")
-                || t.contains("->*")
-        };
+        let has = |t: &str| crate::cpp::lower::has_cpp_feature(t);
         has(&raw) || has(&pp_out.text)
     };
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
