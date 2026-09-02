@@ -6645,6 +6645,15 @@ impl Preprocessor {
                 | "__builtin_memcpy_inline"
                 | "__builtin_memset_inline"
                 | "__builtin_unwind_init"
+                // IO / bcmp builtins (GCC torture test)
+                | "__builtin_printf"
+                | "__builtin_fprintf"
+                | "__builtin_sprintf"
+                | "__builtin_snprintf"
+                | "__builtin_bcmp"
+                | "__builtin_putc"
+                | "__builtin_putchar"
+                | "__builtin_puts"
         )
     }
 

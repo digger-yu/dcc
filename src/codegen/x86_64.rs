@@ -15844,6 +15844,54 @@ impl Codegen {
             "__builtin_unwind_init" => {
                 true
             }
+            // __builtin_printf / __builtin_fprintf / __builtin_sprintf / __builtin_snprintf:
+            // 转发到 libc (同 __builtin_strcpy 等模式)
+            "__builtin_printf" | "__builtin_fprintf" | "__builtin_sprintf" | "__builtin_snprintf" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    if i >= 6 { break; }
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_bcmp: 转发到 libc bcmp
+            "__builtin_bcmp" => {
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    if i >= 6 { break; }
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("bcmp");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_putc / __builtin_putchar / __builtin_puts: 转发到 libc
+            "__builtin_putc" | "__builtin_putchar" | "__builtin_puts" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    if i >= 6 { break; }
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             _ => false,
         }
     }
