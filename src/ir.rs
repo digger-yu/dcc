@@ -6,6 +6,7 @@
 use crate::ast::{self, BinOp, BlockItem, Decl, Expr, InitItem, QualifierFlags, Stmt, Type, UnOp};
 use crate::const_eval;
 use crate::diagnostics::{Diagnostic, Severity, Span};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueType {
@@ -131,8 +132,46 @@ impl Module {
 /// Returns `Err(errors)` only when there are actual `Severity::Error`
 /// diagnostics that prevent further compilation.
 pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diagnostic>> {
+    // Pre-scan type definitions for Type::Named resolution
+    let mut type_map: HashMap<String, Type> = HashMap::new();
+    for decl in &source.decls {
+        match decl {
+            Decl::StructDef(sd) => {
+                let key = format!("struct {}", sd.name.name);
+                type_map.entry(key).or_insert_with(|| Type::Struct(
+                    format!("struct {}", sd.name.name),
+                    std::sync::Arc::new(sd.fields.clone()),
+                    1,
+                ));
+            }
+            Decl::UnionDef(sd) => {
+                let key = format!("union {}", sd.name.name);
+                type_map.entry(key).or_insert_with(|| Type::Union(
+                    format!("union {}", sd.name.name),
+                    std::sync::Arc::new(sd.fields.clone()),
+                    1,
+                ));
+            }
+            Decl::EnumDef(ed) => {
+                let key = format!("enum {}", ed.name.name);
+                let variants: Vec<(String, i64)> = ed.variants.iter().map(|(id, val)| {
+                    (id.name.clone(), val.unwrap_or(0))
+                }).collect();
+                type_map.entry(key).or_insert_with(|| Type::Enum(
+                    format!("enum {}", ed.name.name),
+                    std::sync::Arc::new(variants),
+                    None,
+                ));
+            }
+            Decl::Typedef { name, ty, .. } => {
+                type_map.entry(name.name.clone()).or_insert_with(|| ty.clone());
+            }
+            _ => {}
+        }
+    }
     let mut cx = Lowering {
         diagnostics: Vec::new(),
+        type_defs: type_map,
     };
     let mut functions = Vec::new();
     let mut globals = Vec::new();
@@ -552,6 +591,9 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
 
 struct Lowering {
     diagnostics: Vec<Diagnostic>,
+    /// Pre-scanned type definition map: name → resolved Type.
+    /// Covers typedefs, struct/union/enum tags for Type::Named resolution.
+    type_defs: HashMap<String, Type>,
 }
 
 impl Lowering {
@@ -656,12 +698,18 @@ impl Lowering {
             }
             Type::Atomic(inner) => self.lower_type(&inner.base, span),
             Type::Named(name) => {
-                self.diagnostics.push(Diagnostic::err(
-                    "E1001",
-                    format!("unresolved type '{}' reached typed IR", name),
+                // Try to resolve through pre-scanned type definitions
+                if let Some(resolved) = self.type_defs.get(name).cloned() {
+                    return self.lower_type(&resolved, span);
+                }
+                // Downgrade to warning: kernel code may have opaque types
+                // that are never fully defined in the current TU.
+                self.diagnostics.push(Diagnostic::warn(
+                    "W1013",
+                    format!("unresolved type '{}' in typed IR, assuming int", name),
                     span.clone(),
                 ));
-                ValueType::Void
+                ValueType::Integer { bits: 32, signed: true }
             }
         }
     }

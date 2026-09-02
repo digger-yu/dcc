@@ -605,7 +605,7 @@ fn diagnostic_error_snapshots() {
         }
         if matches!(
             case.name,
-            "e1004" | "e1009" | "e1010" | "e0300" | "e0010"
+            "e1001" | "e1004" | "e1009" | "e1010" | "e0300" | "e0010"
         ) {
             let arg_strings = dcc_args_for(case);
             let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();

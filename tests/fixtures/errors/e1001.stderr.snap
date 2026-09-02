@@ -1,4 +1,4 @@
-error[E1001]: unresolved type 'orphan_type' reached typed IR
+warning[W1013]: unresolved type 'orphan_type' in typed IR, assuming int
   --> <file>:3:11
    3 |    (void)x;
      |           ^
