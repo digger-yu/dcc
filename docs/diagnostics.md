@@ -1,6 +1,6 @@
 # DCC 错误诊断码参考
 
-> 最后更新：2026-07-21  
+> 最后更新：2026-08-28  
 > 实现：`src/diagnostics.rs` · 回归：`tests/errors.rs` + `tests/fixtures/errors/`
 
 本文档是 DCC **Diagnostic 错误/警告码**的权威说明。CLI 参数错误（`dcc: error: …`，无 `[Exxxx]`）不在编号体系内，见 [CLI 非编号错误](#cli-非编号错误)。
@@ -78,7 +78,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | `E10xx` | 1001–1010 | Typed IR（语义/降级） | `src/ir.rs` |
 | `W03xx` | 0301–0313 | 类型转换/OpenMP 警告 | `src/parser.rs`, `src/driver.rs` |
 | `W04xx` | 0400–0403 | PCH 警告 | `src/preproc.rs` |
-| `W10xx` | 1000 | 隐式声明警告 | `src/parser.rs` |
+| `W10xx` | 1000–1015 | IR/Parser 降级警告 | `src/ir.rs`, `src/parser.rs` |
 
 **严重性**：
 
@@ -119,7 +119,19 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **W0005** | `impossible constraint: asm constraint '…' does not match expression type '…'` | 约束与类型不匹配 | asm 约束与操作数表达式类型不兼容（如浮点绑 `r`/`rm`、整数绑 `x`）且按 dcc 兼容策略仅告警不中断；GCC 通常报 `impossible constraint` error | `use an XMM/x87 constraint for floating-point operands or change the expression type` | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | `name all operands or use positional references consistently` | — |
 | **W0008** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` / `duplicate asm operand name '…'` / `matching constraint references …` | mini-asm 非法操作数降级 | 模板占位符缺失/越界、matching constraint 数字无效、重复 `[name]` 等原先 hard error 的 asm 操作数问题 | `add the missing operand or fix the template index` 等 | — |
-| **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
+
+### IR/Parser 降级警告：`W1000`、`W1004`、`W1009`–`W1015`
+
+| 码 | 消息 | 含义 | 触发条件 | 源文件 |
+|----|------|------|----------|--------|
+| **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | `parser.rs` |
+| **W1004** | `dereference of non-pointer type (implicit declaration?)` | 非指针解引用降级 | 对非指针类型做 `*`；通常由隐式声明引起 | `ir.rs` |
+| **W1009** | `unknown aggregate member '…' (incomplete struct?)` | 未知聚合成员降级 | 对不完整 struct 做成员访问 | `ir.rs` |
+| **W1010** | `member access on non-struct/union type (implicit declaration?)` | 非聚合成员访问降级 | 对非 struct/union 做 `.`/`->` | `ir.rs` |
+| **W1012** | `variable-length array size not determinable at compile time` | VLA 大小非常量 | `ArraySize::Var` 且 `const_eval` 求值失败 | `ir.rs` |
+| **W1013** | `unresolved type '…' in typed IR, assuming int` | 未解析类型降级 | `Type::Named` 在预扫描映射中未找到 | `ir.rs` |
+| **W1014** | `unknown qualifier token '…' in pointer declarator` | 未知指针限定符 | `skip_ptr_qualifiers` 遇到非 const/volatile/atomic/restrict 的标识符 | `parser.rs` |
+| **W1015** | `return type of '…' is not known; assuming int` | 未知 builtin 返回类型 | `__builtin_*` 不在已知列表中且无函数声明 | `parser.rs` |
 
 ---
 
@@ -203,7 +215,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 | 码 | 消息（典型） | 含义 | 触发条件 | Snapshot |
 |----|--------------|------|----------|----------|
-| **E1001** | `unresolved type '…' reached typed IR` | 未解析类型进入 IR | `__typeof__(orphan_type) x;` 等产生 `Type::Named` | `e1001.c` |
+| **E1001** | — | 预留：旧未解析类型硬错误已降级 | `Type::Named` 未解析类型现在按 **W1013** warning 处理，不再中止编译 | — | — |
 | **E1002** | `IR function has no name` | 函数名为空 | `int () { return 0; }` 无名函数定义 | `e1002.c` |
 | **E1003** | `unsupported floating-point operation …` | 不支持的 float 运算/转换 | 如 `float` 的 `|`、一元 `!`/`~`、float↔pointer；支持 `+ - * / %`、比较与 `&& \|\|`、float↔float、int↔float cast | `e1003.c` |
 | **E1004** | `cannot dereference a non-pointer expression` | 非法解引用 | `*x` 其中 `x` 非指针 | `e1004.c` |
@@ -218,7 +230,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 ## 8. 警告码汇总
 
-### Parser 警告：`W0001`–`W0008`、`W1000`
+### Parser 警告：`W0001`–`W0008`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
@@ -229,7 +241,8 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 | **W0005** | `impossible constraint: asm constraint '…' does not match expression type '…'` | 约束与类型不匹配 | asm 约束与操作数表达式类型不兼容（如浮点绑 `r`/`rm`、整数绑 `x`），dcc 仅告警不中断；GCC 通常报 `impossible constraint` error | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | — |
 | **W0008** | `…` | mini-asm 非法操作数降级 | 模板操作数缺失/越界、matching constraint 数字无效、重复 asm 操作数名等 | — |
-| **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
+
+IR/Parser 降级警告 `W1000`–`W1015` 详见 §3 末尾表格。
 
 ### 类型转换警告：`W0301`–`W0302`
 
