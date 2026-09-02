@@ -3232,21 +3232,36 @@ impl<'a> Parser<'a> {
                 // 解析 K&R 参数类型声明
                 let mut kr_params = params;
                 while self.is_type_start() && self.cur.kind != TokKind::LBrace {
-                    let ty = self.parse_type()?;
-                    // 可能有多个参数名共享同一类型
-                    while self.cur.kind == TokKind::Ident {
+                    let base_ty = self.parse_type()?;
+                    // 第一个声明符: 类型已含指针/数组后缀
+                    if self.cur.kind == TokKind::Ident {
                         let name = self.cur.text.clone();
                         self.advance();
-                        // 更新对应参数的类型
                         for p in &mut kr_params {
                             if let Some(n) = &p.name {
                                 if n.name == name {
-                                    p.ty = ty.clone();
+                                    p.ty = base_ty.clone();
                                 }
                             }
                         }
-                        if self.cur.kind == TokKind::Comma {
+                    }
+                    // 后续声明符: , *name 或 , name[] 共享同一基础类型
+                    while self.cur.kind == TokKind::Comma {
+                        self.advance();
+                        // 解析额外的指针/数组后缀
+                        let mut decl_ty = base_ty.clone();
+                        decl_ty = self.parse_ptr_suffix(decl_ty);
+                        decl_ty = self.parse_array_suffix(decl_ty);
+                        if self.cur.kind == TokKind::Ident {
+                            let name = self.cur.text.clone();
                             self.advance();
+                            for p in &mut kr_params {
+                                if let Some(n) = &p.name {
+                                    if n.name == name {
+                                        p.ty = decl_ty.clone();
+                                    }
+                                }
+                            }
                         }
                     }
                     if self.cur.kind == TokKind::Semi {
