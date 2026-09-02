@@ -526,7 +526,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let allow_implicit_function_decl = cfg.permissive
         || matches!(
             cfg.std,
-            crate::cli::StdMode::C89 | crate::cli::StdMode::Gnu89
+            crate::cli::StdMode::C89
+                | crate::cli::StdMode::Gnu89
+                | crate::cli::StdMode::Gnu99
+                | crate::cli::StdMode::Gnu11
+                | crate::cli::StdMode::Gnu17
         );
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
