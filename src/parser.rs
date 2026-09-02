@@ -5507,7 +5507,27 @@ impl<'a> Parser<'a> {
                     {
                         self.decl_quals |= QualifierFlags::RESTRICT
                     }
-                    _ => {}
+                    _ => {
+                        // Address space qualifiers (__seg_gs etc.) are
+                        // handled by spec_addr_space elsewhere; only warn
+                        // for truly unknown identifier tokens.
+                        if self.cur.kind == TokKind::Ident
+                            && !matches!(
+                                self.cur.text.as_str(),
+                                "__seg_gs" | "__seg_fs" | "__seg_ds"
+                                    | "__seg_es" | "__seg_cs" | "__seg_ss"
+                            )
+                        {
+                            self.warn_here(
+                                "W1014",
+                                format!(
+                                    "unknown qualifier token '{}' in pointer declarator",
+                                    self.cur.text
+                                ),
+                                Some("expected const, volatile, atomic, or restrict"),
+                            );
+                        }
+                    }
                 }
                 self.advance();
             }
