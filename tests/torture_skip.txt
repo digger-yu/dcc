@@ -1,0 +1,7 @@
+# GCC C Torture Suite — dcc 已知跳过列表
+#
+# 每行一个文件名（精确匹配）或前缀 + *（glob 匹配）。
+# 以 # 开头的行为注释。
+#
+# 随着 dcc 功能完善，逐步删除对应条目以扩大测试覆盖。
+# 运行 `cargo test --release torture` 后根据失败输出将新条目追加到此处。

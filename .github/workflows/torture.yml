@@ -1,0 +1,42 @@
+# GCC C Torture Suite — 编译器正确性验证
+#
+# 每次 CI 运行都从 GCC 仓库拉取最新 torture suite，
+# 用 dcc 编译并运行全部测试，汇总通过/失败/跳过数。
+
+name: gcc-torture
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  torture:
+    name: "GCC C Torture Suite"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup GCC C Torture Suite
+        run: bash scripts/setup_torture.sh
+
+      - name: Run torture tests
+        run: cargo test --release -- torture --nocapture
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## GCC C Torture Suite Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tests run with dcc compiled from this commit." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See test output above for pass/fail/skip breakdown." >> $GITHUB_STEP_SUMMARY
