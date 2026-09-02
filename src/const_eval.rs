@@ -410,7 +410,15 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
             let v = take1(args)?;
             Ok(Some((v as u64).swap_bytes() as i128))
         }
-        _ => Ok(None),
+        _ => {
+            // Unknown __builtin_* functions are not silently ignored;
+            // return a distinct error so callers can differentiate from
+            // non-builtin calls that are simply not constant.
+            if name.starts_with("__builtin_") {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(None)
+        }
     }
 }
 
