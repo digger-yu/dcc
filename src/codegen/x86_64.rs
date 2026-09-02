@@ -33,8 +33,9 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
                 Type::Struct(_, fs, _) | Type::Union(_, fs, _) => fs.as_ref(),
                 _ => return None,
             };
-            let f = fields.iter().find(|f| f.name == name.name)?;
-            Some((f.offset, f.ty.size(), f.ty.clone()))
+            // Use find_field for anonymous struct/union穿透 support
+            let (f, extra_off) = find_field(fields, &name.name)?;
+            Some((f.offset + extra_off, f.ty.size(), f.ty.clone()))
         }
         Designator::Index(idx_expr) => {
             let elem_ty = match ty {
