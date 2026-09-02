@@ -2163,6 +2163,26 @@ fn arch_from_target(t: &crate::cli::TargetTriple) -> crate::debug::ArchKind {
     }
 }
 
+/// 从 raw_args 解析 -Wl,--dynamic-linker= 或 -Wl,-dynamic-linker, 选项。
+/// 支持格式:
+///   -Wl,--dynamic-linker=/path
+///   -Wl,--dynamic-linker,/path
+///   -Wl,-dynamic-linker,/path
+fn parse_dynamic_linker(raw_args: &[String]) -> Option<String> {
+    for arg in raw_args {
+        if let Some(path) = arg.strip_prefix("-Wl,--dynamic-linker=") {
+            return Some(path.to_string());
+        }
+        if let Some(rest) = arg.strip_prefix("-Wl,--dynamic-linker,") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = arg.strip_prefix("-Wl,-dynamic-linker,") {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
 /// 返回架构对应的动态链接器路径
 fn dynamic_linker_path(arch: crate::debug::ArchKind) -> String {
     match arch {
@@ -2351,12 +2371,15 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
         arch: arch_from_target(&cfg.target),
         // PIE/.so 需要 PT_INTERP 让动态链接器处理 GOT/重定位;
-        // TODO: parse from -Wl,--dynamic-linker=
-        dynamic_linker: matches!(
-            output_kind,
-            link::OutputKind::PIE | link::OutputKind::Shared
-        )
-        .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
+        // 支持 -Wl,--dynamic-linker= 覆盖默认路径
+        dynamic_linker: parse_dynamic_linker(&cfg.raw_args)
+            .or_else(|| {
+                matches!(
+                    output_kind,
+                    link::OutputKind::PIE | link::OutputKind::Shared
+                )
+                .then(|| dynamic_linker_path(arch_from_target(&cfg.target)))
+            }),
         vdso: cfg.vdso.clone().or_else(|| {
             // 自动检测系统 vDSO (仅 Executable/PIE 需要)
             if matches!(output_kind, link::OutputKind::Executable | link::OutputKind::PIE) {
