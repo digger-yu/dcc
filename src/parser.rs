@@ -6589,6 +6589,42 @@ impl<'a> Parser<'a> {
                 for init in inits {
                     match init {
                         InitItem::Expr(e) => Self::apply_shadow_map_expr(e, map),
+                        InitItem::Designated { value, designator, .. } => {
+                            Self::apply_shadow_map_expr(value, map);
+                            // Also handle index expressions in designators
+                            Self::apply_shadow_map_designator(designator, map);
+                        }
+                    }
+                }
+            }
+            Expr::StmtExpr { block, .. } => {
+                for item in &mut block.items {
+                    match item {
+                        BlockItem::Stmt(s) => Self::apply_shadow_map_stmt(s, map),
+                        BlockItem::Decl(d) => Self::apply_shadow_map_decl(d, map),
+                    }
+                }
+            }
+            Expr::VaArg { ap, .. } => {
+                Self::apply_shadow_map_expr(ap, map);
+            }
+            Expr::AsmExpr {
+                outputs, inputs, ..
+            } => {
+                for o in outputs {
+                    Self::apply_shadow_map_expr(o, map);
+                }
+                for i in inputs {
+                    Self::apply_shadow_map_expr(i, map);
+                }
+            }
+            Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+                Self::apply_shadow_map_expr(e, map);
+            }
+            Expr::CompoundLit { inits, .. } => {
+                for init in inits {
+                    match init {
+                        InitItem::Expr(e) => Self::apply_shadow_map_expr(e, map),
                         InitItem::Designated { value, .. } => {
                             Self::apply_shadow_map_expr(value, map);
                         }
@@ -6596,6 +6632,23 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// 应用遮蔽映射到设计符中的索引表达式
+    fn apply_shadow_map_designator(designator: &mut Designator, map: &[(String, String)]) {
+        match designator {
+            Designator::Index(e) => Self::apply_shadow_map_expr(e, map),
+            Designator::Range(l, r) => {
+                Self::apply_shadow_map_expr(l, map);
+                Self::apply_shadow_map_expr(r, map);
+            }
+            Designator::Chain(items) => {
+                for item in items {
+                    Self::apply_shadow_map_designator(item, map);
+                }
+            }
+            Designator::Field(_) => {}
         }
     }
 
