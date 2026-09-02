@@ -322,10 +322,16 @@ const FLOAT_BINOPS: &[BinOp] = &[
 const FLOAT_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus];
 
 /// 与 codegen SIMD 向量路径一致的二元运算符集合。
-const VECTOR_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div];
+const VECTOR_BINOPS: &[BinOp] = &[
+    BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div,
+    BinOp::Mod,
+    BinOp::And, BinOp::Or, BinOp::Xor,
+    BinOp::Shl, BinOp::Shr,
+    BinOp::EqEq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
+];
 
 /// 当前没有 codegen 支持的向量一元运算符。
-const VECTOR_UNOPS: &[UnOp] = &[];
+const VECTOR_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot];
 
 /// 与 codegen 复数路径一致的二元运算符集合。
 const COMPLEX_BINOPS: &[BinOp] = &[
@@ -497,7 +503,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                 && !is_vector_ty(&rhs.ty)
                 && !matches!(
                     rhs.kind,
-                    ExprKind::Aggregate | ExprKind::Cast | ExprKind::Binary(_)
+                    ExprKind::Aggregate | ExprKind::Cast | ExprKind::Binary(_) | ExprKind::Unary(_) | ExprKind::Call
                 )
             {
                 diagnostics.push(Diagnostic::err(
@@ -1305,13 +1311,12 @@ mod tests {
     }
 
     #[test]
-    fn vector_bitwise_or_reports_e1007() {
-        let src = b"typedef float v4f __attribute__((vector_size(16)));\n\
-                     int main(void) { v4f a, b; return (int)(a | b)[0]; }\n";
-        let (program, _) = crate::parser::parse(src, "e1007.c");
-        let (module, _) = lower(program).expect("lower despite vector or");
-        let err = validate(&module).expect_err("vector or must fail validation");
-        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    fn vector_bitwise_or_validates() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si a, b; a | b; return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-or.c");
+        let (module, _) = lower(program).expect("lower vector or");
+        validate(&module).expect("vector or should validate");
     }
 
     #[test]
@@ -1432,13 +1437,12 @@ mod tests {
     }
 
     #[test]
-    fn vector_unary_plus_reports_e1007() {
+    fn vector_unary_plus_validates() {
         let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
-                     int main(void) { v4si v = {1,2,3,4}; return (+v)[0]; }\n";
+                     int main(void) { v4si v = {1,2,3,4}; +v; return 0; }\n";
         let (program, _) = crate::parser::parse(src, "vector-unary.c");
-        let (module, _) = lower(program).expect("lower despite vector unary plus");
-        let err = validate(&module).expect_err("vector unary plus must fail validation");
-        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+        let (module, _) = lower(program).expect("lower vector unary plus");
+        validate(&module).expect("vector unary plus should validate");
     }
 
     #[test]

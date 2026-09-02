@@ -20,6 +20,9 @@ Thumbs.db
 # Qoder IDE
 .qoder/
 
+# Third-party test suites (populated by scripts/setup_torture.sh)
+third_party/
+
 # Autotools / configure artifacts
 config.log
 config.status

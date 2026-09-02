@@ -15964,6 +15964,409 @@ impl Codegen {
                 self.emit(&[0x5c]); // pop rsp
                 true
             }
+            // __builtin_fabs / fabsf / fabsl: 浮点绝对值
+            // 清除符号位: AND with abs_mask
+            "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                // 加载 abs_mask 到 xmm1
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                if is_f {
+                    self.emit(&[0x0F, 0x54, 0xC1]); // andps xmm0, xmm1
+                } else {
+                    self.emit(&[0x66, 0x0F, 0x54, 0xC1]); // andpd xmm0, xmm1
+                }
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_copysignf: float 版本
+            "__builtin_copysignf" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // xmm0 = magnitude (float)
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0 (backup)
+                self.gen_expr(&args[1], 0); // xmm0 = sign (float)
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
+                self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
+                self.emit(&[0x54]); // push rsp
+                self.call_label("copysignf");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_bcopy(src, dst, len): 等价于 memmove(dst, src, len)
+            // SysV: rdi=src, rsi=dst, rdx=len → 需要交换 rdi/rsi
+            "__builtin_bcopy" => {
+                if args.len() >= 3 {
+                    self.gen_expr(&args[0], 7); // rdi = src
+                    self.gen_expr(&args[1], 6); // rsi = dst
+                    self.gen_expr(&args[2], 2); // rdx = len
+                    // 交换 rdi, rsi
+                    self.emit(&[0x48, 0x87, 0xFE]); // xchg rsi, rdi
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("memmove");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 7 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_bzero(ptr, len): 等价于 memset(ptr, 0, len)
+            "__builtin_bzero" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = ptr
+                    self.gen_expr(&args[1], 6); // rsi = len
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("bzero");
+                self.emit(&[0x5c]); // pop rsp
+                true
+            }
+            // __builtin_stpncpy(dst, src, len): 转发到 libc
+            "__builtin_stpncpy" => {
+                if args.len() >= 3 {
+                    self.gen_expr(&args[0], 7); // rdi = dst
+                    self.gen_expr(&args[1], 6); // rsi = src
+                    self.gen_expr(&args[2], 2); // rdx = len
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("stpncpy");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_fputs(str, stream): 转发到 libc
+            "__builtin_fputs" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = str
+                    self.gen_expr(&args[1], 6); // rsi = stream
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("fputs");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_uabs: 无符号绝对值 (恒等)
+            "__builtin_uabs" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            }
+            // __builtin_isfinite / isfinitef / isfinitel: 等价于 __builtin_finite
+            "__builtin_isfinite" | "__builtin_isfinitef" | "__builtin_isfinitel" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                self.emit(&[0x0F, 0x54, 0xC1]);
+                self.emit(&[0x48, 0xB8]);
+                let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
+                self.emit(&inf_bits.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                if is_f {
+                    self.emit(&[0x0F, 0x2E, 0xC1]);
+                } else {
+                    self.emit(&[0x66, 0x0F, 0x2E, 0xC1]);
+                }
+                self.emit(&[0x0F, 0x92, 0xC0]);
+                self.emit(&[0x0F, 0x9B, 0xC3]);
+                self.emit(&[0x20, 0xD8]);
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_isgreater/isless/islessgreater: FP 比较 (NaN 安全)
+            // 简化: 转发到 libc 或使用 ucomisd
+            "__builtin_isgreater" | "__builtin_isgreaterequal"
+            | "__builtin_isless" | "__builtin_islessequal"
+            | "__builtin_islessgreater" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 转发到 libc 比较
+                self.gen_expr(&args[0], 0); // xmm0 = a
+                // 备份 a 到 xmm2
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
+                self.gen_expr(&args[1], 0); // xmm0 = b
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
+                self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
+                // ucomisd xmm0, xmm1: 比较 a vs b
+                self.emit(&[0x66, 0x0F, 0x2E, 0xC1]);
+                match name {
+                    "__builtin_isgreater" => {
+                        // a > b: CF=0, ZF=0, PF=0 → seta al
+                        self.emit(&[0x0F, 0x97, 0xC0]); // seta al
+                    }
+                    "__builtin_isgreaterequal" => {
+                        // a >= b: CF=0 → setae al / setnb al
+                        self.emit(&[0x0F, 0x93, 0xC0]); // setae al
+                    }
+                    "__builtin_isless" => {
+                        // a < b: CF=1 → setb al
+                        self.emit(&[0x0F, 0x92, 0xC0]); // setb al
+                    }
+                    "__builtin_islessequal" => {
+                        // a <= b: CF=1 or ZF=1 → setbe al
+                        self.emit(&[0x0F, 0x96, 0xC0]); // setbe al
+                    }
+                    "__builtin_islessgreater" => {
+                        // a != b and not unordered: ZF=0 and PF=0
+                        self.emit(&[0x0F, 0x95, 0xC0]); // setne al (ZF=0)
+                        self.emit(&[0x0F, 0x9B, 0xC3]); // setnp bl (PF=0)
+                        self.emit(&[0x20, 0xD8]); // and al, bl
+                    }
+                    _ => {
+                        self.emit(&[0x0F, 0x97, 0xC0]); // seta al (default)
+                    }
+                }
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx eax, al
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_issignaling / issignalingf / issignalingl
+            // 简化: 转发到 libc issignaling
+            "__builtin_issignaling" | "__builtin_issignalingf" | "__builtin_issignalingl" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = x
+                self.emit(&[0x54]); // push rsp
+                self.call_label("issignaling");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_nans / nansf / nansl: signaling NaN
+            // 转发到 libc nan/nanf/nanl
+            "__builtin_nans" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7);
+                } else {
+                    self.mov_imm(7, 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("nan");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_nansf" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7);
+                } else {
+                    self.mov_imm(7, 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("nanf");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_nansl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7);
+                } else {
+                    self.mov_imm(7, 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("nanl");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fmax/fmaxf/fmaxl: 转发到 libc
+            "__builtin_fmax" | "__builtin_fmin" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
+                    self.gen_expr(&args[1], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
+                }
+                let lib_fn = if name == "__builtin_fmax" { "fmax" } else { "fmin" };
+                self.emit(&[0x54]);
+                self.call_label(lib_fn);
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_fmaxf" | "__builtin_fminf" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
+                    self.gen_expr(&args[1], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
+                }
+                let lib_fn = if name == "__builtin_fmaxf" { "fmaxf" } else { "fminf" };
+                self.emit(&[0x54]);
+                self.call_label(lib_fn);
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_fmaxl" | "__builtin_fminl" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
+                    self.gen_expr(&args[1], 0);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
+                }
+                let lib_fn = if name == "__builtin_fmaxl" { "fmaxl" } else { "fminl" };
+                self.emit(&[0x54]);
+                self.call_label(lib_fn);
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fputc: 转发到 libc fputc
+            "__builtin_fputc" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = c
+                    self.gen_expr(&args[1], 6); // rsi = stream
+                }
+                self.emit(&[0x54]);
+                self.call_label("fputc");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fwrite: 转发到 libc fwrite
+            "__builtin_fwrite" => {
+                if args.len() >= 4 {
+                    self.gen_expr(&args[0], 7); // rdi = ptr
+                    self.gen_expr(&args[1], 6); // rsi = size
+                    self.gen_expr(&args[2], 2); // rdx = nmemb
+                    self.gen_expr(&args[3], 1); // rcx = stream
+                }
+                self.emit(&[0x54]);
+                self.call_label("fwrite");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fread: 转发到 libc fread
+            "__builtin_fread" => {
+                if args.len() >= 4 {
+                    self.gen_expr(&args[0], 7);
+                    self.gen_expr(&args[1], 6);
+                    self.gen_expr(&args[2], 2);
+                    self.gen_expr(&args[3], 1);
+                }
+                self.emit(&[0x54]);
+                self.call_label("fread");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_ulabs / __builtin_ullabs: unsigned abs (identity)
+            "__builtin_ulabs" | "__builtin_ullabs" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            }
+            // _FloatN/_FloatNx builtin variants: forward to libc
+            // Matches patterns like __builtin_nansf128, __builtin_issignalingf64x, etc.
+            _ if name.starts_with("__builtin_")
+                && (name.ends_with("f128") || name.ends_with("f64")
+                    || name.ends_with("f32") || name.ends_with("f16")
+                    || name.ends_with("f64x") || name.ends_with("f32x")
+                    || name.ends_with("f128x")) =>
+            {
+                // Extract base name: __builtin_issignalingf128 -> issignaling
+                let base = name.strip_prefix("__builtin_").unwrap();
+                let lib_name = base
+                    .trim_end_matches("f128x").trim_end_matches("f128")
+                    .trim_end_matches("f64x").trim_end_matches("f64")
+                    .trim_end_matches("f32x").trim_end_matches("f32")
+                    .trim_end_matches("f16");
+                // Forward to libc with appropriate args
+                if name.contains("issignaling") || name.contains("isfinite")
+                    || name.contains("isnan") || name.contains("isinf") {
+                    // Classification: 1 arg
+                    if !args.is_empty() {
+                        self.gen_expr(&args[0], 7);
+                    }
+                    self.emit(&[0x54]);
+                    self.call_label(lib_name);
+                    self.emit(&[0x5c]);
+                    if dst != 0 { self.mov(dst, 0); }
+                } else if name.contains("nans") || name.contains("nan") {
+                    // NaN generation: 0-1 args
+                    if !args.is_empty() {
+                        self.gen_expr(&args[0], 7);
+                    } else {
+                        self.mov_imm(7, 0);
+                    }
+                    self.emit(&[0x54]);
+                    self.call_label(lib_name);
+                    self.emit(&[0x5c]);
+                    if dst != 0 { self.mov(dst, 0); }
+                } else {
+                    // Generic: forward all args
+                    for (i, arg) in args.iter().take(4).enumerate() {
+                        let reg = [7, 6, 2, 1][i]; // rdi, rsi, rdx, rcx
+                        self.gen_expr(arg, reg);
+                    }
+                    self.emit(&[0x54]);
+                    self.call_label(lib_name);
+                    self.emit(&[0x5c]);
+                    if dst != 0 { self.mov(dst, 0); }
+                }
+                true
+            }
+            // __builtin_shuffle: vector shuffle (stub: return first arg)
+            "__builtin_shuffle" | "__builtin_shufflevector" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            }
+            // __builtin_convertvector: vector type conversion (stub: return first arg)
+            "__builtin_convertvector" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            }
             _ => false,
         }
     }

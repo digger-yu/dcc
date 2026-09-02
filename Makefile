@@ -1,4 +1,4 @@
-.PHONY: all build test test-all bootstrap kernel-full-build kernel-full-check clean-cache
+.PHONY: all build test test-all bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
 
 DCC_REPO ?= $(CURDIR)
 KERNEL_DIR ?= /root/linux-7.1
@@ -16,6 +16,12 @@ test:
 
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures.sh
+
+torture-setup:
+	bash scripts/setup_torture.sh
+
+torture: torture-setup build
+	cargo test --release -- torture
 
 kernel-full-build: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" KERNEL_DIR="$(KERNEL_DIR)" JOBS="$(JOBS)" LOG="$(LOG)" bash scripts/kernel_full_build.sh

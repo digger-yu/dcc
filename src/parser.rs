@@ -6473,6 +6473,8 @@ impl<'a> Parser<'a> {
                     ty = Type::Array(Box::new(ty.into()), sz);
                 }
             }
+            // 数组后缀后的属性: char *argv[] __attribute__((unused))
+            self.skip_attributes();
             let ty = match ty {
                 Type::Array(e, _) => Type::Ptr(e),
                 o => o,
@@ -7144,18 +7146,28 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RParen, "')'") {
                     return None;
                 }
-                if !self.expect(TokKind::LBrace, "'{'") {
-                    return None;
+                if self.cur.kind == TokKind::LBrace {
+                    self.advance();
+                    let cases = self.parse_cases();
+                    if !self.expect(TokKind::RBrace, "'}'") {
+                        return None;
+                    }
+                    Some(Stmt::Switch {
+                        expr,
+                        cases,
+                        span: sp,
+                    })
+                } else {
+                    // switch (expr) statement without braces
+                    // Parse case/default labels and statements until we hit
+                    // something that ends the switch scope.
+                    let cases = self.parse_cases_no_brace();
+                    Some(Stmt::Switch {
+                        expr,
+                        cases,
+                        span: sp,
+                    })
                 }
-                let cases = self.parse_cases();
-                if !self.expect(TokKind::RBrace, "'}'") {
-                    return None;
-                }
-                Some(Stmt::Switch {
-                    expr,
-                    cases,
-                    span: sp,
-                })
             }
             TokKind::KwGoto => {
                 self.advance();
@@ -7443,6 +7455,77 @@ impl<'a> Parser<'a> {
                 },
                 span: sp,
             });
+        }
+        cases
+    }
+
+    /// Parse case/default labels for switch without braces.
+    /// Stops after parsing the first non-case statement (the switch body).
+    fn parse_cases_no_brace(&mut self) -> Vec<Case> {
+        let mut cases = vec![];
+        // Collect case/default labels
+        loop {
+            let sp = self.cur.span.clone();
+            if self.cur.kind == TokKind::KwCase {
+                self.advance();
+                let low = self.parse_expr();
+                let mut hi = None;
+                if self.cur.kind == TokKind::Ellipsis {
+                    self.advance();
+                    hi = self.parse_expr();
+                }
+                let _ = self.expect(TokKind::Colon, "':'");
+                cases.push(Case {
+                    val: low,
+                    range_end: hi,
+                    body: Block { items: vec![], span: sp.clone() },
+                    span: sp,
+                });
+            } else if self.cur.kind == TokKind::KwDefault {
+                self.advance();
+                let _ = self.expect(TokKind::Colon, "':'");
+                cases.push(Case {
+                    val: None,
+                    range_end: None,
+                    body: Block { items: vec![], span: sp.clone() },
+                    span: sp,
+                });
+            } else {
+                break;
+            }
+        }
+        // Parse the body statement(s) - attach to last case
+        if !cases.is_empty() {
+            let mut items = vec![];
+            // Parse statements until we hit something that's clearly outside
+            // the switch: a label (non-case), or end of the enclosing block.
+            while self.cur.kind != TokKind::RBrace
+                && self.cur.kind != TokKind::Eof
+                && self.cur.kind != TokKind::KwCase
+                && self.cur.kind != TokKind::KwDefault
+            {
+                // Stop if we see a non-case label (like `lbl:`)
+                if self.cur.kind == TokKind::Ident && self.peek.kind == TokKind::Colon {
+                    break;
+                }
+                if self.is_decl_start() {
+                    // A declaration at the start of a new statement likely
+                    // means we've left the switch body.
+                    break;
+                }
+                match self.parse_stmt() {
+                    Some(s) => items.push(BlockItem::Stmt(s)),
+                    None => break,
+                }
+                // After one statement, stop (switch without braces has
+                // only one statement as body, but case labels can chain)
+                if !items.is_empty() {
+                    break;
+                }
+            }
+            if let Some(last) = cases.last_mut() {
+                last.body.items = items;
+            }
         }
         cases
     }
@@ -8577,12 +8660,20 @@ impl<'a> Parser<'a> {
                             };
                             continue;
                         }
-                        // __builtin_classify_type(type): GCC type classification.
+                        // __builtin_classify_type(type-or-expr): GCC type classification.
                         // 1=void, 2=integer, 3=pointer, 4=real_float,
                         // 5=complex, 6=struct_union, 7=array, 8=function,
                         // 9=vector, 10=enum, -1=lang_mask (unknown).
+                        // GCC accepts both type names and expressions.
                         if name.name == "__builtin_classify_type" {
-                            let ty = self.parse_type()?;
+                            let ty = if self.is_type_start() {
+                                // Try parsing as a type
+                                self.parse_type()?
+                            } else {
+                                // Parse as expression and get its type
+                                let expr = self.parse_expr_bp(2)?;
+                                expr.ty()
+                            };
                             if !self.expect(TokKind::RParen, "')'") {
                                 return None;
                             }
@@ -8999,25 +9090,83 @@ impl<'a> Parser<'a> {
             TokKind::StringLit => {
                 let mut data = parse_str(&self.cur.text);
                 self.advance();
-                while self.cur.kind == TokKind::StringLit {
-                    data.extend(parse_str(&self.cur.text));
+                let mut is_wide = false;
+                // 窄字符串与宽字符串拼接: "a" L"b" → L"ab"
+                while self.cur.kind == TokKind::StringLit
+                    || self.cur.kind == TokKind::WideStringLit
+                {
+                    if self.cur.kind == TokKind::WideStringLit {
+                        // 如果之前只有窄字符串, 先将其提升为宽格式
+                        if !is_wide {
+                            is_wide = true;
+                            let narrow = std::mem::take(&mut data);
+                            let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
+                            data = Vec::with_capacity(narrow.len() * wchar_sz);
+                            for &b in &narrow {
+                                data.push(b);
+                                for _ in 1..wchar_sz { data.push(0); }
+                            }
+                        }
+                        let wide_bytes = parse_wide_str(&self.cur.text, self.opts.short_wchar);
+                        data.extend(wide_bytes);
+                    } else {
+                        if is_wide {
+                            // 已有宽数据: 窄字符串每字节提升为 wchar_t
+                            let narrow = parse_str(&self.cur.text);
+                            let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
+                            for &b in &narrow {
+                                data.push(b);
+                                for _ in 1..wchar_sz { data.push(0); }
+                            }
+                        } else {
+                            data.extend(parse_str(&self.cur.text));
+                        }
+                    }
                     self.advance();
                 }
-                data.push(0); // NUL 终止符
-                Some(Expr::String {
-                    data,
-                    span: sp,
-                    ty: Type::Ptr(Box::new(Type::Char.into())),
-                })
+                // NUL 终止符 (宽字符串需要多个零字节)
+                if is_wide {
+                    let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
+                    for _ in 0..wchar_sz { data.push(0); }
+                    let wchar_ty = if self.opts.short_wchar { Type::Short } else { Type::Int };
+                    Some(Expr::String {
+                        data,
+                        span: sp,
+                        ty: Type::Ptr(Box::new(wchar_ty.into())),
+                    })
+                } else {
+                    data.push(0);
+                    Some(Expr::String {
+                        data,
+                        span: sp,
+                        ty: Type::Ptr(Box::new(Type::Char.into())),
+                    })
+                }
             }
             TokKind::WideStringLit => {
                 let short_wchar = self.opts.short_wchar;
                 let mut data = parse_wide_str(&self.cur.text, short_wchar);
                 self.advance();
-                while self.cur.kind == TokKind::WideStringLit {
-                    data.extend(parse_wide_str(&self.cur.text, short_wchar));
+                // 宽字符串与窄字符串拼接: L"a" "b" → L"ab"
+                while self.cur.kind == TokKind::WideStringLit
+                    || self.cur.kind == TokKind::StringLit
+                {
+                    if self.cur.kind == TokKind::WideStringLit {
+                        data.extend(parse_wide_str(&self.cur.text, short_wchar));
+                    } else {
+                        // 窄字符串: 每个字节提升为 wchar_t (UTF-32LE/UTF-16LE)
+                        let narrow = parse_str(&self.cur.text);
+                        let wchar_sz = if short_wchar { 2 } else { 4 };
+                        for &b in &narrow {
+                            data.push(b);
+                            for _ in 1..wchar_sz { data.push(0); }
+                        }
+                    }
                     self.advance();
                 }
+                // NUL 终止符 (宽字符串需要 wchar_sz 个零字节)
+                let wchar_sz = if short_wchar { 2 } else { 4 };
+                for _ in 0..wchar_sz { data.push(0); }
                 // wchar_t = int (4 bytes) on Linux, or short (2 bytes) with -fshort-wchar
                 let wchar_ty = if short_wchar { Type::Short } else { Type::Int };
                 Some(Expr::String {

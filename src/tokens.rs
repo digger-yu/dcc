@@ -702,10 +702,30 @@ impl<'a> Lexer<'a> {
             // 两者均可追加 C99 虚数后缀 i/I/j/J (如 4.0i、1.0iF、3j)。
             if is_float {
                 // 浮点: 类型后缀 F/L 与虚数后缀 i/j 各最多一个, 顺序任意
+                // 支持 ISO _FloatN 后缀: f16/f32/f64/f128
+                // 支持 Decimal 后缀: DF/DD/DL
                 for _ in 0..2 {
                     match self.peek() {
-                        Some(b'f' | b'F' | b'l' | b'L') => {
+                        Some(b'f' | b'F') => {
                             self.bump();
+                            // _FloatN: f16/f32/f64/f128
+                            if matches!(self.peek(), Some(b'1') | Some(b'3') | Some(b'6')) {
+                                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                                    self.bump();
+                                }
+                                // 可选的 x 后缀: f64x/f128x
+                                if matches!(self.peek(), Some(b'x') | Some(b'X')) {
+                                    self.bump();
+                                }
+                            }
+                        }
+                        Some(b'l' | b'L') => {
+                            self.bump();
+                        }
+                        Some(b'd' | b'D') if matches!(self.peek_at(1), Some(b'f') | Some(b'F') | Some(b'd') | Some(b'D') | Some(b'l') | Some(b'L')) => {
+                            // Decimal float: DF/DD/DL
+                            self.bump(); // d
+                            self.bump(); // f/d/l
                         }
                         Some(b'i' | b'I' | b'j' | b'J') => {
                             self.bump();

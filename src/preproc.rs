@@ -4257,6 +4257,32 @@ impl Preprocessor {
                 }
                 let ident: String = chars[start..i].iter().collect();
 
+                // 宽/Unicode 字面量前缀: L'x'/L"x"/u'x'/U"x"/u8"x" 等
+                // 前缀与引号之间不允许空白; 若匹配则整体输出, 不做宏展开
+                if (ident == "L" || ident == "u" || ident == "U"
+                    || ident == "u8")
+                    && i < len && (chars[i] == '\'' || chars[i] == '"')
+                {
+                    let quote = chars[i];
+                    out.push_str(&ident);
+                    out.push(quote);
+                    i += 1; // skip opening quote
+                    while i < len && chars[i] != quote {
+                        if chars[i] == '\\' && i + 1 < len {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                        if chars[i] == '\n' { break; }
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < len && chars[i] == quote {
+                        out.push(quote);
+                        i += 1;
+                    }
+                    continue;
+                }
+
                 // 特殊内建宏
                 if ident == "__FILE__" {
                     let mut file_str = self.file.clone();
@@ -6662,7 +6688,75 @@ impl Preprocessor {
                 | "__builtin_abort"
                 | "__builtin_exit"
                 | "__builtin_copysign"
+                | "__builtin_copysignf"
                 | "__builtin_va_arg_pack"
+                // fabs/bcopy/bzero/stpncpy/fputs/uabs (GCC torture test)
+                | "__builtin_fabs"
+                | "__builtin_fabsf"
+                | "__builtin_fabsl"
+                | "__builtin_bcopy"
+                | "__builtin_bzero"
+                | "__builtin_stpncpy"
+                | "__builtin_fputs"
+                | "__builtin_uabs"
+                // FP comparison/classification builtins (GCC torture test)
+                | "__builtin_isfinite"
+                | "__builtin_isfinitef"
+                | "__builtin_isfinitel"
+                | "__builtin_isgreater"
+                | "__builtin_isgreaterequal"
+                | "__builtin_isless"
+                | "__builtin_islessequal"
+                | "__builtin_islessgreater"
+                | "__builtin_isunordered"
+                | "__builtin_issignaling"
+                | "__builtin_issignalingf"
+                | "__builtin_issignalingl"
+                // nans/fmax/fputc/fwrite/ulabs (GCC torture test)
+                | "__builtin_nans"
+                | "__builtin_nansf"
+                | "__builtin_nansl"
+                | "__builtin_fmax"
+                | "__builtin_fmaxf"
+                | "__builtin_fmaxl"
+                | "__builtin_fmin"
+                | "__builtin_fminf"
+                | "__builtin_fminl"
+                | "__builtin_fputc"
+                | "__builtin_fwrite"
+                | "__builtin_fread"
+                | "__builtin_ulabs"
+                | "__builtin_ullabs"
+                // _FloatN/FloatNx builtin variants (GCC torture test)
+                | "__builtin_nansf128"
+                | "__builtin_nansf64"
+                | "__builtin_nansf32"
+                | "__builtin_nansf16"
+                | "__builtin_nansf64x"
+                | "__builtin_nansf32x"
+                | "__builtin_nansf128x"
+                | "__builtin_nanf128"
+                | "__builtin_nanf64"
+                | "__builtin_nanf32"
+                | "__builtin_nanf16"
+                | "__builtin_nanf64x"
+                | "__builtin_nanf32x"
+                | "__builtin_nanf128x"
+                | "__builtin_issignalingf128"
+                | "__builtin_issignalingf64"
+                | "__builtin_issignalingf32"
+                | "__builtin_issignalingf16"
+                | "__builtin_issignalingf64x"
+                | "__builtin_issignalingf32x"
+                | "__builtin_issignalingf128x"
+                | "__builtin_isfinitef128"
+                | "__builtin_isfinitef64"
+                | "__builtin_isfinitef32"
+                | "__builtin_isfinitef16"
+                // shuffle/convert builtins (GCC torture test)
+                | "__builtin_shuffle"
+                | "__builtin_shufflevector"
+                | "__builtin_convertvector"
         )
     }
 
