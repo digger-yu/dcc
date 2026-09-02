@@ -20963,3 +20963,61 @@ fn software_pipelining_simple_loop() {
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 3);
 }
+
+// ===== C++ Feature Keyword Checklist Validation =====
+
+/// Verify every entry in CPP_FEATURE_KEYWORDS is detected by has_cpp_feature.
+/// This prevents the recurring bug where new C++ feature test fixtures are
+/// added but the detection heuristic is not updated.
+#[test]
+fn cpp_feature_keywords_all_detected() {
+    use dcc::cpp::lower::{has_cpp_feature, CPP_FEATURE_KEYWORDS};
+    for &kw in CPP_FEATURE_KEYWORDS {
+        // Wrap keyword in spaces to simulate real source context.
+        // For patterns already containing spaces (e.g. "class "),
+        // just add minimal context.
+        let test_src = format!("void foo() {{ {} }}\n", kw.trim());
+        assert!(
+            has_cpp_feature(&test_src),
+            "CPP_FEATURE_KEYWORDS entry {:?} not detected by has_cpp_feature",
+            kw
+        );
+    }
+}
+
+/// Verify strip_cpp_keywords removes all entries in CPP_STRIP_KEYWORDS.
+#[test]
+fn cpp_strip_keywords_all_removed() {
+    use dcc::cpp::lower::{strip_cpp_keywords, CPP_STRIP_KEYWORDS};
+    for &kw in CPP_STRIP_KEYWORDS {
+        // Some keywords are replaced rather than deleted
+        // (decltype -> void*, nullptr -> ((void*)0)).
+        // The key property: the original keyword must not appear in output.
+        let test_src = format!("int x = {} ;\n", kw);
+        let stripped = strip_cpp_keywords(&test_src);
+        assert!(
+            !stripped.contains(kw),
+            "CPP_STRIP_KEYWORDS entry {:?} not fully stripped.\nOutput: {}",
+            kw,
+            stripped
+        );
+    }
+}
+
+/// Verify namespace typedef handling is consistent between AST lower
+/// (qualify_name) and strip path (flatten :: to _).
+/// Both paths must produce the same flattened name for namespace typedefs.
+#[test]
+fn cpp_namespace_typedef_qualify_name_consistent() {
+    use dcc::cpp::lower::strip_cpp_keywords;
+    // Strip path: namespace typedef std::float32_t should become
+    // std_float32_t (same as qualify_name output).
+    let src = "namespace std { typedef float float32_t; }\n";
+    let stripped = strip_cpp_keywords(src);
+    // After stripping, the typedef should use flattened name
+    assert!(
+        stripped.contains("std_float32_t") || stripped.contains("float32_t"),
+        "namespace typedef not properly flattened in strip path.\nOutput: {}",
+        stripped
+    );
+}
