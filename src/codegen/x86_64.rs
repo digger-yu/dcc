@@ -15941,6 +15941,29 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             }
+            // __builtin_malloc: 转发到 libc malloc()
+            "__builtin_malloc" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = size
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("malloc");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_free: 转发到 libc free()
+            "__builtin_free" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = ptr
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("free");
+                self.emit(&[0x5c]); // pop rsp
+                true
+            }
             _ => false,
         }
     }
