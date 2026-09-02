@@ -117,8 +117,8 @@ pub fn optimize_with_target(
 
 /// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
-/// 含循环 (while/for/do) 的函数也跳过: SSA builder 当前不支持 phi 节点,
-/// 循环变量版本无法在回边合并。
+/// SSA builder 支持 phi 节点, 但 SSA→AST 重建对含循环函数的条件更新
+/// 尚未完全正确, 因此含循环的函数仍走 AST pass 路径。
 fn run_ssa_passes(module: &mut Module, level: u8) {
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
@@ -134,17 +134,17 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
-            // 跳过含循环的函数 (SSA builder 无 phi 节点支持)
+            // Skip functions with loops: SSA→AST rebuild for cyclic CFG
+            // does not yet correctly handle loop variable updates and
+            // condition re-evaluation. These functions use AST-level passes.
             if func_has_loop(f) {
                 continue;
             }
-            // 跳过含数组/取址/指针解引用的函数: SSA→AST 重建对这些模式
-            // 尚未完全正确, 会产生错误的代码 (数组地址丢失, 栈指针被覆盖等).
+            // Skip functions with unsafe SSA patterns
             if func_has_unsafe_ssa_pattern(f) {
                 continue;
             }
-            // Skip functions that access volatile globals - SSA constant
-            // propagation would incorrectly fold volatile loads.
+            // Skip functions that access volatile globals
             if !volatile_globals.is_empty() && func_refs_volatile(f, &volatile_globals) {
                 continue;
             }
@@ -413,6 +413,7 @@ fn check_expr_for_const_stores(
 }
 
 /// 检测函数体是否包含循环 (while/for/do-while)。
+/// 含循环的函数暂时跳过 SSA pass, 走 AST 层优化。
 fn func_has_loop(f: &FuncDecl) -> bool {
     f.body.as_ref().is_some_and(block_has_loop)
 }
@@ -461,7 +462,7 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
 fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
     match s {
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => expr_has_unsafe_ssa_pattern(e),
-        // asm goto 和 asm 表达式包含无法 SSA 化的副作用
+        // asm goto 包含无法 SSA 化的非结构化控制流
         Stmt::AsmGoto { .. } => true,
         Stmt::If {
             cond, then_, else_, ..
@@ -500,15 +501,17 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
 fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
     match e {
         Expr::AddrOf { .. } | Expr::Deref { .. } | Expr::Index { .. } => true,
-        // Inline asm 已显式表示为 SSA 节点。调度器使用其 clobber
-        // 元数据判断哪些指令可以跨越 asm。
+        // Inline asm 已显式表示为 SSA 节点
         Expr::AsmExpr { .. } => false,
         Expr::Binop { l, r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
         }
         Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_unsafe_ssa_pattern(e),
         Expr::Cond {
-            cond, then_, else_, ..
+            cond,
+            then_,
+            else_,
+            ..
         } => {
             expr_has_unsafe_ssa_pattern(cond)
                 || expr_has_unsafe_ssa_pattern(then_)

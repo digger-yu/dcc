@@ -1349,6 +1349,184 @@ fn collect_local_decls_stmt(
     }
 }
 
+/// Insert phi nodes at loop headers for variables modified in loop bodies.
+///
+/// When the SSA builder processes loops (while/for/do), it creates a CFG
+/// with back edges. Variables modified in the loop body get new SSA versions,
+/// but without phi nodes at the loop header, SSA optimization passes cannot
+/// correctly reason about loop-carried values.
+///
+/// This pass:
+/// 1. Identifies back edges (latch → header) using dominator analysis
+/// 2. For each loop header, collects variables defined in the loop body
+/// 3. Inserts phi nodes merging the pre-loop and post-body versions
+pub fn insert_loop_phis(func: &mut Function) {
+    let doms = compute_dominators(func);
+    // Find back edges: edge A→B where B dominates A
+    let mut back_edges: Vec<(String, String)> = Vec::new(); // (latch, header)
+    for bb_name in &func.block_order {
+        let bb = match func.blocks.get(bb_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        let successors = match &bb.term {
+            Terminator::Jump(t) => vec![t.clone()],
+            Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
+            _ => vec![],
+        };
+        for succ in successors {
+            // Back edge: succ dominates bb_name
+            if let Some(succ_dom) = doms.get(&succ) {
+                if succ_dom.contains(bb_name) {
+                    back_edges.push((bb_name.clone(), succ.clone()));
+                }
+            }
+        }
+    }
+    if back_edges.is_empty() {
+        return;
+    }
+    // For each back edge (latch → header), find variables defined in the
+    // loop body and insert phi nodes at the header.
+    for (latch, header) in &back_edges {
+        // Collect loop body blocks: all blocks that can reach the latch
+        // without going through the header (simplified: blocks dominated
+        // by the header that can reach the latch).
+        let loop_bbs = find_loop_body(func, header, latch);
+        // Collect variables defined (assigned) in the loop body
+        let mut body_defs: HashMap<String, SsaVar> = HashMap::new();
+        for bb_name in &loop_bbs {
+            if let Some(bb) = func.blocks.get(bb_name) {
+                for inst in &bb.insts {
+                    if let Some(d) = &inst.dest {
+                        body_defs.insert(d.base.clone(), d.clone());
+                    }
+                }
+            }
+        }
+        // For each variable defined in the loop body, check if it has
+        // different versions at the header entry and latch exit.
+        // If so, insert a phi node at the header.
+        let header_bb = match func.blocks.get(header) {
+            Some(b) => b,
+            None => continue,
+        };
+        // Find the version of each variable used at the header
+        let mut header_uses: HashMap<String, SsaVar> = HashMap::new();
+        for inst in &header_bb.insts {
+            collect_var_uses_inst(&inst.kind, &mut header_uses);
+        }
+        if let Terminator::Branch { cond, .. } = &header_bb.term {
+            collect_var_uses_op(cond, &mut header_uses);
+        }
+        // Insert phi for each variable that is both used at the header
+        // and redefined in the loop body
+        let mut new_phis: Vec<Phi> = Vec::new();
+        for (base, body_var) in &body_defs {
+            if let Some(header_var) = header_uses.get(base) {
+                if header_var.name() != body_var.name() {
+                    // Different versions: need a phi node
+                    let phi_dest = SsaVar {
+                        base: base.clone(),
+                        version: body_var.version + 1,
+                        ty: body_var.ty.clone(),
+                        span: body_var.span.clone(),
+                    };
+                    new_phis.push(Phi {
+                        dest: phi_dest,
+                        incoming: vec![
+                            (header_var.clone(), "__entry".to_string()),
+                            (body_var.clone(), latch.clone()),
+                        ],
+                    });
+                }
+            }
+        }
+        if let Some(bb) = func.blocks.get_mut(header) {
+            bb.phis.extend(new_phis);
+        }
+    }
+}
+
+/// Find the body blocks of a natural loop (header, latch).
+/// Loop body = {header} ∪ {blocks that can reach latch without going through header}
+fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
+    let mut body: HashSet<String> = HashSet::new();
+    body.insert(header.to_string());
+    if header == latch {
+        // Self-loop: only the header itself
+        return body.into_iter().collect();
+    }
+    // Reverse DFS from latch, not going through header
+    let mut stack = vec![latch.to_string()];
+    while let Some(bb) = stack.pop() {
+        if !body.insert(bb.clone()) {
+            continue;
+        }
+        if let Some(bb_data) = func.blocks.get(&bb) {
+            for pred in &bb_data.preds {
+                if pred != header && !body.contains(pred) {
+                    stack.push(pred.clone());
+                }
+            }
+        }
+    }
+    body.into_iter().collect()
+}
+
+/// Collect SSA variables used by an instruction, keyed by base name.
+fn collect_var_uses_inst(kind: &InstKind, out: &mut HashMap<String, SsaVar>) {
+    match kind {
+        InstKind::Bin { l, r, .. } => {
+            collect_var_uses_op(l, out);
+            collect_var_uses_op(r, out);
+        }
+        InstKind::Un { e, .. } | InstKind::Cast { e, .. } | InstKind::Load { e, .. } => {
+            collect_var_uses_op(e, out);
+        }
+        InstKind::Store { e, src, .. } => {
+            collect_var_uses_op(e, out);
+            collect_var_uses_op(src, out);
+        }
+        InstKind::IndexLoad { arr, idx } | InstKind::IndexStore { arr, idx, .. } => {
+            collect_var_uses_op(arr, out);
+            collect_var_uses_op(idx, out);
+        }
+        InstKind::Call { callee, args, .. } => {
+            collect_var_uses_op(callee, out);
+            for a in args {
+                collect_var_uses_op(a, out);
+            }
+        }
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
+            collect_var_uses_op(obj, out);
+        }
+        InstKind::Select { cond, then_, else_ } => {
+            collect_var_uses_op(cond, out);
+            collect_var_uses_op(then_, out);
+            collect_var_uses_op(else_, out);
+        }
+        InstKind::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                collect_var_uses_op(input, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_var_uses_op(o: &Operand, out: &mut HashMap<String, SsaVar>) {
+    if let Operand::Var(v) = o {
+        out.entry(v.base.clone())
+            .and_modify(|existing| {
+                if v.version > existing.version {
+                    *existing = v.clone();
+                }
+            })
+            .or_insert_with(|| v.clone());
+    }
+}
+
 pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     let body = f.body.as_ref()?;
     if !is_structured(body) {
@@ -1383,7 +1561,12 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
             b.term = Terminator::Ret { val: None };
         }
     }
-    Some(builder.func)
+    let mut func = builder.func;
+    // Insert phi nodes at loop headers for variables modified in loop bodies.
+    // This enables SSA optimization passes to correctly analyze loop-carried
+    // dependencies (induction variables, strength reduction, etc.).
+    insert_loop_phis(&mut func);
+    Some(func)
 }
 
 // ============================================================
@@ -1574,9 +1757,16 @@ fn rebuild_bb(
         return;
     }
     let bb = match func.blocks.get(bb_name) {
-        Some(b) => b.clone(),
+        Some(b) => b,
         None => return,
     };
+    // Detect if this block is a cycle entry (target of a back edge).
+    // If so, emit a while loop to represent the cyclic CFG.
+    if is_cycle_entry(bb_name, func) {
+        rebuild_cycle(bb_name, func, out, visited, env, subst);
+        return;
+    }
+    let bb = bb.clone();
     // 0. phi 处理: 将前驱的 SSA 值映射到 phi dest 的基础名
     for phi in &bb.phis {
         for (src, pred) in &phi.incoming {
@@ -1590,23 +1780,16 @@ fn rebuild_bb(
     }
     // 1. 翻译指令为 AST 赋值语句
     for inst in &bb.insts {
-        // 跳过 SSA pass 插入的 hint/metadata 指令 (register_allocation,
-        // auto_parallelization, pgo 等). 这些指令以 Store 到 __dcc_ 前缀
-        // 符号的形式存在, 不对应真实计算, 在 SSA→AST 重建时必须丢弃.
+        // 跳过 SSA pass 插入的 hint/metadata 指令
         if is_pass_hint_inst(&inst.kind) {
             continue;
         }
         if let Some(d) = &inst.dest {
             env.insert(d.name(), d.clone());
             let ssa_name = d.name();
-            // 如果被标记为内联, 跳过赋值 (表达式已在 subst 中)。
-            // 有副作用的指令 (如返回值被丢弃的 Call) 只在确实有使用点时
-            // 允许内联——结果未使用 (use_count==0) 时 subst 里存的表达式
-            // 没有任何使用点消费, 跳过会导致副作用丢失 (fesetround 被删).
             if let Some(Some(_)) = subst.get(&ssa_name) {
                 continue;
             }
-            // 发射赋值: base_name = resolved_rhs
             let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
             let assign = Expr::Assign {
                 op: crate::ast::BinOp::Add,
@@ -1694,6 +1877,262 @@ fn rebuild_bb(
             }));
         }
         Terminator::Unreachable => {}
+    }
+}
+
+/// Check if a block is the target of a back edge (cycle entry).
+fn is_cycle_entry(bb_name: &str, func: &Function) -> bool {
+    let bb_pos = func.block_order.iter().position(|b| b == bb_name);
+    let Some(bb_pos) = bb_pos else {
+        return false;
+    };
+    for (name, bb) in &func.blocks {
+        let name_pos = func.block_order.iter().position(|b| b == name);
+        let Some(name_pos) = name_pos else {
+            continue;
+        };
+        if name_pos >= bb_pos {
+            let succs = match &bb.term {
+                Terminator::Jump(t) => vec![t.as_str()],
+                Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
+                _ => vec![],
+            };
+            if succs.contains(&bb_name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Emit a while loop for a cyclic CFG region.
+///
+/// Strategy: emit cycle blocks directly (without following terminator chains)
+/// to avoid consuming the exit block's instructions inside the loop body.
+/// Back edges become `continue`, exits become `break`.
+fn rebuild_cycle(
+    header: &str,
+    func: &Function,
+    out: &mut Vec<BlockItem>,
+    visited: &mut HashSet<String>,
+    env: &mut HashMap<String, SsaVar>,
+    subst: &HashMap<String, Option<Expr>>,
+) {
+    let header_bb = match func.blocks.get(header) {
+        Some(b) => b,
+        None => return,
+    };
+    // Collect cycle blocks via forward BFS from header
+    let mut cycle_blocks: HashSet<String> = HashSet::new();
+    let mut queue = vec![header.to_string()];
+    while let Some(bb_name) = queue.pop() {
+        if !cycle_blocks.insert(bb_name.clone()) {
+            continue;
+        }
+        if let Some(bb) = func.blocks.get(&bb_name) {
+            let succs: Vec<String> = match &bb.term {
+                Terminator::Jump(t) => vec![t.clone()],
+                Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
+                _ => vec![],
+            };
+            for s in succs {
+                if is_back_edge(&bb_name, &s, func) {
+                    continue;
+                }
+                if !cycle_blocks.contains(&s) {
+                    queue.push(s);
+                }
+            }
+        }
+    }
+    // Emit header instructions and phi handling
+    for phi in &header_bb.phis {
+        for (src, _pred) in &phi.incoming {
+            env.insert(phi_name(&phi.dest), src.clone());
+        }
+        if let Some((src, _)) = phi.incoming.first() {
+            env.insert(phi_name(&phi.dest), src.clone());
+        }
+    }
+    for inst in &header_bb.insts {
+        if is_pass_hint_inst(&inst.kind) {
+            continue;
+        }
+        emit_rebuild_inst(inst, out, env, subst, func);
+    }
+    // Determine loop condition from header's branch terminator
+    let (cond_expr, _cycle_succ, exit_succ) = match &header_bb.term {
+        Terminator::Branch { cond, t, f } => {
+            let t_in_cycle = cycle_blocks.contains(t) && !is_back_edge(header, t, func);
+            let f_in_cycle = cycle_blocks.contains(f) && !is_back_edge(header, f, func);
+            if t_in_cycle {
+                (Some(resolve_operand(cond, env, subst)), Some(t.as_str()), if f_in_cycle { None } else { Some(f.as_str()) })
+            } else if f_in_cycle {
+                // Negate condition: while(!cond) { ... }
+                let cond_e = resolve_operand(cond, env, subst);
+                let neg = Expr::Unary {
+                    op: crate::ast::UnOp::Not,
+                    e: Box::new(cond_e),
+                    span: func.span.clone(),
+                    ty: Type::Int,
+                };
+                (Some(neg), Some(f.as_str()), if t_in_cycle { None } else { Some(t.as_str()) })
+            } else {
+                (None, None, None)
+            }
+        }
+        Terminator::Jump(t) if cycle_blocks.contains(t) && !is_back_edge(header, t, func) => {
+            (None, Some(t.as_str()), None)
+        }
+        _ => (None, None, None),
+    };
+    // Emit loop body: cycle blocks (except header) in block_order
+    let mut body_items: Vec<BlockItem> = Vec::new();
+    let ordered_cycle: Vec<String> = func
+        .block_order
+        .iter()
+        .filter(|n| cycle_blocks.contains(n.as_str()) && n.as_str() != header)
+        .cloned()
+        .collect();
+    for bb_name in &ordered_cycle {
+        let bb = match func.blocks.get(bb_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        // Handle phi nodes
+        for phi in &bb.phis {
+            for (src, pred) in &phi.incoming {
+                if cycle_blocks.contains(pred) {
+                    env.insert(phi_name(&phi.dest), src.clone());
+                }
+            }
+            if let Some((src, _)) = phi.incoming.last() {
+                env.insert(phi_name(&phi.dest), src.clone());
+            }
+        }
+        // Emit instructions
+        for inst in &bb.insts {
+            if is_pass_hint_inst(&inst.kind) {
+                continue;
+            }
+            emit_rebuild_inst(inst, &mut body_items, env, subst, func);
+        }
+        // Handle terminator
+        match &bb.term {
+            Terminator::Jump(t) => {
+                if is_back_edge(bb_name, t, func) {
+                    body_items.push(BlockItem::Stmt(Stmt::Continue {
+                        span: func.span.clone(),
+                    }));
+                } else if !cycle_blocks.contains(t) {
+                    body_items.push(BlockItem::Stmt(Stmt::Break {
+                        span: func.span.clone(),
+                    }));
+                }
+            }
+            Terminator::Branch { t, f, .. } => {
+                let t_is_back = is_back_edge(bb_name, t, func);
+                let f_is_back = is_back_edge(bb_name, f, func);
+                let _t_in_cycle = cycle_blocks.contains(t) && !t_is_back;
+                let f_in_cycle = cycle_blocks.contains(f) && !f_is_back;
+                if t_is_back || f_in_cycle {
+                    // Condition already leads to continue/break; no extra stmt needed
+                    // unless we need to differentiate paths
+                    if f_is_back || !f_in_cycle {
+                        // Both paths exit or loop: just continue
+                        body_items.push(BlockItem::Stmt(Stmt::Continue {
+                            span: func.span.clone(),
+                        }));
+                    }
+                } else {
+                    // Both targets exit the cycle
+                    body_items.push(BlockItem::Stmt(Stmt::Break {
+                        span: func.span.clone(),
+                    }));
+                }
+            }
+            Terminator::Ret { val } => {
+                let e = val.as_ref().map(|o| resolve_operand(o, env, subst));
+                body_items.push(BlockItem::Stmt(Stmt::Return {
+                    val: e,
+                    span: func.span.clone(),
+                }));
+            }
+            Terminator::Unreachable => {}
+        }
+    }
+    // Emit the while loop
+    let cond = cond_expr.unwrap_or(Expr::Int {
+        v: 1,
+        span: func.span.clone(),
+        ty: Type::Int,
+    });
+    out.push(BlockItem::Stmt(Stmt::While {
+        cond,
+        body: Box::new(Stmt::Block {
+            b: Block {
+                items: body_items,
+                span: func.span.clone(),
+            },
+            span: func.span.clone(),
+        }),
+        span: func.span.clone(),
+    }));
+    // Continue from exit block
+    if let Some(exit) = exit_succ {
+        rebuild_bb(exit, func, out, visited, env, subst);
+    }
+}
+
+/// Check if edge from→to is a back edge (to dominates from in block_order).
+fn is_back_edge(from: &str, to: &str, func: &Function) -> bool {
+    let from_pos = func.block_order.iter().position(|b| b == from);
+    let to_pos = func.block_order.iter().position(|b| b == to);
+    match (from_pos, to_pos) {
+        (Some(fp), Some(tp)) => fp >= tp,
+        _ => false,
+    }
+}
+
+/// Emit a single SSA instruction as an AST statement during rebuild.
+fn emit_rebuild_inst(
+    inst: &Inst,
+    out: &mut Vec<BlockItem>,
+    env: &mut HashMap<String, SsaVar>,
+    subst: &HashMap<String, Option<Expr>>,
+    _func: &Function,
+) {
+    if let Some(d) = &inst.dest {
+        env.insert(d.name(), d.clone());
+        let ssa_name = d.name();
+        if let Some(Some(_)) = subst.get(&ssa_name) {
+            return;
+        }
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+        let assign = Expr::Assign {
+            op: crate::ast::BinOp::Add,
+            l: Box::new(Expr::Ident {
+                name: crate::ast::Ident {
+                    name: d.base.clone(),
+                    span: d.span.clone(),
+                },
+                span: d.span.clone(),
+                ty: d.ty.clone(),
+            }),
+            r: Box::new(rhs),
+            span: inst.span.clone(),
+            ty: d.ty.clone(),
+        };
+        out.push(BlockItem::Stmt(Stmt::Expr {
+            e: assign,
+            span: inst.span.clone(),
+        }));
+    } else {
+        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+        out.push(BlockItem::Stmt(Stmt::Expr {
+            e,
+            span: inst.span.clone(),
+        }));
     }
 }
 
