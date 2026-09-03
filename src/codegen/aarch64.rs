@@ -1458,6 +1458,41 @@ impl Aarch64Codegen {
                 && !is_complex_ty(&expr.children[1].ty)
                 && !is_vector_ty(&expr.children[1].ty)
             {
+                // Check for bitfield write before normal assignment
+                let lhs = &expr.children[0];
+                if let ExprKind::Member(ref field_name) = lhs.kind {
+                    if !lhs.children.is_empty() {
+                        let child = &lhs.children[0];
+                        let sn = match &child.ty {
+                            ValueType::Aggregate { name, .. } => Some(name.clone()),
+                            ValueType::Pointer(inner) => {
+                                if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                                    Some(name.clone())
+                                } else { None }
+                            }
+                            _ => None,
+                        };
+                        let bf = sn.as_ref().and_then(|n| {
+                            self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                                find_field(fields, field_name).and_then(|(f, extra)| {
+                                    f.bit_width.map(|bw| {
+                                        (f.offset + extra, bw, f.bit_offset, f.ty.clone())
+                                    })
+                                })
+                            })
+                        });
+                        if let Some((f_off, bw, b_off, cty)) = bf {
+                            if bw < (cty.size() * 8) as u32 {
+                                self.gen_bitfield_store_aarch64(
+                                    &lhs.children[0], &expr.children[1],
+                                    f_off, bw, b_off, &cty,
+                                );
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Normal (non-bitfield) assignment
                 // Evaluate rhs -> x0
                 self.gen_expr(&expr.children[1]);
                 // Save rhs value to stack temp (safe across recursive calls)
@@ -1688,7 +1723,7 @@ impl Aarch64Codegen {
                     self.gen_lvalue_addr(child);
                 }
                 // x0 = base address
-                // Look up field offset
+                // Look up field info
                 let struct_name = match &child.ty {
                     ValueType::Aggregate { name, .. } => Some(name.clone()),
                     ValueType::Pointer(inner) => {
@@ -1700,11 +1735,54 @@ impl Aarch64Codegen {
                     }
                     _ => None,
                 };
-                let field_off = struct_name.and_then(|name| {
-                    self.aggregate_fields.get(&name).and_then(|(fields, _)| {
-                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                let field_info = struct_name.as_ref().and_then(|name| {
+                    self.aggregate_fields.get(name).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| {
+                            (f.offset + extra, f.bit_width, f.bit_offset, f.ty.clone())
+                        })
                     })
-                }).unwrap_or(0);
+                });
+                let field_off = field_info.as_ref().map(|(off, _, _, _)| *off).unwrap_or(0);
+                // Check if this is a bitfield read
+                let bf_info = field_info.as_ref().and_then(|(_, bw, bo, fty)| {
+                    bw.map(|w| (w, *bo, fty.clone()))
+                });
+                if let Some((bit_width, bit_offset, container_ty)) = bf_info {
+                    if bit_width < (container_ty.size() * 8) as u32 {
+                        // Bitfield extraction
+                        if field_off != 0 {
+                            self.emit_mov_x_reg(12, 0);
+                            self.emit_add_imm_x(0, 12, field_off as u32);
+                        }
+                        // x0 = container address, load container value
+                        let csz = container_ty.size();
+                        self.emit_ldr_x(0, 0, 0, csz); // zero-extend load
+                        // LSR x0, x0, bit_offset
+                        if bit_offset > 0 {
+                            self.emit_lsr_x(0, 0, bit_offset as u8);
+                        }
+                        // AND x0, x0, mask
+                        if bit_width < 64 {
+                            let mask: u64 = (1u64 << bit_width) - 1;
+                            self.mov_x_reg_imm(12, mask);
+                            self.emit_and_x_reg(0, 0, 12);
+                        }
+                        // Sign extend for signed bitfields
+                        let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                        if !is_unsigned && bit_width < 64 {
+                            let sign_bit = 1u64 << (bit_width - 1);
+                            self.mov_x_reg_imm(12, sign_bit);
+                            self.emit_ands_x_reg(12, 0, 12); // TST x0, sign_bit
+                            // B.NE +2 (skip next ORR, 8 bytes = 2 insns)
+                            self.emit(&0x54000041u32.to_le_bytes());
+                            let inv_mask: u64 = !((1u64 << bit_width) - 1);
+                            self.mov_x_reg_imm(12, inv_mask);
+                            self.emit_or_x_reg(0, 0, 12); // ORR x0, x0, x12
+                        }
+                        return true;
+                    }
+                }
+                // Normal (non-bitfield) field read
                 if field_off != 0 {
                     self.emit_mov_x_reg(12, 0); // x12 = base
                     self.emit_add_imm_x(0, 12, field_off as u32); // x0 = base + off
@@ -4417,6 +4495,111 @@ impl Aarch64Codegen {
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
+    }
+
+    /// LSR Xd, Xn, #shift — 64 位逻辑右移 (UBFM encoding)
+    fn emit_lsr_x(&mut self, dst: u8, src: u8, shift: u8) {
+        if shift == 0 { return; }
+        // UBFM X64: 0xD3400000 | (1<<22) | (immr<<16) | (imms<<10) | (Rn<<5) | Rd
+        let immr = shift as u32 & 0x3f;
+        let imms = 63u32; // imms = N-1 for 64-bit
+        let insn = 0xd3400000u32
+            | (1u32 << 22) // N bit for 64-bit
+            | (immr << 16)
+            | (imms << 10)
+            | ((src as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LSL Xd, Xn, #shift — 64 位逻辑左移 (UBFM encoding)
+    fn emit_lsl_x(&mut self, dst: u8, src: u8, shift: u8) {
+        if shift == 0 { return; }
+        // UBFM X64: LSL #shift = UBFM with immr=(64-shift), imms=63
+        let immr = (64 - shift as u32) & 0x3f;
+        let imms = 63u32;
+        let insn = 0xd3400000u32
+            | (1u32 << 22)
+            | (immr << 16)
+            | (imms << 10)
+            | ((src as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// ANDS Xd, Xn, Xm — 64 位寄存器与并设置标志
+    fn emit_ands_x_reg(&mut self, dst: u8, rn: u8, rm: u8) {
+        let insn = 0xea000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MVN Xd, Xm — 按位取反 (ORN Xd, XZR, Xm)
+    fn emit_mvn_x(&mut self, dst: u8, src: u8) {
+        // ORN Xd, XZR, Xm: 0xAA200000 | (1<<21) | (Rm<<16) | (XZR<<5) | Rd
+        let insn = 0xaa200000u32
+            | ((src as u32 & 0x1f) << 16)
+            | (31u32 << 5) // XZR
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Bitfield read-modify-write for aarch64.
+    /// Computes container address, reads current value, clears target bits,
+    /// ORs in the new value (shifted into position), and stores back.
+    /// Uses x12=addr, x13=container, x14=new_val, x11=scratch.
+    fn gen_bitfield_store_aarch64(
+        &mut self,
+        base_expr: &TypedExpr,
+        rhs: &TypedExpr,
+        field_off: usize,
+        bit_width: u32,
+        bit_offset: u32,
+        container_ty: &Type,
+    ) {
+        let csz = container_ty.size();
+        // 1. Compute container address -> x0, save to stack
+        if let ExprKind::Dereference = &base_expr.kind {
+            self.gen_expr(&base_expr.children[0]);
+        } else {
+            self.gen_lvalue_addr(base_expr);
+        }
+        if field_off != 0 {
+            self.emit_mov_x_reg(12, 0);
+            self.emit_add_imm_x(0, 12, field_off as u32);
+        }
+        // x0 = container address, save to stack
+        let addr_off = self.alloc_local("<bf_addr>", 8);
+        self.emit_str_x(0, 31, addr_off as u32, 8);
+        // 2. Evaluate rhs -> x0, mask to bit_width, save to stack
+        self.gen_expr(rhs);
+        if bit_width < 64 {
+            let mask: u64 = (1u64 << bit_width) - 1;
+            self.mov_x_reg_imm(12, mask);
+            self.emit_and_x_reg(0, 0, 12);
+        }
+        let val_off = self.alloc_local("<bf_val>", 8);
+        self.emit_str_x(0, 31, val_off as u32, 8);
+        // 3. Load current container value
+        self.emit_ldr_x(0, 31, addr_off as u32, 8); // x0 = addr
+        self.emit_ldr_x(13, 0, 0, csz); // x13 = container
+        // 4. Clear target bits in container
+        let clear_mask: u64 = !(((1u64 << bit_width) - 1) << bit_offset);
+        self.mov_x_reg_imm(11, clear_mask);
+        self.emit_and_x_reg(13, 13, 11); // x13 &= clear_mask
+        // 5. Shift new value into position and OR into container
+        self.emit_ldr_x(14, 31, val_off as u32, 8); // x14 = new val
+        if bit_offset > 0 {
+            self.emit_lsl_x(14, 14, bit_offset as u8);
+        }
+        self.emit_or_x_reg(13, 13, 14); // x13 |= x14
+        // 6. Store container back
+        self.emit_ldr_x(0, 31, addr_off as u32, 8); // x0 = addr
+        self.emit_str_x(13, 0, 0, csz); // [x0] = x13
+        // 7. Result of assignment = rhs value
+        self.emit_ldr_x(0, 31, val_off as u32, 8);
     }
 
     /// 将 HFA 从 v 寄存器组存储到栈 [sp+off] (用于 HFA 返回/传参)

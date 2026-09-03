@@ -54,6 +54,7 @@ pub struct Riscv64Codegen {
     locals: HashMap<String, i32>,
     global_rodata: HashMap<String, u64>,
     float_refs: Vec<(u64, u64)>,
+    const64_refs: Vec<(u64, u64)>, // (code_pos, rodata_offset) for 64-bit const loads
     sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
@@ -111,6 +112,7 @@ impl Riscv64Codegen {
             locals: HashMap::new(),
             global_rodata: HashMap::new(),
             float_refs: Vec::new(),
+            const64_refs: Vec::new(),
             sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
@@ -558,6 +560,10 @@ impl Riscv64Codegen {
         let refs: Vec<_> = self.float_refs.drain(..).collect();
         for (code_pos, rodata_off) in refs {
             self.patch_auipc_load(code_pos, rodata_start + rodata_off);
+        }
+        let c64: Vec<_> = self.const64_refs.drain(..).collect();
+        for (code_pos, rodata_off) in c64 {
+            self.patch_auipc_ld(code_pos, rodata_start + rodata_off);
         }
         self.finalize_branches();
     }
@@ -1204,6 +1210,41 @@ impl Riscv64Codegen {
                 && !is_complex_ty(&expr.children[1].ty)
                 && !is_vector_ty(&expr.children[1].ty)
             {
+                // Check for bitfield write before normal assignment
+                let lhs = &expr.children[0];
+                if let ExprKind::Member(ref field_name) = lhs.kind {
+                    if !lhs.children.is_empty() {
+                        let child = &lhs.children[0];
+                        let sn = match &child.ty {
+                            ValueType::Aggregate { name, .. } => Some(name.clone()),
+                            ValueType::Pointer(inner) => {
+                                if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                                    Some(name.clone())
+                                } else { None }
+                            }
+                            _ => None,
+                        };
+                        let bf = sn.as_ref().and_then(|n| {
+                            self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                                find_field(fields, field_name).and_then(|(f, extra)| {
+                                    f.bit_width.map(|bw| {
+                                        (f.offset + extra, bw, f.bit_offset, f.ty.clone())
+                                    })
+                                })
+                            })
+                        });
+                        if let Some((f_off, bw, b_off, cty)) = bf {
+                            if bw < (cty.size() * 8) as u32 {
+                                self.gen_bitfield_store_riscv64(
+                                    &lhs.children[0], &expr.children[1],
+                                    f_off, bw, b_off, &cty,
+                                );
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Normal (non-bitfield) assignment
                 // Evaluate rhs -> a0
                 self.gen_expr(&expr.children[1]);
                 // Save rhs value to stack
@@ -1391,10 +1432,8 @@ impl Riscv64Codegen {
             ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if let ExprKind::Dereference = &child.kind {
-                    // ptr->field: evaluate inner pointer
                     self.gen_expr(&child.children[0]);
                 } else {
-                    // s.field: compute address of struct
                     self.gen_lvalue_addr(child);
                 }
                 // a0 = base address
@@ -1407,15 +1446,86 @@ impl Riscv64Codegen {
                     }
                     _ => None,
                 };
-                let field_off = struct_name.and_then(|n| {
-                    self.aggregate_fields.get(&n).and_then(|(fields, _)| {
-                        find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                let field_info = struct_name.as_ref().and_then(|n| {
+                    self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| {
+                            (f.offset + extra, f.bit_width, f.bit_offset, f.ty.clone())
+                        })
                     })
-                }).unwrap_or(0);
-                if field_off != 0 {
-                    self.emit_addi(10, 10, field_off as i32); // a0 += off
+                });
+                let field_off = field_info.as_ref().map(|(off, _, _, _)| *off).unwrap_or(0);
+                // Check if this is a bitfield read
+                let bf_info = field_info.as_ref().and_then(|(_, bw, bo, fty)| {
+                    bw.map(|w| (w, *bo, fty.clone()))
+                });
+                if let Some((bit_width, bit_offset, container_ty)) = bf_info {
+                    if bit_width < (container_ty.size() * 8) as u32 {
+                        // Bitfield extraction
+                        if field_off != 0 {
+                            self.emit_addi(10, 10, field_off as i32);
+                        }
+                        // a0 = container address, load container value
+                        let csz = container_ty.size();
+                        self.emit_load_sz(10, 10, 0, csz);
+                        // SRLI a0, a0, bit_offset
+                        if bit_offset > 0 {
+                            self.emit_srli(10, 10, bit_offset as u8);
+                        }
+                        // Mask: a0 &= (1 << bit_width) - 1
+                        if bit_width < 64 {
+                            let mask: u64 = (1u64 << bit_width) - 1;
+                            if mask <= 0x7FF {
+                                self.emit_andi(10, 10, mask as i32);
+                            } else {
+                                // Save shifted value, load mask to a1, reload, AND
+                                let sv = self.alloc_local("<bf_m>", 8);
+                                self.emit_sd(10, 2, sv);       // save
+                                self.load_const64_a0(mask);     // a0 = mask
+                                self.emit_addi(11, 10, 0);     // a1 = mask
+                                self.emit_ld(10, 2, sv);       // a0 = shifted
+                                self.emit_and(10, 10, 11);     // a0 &= mask
+                            }
+                        }
+                        // Sign extend for signed bitfields
+                        let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                        if !is_unsigned && bit_width < 64 {
+                            let sign_bit = 1u64 << (bit_width - 1);
+                            let inv_mask: u64 = !((1u64 << bit_width) - 1);
+                            let sv2 = self.alloc_local("<bf_v>", 8);
+                            self.emit_sd(10, 2, sv2);          // save masked value
+                            // Test sign bit
+                            if sign_bit <= 0x7FF {
+                                self.emit_andi(10, 10, sign_bit as i32);
+                            } else {
+                                let sv3 = self.alloc_local("<bf_t>", 8);
+                                self.emit_sd(10, 2, sv3);
+                                self.load_const64_a0(sign_bit);
+                                self.emit_addi(11, 10, 0);
+                                self.emit_ld(10, 2, sv3);
+                                self.emit_and(10, 10, 11);
+                            }
+                            let lbl_end = format!(".Lbf_end_{}", self.pos());
+                            // BNEZ a0, do_ext (sign bit set -> extend)
+                            let lbl_do = format!(".Lbf_do_{}", self.pos());
+                            self.emit_bnez(10, &lbl_do);
+                            // Sign bit NOT set: reload value, skip extension
+                            self.emit_ld(10, 2, sv2);          // a0 = masked value
+                            self.j(&lbl_end);
+                            // Sign bit set: OR with inv_mask
+                            self.label(&lbl_do);
+                            self.load_const64_a0(inv_mask);    // a0 = inv_mask
+                            self.emit_addi(11, 10, 0);         // a1 = inv_mask
+                            self.emit_ld(10, 2, sv2);          // a0 = masked value
+                            self.emit_or(10, 10, 11);          // a0 |= inv_mask
+                            self.label(&lbl_end);
+                        }
+                        return true;
+                    }
                 }
-                // Now a0 = address of field, load value
+                // Normal (non-bitfield) field read
+                if field_off != 0 {
+                    self.emit_addi(10, 10, field_off as i32);
+                }
                 let sz = value_type_size(&expr.ty).max(1);
                 self.emit_load_sz(10, 10, 0, sz);
                 return true;
@@ -3559,6 +3669,138 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// SRLI rd, rs1, shamt — 64-bit logical right shift immediate
+    fn emit_srli(&mut self, rd: u8, rs1: u8, shamt: u8) {
+        if shamt == 0 { return; }
+        let shamt = (shamt as u32) & 0x3f;
+        // I-type: imm[5:0]=shamt, rs1, funct3=101, rd, opcode=0010011
+        let insn = shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SLLI rd, rs1, shamt — 64-bit logical left shift immediate
+    fn emit_slli(&mut self, rd: u8, rs1: u8, shamt: u8) {
+        if shamt == 0 { return; }
+        let shamt = (shamt as u32) & 0x3f;
+        let insn = shamt << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x13;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// ANDI rd, rs1, imm — AND immediate (12-bit signed)
+    fn emit_andi(&mut self, rd: u8, rs1: u8, imm: i32) {
+        let imm = imm as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x13;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// ORI rd, rs1, imm — OR immediate (12-bit signed)
+    fn emit_ori(&mut self, rd: u8, rs1: u8, imm: i32) {
+        let imm = imm as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b110 << 12 | (rd as u32) << 7 | 0x13;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Load a 64-bit constant into a0 using AUIPC + LD from rodata.
+    /// For constants that fit in 32 bits, uses li_reg (LUI+ADDI) instead.
+    fn load_const64_a0(&mut self, val: u64) {
+        if val <= 0x7FFFFFFF {
+            self.li_a0(val as i32);
+            return;
+        }
+        // Store in rodata (8-byte aligned)
+        let off = align_rodata(&mut self.rodata, 8);
+        self.rodata.extend_from_slice(&val.to_le_bytes());
+        let pos = self.pos();
+        self.emit_auipc_a0(0); // placeholder
+        self.emit_ld_a0_a0(0); // placeholder
+        self.const64_refs.push((pos, off));
+    }
+
+    /// Load a 64-bit constant into rd using AUIPC + LD from rodata.
+    fn load_const64_reg(&mut self, rd: u8, val: u64) {
+        if val <= 0x7FFFFFFF {
+            if rd == 10 {
+                self.li_a0(val as i32);
+            } else {
+                self.li_reg(rd, val as i32);
+            }
+            return;
+        }
+        // Use a0 as intermediate then move to rd
+        self.load_const64_a0(val);
+        if rd != 10 {
+            self.emit_addi(rd, 10, 0); // MV rd, a0
+        }
+    }
+
+    /// Bitfield read-modify-write for riscv64.
+    /// Uses a0=addr, a1=container, a2=new_val, a3=scratch.
+    fn gen_bitfield_store_riscv64(
+        &mut self,
+        base_expr: &TypedExpr,
+        rhs: &TypedExpr,
+        field_off: usize,
+        bit_width: u32,
+        bit_offset: u32,
+        container_ty: &Type,
+    ) {
+        let csz = container_ty.size();
+        // 1. Compute container address -> a0, save to stack
+        if let ExprKind::Dereference = &base_expr.kind {
+            self.gen_expr(&base_expr.children[0]);
+        } else {
+            self.gen_lvalue_addr(base_expr);
+        }
+        if field_off != 0 {
+            self.emit_addi(10, 10, field_off as i32);
+        }
+        let addr_off = self.alloc_local("<bf_addr>", 8);
+        self.emit_sd(10, 2, addr_off); // save addr
+        // 2. Evaluate rhs -> a0, mask to bit_width, save to stack
+        self.gen_expr(rhs);
+        if bit_width < 64 {
+            let mask: u64 = (1u64 << bit_width) - 1;
+            if mask <= 0x7FF {
+                self.emit_andi(10, 10, mask as i32);
+            } else {
+                let sv = self.alloc_local("<bf_rv>", 8);
+                self.emit_sd(10, 2, sv);
+                self.load_const64_a0(mask);
+                self.emit_addi(11, 10, 0); // a1 = mask
+                self.emit_ld(10, 2, sv);   // a0 = rhs
+                self.emit_and(10, 10, 11);  // a0 &= mask
+            }
+        }
+        let val_off = self.alloc_local("<bf_val>", 8);
+        self.emit_sd(10, 2, val_off); // save masked rhs
+        // 3. Load current container value
+        self.emit_ld(10, 2, addr_off);  // a0 = addr
+        self.emit_load_sz(11, 10, 0, csz); // a1 = container
+        // 4. Clear target bits: a1 &= ~((mask) << bit_offset)
+        let clear_mask: u64 = !(((1u64 << bit_width) - 1) << bit_offset);
+        if clear_mask as i64 >= -2048 && clear_mask as i64 <= 2047 {
+            self.emit_andi(11, 11, clear_mask as i32);
+        } else {
+            let sv2 = self.alloc_local("<bf_c>", 8);
+            self.emit_sd(11, 2, sv2); // save container
+            self.load_const64_a0(clear_mask); // a0 = clear_mask
+            self.emit_addi(12, 10, 0); // a2 = clear_mask
+            self.emit_ld(11, 2, sv2);  // a1 = container
+            self.emit_and(11, 11, 12);  // a1 &= clear_mask
+        }
+        // 5. Shift new value and OR into container
+        self.emit_ld(12, 2, val_off); // a2 = masked rhs
+        if bit_offset > 0 {
+            self.emit_slli(12, 12, bit_offset as u8); // a2 <<= bit_offset
+        }
+        self.emit_or(11, 11, 12); // a1 |= a2
+        // 6. Store container back
+        self.emit_ld(10, 2, addr_off); // a0 = addr
+        self.emit_store_sz(11, 10, 0, csz); // [a0] = a1
+        // 7. Result = rhs value
+        self.emit_ld(10, 2, val_off);
+    }
+
     fn emit_slt(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x33;
         self.emit(&insn.to_le_bytes());
@@ -3900,6 +4142,24 @@ impl Riscv64Codegen {
         if pos + 8 <= self.code.len() {
             let flw = (lower as u32 & 0xfff) << 20 | 10 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
             self.code[pos + 4..pos + 8].copy_from_slice(&flw.to_le_bytes());
+        }
+    }
+
+    /// Patch AUIPC + LD pair for 64-bit integer constant loading
+    fn patch_auipc_ld(&mut self, at: u64, addr: u64) {
+        let pc = at;
+        let delta = (addr as i64 - pc as i64) as i32;
+        let upper = (delta + 0x800) >> 12;
+        let lower = delta - (upper << 12);
+        let auipc = ((upper as u32 & 0xfffff) << 12) | 10 << 7 | 0x17;
+        let pos = at as usize;
+        if pos + 4 <= self.code.len() {
+            self.code[pos..pos + 4].copy_from_slice(&auipc.to_le_bytes());
+        }
+        if pos + 8 <= self.code.len() {
+            // LD a0, [a0 + lower]: funct3=011, opcode=0000011
+            let ld = (lower as u32 & 0xfff) << 20 | 10 << 15 | 0b011 << 12 | 10 << 7 | 0x03;
+            self.code[pos + 4..pos + 8].copy_from_slice(&ld.to_le_bytes());
         }
     }
 

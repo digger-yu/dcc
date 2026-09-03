@@ -31,7 +31,7 @@
 
 | 模块 | 优先级 | 前端(解析) | 后端(代码生成) | 验证测试 |
 |------|--------|----------|------------|----------|
-| 位域 bitfields | P2 | ✅ `int x : 3` 语法 | ✅ 位偏移+掩码+移位+有符号扩展 | ✅ bitfield_test.c |
+| 位域 bitfields | P2 | ✅ `int x : 3` 语法 | ✅ x86_64/aarch64/riscv64 位偏移+掩码+移位+有符号扩展+读-改-写 | ✅ bitfield_runtime.c |
 | 柔性数组成员 | P2 | ✅ `char data[]` | ✅ sizeof不贡献+偏移正确 | ✅ flex_arr_test.c |
 | 向量类型 SIMD | P3 | ✅ `__attribute__((vector_size))` | ✅ 标量逐元素加减乘；全局向量复制 | ✅ simd_test.c, vector_global.c |
 | 定点数类型 | P3 | ✅ `_Fract`/`_Accum` | ✅ 作为整数运算(1.31/16.16) | ✅ fixedpt_test.c |

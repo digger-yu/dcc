@@ -11493,6 +11493,21 @@ fn m2_2_struct_layout() {
     assert_eq!(code, 0, "struct layout checks failed (exit={code})");
 }
 
+/// Bitfield runtime: read/write/sizeof for signed, unsigned,
+/// mixed, cross-container, and small container bitfields.
+#[test]
+#[cfg(unix)]
+fn bitfield_runtime() {
+    let src = include_str!("fixtures/c/bitfield_runtime.c");
+    let (out, code) = run_host_link_and_run("bitfield-rt", src);
+    assert!(
+        out.status.success(),
+        "bitfield compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "bitfield runtime checks failed (exit={code})");
+}
+
 /// M2.3: integer promotion and implicit conversion rules.
 #[test]
 #[cfg(unix)]
