@@ -164,6 +164,8 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
             if !volatile_globals.is_empty() && func_refs_volatile(f, &volatile_globals) {
                 continue;
             }
+            // P0-4: 先将 switch 降级为 if-chain, 使含 switch 的函数也能 SSA 化
+            crate::ssa::lower_switches_in_func(f);
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
                 crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
                 *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);

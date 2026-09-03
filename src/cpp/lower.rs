@@ -10384,9 +10384,9 @@ impl Lower {
                         }
                     }
                     // 求值失败 (例如依赖模板参数 / SFINAE 探测): 保守地两段都保留
-                    // 标记一行注释以便追踪
+                    // 降级为运行时 if-else，添加明确标记注释
                     None => {
-                        self.out.push_str("/* M17.0: if constexpr condition not constexpr, both branches kept */\n");
+                        self.out.push_str("/* dcc: if constexpr fallback - condition not evaluable at compile time, degraded to runtime if */\n");
                         self.out.push_str("if (");
                         self.emit_expr(cond);
                         self.out.push_str(") {\n");

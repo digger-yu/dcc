@@ -19,6 +19,10 @@ pub fn write_elf_pie_riscv64(layout: &Layout) -> Vec<u8> {
     write_elf_pie(layout, EM_RISCV)
 }
 
+pub fn write_elf_pie_riscv32(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_RISCV)
+}
+
 pub fn write_elf_pie_mips64(layout: &Layout) -> Vec<u8> {
     write_elf_pie(layout, EM_MIPS)
 }
@@ -56,6 +60,10 @@ pub fn write_elf_shared_aarch64(layout: &Layout) -> Vec<u8> {
 }
 
 pub fn write_elf_shared_riscv64(layout: &Layout) -> Vec<u8> {
+    write_elf_shared(layout, EM_RISCV)
+}
+
+pub fn write_elf_shared_riscv32(layout: &Layout) -> Vec<u8> {
     write_elf_shared(layout, EM_RISCV)
 }
 

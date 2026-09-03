@@ -143,6 +143,8 @@ pub struct Config {
     pub warn_int_truncation: bool,
     /// -Wimplicit-declaration: 未声明标识符警告
     pub warn_implicit_decl: bool,
+    /// -Wundef: #if 中未定义标识符警告
+    pub warn_undef: bool,
     /// PGO / GCOV / AutoFDO / LBR / MemProf / Offloading 统一配置
     pub profile: crate::profile::ProfileConfig,
     /// IPA-SRA 配置: -fipa-sra
@@ -771,6 +773,426 @@ fn expand_response_files(args: &[String]) -> Result<Vec<String>, CliError> {
     expand_response_files_impl(args, 0)
 }
 
+/// 已知 GCC/Clang -m* 机器选项白名单。
+/// 这些选项被 DCC 安全忽略（不产生效果但不报警告）。
+fn is_known_m_option(opt: &str) -> bool {
+    // 精确匹配
+    if match opt {
+        "-mno-red-zone" | "-mred-zone" |
+        "-m64" | "-m32" |
+        "-mno-sse" | "-mno-sse2" | "-mno-sse3" | "-mno-ssse3" |
+        "-mno-sse4" | "-mno-sse4.1" | "-mno-sse4.2" |
+        "-mno-avx" | "-mno-avx2" | "-mno-avx512f" |
+        "-mno-mmx" | "-mno-3dnow" | "-mno-fma" |
+        "-msoft-float" | "-mhard-float" |
+        "-mno-fp-ret-in-387" | "-mfpmath=sse" | "-mfpmath=387" |
+        "-mno-80387" |
+        "-mthumb" | "-marm" |
+        "-mno-unaligned-access" | "-munaligned-access" |
+        "-mno-outline-atomics" | "-moutline-atomics" |
+        "-mno-tls-direct-seg-refs" |
+        "-mno-global-merge" | "-mglobal-merge" |
+        "-mno-omit-leaf-frame-pointer" | "-momit-leaf-frame-pointer" |
+        "-mstack-protector-guard=tls" |
+        "-mstack-protector-guard=global" |
+        "-mstack-protector-guard-reg=sp" |
+        "-mstack-protector-guard-offset=0" |
+        "-mno-vsx" | "-mno-altivec" | "-mno-isa" |
+        "-mno-crypto" | "-mno-htm" |
+        "-mfix-cortex-a53-835769" | "-mno-fix-cortex-a53-835769" |
+        "-mfix-cortex-a53-843419" | "-mno-fix-cortex-a53-843419" |
+        "-mno-sve" | "-mno-sve2" | "-mno-lse" |
+        "-mno-relax" | "-mrelax" |
+        "-mno-strict-align" | "-mstrict-align" |
+        "-mno-branch-protection" | "-mbranch-protection=none" |
+        "-mno-sign-return-address" | "-msign-return-address=none" |
+        "-mno-prefetch" | "-mprefetch" |
+        "-mno-ms-bitfields" | "-mms-bitfields" |
+        "-mno-app-regs" | "-mapp-regs" |
+        "-mno-faster-structs" | "-mfaster-structs" |
+        "-mno-ieee-fp" | "-mieee-fp" |
+        "-mno-long-calls" | "-mlong-calls" |
+        "-mno-short-calls" | "-mshort-calls" |
+        "-mno-tls-direct-seg-refs" |
+        "-maccumulate-outgoing-args" | "-mno-accumulate-outgoing-args" |
+        "-mno-align-stringops" | "-malign-stringops" |
+        "-mno-inline-all-stringops" | "-minline-all-stringops" |
+        "-mno-push-args" | "-mpush-args" |
+        "-mno-stack-arg-probe" | "-mstack-arg-probe" |
+        "-mno-dwarf2-asm" | "-mdwarf2-asm" |
+        "-mno-tune" => true,
+        _ => false,
+    } {
+        return true;
+    }
+    // 前缀匹配: -march=, -mcpu=, -mtune=, -mcmodel=, -mabi=, -mfpu= 等
+    let known_prefixes = [
+        "-march=", "-mcpu=", "-mtune=", "-mcmodel=", "-mabi=",
+        "-mfpu=", "-mfloat-abi=", "-mmmu=", "-mpid=",
+        "-msmall-data-limit=", "-mbranch-cost=",
+        "-mstack-protector-guard=", "-mstack-protector-guard-reg=",
+        "-mstack-protector-guard-offset=",
+        "-mbranch-protection=", "-msign-return-address=",
+        "-msve-vector-bits=", "-moverride=",
+        "-mtrace=", "-mfix-cortex-a53=",
+        "-mgeneral-regs-only",
+    ];
+    known_prefixes.iter().any(|p| opt.starts_with(p))
+}
+
+/// 已知 GCC/Clang -f* 选项白名单。
+/// 这些选项被 DCC 安全忽略（不产生效果但不报警告）。
+fn is_known_f_option(opt: &str) -> bool {
+    // 精确匹配
+    if match opt {
+        // 已在上层单独处理的选项（不应到达这里，但保险起见列出）
+        "-fno-plt" | "-fplt" |
+        // PIC/PIE
+        "-fpic" | "-fPIC" | "-fpie" | "-fPIE" | "-fno-pic" | "-fno-PIC" |
+        "-fno-pie" | "-fno-PIE" |
+        // 栈保护
+        "-fstack-protector" | "-fstack-protector-all" |
+        "-fstack-protector-strong" | "-fno-stack-protector" |
+        // 内联
+        "-fno-inline" | "-finline-functions" |
+        "-fno-inline-functions" | "-finline-small-functions" |
+        "-fno-inline-small-functions" |
+        // 严格别名
+        "-fstrict-aliasing" | "-fno-strict-aliasing" |
+        // 溢出陷阱
+        "-ftrapv" | "-fno-trapv" |
+        "-fwrapv" | "-fno-wrapv" |
+        // 省略帧指针
+        "-fomit-frame-pointer" | "-fno-omit-frame-pointer" |
+        // 重定位
+        "-fno-readonly-after-reloc" |
+        // 合并常量
+        "-fmerge-all-constants" | "-fno-merge-all-constants" |
+        "-fmerge-constants" | "-fno-merge-constants" |
+        // 函数 sections
+        "-ffunction-sections" | "-fno-function-sections" |
+        "-fdata-sections" | "-fno-data-sections" |
+        // 通用
+        "-fno-common" | "-fcommon" |
+        "-fno-builtin" | "-fbuiltin" |
+        "-fno-builtin-printf" | "-fno-builtin-memcpy" |
+        "-fno-builtin-memset" | "-fno-builtin-strlen" |
+        "-fno-builtin-malloc" | "-fno-builtin-free" |
+        "-fno-builtin-fprintf" | "-fno-builtin-sprintf" |
+        "-fno-ident" | "-fident" |
+        "-ffast-math" | "-fno-fast-math" |
+        "-fmath-errno" | "-fno-math-errno" |
+        "-ftrapping-math" | "-fno-trapping-math" |
+        "-fsigned-char" | "-funsigned-char" |
+        "-fsigned-bitfields" | "-funsigned-bitfields" |
+        "-fshort-enums" | "-fno-short-enums" |
+        "-fshort-wchar" | "-fno-short-wchar" |
+        "-fno-strict-overflow" | "-fstrict-overflow" |
+        "-fno-aggressive-loop-optimizations" |
+        "-faggressive-loop-optimizations" |
+        "-fno-delete-null-pointer-checks" |
+        "-fdelete-null-pointer-checks" |
+        "-fno-guess-branch-probability" |
+        "-fguess-branch-probability" |
+        "-fno-peephole" | "-fpeephole" |
+        "-fno-peephole2" | "-fpeephole2" |
+        "-fno-toplevel-reorder" | "-ftoplevel-reorder" |
+        "-fno-unit-at-a-time" | "-funit-at-a-time" |
+        "-fno-exceptions" | "-fexceptions" |
+        "-fno-rtti" | "-frtti" |
+        "-fno-asynchronous-unwind-tables" |
+        "-fasynchronous-unwind-tables" |
+        "-fno-unwind-tables" | "-funwind-tables" |
+        "-fno-stack-check" | "-fstack-check" |
+        "-fno-stack-limit" |
+        "-fno-hosted" | "-fhosted" |
+        "-ffreestanding" | "-fno-freestanding" |
+        "-fno-openmp" | "-fopenmp" |
+        "-fno-openacc" | "-fopenacc" |
+        "-fno-dollars-in-identifiers" |
+        "-fdollars-in-identifiers" |
+        "-fno-leading-underscore" | "-fleading-underscore" |
+        "-fno-record-gcc-switches" |
+        "-frecord-gcc-switches" |
+        "-fno-strict-concurrency" |
+        "-fstrict-concurrency" |
+        "-fno-objc-arc" | "-fobjc-arc" |
+        "-fno-objc-exceptions" |
+        "-fno-objc-msgsend-selector-stubs" |
+        "-fno-keep-inline-dllexport" |
+        "-fno-keep-inline-functions" |
+        "-fno-keep-static-consts" |
+        "-fkeep-static-consts" |
+        "-fno-ivopts" | "-fivopts" |
+        "-fno-loop-optimize" | "-floop-optimize" |
+        "-fno-crossjumping" | "-fcrossjumping" |
+        "-fno-if-conversion" | "-fif-conversion" |
+        "-fno-if-conversion2" | "-fif-conversion2" |
+        "-fno-rerun-cse-after-loop" |
+        "-fno-caller-saves" | "-fcaller-saves" |
+        "-fno-schedule-insns" | "-fschedule-insns" |
+        "-fno-schedule-insns2" | "-fschedule-insns2" |
+        "-fno-noop-after-inlining" |
+        "-fno-optimize-sibling-calls" |
+        "-foptimize-sibling-calls" |
+        "-fno-defer-pop" | "-fdefer-pop" |
+        "-fno-force-mem" | "-fforce-mem" |
+        "-fno-force-addr" | "-fforce-addr" |
+        "-fno-thread-jumps" | "-fthread-jumps" |
+        "-fno-delayed-branch" | "-fdelayed-branch" |
+        "-fno-prefetch-loop-arrays" |
+        "-fprefetch-loop-arrays" |
+        "-fno-unroll-loops" | "-funroll-loops" |
+        "-fno-peel-loops" | "-fpeel-loops" |
+        "-fno-move-loop-invariants" |
+        "-fmove-loop-invariants" |
+        "-fno-loop-interchange" |
+        "-floop-interchange" |
+        "-fno-loop-strip-mine" |
+        "-floop-strip-mine" |
+        "-fno-loop-block" | "-floop-block" |
+        "-fno-tree-dominator-opts" |
+        "-ftree-dominator-opts" |
+        "-fno-tree-dse" | "-ftree-dse" |
+        "-fno-tree-pre" | "-ftree-pre" |
+        "-fno-tree-fre" | "-ftree-fre" |
+        "-fno-tree-copy-prop" |
+        "-ftree-copy-prop" |
+        "-fno-tree-store-copy-prop" |
+        "-fno-tree-sink" | "-ftree-sink" |
+        "-fno-tree-ter" | "-ftree-ter" |
+        "-fno-tree-lrs" | "-ftree-lrs" |
+        "-fno-tree-vrp" | "-ftree-vrp" |
+        "-fno-tree-ch" | "-ftree-ch" |
+        "-fno-tree-loop-optimize" |
+        "-ftree-loop-optimize" |
+        "-fno-tree-vectorize" | "-ftree-vectorize" |
+        "-fno-tree-loop-vectorize" |
+        "-ftree-loop-vectorize" |
+        "-fno-tree-slp-vectorize" |
+        "-ftree-slp-vectorize" |
+        "-fno-var-tracking" | "-fvar-tracking" |
+        "-fno-var-tracking-assignments" |
+        "-fvar-tracking-assignments" |
+        "-fno-gcse" | "-fgcse" |
+        "-fno-gcse-lm" | "-fgcse-lm" |
+        "-fno-gcse-sm" | "-fgcse-sm" |
+        "-fno-gcse-las" | "-fgcse-las" |
+        "-fno-gcse-after-reload" |
+        "-fgcse-after-reload" |
+        "-fno-expensive-optimizations" |
+        "-fexpensive-optimizations" |
+        "-fno-auto-inc-dec" | "-fauto-inc-dec" |
+        "-fno-math-errno" | "-fmath-errno" |
+        "-fno-trapping-math" | "-ftrapping-math" |
+        "-fno-signaling-nans" | "-fsignaling-nans" |
+        "-fno-rounding-math" | "-frounding-math" |
+        "-fno-strict-aliasing" | "-fstrict-aliasing" |
+        "-fno-strict-overflow" | "-fstrict-overflow" |
+        "-fno-partial-inlining" | "-fpartial-inlining" |
+        "-fno-early-inlining" | "-fearly-inlining" |
+        "-fno-inline-functions-called-once" |
+        "-finline-functions-called-once" |
+        "-fno-ipa-cp" | "-fipa-cp" |
+        "-fno-ipa-cp-clone" | "-fipa-cp-clone" |
+        "-fno-ipa-pta" | "-fipa-pta" |
+        "-fno-ipa-pure-const" | "-fipa-pure-const" |
+        "-fno-ipa-reference" | "-fipa-reference" |
+        "-fno-ipa-ra" | "-fipa-ra" |
+        "-fno-ipa-icf" | "-fipa-icf" |
+        "-fno-ipa-modref" | "-fipa-modref" |
+        "-fno-lto" | "-flto" |
+        "-fno-use-linker-plugin" | "-fuse-linker-plugin" |
+        "-fno-fat-lto-objects" | "-ffat-lto-objects" |
+        "-fno-split-lto-unit" | "-fsplit-lto-unit" |
+        "-fno-devirtualize" | "-fdevirtualize" |
+        "-fno-devirtualize-speculatively" |
+        "-fdevirtualize-speculatively" |
+        "-fno-lifetime-dse" | "-flifetime-dse" |
+        "-fno-live-patching" |
+        "-fno-semantic-interposition" |
+        "-fsemantic-interposition" |
+        "-fno-sanitize=all" |
+        "-fno-sanitize-undefined-trap-on-error" |
+        "-fsanitize-undefined-trap-on-error" |
+        "-fno-sanitize-recover=all" |
+        "-fno-sanitize-address-use-after-scope" |
+        "-fno-stack-clash-protection" |
+        "-fstack-clash-protection" |
+        "-fno-profile-generate" | "-fprofile-generate" |
+        "-fno-profile-use" | "-fprofile-use" |
+        "-fno-profile-correction" |
+        "-fprofile-correction" |
+        "-fno-auto-profile" | "-fauto-profile" |
+        "-fno-cx-limited-range" | "-fcx-limited-range" |
+        "-fno-cx-fortified-rules" |
+        "-fcx-fortified-rules" |
+        "-fno-store-merging" | "-fstore-merging" |
+        "-fno-ssa-backprop" | "-fssa-backprop" |
+        "-fno-ssa-phiopt" | "-fssa-phiopt" |
+        "-fno-ssa-coalesce" |
+        "-fno-forward-propagate" | "-fforward-propagate" |
+        "-fno-reorder-blocks" | "-freorder-blocks" |
+        "-fno-reorder-blocks-and-partition" |
+        "-freorder-blocks-and-partition" |
+        "-fno-reorder-functions" | "-freorder-functions" |
+        "-fno-sched-pressure" | "-fsched-pressure" |
+        "-fno-sched-spec" | "-fsched-spec" |
+        "-fno-shrink-wrap" | "-fshrink-wrap" |
+        "-fno-shrink-wrap-separate" |
+        "-fshrink-wrap-separate" |
+        "-fno-split-paths" | "-fsplit-paths" |
+        "-fno-stack-reuse" |
+        "-fno-ssa-loop-ivcanon" |
+        "-fssa-loop-ivcanon" |
+        "-fno-ssa-loop-im" | "-fssa-loop-im" |
+        "-fno-ssa-loop-ivopts" |
+        "-fssa-loop-ivopts" |
+        "-fno-tree-loop-distribute-patterns" |
+        "-ftree-loop-distribute-patterns" |
+        "-fno-tree-loop-distribution" |
+        "-ftree-loop-distribution" |
+        "-fno-tree-parallelize-loops" |
+        "-ftree-parallelize-loops=" |
+        "-fno-unswitch-loops" |
+        "-funswitch-loops" |
+        "-fno-vect-cost-model" |
+        "-fvect-cost-model" |
+        "-fno-vtable-verify" |
+        "-fvtable-verify" |
+        "-fno-web" | "-fweb" |
+        "-fno-zero-initialized-in-bss" |
+        "-fzero-initialized-in-bss" |
+        "-fno-input-charset" |
+        "-fexec-charset" | "-fno-exec-charset" |
+        "-fwide-exec-charset" | "-fno-wide-exec-charset" |
+        "-finput-charset" |
+        "-fno-show-column" | "-fshow-column" |
+        "-fno-diagnostics-color" |
+        "-fdiagnostics-color" |
+        "-fno-diagnostics-show-option" |
+        "-fdiagnostics-show-option" |
+        "-fno-diagnostics-show-caret" |
+        "-fdiagnostics-show-caret" |
+        "-fno-diagnostics-show-line-numbers" |
+        "-fdiagnostics-show-line-numbers" |
+        "-fno-diagnostics-parseable-fixits" |
+        "-fdiagnostics-parseable-fixits" |
+        "-fno-emit-class-debug-always" |
+        "-femit-class-debug-always" |
+        "-fno-debug-types-section" |
+        "-fdebug-types-section" |
+        "-fno-eliminate-unused-debug-types" |
+        "-feliminate-unused-debug-types" |
+        "-fno-eliminate-unused-debug-symbols" |
+        "-feliminate-unused-debug-symbols" |
+        "-fno-dwarf2-cfi-asm" | "-fdwarf2-cfi-asm" |
+        "-fno-asynchronous-unwind-tables" |
+        "-fasynchronous-unwind-tables" |
+        "-fno-unwind-tables" | "-funwind-tables" |
+        "-fno-verbose-asm" | "-fverbose-asm" |
+        "-fno-integrated-as" | "-fintegrated-as" |
+        "-fno-addrsig" | "-faddrsig" |
+        "-fno-unique-section-names" |
+        "-funique-section-names" |
+        "-fno-coverage" | "-fcoverage" |
+        "-fno-test-coverage" | "-ftest-coverage" |
+        "-fno-profile-arcs" | "-fprofile-arcs" |
+        "-fno-pie" | "-fpie" |
+        "-fno-pic-unicode" |
+        "-fms-extensions" | "-fno-ms-extensions" |
+        "-fms-compatibility" | "-fno-ms-compatibility" |
+        "-fms-volatile" | "-fno-ms-volatile" |
+        "-fno-builtin-" => true, // -fno-builtin-xxx
+        // 内核常用组合
+        "-fno-allow-store-data-races" |
+        "-fno-strict-flex-array" |
+        "-fstrict-flex-arrays=" |
+        "-ftrivial-auto-var-init=zero" |
+        "-ftrivial-auto-var-init=pattern" |
+        "-ftrivial-auto-var-init=uninitialized" |
+        "-fno-stack-protector" |
+        "-falign-loops" | "-falign-jumps" |
+        "-falign-functions" | "-fno-align-functions" |
+        "-falign-labels" | "-fno-align-labels" => true,
+        _ => false,
+    } {
+        return true;
+    }
+    // 前缀匹配
+    let known_prefixes = [
+        "-falign-loops=", "-falign-jumps=", "-falign-functions=",
+        "-falign-labels=", "-fmax-errors=",
+        "-fdbg-cnt=", "-fira-algorithm=",
+        "-fira-region=", "-floop-parallelize-all=",
+        "-ftracer", "-fno-tracer",
+        "-fconserve-stack", "-fno-conserve-stack",
+        "-fno-tree-switch-conversion",
+        "-ftree-switch-conversion",
+        "-fno-tree-tail-merge", "-ftree-tail-merge",
+        "-fno-tree-bit-ccp", "-ftree-bit-ccp",
+        "-fno-tree-ccp", "-ftree-ccp",
+        "-fno-ipa-cp-alien", "-fipa-cp-alien",
+        "-fipa-cp-clone", "-fno-ipa-cp-clone",
+        "-fno-ipa-icf-functions", "-fipa-icf-functions",
+        "-fno-ipa-icf-variables", "-fipa-icf-variables",
+        "-fno-ipa-pure-const-discover",
+        "-fstack-protector-guard=",
+        "-fstack-protector-guard-reg=",
+        "-fstack-protector-guard-offset=",
+        "-fno-sanitize=", "-fsanitize=",
+        "-fno-sanitize-recover=", "-fsanitize-recover=",
+        "-fno-sanitize-address=", "-fsanitize-address=",
+        "-fno-sanitize-coverage=",
+        "-fno-sanitize-memory=",
+        "-fno-sanitize-thread=",
+        "-fno-builtin-",
+        "-fno-cfi-", "-fcfi-",
+        "-fno-kasan-", "-fkasan-",
+        "-fno-ubsan-", "-fubsan-",
+        "-fno-orchestrate-",
+        "-fmodules", "-fno-modules",
+        "-fmodule-", "-fno-module-",
+        "-fexperimental-library",
+        "-fno-experimental-library",
+        "-fvisibility=", "-fno-visibility=",
+        "-fno-visibility-inlines-hidden",
+        "-fvisibility-inlines-hidden",
+        "-fno-rtti-data", "-frtti-data",
+        "-fno-objc-runtime=",
+        "-fobjc-runtime=",
+        "-fobjc-call-cxx-cdtors",
+        "-fno-objc-call-cxx-cdtors",
+        "-fprofile-",
+        "-fno-profile-",
+        "-finstrument-functions",
+        "-fno-instrument-functions",
+        "-fpatchable-function-entry=",
+        "-fno-optimize-",
+        "-foptimize-",
+        "-fno-lifetime-",
+        "-flifetime-",
+        "-fno-strict-",
+        "-fstrict-",
+        "-fno-diagnostics-",
+        "-fdiagnostics-",
+        "-fno-code-model-",
+        "-fcode-model-",
+        "-fno-sanitize-address-field-padding",
+        "-fsanitize-address-field-padding=",
+        "-fno-implicit-modules",
+        "-fimplicit-modules",
+        "-fno-implicit-module-maps",
+        "-fimplicit-module-maps",
+        "-fprebuilt-module-path=",
+        "-fprebuilt-implicit-modules",
+        "-fno-prebuilt-implicit-modules",
+        "-fmodule-map-file=",
+        "-fno-module-map-file=",
+    ];
+    known_prefixes.iter().any(|p| !p.is_empty() && opt.starts_with(p))
+}
+
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
     // 响应文件展开: @file -> 文件内容分词后的参数列表
     let expanded = expand_response_files(args)?;
@@ -859,6 +1281,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut warn_int_conversion = false;
     let mut warn_int_truncation = false;
     let mut warn_implicit_decl = true;
+    let mut warn_undef = false; // -Wundef 默认关闭
+    let mut warn_ignored_option = true; // -Wno-ignored-option 可关闭
     let mut profile = crate::profile::ProfileConfig::default();
     let mut ipa_sra = crate::ipa_sra::IpaSraConfig::default();
     let mut offload = crate::profile::offload::OffloadConfig::default();
@@ -1393,6 +1817,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wno-implicit-declaration" | "-Wno-implicit-function-declaration" => {
                 warn_implicit_decl = false
             }
+            // -Wundef: #if 中未定义标识符警告
+            "-Wundef" => warn_undef = true,
+            "-Wno-undef" => warn_undef = false,
+            // -Wignored-option: 控制未知 -f*/-m* 选项的警告
+            "-Wno-ignored-option" => warn_ignored_option = false,
             // ====== PGO / GCOV / AutoFDO / LBR / MemProf ======
             "-fprofile-generate" => {
                 profile.pgo_generate = Some(std::path::PathBuf::from("."));
@@ -2057,8 +2486,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     ));
                 }
             }
-            // 其余 -m* 忽略 (GCC 机器相关选项, DCC 作为 x86-64 编译器安全忽略)
-            a if a.starts_with("-m") => {}
+            // 其余 -m* 机器选项: 已知 GCC/Clang 选项安全忽略，未知选项警告
+            a if a.starts_with("-m") => {
+                if warn_ignored_option && !is_known_m_option(a) {
+                    cli_warnings.push(format!(
+                        "unknown -m option ignored: '{}'", a
+                    ));
+                }
+            }
             // -fipa-sra: 启用/禁用跨过程标量替换
             "-fipa-sra" => ipa_sra.enabled = true,
             "-fno-ipa-sra" => ipa_sra.enabled = false,
@@ -2103,9 +2538,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     ));
                 }
             }
-            // -f* 其他选项 - 忽略 (GCC 选项数量庞大, 内核 Makefile 使用大量
-            // GCC 特有选项, 安全忽略以避免噪音)
-            a if a.starts_with("-f") => {}
+            // -f* 其他选项 - 已知 GCC/Clang 选项安全忽略，未知选项警告
+            a if a.starts_with("-f") => {
+                if warn_ignored_option && !is_known_f_option(a) {
+                    cli_warnings.push(format!(
+                        "unknown -f option ignored: '{}'", a
+                    ));
+                }
+            }
             // -std=* 已经处理过了
             // -include, -isystem 等
             "-include" => {
@@ -2553,6 +2993,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             warn_int_conversion,
             warn_int_truncation,
             warn_implicit_decl,
+            warn_undef,
             diag_color,
             diag_format,
             diag_show_template_tree,
@@ -2675,6 +3116,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             warn_int_conversion,
             warn_int_truncation,
             warn_implicit_decl,
+            warn_undef,
             diag_color,
             diag_format,
             diag_show_template_tree,

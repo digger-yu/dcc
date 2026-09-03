@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, QualType, Stmt, Type, UnOp};
+use crate::ast::{BinOp, Block, BlockItem, Case, Decl, Expr, FuncDecl, QualType, Stmt, Type, UnOp};
 use crate::diagnostics::Span;
 
 /// SSA 变量名: `"x_3"` 表示 `x` 的第 4 个版本 (下标从 0 起)。
@@ -338,8 +338,9 @@ fn is_structured_item(item: &BlockItem) -> bool {
 
 fn is_structured_stmt(s: &Stmt) -> bool {
     match s {
-        Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => false,
-        Stmt::AsmGoto { .. } => false,
+        // P0-4 Phase 2: goto/label 现在由 Builder 直接支持
+        Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => true,
+        Stmt::AsmGoto { .. } => false, // asm goto 仍然降级
         Stmt::Switch { .. } => false, // Switch 简化为 if-chains 后再 SSA 化
         Stmt::If { then_, else_, .. } => {
             is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
@@ -368,6 +369,12 @@ struct Builder {
     continue_stack: Vec<String>,
     /// 中间临时变量名计数器
     tmp_count: u32,
+    /// P0-4 Phase 2: label 名称 -> BB 名称映射
+    label_bbs: HashMap<String, String>,
+    /// P0-4 Phase 2: 待解析的 goto (源 BB, 目标 label 名)
+    pending_gotos: Vec<(String, String)>,
+    /// P0-4 Phase 2: 每个 label BB 入口处的变量版本快照 (label -> current 副本)
+    label_var_snapshots: HashMap<String, HashMap<String, SsaVar>>,
 }
 
 impl Builder {
@@ -381,6 +388,9 @@ impl Builder {
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
             tmp_count: 0,
+            label_bbs: HashMap::new(),
+            pending_gotos: Vec::new(),
+            label_var_snapshots: HashMap::new(),
         };
         b.func.blocks.get_mut(&b.cur).unwrap().term = Terminator::Unreachable;
         b
@@ -1142,6 +1152,68 @@ impl Builder {
                     self.cur = dead;
                 }
             }
+            // P0-4 Phase 2: goto/label 支持
+            Stmt::Label { name, stmt, .. } => {
+                let label_name = name.name.clone();
+                // 创建 label BB (如果尚未创建)
+                let label_bb = self.label_bbs.entry(label_name.clone())
+                    .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
+                    .clone();
+                // 保存当前变量版本快照 (用于 phi 插入)
+                self.label_var_snapshots.insert(label_name, self.current.clone());
+                // 从当前 BB 跳转到 label BB
+                if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+                    if matches!(b.term, Terminator::Unreachable) {
+                        b.term = Terminator::Jump(label_bb.clone());
+                        b.succs.push(label_bb.clone());
+                    }
+                }
+                if let Some(lbb) = self.func.blocks.get_mut(&label_bb) {
+                    lbb.preds.push(self.cur.clone());
+                    lbb.preds.dedup();
+                }
+                self.cur = label_bb;
+                // 继续处理 label 后面的语句
+                self.lower_stmt(stmt);
+            }
+            Stmt::Goto { target, .. } => {
+                let label_name = target.name.clone();
+                // 确保目标 label BB 存在
+                let target_bb = self.label_bbs.entry(label_name.clone())
+                    .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
+                    .clone();
+                // 记录待解析的 goto
+                self.pending_gotos.push((self.cur.clone(), label_name));
+                // 设置跳转
+                self.set_term(Terminator::Jump(target_bb.clone()));
+                if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+                    b.succs.push(target_bb.clone());
+                }
+                if let Some(tbb) = self.func.blocks.get_mut(&target_bb) {
+                    tbb.preds.push(self.cur.clone());
+                    tbb.preds.dedup();
+                }
+                // goto 后的代码在 unreachable BB
+                let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
+                self.cur = dead;
+            }
+            Stmt::GotoIndirect { expr, .. } => {
+                // computed goto: 保守处理，跳转到所有已知 label BB
+                let _ = self.lower_expr(expr);
+                // 保守: 添加边到所有已知 label BB
+                for (_, target_bb) in &self.label_bbs {
+                    if let Some(tbb) = self.func.blocks.get_mut(target_bb) {
+                        tbb.preds.push(self.cur.clone());
+                        tbb.preds.dedup();
+                    }
+                    if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+                        b.succs.push(target_bb.clone());
+                    }
+                }
+                self.set_term(Terminator::Unreachable);
+                let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
+                self.cur = dead;
+            }
             _ => {} // 其他: 已通过 is_structured 过滤
         }
     }
@@ -1470,6 +1542,107 @@ pub fn insert_loop_phis(func: &mut Function) {
     }
 }
 
+/// P0-4 Phase 2: 在 label BB 入口插入 phi 节点.
+///
+/// 当 goto 跳转到 label 时，变量版本可能与 label 正常入口不同.
+/// 为每个被 goto 跨越的变量插入 phi 节点合并不同版本.
+fn insert_label_phis(
+    func: &mut Function,
+    label_bbs: &HashMap<String, String>,
+    _label_var_snapshots: &HashMap<String, HashMap<String, SsaVar>>,
+) {
+    if label_bbs.is_empty() {
+        return;
+    }
+    // 对每个 label BB，检查是否有多个前驱且前驱的变量版本不同
+    for (_label_name, bb_name) in label_bbs {
+        let bb = match func.blocks.get(bb_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        if bb.preds.len() <= 1 {
+            continue; // 只有一个前驱，不需要 phi
+        }
+        // 收集每个前驱 BB 最后定义的变量版本
+        let mut pred_vars: Vec<(String, HashMap<String, SsaVar>)> = Vec::new();
+        for pred_name in &bb.preds {
+            let pred_bb = match func.blocks.get(pred_name) {
+                Some(b) => b,
+                None => continue,
+            };
+            let mut vars: HashMap<String, SsaVar> = HashMap::new();
+            for inst in &pred_bb.insts {
+                if let Some(d) = &inst.dest {
+                    vars.insert(d.base.clone(), d.clone());
+                }
+            }
+            pred_vars.push((pred_name.clone(), vars));
+        }
+        if pred_vars.len() < 2 {
+            continue;
+        }
+        // 找出在所有前驱中都有定义但版本不同的变量
+        let first_vars = &pred_vars[0].1;
+        let mut needs_phi: Vec<String> = Vec::new();
+        for (base, var) in first_vars {
+            let mut all_same = true;
+            for (_, other_vars) in &pred_vars[1..] {
+                if let Some(other_var) = other_vars.get(base) {
+                    if other_var.name() != var.name() {
+                        all_same = false;
+                        break;
+                    }
+                }
+            }
+            if !all_same {
+                needs_phi.push(base.clone());
+            }
+        }
+        // 为需要 phi 的变量插入 phi 节点
+        if !needs_phi.is_empty() {
+            let bb = match func.blocks.get_mut(bb_name) {
+                Some(b) => b,
+                None => continue,
+            };
+            for base in &needs_phi {
+                // 找到最高版本号 + 1 作为 phi 目标版本
+                let max_version = pred_vars.iter()
+                    .filter_map(|(_, vars)| vars.get(base))
+                    .map(|v| v.version)
+                    .max()
+                    .unwrap_or(0);
+                let ty = pred_vars.iter()
+                    .filter_map(|(_, vars)| vars.get(base))
+                    .next()
+                    .map(|v| v.ty.clone())
+                    .unwrap_or(Type::Int);
+                let span = pred_vars.iter()
+                    .filter_map(|(_, vars)| vars.get(base))
+                    .next()
+                    .map(|v| v.span.clone())
+                    .unwrap_or_else(|| func.span.clone());
+                let phi_dest = SsaVar {
+                    base: base.clone(),
+                    version: max_version + 1,
+                    ty,
+                    span,
+                };
+                let incoming: Vec<(SsaVar, String)> = pred_vars.iter()
+                    .filter_map(|(pred_name, vars)| {
+                        vars.get(base).map(|v| (v.clone(), pred_name.clone()))
+                    })
+                    .collect();
+                if incoming.len() >= 2 {
+                    bb.phis.push(Phi {
+                        dest: phi_dest,
+                        incoming,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// Find the body blocks of a natural loop (header, latch).
 /// Loop body = {header} ∪ {blocks that can reach latch without going through header}
 fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
@@ -1549,6 +1722,174 @@ fn collect_var_uses_op(o: &Operand, out: &mut HashMap<String, SsaVar>) {
     }
 }
 
+// ============================================================
+// Switch -> If-chain 降级 pass
+// ============================================================
+
+/// 将函数体中的 switch 语句转换为 if-else 链.
+/// 这样含 switch 的函数也能进入 SSA 化路径.
+pub fn lower_switches_in_func(f: &mut FuncDecl) -> bool {
+    if let Some(body) = &mut f.body {
+        lower_switches_in_block(body)
+    } else {
+        false
+    }
+}
+
+/// 递归扫描 block，将所有 switch 语句替换为 if-else 链.
+fn lower_switches_in_block(block: &mut Block) -> bool {
+    let mut modified = false;
+    let mut new_items = Vec::with_capacity(block.items.len());
+    for mut item in block.items.drain(..) {
+        match &mut item {
+            BlockItem::Stmt(s) => {
+                if let Some(new_stmt) = lower_switch_stmt(s) {
+                    *s = new_stmt;
+                    modified = true;
+                }
+                // 递归处理嵌套 block
+                lower_switches_in_stmt(s);
+            }
+            BlockItem::Decl(d) => {
+                if let Decl::Func(f) = d {
+                    if let Some(body) = &mut f.body {
+                        if lower_switches_in_block(body) {
+                            modified = true;
+                        }
+                    }
+                }
+            }
+        }
+        new_items.push(item);
+    }
+    block.items = new_items;
+    modified
+}
+
+/// 递归处理语句中的嵌套 block.
+fn lower_switches_in_stmt(s: &mut Stmt) {
+    match s {
+        Stmt::If { then_, else_, .. } => {
+            lower_switches_in_stmt(then_);
+            if let Some(e) = else_ {
+                lower_switches_in_stmt(e);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            lower_switches_in_stmt(body);
+        }
+        Stmt::For { body, .. } => {
+            lower_switches_in_stmt(body);
+        }
+        Stmt::Block { b, .. } => {
+            lower_switches_in_block(b);
+        }
+        Stmt::Label { stmt, .. } => {
+            lower_switches_in_stmt(stmt);
+        }
+        _ => {}
+    }
+}
+
+/// 将单个 switch 语句转换为 if-else 链.
+/// 返回 Some(new_stmt) 如果成功转换，None 如果无法转换.
+fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
+    let Stmt::Switch { expr, cases, span: _ } = s else {
+        return None;
+    };
+    if cases.is_empty() {
+        return None;
+    }
+
+    // 分离 default case 和普通 case
+    let mut normal_cases: Vec<&Case> = Vec::new();
+    let mut default_case: Option<&Case> = None;
+    for c in cases {
+        if c.val.is_none() {
+            default_case = Some(c);
+        } else {
+            normal_cases.push(c);
+        }
+    }
+
+    // 从后向前构建 if-else 链
+    // 最后是 default (如果有)
+    let mut current_else: Option<Box<Stmt>> = if let Some(def) = default_case {
+        Some(Box::new(Stmt::Block {
+            b: def.body.clone(),
+            span: def.span.clone(),
+        }))
+    } else {
+        None
+    };
+
+    // 从后向前遍历普通 case，构建嵌套 if-else
+    for case in normal_cases.iter().rev() {
+        let case_val = case.val.as_ref().unwrap();
+        // 构建条件: expr == case_val
+        let cond = Expr::Binop {
+            op: BinOp::EqEq,
+            l: Box::new(expr.clone()),
+            r: Box::new(case_val.clone()),
+            span: case.span.clone(),
+            ty: expr_ty(expr),
+        };
+        let then_stmt = Box::new(Stmt::Block {
+            b: case.body.clone(),
+            span: case.span.clone(),
+        });
+        let if_stmt = Stmt::If {
+            cond,
+            then_: then_stmt,
+            else_: current_else.take(),
+            span: case.span.clone(),
+        };
+        current_else = Some(Box::new(if_stmt));
+    }
+
+    // 最外层的 if 语句就是结果
+    current_else.map(|s| *s)
+}
+
+/// 获取表达式的类型 (简化版).
+fn expr_ty(e: &Expr) -> Type {
+    match e {
+        Expr::Int { ty, .. } => ty.clone(),
+        Expr::Float { ty, .. } => ty.clone(),
+        Expr::String { ty, .. } => ty.clone(),
+        Expr::Char { ty, .. } => ty.clone(),
+        Expr::Ident { ty, .. } => ty.clone(),
+        Expr::Binop { ty, .. } => ty.clone(),
+        Expr::Unary { ty, .. } => ty.clone(),
+        Expr::Call { ty, .. } => ty.clone(),
+        Expr::Assign { ty, .. } => ty.clone(),
+        Expr::Cond { ty, .. } => ty.clone(),
+        Expr::Cast { ty, .. } => ty.clone(),
+        Expr::SizeofTy { ty, .. } => ty.clone(),
+        Expr::SizeofExpr { .. } => Type::ULong,
+        Expr::Index { ty, .. } => ty.clone(),
+        Expr::Member { ty, .. } => ty.clone(),
+        Expr::AddrOf { ty, .. } => ty.clone(),
+        Expr::Deref { ty, .. } => ty.clone(),
+        Expr::CompoundLit { ty, .. } => ty.clone(),
+        Expr::InitList { ty, .. } => ty.clone(),
+        Expr::StmtExpr { ty, .. } => ty.clone(),
+        Expr::Comma { ty, .. } => ty.clone(),
+        Expr::ComplexLit { ty, .. } => ty.clone(),
+        Expr::Real { ty, .. } => ty.clone(),
+        Expr::Imag { ty, .. } => ty.clone(),
+        Expr::VaArg { ty, .. } => ty.clone(),
+        Expr::Offsetof { result_ty, .. } => result_ty.clone(),
+        Expr::AlignofTy { .. } => Type::ULong,
+        Expr::AlignofExpr { .. } => Type::ULong,
+        Expr::PostInc { ty, .. } | Expr::PostDec { ty, .. }
+        | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. } => ty.clone(),
+        Expr::AsmExpr { ty, .. } => ty.clone(),
+        Expr::LabelAddr { ty, .. } => ty.clone(),
+        _ => Type::Int,
+    }
+}
+
 pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     let body = f.body.as_ref()?;
     if !is_structured(body) {
@@ -1588,6 +1929,8 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     // This enables SSA optimization passes to correctly analyze loop-carried
     // dependencies (induction variables, strength reduction, etc.).
     insert_loop_phis(&mut func);
+    // P0-4 Phase 2: Insert phi nodes at label BBs for goto targets
+    insert_label_phis(&mut func, &builder.label_bbs, &builder.label_var_snapshots);
     Some(func)
 }
 

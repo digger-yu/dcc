@@ -104,6 +104,24 @@ pub struct Target {
     pub riscv_has_b: bool,
     /// RISC-V V 扩展 (向量指令)
     pub riscv_has_v: bool,
+    /// AArch64 NEON (Advanced SIMD / ASIMD)
+    pub aarch64_has_neon: bool,
+    /// AArch64 SVE (Scalable Vector Extension)
+    pub aarch64_has_sve: bool,
+    /// AArch64 SVE2
+    pub aarch64_has_sve2: bool,
+    /// AArch64 LSE (Large System Extensions, ARMv8.1)
+    pub aarch64_has_lse: bool,
+    /// AArch64 RDM (Rounding Double Multiply Accumulate)
+    pub aarch64_has_rdm: bool,
+    /// AArch64 DP (Dot Product)
+    pub aarch64_has_dp: bool,
+    /// AArch64 CRC32
+    pub aarch64_has_crc32: bool,
+    /// MIPS MSA (MIPS SIMD Architecture)
+    pub mips_has_msa: bool,
+    /// MIPS DSP ASE
+    pub mips_has_dsp: bool,
 }
 
 impl Target {
@@ -144,6 +162,12 @@ impl Target {
         //
         // 交叉编译: red_zone / sse 仅在 x86_64 上有意义, 其余架构默认关闭.
         let is_x86_64 = t.arch == Arch::X86_64;
+        // 非 x86 架构: 检测宿主 CPU 特性 (仅在对应架构宿主上返回真实值)
+        let non_x86 = if !is_x86_64 {
+            CpuFeatures::detect_non_x86(t.arch)
+        } else {
+            crate::cpuid::NonX86Features::default()
+        };
         Self {
             triple: t.clone(),
             arch: t.arch,
@@ -187,19 +211,28 @@ impl Target {
             fast_math: false,
             fp_contract_mode: crate::cli::FpContractMode::Default,
             arm_arch_version: None,
-            has_thumb2: false,
-            has_fpu: false,
-            has_dsp: false,
+            has_thumb2: non_x86.thumb2,
+            has_fpu: non_x86.vfpv4 || non_x86.arm_neon,
+            has_dsp: non_x86.mips_dsp,
             has_trustzone: false,
             arm_instruction_mode: crate::cli::ArmInstructionMode::default(),
             float_abi: crate::cli::FloatAbi::default(),
-            riscv_has_m: false,
-            riscv_has_a: false,
-            riscv_has_f: false,
-            riscv_has_d: false,
-            riscv_has_c: false,
-            riscv_has_b: false,
-            riscv_has_v: false,
+            riscv_has_m: non_x86.rv_m,
+            riscv_has_a: non_x86.rv_a,
+            riscv_has_f: non_x86.rv_f,
+            riscv_has_d: non_x86.rv_d,
+            riscv_has_c: non_x86.rv_c,
+            riscv_has_b: non_x86.rv_b,
+            riscv_has_v: non_x86.rv_v,
+            aarch64_has_neon: non_x86.neon,
+            aarch64_has_sve: non_x86.sve,
+            aarch64_has_sve2: non_x86.sve2,
+            aarch64_has_lse: non_x86.lse,
+            aarch64_has_rdm: non_x86.rdm,
+            aarch64_has_dp: non_x86.dp,
+            aarch64_has_crc32: non_x86.crc32,
+            mips_has_msa: non_x86.msa,
+            mips_has_dsp: non_x86.mips_dsp,
         }
     }
 

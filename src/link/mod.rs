@@ -50,14 +50,17 @@ use crate::debug::ArchKind;
 use crate::diagnostics::{Diagnostic, Span};
 
 pub use elf_dyn::{
-    write_elf_pie_aarch64, write_elf_pie_arm, write_elf_pie_mips64, write_elf_pie_riscv64,
-    write_elf_pie_x86_64, write_elf_shared_aarch64, write_elf_shared_arm, write_elf_shared_mips64,
+    write_elf_pie_aarch64, write_elf_pie_arm, write_elf_pie_mips64, write_elf_pie_riscv32,
+    write_elf_pie_riscv64, write_elf_pie_x86_64, write_elf_shared_aarch64,
+    write_elf_shared_arm, write_elf_shared_mips64, write_elf_shared_riscv32,
     write_elf_shared_riscv64, write_elf_shared_x86_64,
 };
 pub use elf_exec::{
-    write_elf_exec_aarch64, write_elf_exec_arm, write_elf_exec_mips64, write_elf_exec_riscv64,
-    write_elf_exec_x86_64, write_elf_relocatable_aarch64, write_elf_relocatable_arm,
-    write_elf_relocatable_mips64, write_elf_relocatable_riscv64, write_elf_relocatable_x86_64,
+    write_elf_exec_aarch64, write_elf_exec_arm, write_elf_exec_mips64,
+    write_elf_exec_riscv32, write_elf_exec_riscv64, write_elf_exec_x86_64,
+    write_elf_relocatable_aarch64, write_elf_relocatable_arm, write_elf_relocatable_mips64,
+    write_elf_relocatable_riscv32, write_elf_relocatable_riscv64,
+    write_elf_relocatable_x86_64,
 };
 pub use layout::LayoutBuilder;
 pub use legacy::link_relocatable;
@@ -614,31 +617,31 @@ pub fn link_from_bundle(
             (OutputKind::Executable, ArchKind::X86_64) => write_elf_exec_x86_64(&layout),
             (OutputKind::Executable, ArchKind::AArch64) => write_elf_exec_aarch64(&layout),
             (OutputKind::Executable, ArchKind::RiscV64) => write_elf_exec_riscv64(&layout),
+            (OutputKind::Executable, ArchKind::RiscV32) => write_elf_exec_riscv32(&layout),
             (OutputKind::Executable, ArchKind::Mips64) => write_elf_exec_mips64(&layout),
             (OutputKind::Executable, ArchKind::Mips) => write_elf_exec_mips64(&layout),
             (OutputKind::Executable, ArchKind::Arm) => write_elf_exec_arm(&layout),
             (OutputKind::PIE, ArchKind::X86_64) => write_elf_pie_x86_64(&layout),
             (OutputKind::PIE, ArchKind::AArch64) => write_elf_pie_aarch64(&layout),
             (OutputKind::PIE, ArchKind::RiscV64) => write_elf_pie_riscv64(&layout),
+            (OutputKind::PIE, ArchKind::RiscV32) => write_elf_pie_riscv32(&layout),
             (OutputKind::PIE, ArchKind::Mips64) => write_elf_pie_mips64(&layout),
             (OutputKind::PIE, ArchKind::Mips) => write_elf_pie_mips64(&layout),
             (OutputKind::PIE, ArchKind::Arm) => write_elf_pie_arm(&layout),
             (OutputKind::Shared, ArchKind::X86_64) => write_elf_shared_x86_64(&layout),
             (OutputKind::Shared, ArchKind::AArch64) => write_elf_shared_aarch64(&layout),
             (OutputKind::Shared, ArchKind::RiscV64) => write_elf_shared_riscv64(&layout),
+            (OutputKind::Shared, ArchKind::RiscV32) => write_elf_shared_riscv32(&layout),
             (OutputKind::Shared, ArchKind::Mips64) => write_elf_shared_mips64(&layout),
             (OutputKind::Shared, ArchKind::Mips) => write_elf_shared_mips64(&layout),
             (OutputKind::Shared, ArchKind::Arm) => write_elf_shared_arm(&layout),
             (OutputKind::Relocatable, ArchKind::X86_64) => write_elf_relocatable_x86_64(&layout),
             (OutputKind::Relocatable, ArchKind::AArch64) => write_elf_relocatable_aarch64(&layout),
             (OutputKind::Relocatable, ArchKind::RiscV64) => write_elf_relocatable_riscv64(&layout),
+            (OutputKind::Relocatable, ArchKind::RiscV32) => write_elf_relocatable_riscv32(&layout),
             (OutputKind::Relocatable, ArchKind::Mips64) => write_elf_relocatable_mips64(&layout),
             (OutputKind::Relocatable, ArchKind::Mips) => write_elf_relocatable_mips64(&layout),
             (OutputKind::Relocatable, ArchKind::Arm) => write_elf_relocatable_arm(&layout),
-            (OutputKind::Executable, _) => write_elf_exec_x86_64(&layout),
-            (OutputKind::PIE, _) => write_elf_pie_x86_64(&layout),
-            (OutputKind::Shared, _) => write_elf_shared_x86_64(&layout),
-            (OutputKind::Relocatable, _) => write_elf_relocatable_x86_64(&layout),
         }
     };
     if cfg.verbose {

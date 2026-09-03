@@ -664,6 +664,12 @@ pub fn write_elf_exec_riscv64(layout: &Layout) -> Vec<u8> {
     write_elf_exec(layout, crate::codegen::elf::EM_RISCV)
 }
 
+pub fn write_elf_exec_riscv32(layout: &Layout) -> Vec<u8> {
+    // RISC-V 32 与 64 共享同一 e_machine (EM_RISCV).
+    // TODO: 应使用 ELFCLASS32 而非 ELFCLASS64, 待完整 32-bit ELF 支持后修正.
+    write_elf_exec(layout, crate::codegen::elf::EM_RISCV)
+}
+
 pub fn write_elf_exec_mips64(layout: &Layout) -> Vec<u8> {
     write_elf_exec(layout, crate::codegen::elf::EM_MIPS)
 }
@@ -691,6 +697,13 @@ pub fn write_elf_relocatable_aarch64(layout: &Layout) -> Vec<u8> {
 }
 
 pub fn write_elf_relocatable_riscv64(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_RISCV);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
+}
+
+pub fn write_elf_relocatable_riscv32(layout: &Layout) -> Vec<u8> {
     use crate::codegen::elf::ET_REL;
     let mut out = write_elf_exec(layout, crate::codegen::elf::EM_RISCV);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());

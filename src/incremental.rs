@@ -389,6 +389,7 @@ mod tests {
             warn_int_conversion: false,
             warn_int_truncation: false,
             warn_implicit_decl: true,
+            warn_undef: false,
             diag_color: crate::diagnostics::ColorPolicy::Auto,
             diag_format: crate::diagnostics::FormatStyle::Github,
             diag_show_template_tree: false,

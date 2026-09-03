@@ -255,6 +255,13 @@ impl CpuFeatures {
         if self.movbe { feats.push("movbe"); }
         feats
     }
+
+    /// 检测非 x86 架构的 CPU 特性.
+    ///
+    /// 委托给 `NonX86Features::detect()` 并将结果转换为统一结构.
+    pub fn detect_non_x86(arch: crate::cli::Arch) -> NonX86Features {
+        NonX86Features::detect(arch)
+    }
 }
 
 /// x86/x86_64 CPUID 检测实现.
@@ -394,6 +401,211 @@ fn check_xcr0_avx512() -> bool {
 #[inline]
 fn bit(val: u32, n: u32) -> bool {
     (val >> n) & 1 != 0
+}
+
+/// 非 x86 架构 CPU 特性集合.
+///
+/// 通过读取 /proc/cpuinfo 检测 ARM/AArch64/RISC-V/MIPS 的硬件特性.
+/// 仅在目标架构与宿主架构匹配时才有意义.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NonX86Features {
+    // AArch64
+    pub neon: bool,
+    pub sve: bool,
+    pub sve2: bool,
+    pub lse: bool,
+    pub rdm: bool,
+    pub dp: bool,
+    pub crc32: bool,
+    // ARM
+    pub thumb2: bool,
+    pub arm_neon: bool,
+    pub vfpv4: bool,
+    // RISC-V
+    pub rv_m: bool,
+    pub rv_a: bool,
+    pub rv_f: bool,
+    pub rv_d: bool,
+    pub rv_c: bool,
+    pub rv_b: bool,
+    pub rv_v: bool,
+    // MIPS
+    pub msa: bool,
+    pub mips_dsp: bool,
+}
+
+impl NonX86Features {
+    /// 检测当前 CPU 的非 x86 架构特性.
+    ///
+    /// 仅在对应架构的宿主上运行时才返回真实检测结果;
+    /// 其他情况返回全 false.
+    pub fn detect(arch: crate::cli::Arch) -> Self {
+        match arch {
+            crate::cli::Arch::AArch64 => detect_aarch64(),
+            crate::cli::Arch::Arm => detect_arm(),
+            crate::cli::Arch::RiscV64 | crate::cli::Arch::RiscV32 => detect_riscv(),
+            crate::cli::Arch::Mips64 | crate::cli::Arch::Mips => detect_mips(),
+            _ => Self::default(),
+        }
+    }
+}
+
+/// 读取 /proc/cpuinfo 内容. 失败时返回 None.
+fn read_proc_cpuinfo() -> Option<String> {
+    std::fs::read_to_string("/proc/cpuinfo").ok()
+}
+
+/// AArch64 特性检测: 读取 /proc/cpuinfo 的 Features 行.
+///
+/// 已知特性关键字:
+/// - `asimd` -> NEON (Advanced SIMD)
+/// - `sve` -> SVE
+/// - `sve2` -> SVE2
+/// - `atomics` -> LSE (ARMv8.1)
+/// - `asimdrdm` -> RDM
+/// - `asimddp` -> Dot Product
+/// - `crc32` -> CRC32
+#[cfg(target_arch = "aarch64")]
+fn detect_aarch64() -> NonX86Features {
+    let mut f = NonX86Features::default();
+    if let Some(cpuinfo) = read_proc_cpuinfo() {
+        for line in cpuinfo.lines() {
+            if line.starts_with("Features") {
+                let features = line.split(':').nth(1).unwrap_or("");
+                let feats: Vec<&str> = features.split_whitespace().collect();
+                f.neon = feats.contains(&"asimd");
+                f.sve = feats.contains(&"sve");
+                f.sve2 = feats.contains(&"sve2");
+                f.lse = feats.contains(&"atomics");
+                f.rdm = feats.contains(&"asimdrdm");
+                f.dp = feats.contains(&"asimddp");
+                f.crc32 = feats.contains(&"crc32");
+                break;
+            }
+        }
+    }
+    f
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn detect_aarch64() -> NonX86Features {
+    NonX86Features::default()
+}
+
+/// ARM (32-bit) 特性检测: 读取 /proc/cpuinfo 的 Features 行.
+///
+/// 已知特性关键字:
+/// - `thumb` -> Thumb (Thumb-2 通过 `idiva`/`idivt` 或 `arch` 行判断)
+/// - `neon` -> NEON
+/// - `vfpv4` -> VFPv4
+#[cfg(target_arch = "arm")]
+fn detect_arm() -> NonX86Features {
+    let mut f = NonX86Features::default();
+    if let Some(cpuinfo) = read_proc_cpuinfo() {
+        for line in cpuinfo.lines() {
+            if line.starts_with("Features") {
+                let features = line.split(':').nth(1).unwrap_or("");
+                let feats: Vec<&str> = features.split_whitespace().collect();
+                f.thumb2 = feats.contains(&"thumb") || feats.contains(&"edsp");
+                f.arm_neon = feats.contains(&"neon");
+                f.vfpv4 = feats.contains(&"vfpv4") || feats.contains(&"vfpv3");
+                break;
+            }
+        }
+    }
+    f
+}
+
+#[cfg(not(target_arch = "arm"))]
+fn detect_arm() -> NonX86Features {
+    NonX86Features::default()
+}
+
+/// RISC-V 特性检测: 读取 /proc/cpuinfo 的 isa 行.
+///
+/// 解析 ISA 字符串中的扩展字母:
+/// - M: 整数乘除
+/// - A: 原子指令
+/// - F: 单精度浮点
+/// - D: 双精度浮点
+/// - C: 压缩指令
+/// - B: 位操作 (Zbb 等)
+/// - V: 向量指令
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
+fn detect_riscv() -> NonX86Features {
+    let mut f = NonX86Features::default();
+    if let Some(cpuinfo) = read_proc_cpuinfo() {
+        for line in cpuinfo.lines() {
+            if line.starts_with("isa") {
+                let isa = line.split(':').nth(1).unwrap_or("").trim();
+                // ISA 字符串格式: rv64imafdcvh...
+                // 跳过 "rv32"/"rv64" 前缀后解析扩展字母
+                let exts = if isa.starts_with("rv64") {
+                    &isa[4..]
+                } else if isa.starts_with("rv32") {
+                    &isa[4..]
+                } else {
+                    isa
+                };
+                // 只检查基本扩展字母 (在 Z/x 等后缀扩展之前)
+                for ch in exts.chars() {
+                    match ch {
+                        'm' => f.rv_m = true,
+                        'a' => f.rv_a = true,
+                        'f' => f.rv_f = true,
+                        'd' => f.rv_d = true,
+                        'c' => f.rv_c = true,
+                        'v' => f.rv_v = true,
+                        // 遇到大写 Z 或 x 表示自定义/标准扩展, 停止基本扫描
+                        'Z' | 'z' | 'x' | 'X' | 'S' | 's' => break,
+                        _ => {}
+                    }
+                }
+                // 检测 B 扩展 (可能以 Zba/Zbb/Zbc 形式出现)
+                f.rv_b = exts.contains('b')
+                    || exts.contains("zbb")
+                    || exts.contains("zba")
+                    || exts.contains("zbc");
+                break;
+            }
+        }
+    }
+    f
+}
+
+#[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
+fn detect_riscv() -> NonX86Features {
+    NonX86Features::default()
+}
+
+/// MIPS 特性检测: 读取 /proc/cpuinfo 的 ASEs 行.
+///
+/// 已知 ASE 关键字:
+/// - `msa` -> MIPS SIMD Architecture
+/// - `dsp` / `dspr2` -> DSP ASE
+#[cfg(any(target_arch = "mips", target_arch = "mips64"))]
+fn detect_mips() -> NonX86Features {
+    let mut f = NonX86Features::default();
+    if let Some(cpuinfo) = read_proc_cpuinfo() {
+        for line in cpuinfo.lines() {
+            let lower = line.to_lowercase();
+            if lower.starts_with("ases implemented") {
+                let ases = line.split(':').nth(1).unwrap_or("");
+                let ase_list: Vec<&str> = ases.split_whitespace().collect();
+                f.msa = ase_list.iter().any(|a| a.eq_ignore_ascii_case("msa"));
+                f.mips_dsp = ase_list.iter().any(|a| {
+                    a.eq_ignore_ascii_case("dsp") || a.eq_ignore_ascii_case("dspr2")
+                });
+                break;
+            }
+        }
+    }
+    f
+}
+
+#[cfg(not(any(target_arch = "mips", target_arch = "mips64")))]
+fn detect_mips() -> NonX86Features {
+    NonX86Features::default()
 }
 
 #[cfg(test)]

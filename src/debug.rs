@@ -254,7 +254,27 @@ pub enum DwarfTypeKind {
         alias: String,
         target: Box<DwarfType>,
     },
+    /// C++ class: 类似 struct 但使用 DW_TAG_class_type,
+    /// 可包含继承关系和多态信息.
+    Class {
+        members: Vec<DwarfMember>,
+        bases: Vec<DwarfInheritance>,
+        vtable_count: u32,
+    },
     Void,
+}
+
+/// C++ 继承信息 (DW_TAG_inheritance).
+#[derive(Debug, Clone)]
+pub struct DwarfInheritance {
+    /// 基类类型
+    pub base_type: DwarfType,
+    /// 基类在派生类中的字节偏移
+    pub offset: u64,
+    /// 是否虚继承
+    pub is_virtual: bool,
+    /// 访问说明符: 1=public, 2=protected, 3=private
+    pub access: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -539,6 +559,7 @@ const DW_TAG_variable: u16 = 0x34;
 const DW_TAG_volatile_type: u16 = 0x23;
 const DW_TAG_restrict_type: u16 = 0x25;
 const DW_TAG_subprogram: u16 = 0x2e;
+const DW_TAG_inheritance: u16 = 0x18;
 
 const DW_AT_name: u16 = 0x03;
 const DW_AT_byte_size: u16 = 0x0b;
@@ -569,6 +590,9 @@ const DW_AT_decl_line: u16 = 0x3b;
 const DW_AT_GNU_dwo_id: u16 = 0x2130;
 const DW_AT_GNU_dwo_name: u16 = 0x2131;
 const DW_AT_GNU_all_call_sites: u16 = 0x2117;
+const DW_AT_visibility: u16 = 0x33;
+const DW_AT_virtuality: u16 = 0x4c;
+const DW_AT_vtable_elem_count: u16 = 0x6f;
 
 const DW_FORM_addr: u16 = 0x01;
 const DW_FORM_data1: u16 = 0x0b;
@@ -1054,6 +1078,15 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
                 intern_type(strs, &m.ty);
             }
         }
+        DwarfTypeKind::Class { members, bases, .. } => {
+            for m in members {
+                strs.intern(&m.name);
+                intern_type(strs, &m.ty);
+            }
+            for b in bases {
+                intern_type(strs, &b.base_type);
+            }
+        }
         DwarfTypeKind::Array { element, .. } => intern_type(strs, element),
         DwarfTypeKind::Pointer(p)
         | DwarfTypeKind::Const(p)
@@ -1101,6 +1134,14 @@ fn collect_all_types_from(ty: &DwarfType, out: &mut Vec<DwarfType>) {
         DwarfTypeKind::Struct { members } | DwarfTypeKind::Union { members } => {
             for m in members {
                 collect_all_types_from(&m.ty, out);
+            }
+        }
+        DwarfTypeKind::Class { members, bases, .. } => {
+            for m in members {
+                collect_all_types_from(&m.ty, out);
+            }
+            for b in bases {
+                collect_all_types_from(&b.base_type, out);
             }
         }
         DwarfTypeKind::Enum { underlying, .. } => {
@@ -1531,6 +1572,15 @@ fn write_type_die(
                 ensure_type_die(info, abb, strs, type_offsets, target);
             info.extend_from_slice(&t_off.to_le_bytes());
         }
+        DwarfTypeKind::Class {
+            members,
+            bases,
+            vtable_count,
+        } => {
+            write_class_die(
+                info, abb, strs, type_offsets, ty, members, bases, *vtable_count,
+            );
+        }
         DwarfTypeKind::Void => {
             // DW_ATE_void (0x00) 兜底
             let attrs: Vec<(u16, u16)> = vec![
@@ -1641,6 +1691,95 @@ fn write_aggregate_die(
     }
     if has_members {
         info.push(0);
+    }
+}
+
+/// 发射 C++ class 的 DWARF DIE.
+///
+/// 使用 DW_TAG_class_type 而非 DW_TAG_structure_type,
+/// 并支持继承 (DW_TAG_inheritance) 和多态 (DW_AT_vtable_elem_count).
+fn write_class_die(
+    info: &mut Vec<u8>,
+    abb: &mut AbbrevBuilder,
+    strs: &mut StringTable,
+    type_offsets: &mut std::collections::HashMap<String, u32>,
+    ty: &DwarfType,
+    members: &[DwarfMember],
+    bases: &[DwarfInheritance],
+    vtable_count: u32,
+) {
+    let has_children = !members.is_empty() || !bases.is_empty();
+    // 构建属性列表: 始终有 name + byte_size
+    let mut attrs: Vec<(u16, u16)> = vec![
+        (DW_AT_name, DW_FORM_strp),
+        (DW_AT_byte_size, DW_FORM_data1),
+    ];
+    // 多态类添加 DW_AT_vtable_elem_count
+    if vtable_count > 0 {
+        attrs.push((DW_AT_vtable_elem_count, DW_FORM_data2));
+    }
+    let code = abb.get_or_create(
+        DW_TAG_class_type,
+        if has_children { DW_CHILDREN_yes } else { DW_CHILDREN_no },
+        &attrs,
+    );
+    write_uleb128(info, code as u64);
+    write_attr_strp(info, strs.intern(&ty.name));
+    info.push(ty.byte_size as u8);
+    if vtable_count > 0 {
+        info.extend_from_slice(&(vtable_count as u16).to_le_bytes());
+    }
+    // 发射继承 DIE (DW_TAG_inheritance)
+    for base in bases {
+        let mut inh_attrs: Vec<(u16, u16)> = vec![
+            (DW_AT_type, DW_FORM_ref4),
+            (DW_AT_data_member_location, DW_FORM_data1),
+        ];
+        if base.is_virtual {
+            inh_attrs.push((DW_AT_virtuality, DW_FORM_flag));
+        }
+        inh_attrs.push((DW_AT_visibility, DW_FORM_data1));
+        let inh_code = abb.get_or_create(DW_TAG_inheritance, DW_CHILDREN_no, &inh_attrs);
+        write_uleb128(info, inh_code as u64);
+        let base_off = ensure_type_die(info, abb, strs, type_offsets, &base.base_type);
+        info.extend_from_slice(&base_off.to_le_bytes());
+        info.push(base.offset as u8);
+        if base.is_virtual {
+            info.push(1); // DW_VIRTUALITY_virtual
+        }
+        info.push(base.access); // 1=public, 2=protected, 3=private
+    }
+    // 发射成员 DIE (与 write_aggregate_die 相同)
+    for m in members {
+        let mem_attrs: Vec<(u16, u16)> = if m.bit_size > 0 {
+            vec![
+                (DW_AT_name, DW_FORM_strp),
+                (DW_AT_data_member_location, DW_FORM_data1),
+                (DW_AT_bit_size, DW_FORM_data1),
+                (DW_AT_bit_offset, DW_FORM_data1),
+                (DW_AT_type, DW_FORM_ref4),
+            ]
+        } else {
+            vec![
+                (DW_AT_name, DW_FORM_strp),
+                (DW_AT_data_member_location, DW_FORM_data1),
+                (DW_AT_type, DW_FORM_ref4),
+            ]
+        };
+        let mem_code = abb.get_or_create(DW_TAG_member, DW_CHILDREN_no, &mem_attrs);
+        write_uleb128(info, mem_code as u64);
+        write_attr_strp(info, strs.intern(&m.name));
+        info.push((m.offset_bits / 8) as u8);
+        if m.bit_size > 0 {
+            info.push(m.bit_size as u8);
+            let bit_in_byte = (m.offset_bits % 8) as u8;
+            info.push(bit_in_byte);
+        }
+        let t_off = ensure_type_die(info, abb, strs, type_offsets, &m.ty);
+        info.extend_from_slice(&t_off.to_le_bytes());
+    }
+    if has_children {
+        info.push(0); // children 终止符
     }
 }
 
@@ -2996,6 +3135,41 @@ fn encode_btf_type(
             let id = encoder.add_type(func_name_off, BTF_KIND_FUNC, 0, proto_id, &[]);
             if !ty.name.is_empty() {
                 encoder.register_name(&ty.name, id);
+            }
+            id
+        }
+
+        DwarfTypeKind::Class { members, bases, .. } => {
+            // BTF 不区分 struct 和 class, 统一使用 BTF_KIND_STRUCT.
+            // 基类信息在 BTF 中暂不编码 (BTF 无原生继承支持).
+            let _ = bases;
+            let name_off = strs.intern(&ty.name);
+            let temp_id = encoder.next_id();
+            encoder.register_name(&ty.name, temp_id);
+
+            let mut member_data = Vec::new();
+            for m in members {
+                let m_name_off = strs.intern(&m.name);
+                let m_type_id = encode_btf_type(&m.ty, strs, encoder);
+                member_data.extend_from_slice(&m_name_off.to_le_bytes());
+                member_data.extend_from_slice(&m_type_id.to_le_bytes());
+                let offset_bits = m.offset_bits as u32;
+                if m.bit_size > 0 {
+                    let offset_enc = offset_bits | ((m.bit_size as u32) << 24);
+                    member_data.extend_from_slice(&offset_enc.to_le_bytes());
+                } else {
+                    member_data.extend_from_slice(&offset_bits.to_le_bytes());
+                }
+            }
+
+            let size = ty.byte_size as u32;
+            let vlen = members.len() as u32;
+            if encoder.lookup_name(&ty.name) == Some(temp_id) && encoder.types.len() >= (temp_id as usize) {
+                return temp_id;
+            }
+            let id = encoder.add_type(name_off, BTF_KIND_STRUCT, vlen, size, &member_data);
+            if id != temp_id {
+                encoder.name_to_id.insert(ty.name.clone(), id);
             }
             id
         }
