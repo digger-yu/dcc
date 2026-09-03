@@ -12661,7 +12661,70 @@ impl Codegen {
             return;
         }
         let off = self.var_offset(name);
-        self.load_stack(reg, off);
+        // 按声明类型宽度加载. 槽可能被窄写污染 (如 *ip = v 只写 4 字节,
+        // 高 4 字节是启动代码残留的栈垃圾), 恒用 64 位 load 会把未定义
+        // 高位一起读入 (64 位比较/传参即出错).
+        // signed 4 字节用 movsxd 符号扩展, unsigned 4 字节用 32 位 load
+        // (写 32 位寄存器自动清零高位); 1/2 字节用 movzx, 普通窄类型的
+        // 符号语义由调用方的 gen_int_promote 处理, 窄有符号枚举在此处
+        // 补 movsx (promote 不覆盖枚举); 8 字节维持 64 位 load.
+        let (sz, signed4, signed_narrow) = match self.var_map.get(name) {
+            Some((_, t)) => {
+                let s = t.size();
+                // 符号性: int / 默认枚举 / _Atomic(int) 视为 signed;
+                // C23 固定底层类型枚举按底层类型判定 (如 enum E : int),
+                // 否则负枚举值会被零扩展成巨大正数.
+                let signed = |ty: &Type| -> bool {
+                    match ty {
+                        Type::Int => true,
+                        Type::Enum(_, _, None) => true,
+                        Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+                        Type::Atomic(b) => match &b.base {
+                            Type::Int => true,
+                            Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+                            _ => false,
+                        },
+                        _ => false,
+                    }
+                };
+                // signed_narrow: 窄类型 (1/2 字节) 且 signed, 但调用方的
+                // gen_int_promote 不处理枚举 (ty.is_int() 不含 Enum),
+                // 需在此处补 movsx 符号扩展.
+                let sn = s < 4
+                    && matches!(t, Type::Enum(_, _, Some(u)) if Self::is_signed_int(&u.base));
+                (s, signed(t), sn)
+            }
+            None => (8, true, false),
+        };
+        match sz {
+            4 => {
+                let rex_r = if reg >= 8 { 0x04 } else { 0 };
+                if signed4 {
+                    // movsxd reg, dword [r13+off] (REX.W + 0x63 /r)
+                    self.emit(&[0x49 | rex_r, 0x63]);
+                } else {
+                    // mov reg32, dword [r13+off] (无 REX.W: 高 32 位清零)
+                    self.emit(&[0x41 | rex_r, 0x8B]);
+                }
+                if off.abs() < 128 {
+                    self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+                } else {
+                    self.emit(&[0x85 | ((reg & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+            }
+            1 | 2 => {
+                self.load_stack_sized(reg, off, sz);
+                if signed_narrow {
+                    // movsx reg, reg_lowN: 窄有符号枚举 (C23 enum E : signed char/short)
+                    // 零扩展读入后符号扩展到 64 位 (调用方 promote 不覆盖枚举)
+                    let rex = 0x48 | if reg >= 8 { 0x44 } else { 0 };
+                    let op = if sz == 1 { 0xBE } else { 0xBF };
+                    self.emit(&[rex, 0x0F, op, 0xC0 | ((reg & 7) << 3) | (reg & 7)]);
+                }
+            }
+            _ => self.load_stack(reg, off),
+        }
     }
 
     // 浮点变量存储: xmm0 → 栈 (使用 XMM 指令) 或 st(0) → 栈 (x87)
