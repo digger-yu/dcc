@@ -1,6 +1,6 @@
 // src/codegen/arm.rs - ARM 后端 (AAPCS)
 
-use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
+use crate::ast::{find_field, BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
@@ -173,8 +173,26 @@ impl ArmCodegen {
             .collect()
     }
 
+    fn build_aggregate_fields(&mut self, prog: &Program) {
+        self.aggregate_fields.clear();
+        for decl in &prog.decls {
+            match decl {
+                Decl::StructDef(s) => {
+                    self.aggregate_fields
+                        .insert(s.name.name.clone(), (Arc::new(s.fields.clone()), false));
+                }
+                Decl::UnionDef(u) => {
+                    self.aggregate_fields
+                        .insert(u.name.name.clone(), (Arc::new(u.fields.clone()), true));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
+        self.build_aggregate_fields(prog);
         self.emit_globals(module);
         // 文件级 asm: 收集原始文本行 (增强版约束解析 + 寄存器名替换)
         for decl in &prog.decls {
@@ -1162,19 +1180,65 @@ impl ArmCodegen {
                 self.code.extend_from_slice(&inst.to_le_bytes());
             }
             // 结构体成员访问
-            Expr::Member { expr, field: _, ty: _, is_arrow, .. } => {
+            Expr::Member { expr, field, ty: _, is_arrow, .. } => {
                 self.gen_expr_from_ast(expr);
-                // r0 现在是结构体地址 (或值)
-                // 简化: 加载第一个成员 (偏移 0)
-                // TODO: 使用 aggregate_fields 计算实际偏移
+                // r0 现在是结构体地址 (is_arrow) 或结构体值 (.)
+                // 从 aggregate_fields 查找字段实际偏移
+                let struct_name = if *is_arrow {
+                    // ptr->member: expr.ty() 是指针, 取 pointee 类型
+                    match expr.ty() {
+                        Type::Ptr(inner) => match &inner.base {
+                            Type::Struct(name, _, _) | Type::Union(name, _, _) => Some(name.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    // s.member: expr.ty() 是结构体/联合体本身
+                    match expr.ty() {
+                        Type::Struct(name, _, _) | Type::Union(name, _, _) => Some(name.clone()),
+                        _ => None,
+                    }
+                };
+                let field_off = struct_name.as_ref().and_then(|n| {
+                    self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                        find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                    })
+                }).unwrap_or(0);
+
                 if *is_arrow {
-                    // ptr->member: r0 已经是指针
-                    self.emit_push(vec![0]);
-                    self.emit_pop(vec![1]);
-                    let inst = 0xE5910000u32; // ldr r0, [r1]
+                    // ptr->member: r0 已经是指针地址
+                    if field_off != 0 {
+                        // r0 += field_off
+                        self.emit_push(vec![0]); // 保存指针
+                        self.emit_pop(vec![1]);  // r1 = 指针
+                        self.emit_load_imm(2, field_off as i32); // r2 = 偏移
+                        self.emit_add(0, 1, 2);  // r0 = 指针 + 偏移
+                        self.emit_push(vec![0]); // 保存地址
+                        self.emit_pop(vec![1]);
+                    } else {
+                        self.emit_push(vec![0]);
+                        self.emit_pop(vec![1]);
+                    }
+                    // ldr r0, [r1] — 加载成员值
+                    let inst = 0xE5910000u32;
                     self.code.extend_from_slice(&inst.to_le_bytes());
+                } else {
+                    // s.member: r0 是结构体值 (已在寄存器中)
+                    // 对于值类型, 需要取地址再加偏移
+                    // 简化: 如果结构体在栈上, 从栈加载对应偏移字段
+                    if field_off != 0 {
+                        // 值类型非零偏移: 通过帧偏移加载
+                        // 如果 expr 是 Ident, 直接从帧加载字段偏移
+                        if let Expr::Ident { name, .. } = expr.as_ref() {
+                            if let Some(&base_off) = self.locals.get(&name.name) {
+                                let total_off = base_off + field_off as i32;
+                                self.emit_ldr_fp_off(0, total_off);
+                            }
+                        }
+                    }
+                    // field_off == 0 时 gen_expr_from_ast 已加载第一个成员
                 }
-                // 对于 .member, r0 是结构体值, 简化处理
             }
             // 前置自增: ++x
             Expr::PreInc { e, .. } => {

@@ -95,6 +95,8 @@ pub struct Riscv64Codegen {
     break_continue_stack: Vec<(String, String)>,
     /// GNU asm label 映射: C 名 → asm("label") 覆盖名
     asm_label_map: HashMap<String, String>,
+    /// DWARF 行号表条目: (pc, source_line)
+    pub line_entries: Vec<(u64, u32)>,
 }
 
 impl Riscv64Codegen {
@@ -139,6 +141,7 @@ impl Riscv64Codegen {
             _target: target,
             break_continue_stack: Vec::new(),
             asm_label_map: HashMap::new(),
+            line_entries: Vec::new(),
         }
     }
 
@@ -915,6 +918,12 @@ impl Riscv64Codegen {
     }
 
     fn gen_stmt(&mut self, stmt: &Stmt, ir: &TypedStmt) {
+        // 记录 DWARF 行号表条目
+        let pc = self.code.len() as u64;
+        let line = ir.span.line;
+        if line > 0 {
+            self.line_entries.push((pc, line));
+        }
         match stmt {
             Stmt::Return { val, .. } => {
                 let ret_ty = self.current_return_ty.clone().unwrap_or(ValueType::Void);
@@ -964,8 +973,10 @@ impl Riscv64Codegen {
                 let lbl_else = self.fresh_label("Lelse");
                 let lbl_end = self.fresh_label("Lendif");
                 self.beqz_a0(&lbl_else);
+                self.maybe_align_jump();
                 self.gen_stmt(then_, &ir.nested[0]);
                 self.j(&lbl_end);
+                self.maybe_align_jump();
                 self.label(&lbl_else);
                 if let Some(el) = else_ {
                     if ir.nested.len() > 1 {
@@ -977,6 +988,7 @@ impl Riscv64Codegen {
             Stmt::While { body, .. } | Stmt::Do { body, .. } => {
                 let lbl_loop = self.fresh_label("Lwhile");
                 let lbl_exit = self.fresh_label("Lwend");
+                self.maybe_align_loop();
                 self.label(&lbl_loop);
                 self.break_continue_stack.push((lbl_exit.clone(), lbl_loop.clone()));
                 if let Some(cond) = ir.expressions.first() {
@@ -1002,6 +1014,7 @@ impl Riscv64Codegen {
                 let lbl_loop = self.fresh_label("Lfor");
                 let lbl_cont = self.fresh_label("Lfor_cont");
                 let lbl_exit = self.fresh_label("Lfend");
+                self.maybe_align_loop();
                 self.label(&lbl_loop);
                 self.break_continue_stack.push((lbl_exit.clone(), lbl_cont.clone()));
                 if cond.is_some() {
@@ -1350,7 +1363,7 @@ impl Riscv64Codegen {
                     self.gen_float_expr(&expr.children[1]);
                     // Now fa0 = right, fa1 = left
                     // Compare and set a0 from result
-                    self.float_cmp_a0_fa1_fa0(*op);
+                    self.float_cmp_a0_fa1_fa0(*op, &expr.children[0].ty);
                     return true;
                 }
                 // Float binary arithmetic: children are float, result is float
@@ -1735,6 +1748,48 @@ impl Riscv64Codegen {
             return;
         }
 
+        // D 扩展内建函数: sqrt/fmin/fmax 直接使用硬件浮点指令
+        if callee == "__builtin_sqrt" || callee == "sqrt" || callee == "sqrtf" {
+            let is_double = callee == "__builtin_sqrt" || callee == "sqrt";
+            if let Some(arg0) = args.first() {
+                self.gen_expr(arg0);
+            }
+            if is_double {
+                self.emit_fsqrt_d(10, 10);
+            } else {
+                self.emit_fsqrt_s(10, 10);
+            }
+            return;
+        }
+        if callee == "__builtin_fmin" || callee == "fmin" || callee == "fminf" {
+            let is_double = callee == "__builtin_fmin" || callee == "fmin";
+            if args.len() >= 2 {
+                self.gen_expr(&args[0]);
+                self.mv_fa1_fa0();
+                self.gen_expr(&args[1]);
+            }
+            if is_double {
+                self.emit_fmin_d(10, 11, 10);
+            } else {
+                self.emit_fmin_s(10, 11, 10);
+            }
+            return;
+        }
+        if callee == "__builtin_fmax" || callee == "fmax" || callee == "fmaxf" {
+            let is_double = callee == "__builtin_fmax" || callee == "fmax";
+            if args.len() >= 2 {
+                self.gen_expr(&args[0]);
+                self.mv_fa1_fa0();
+                self.gen_expr(&args[1]);
+            }
+            if is_double {
+                self.emit_fmax_d(10, 11, 10);
+            } else {
+                self.emit_fmax_s(10, 11, 10);
+            }
+            return;
+        }
+
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
         // 限制: 仅 caller 分配 <sret> local, callee 写到 [a0]
         let mut sret_reg_idx = 0usize;
@@ -1849,7 +1904,7 @@ impl Riscv64Codegen {
                 self.mv_fa1_fa0(); // save left to fa1
                 self.gen_float_expr(&expr.children[1]);
                 // Now fa0 = right, fa1 = left
-                self.float_binop_fa0(*op);
+                self.float_binop_fa0(*op, &expr.ty);
                 return true;
             }
             // M25: 浮点型 __builtin_va_arg(ap, double) — fa0..fa7 已在入口保存到 va_save_base+64
@@ -2999,32 +3054,99 @@ impl Riscv64Codegen {
         }
     }
 
-    fn float_binop_fa0(&mut self, op: BinOp) {
+    fn float_binop_fa0(&mut self, op: BinOp, ty: &ValueType) {
         // Operands: fa1 = left, fa0 = right (saved by caller)
         // Result in fa0
+        // D extension: use double-precision for Float{bits:64}
+        let is_double = matches!(ty, ValueType::Float { bits: 64 });
         match op {
-            BinOp::Add => self.emit_fadd_s_fa0_fa1_fa0(),
-            BinOp::Sub => self.emit_fsub_s_fa0_fa1_fa0(),
-            BinOp::Mul => self.emit_fmul_s_fa0_fa1_fa0(),
-            BinOp::Div => self.emit_fdiv_s_fa0_fa1_fa0(),
-            _ => self.emit_fadd_s_fa0_fa1_fa0(),
+            BinOp::Add => {
+                if is_double { self.emit_fadd_d(10, 11, 10); }
+                else { self.emit_fadd_s_fa0_fa1_fa0(); }
+            }
+            BinOp::Sub => {
+                if is_double { self.emit_fsub_d(10, 11, 10); }
+                else { self.emit_fsub_s_fa0_fa1_fa0(); }
+            }
+            BinOp::Mul => {
+                if is_double { self.emit_fmul_d(10, 11, 10); }
+                else { self.emit_fmul_s_fa0_fa1_fa0(); }
+            }
+            BinOp::Div => {
+                if is_double { self.emit_fdiv_d(10, 11, 10); }
+                else { self.emit_fdiv_s_fa0_fa1_fa0(); }
+            }
+            _ => {
+                if is_double { self.emit_fadd_d(10, 11, 10); }
+                else { self.emit_fadd_s_fa0_fa1_fa0(); }
+            }
         }
     }
 
     /// Float comparison: fa1 = left, fa0 = right, result in a0
-    fn float_cmp_a0_fa1_fa0(&mut self, op: BinOp) {
+    fn float_cmp_a0_fa1_fa0(&mut self, op: BinOp, ty: &ValueType) {
+        // D extension: use double-precision for Float{bits:64}
+        let is_double = matches!(ty, ValueType::Float { bits: 64 });
         match op {
-            BinOp::EqEq => self.emit_feq_s(10, 11, 10),
-            BinOp::Lt => self.emit_flt_s(10, 11, 10),
-            BinOp::Le => self.emit_fle_s(10, 11, 10),
-            BinOp::Gt => self.emit_flt_s(10, 10, 11), // swap operands
-            BinOp::Ge => self.emit_fle_s(10, 10, 11), // swap operands
+            BinOp::EqEq => {
+                if is_double { self.emit_feq_d(10, 11, 10); }
+                else { self.emit_feq_s(10, 11, 10); }
+            }
+            BinOp::Lt => {
+                if is_double { self.emit_flt_d(10, 11, 10); }
+                else { self.emit_flt_s(10, 11, 10); }
+            }
+            BinOp::Le => {
+                if is_double { self.emit_fle_d(10, 11, 10); }
+                else { self.emit_fle_s(10, 11, 10); }
+            }
+            BinOp::Gt => {
+                if is_double { self.emit_flt_d(10, 10, 11); }
+                else { self.emit_flt_s(10, 10, 11); }
+            }
+            BinOp::Ge => {
+                if is_double { self.emit_fle_d(10, 10, 11); }
+                else { self.emit_fle_s(10, 10, 11); }
+            }
             BinOp::Ne => {
-                // FEQ.S then invert
-                self.emit_feq_s(10, 11, 10);
+                if is_double {
+                    self.emit_feq_d(10, 11, 10);
+                } else {
+                    self.emit_feq_s(10, 11, 10);
+                }
                 self.emit_xori(10, 10, 1);
             }
-            _ => self.emit_feq_s(10, 11, 10),
+            _ => {
+                if is_double { self.emit_feq_d(10, 11, 10); }
+                else { self.emit_feq_s(10, 11, 10); }
+            }
+        }
+    }
+
+    /// 发射 NOP 填充到对齐边界 (RISC-V: NOP = addi x0, x0, 0 = 0x00000013, 4 字节)
+    fn emit_align_padding(&mut self, alignment: u32) {
+        if alignment <= 1 { return; }
+        let pos = self.code.len() as u64;
+        let aligned = (pos + alignment as u64 - 1) & !(alignment as u64 - 1);
+        let pad = (aligned - pos) as usize;
+        // RISC-V NOP 是 4 字节指令, 只能按 4 字节边界填充
+        let nop_count = pad / 4;
+        for _ in 0..nop_count {
+            self.emit(&[0x13, 0x00, 0x00, 0x00]); // NOP (addi x0, x0, 0)
+        }
+    }
+
+    /// 如果配置了 align_loops, 在循环头部标签前发射对齐填充
+    fn maybe_align_loop(&mut self) {
+        if self._target.align_loops > 1 {
+            self.emit_align_padding(self._target.align_loops);
+        }
+    }
+
+    /// 如果配置了 align_jumps, 在跳转目标标签前发射对齐填充
+    fn maybe_align_jump(&mut self) {
+        if self._target.align_jumps > 1 {
+            self.emit_align_padding(self._target.align_jumps);
         }
     }
 
@@ -4084,6 +4206,32 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// FSQRT.S fd, fs1: 单精度平方根, funct7=0101101
+    fn emit_fsqrt_s(&mut self, fd: u8, fs1: u8) {
+        let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0101101 << 25 | 0x53;
+        // rm field (bits [14:12]) = 000 (RNE) — encoded as part of funct7 shift
+        let insn = insn & !(0b111 << 12); // clear rm bits
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMIN.S fd, fs1, fs2: 单精度最小值, funct7=0010101, funct3=000
+    fn emit_fmin_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010100 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMAX.S fd, fs1, fs2: 单精度最大值, funct7=0010101, funct3=001
+    fn emit_fmax_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b001 << 12
+            | (fd as u32) << 7
+            | 0b0010100 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
     fn emit_fcvt_s_w_fa0(&mut self) {
         let insn = 0xD0000053u32 | (10 << 7) | (10 << 15);
         self.emit(&insn.to_le_bytes());
@@ -4432,6 +4580,26 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// FCLASS.S rd, fs1: 单精度浮点分类, funct7=1010000, funct3=001
+    fn emit_fclass_s(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1010000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCLASS.D rd, fs1: 双精度浮点分类, funct7=1010001, funct3=001
+    fn emit_fclass_d(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1010001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// FCVT.W.D rd, fs1: 双精度转整数
     fn emit_fcvt_w_d(&mut self, rd: u8, fs1: u8) {
         let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100000 << 25 | 0x53;
@@ -4763,6 +4931,34 @@ impl Riscv64Codegen {
         let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15)
             | (vd as u32) << 7
             | 0b1011011 << 25
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // --- 窄化钳位指令 ---
+
+    /// VNCLIP.WV vd, vs2, vs1, vm: 有符号窄化钳位右移
+    fn emit_vnclip_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
+        let vm_bit = if vm { 1u32 << 25 } else { 0 };
+        let insn = (0b100110u32 << 26)
+            | vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b011 << 12
+            | (vd as u32) << 7
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VNCLIPU.WV vd, vs2, vs1, vm: 无符号窄化钳位右移
+    fn emit_vnclipu_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
+        let vm_bit = if vm { 1u32 << 25 } else { 0 };
+        let insn = (0b100110u32 << 26)
+            | vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
             | 0x57;
         self.emit(&insn.to_le_bytes());
     }
@@ -5736,5 +5932,59 @@ mod tests {
             })
             .count();
         assert_eq!(sd_count, 4, "expected 4 sd zero, offset(sp) instructions for 32-byte frame, got {sd_count}");
+    }
+
+    // D 扩展新增指令: FSQRT.S, FMIN.S, FMAX.S, FCLASS.S/D
+    #[test]
+    fn riscv64_d_extension_new_instructions() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_fsqrt_s(10, 11);
+        cg.emit_fmin_s(12, 13, 14);
+        cg.emit_fmax_s(15, 16, 17);
+        cg.emit_fclass_s(10, 11);
+        cg.emit_fclass_d(12, 13);
+        let code = &cg.code;
+        assert!(code.len() >= 20, "expected 20 bytes for 5 instructions");
+        // FSQRT.S: funct7=0101101
+        let insn_sqrt = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!((insn_sqrt >> 25) & 0x7f, 0b0101101, "FSQRT.S funct7");
+        // FMIN.S: funct7=0010100, funct3=000
+        let insn_min = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
+        assert_eq!((insn_min >> 25) & 0x7f, 0b0010100, "FMIN.S funct7");
+        assert_eq!((insn_min >> 12) & 0x7, 0, "FMIN.S funct3=000");
+        // FMAX.S: funct7=0010100, funct3=001
+        let insn_max = u32::from_le_bytes([code[8], code[9], code[10], code[11]]);
+        assert_eq!((insn_max >> 25) & 0x7f, 0b0010100, "FMAX.S funct7");
+        assert_eq!((insn_max >> 12) & 0x7, 1, "FMAX.S funct3=001");
+        // FCLASS.S: funct7=1010000, funct3=001
+        let insn_class_s = u32::from_le_bytes([code[12], code[13], code[14], code[15]]);
+        assert_eq!((insn_class_s >> 25) & 0x7f, 0b1010000, "FCLASS.S funct7");
+        assert_eq!((insn_class_s >> 12) & 0x7, 1, "FCLASS.S funct3=001");
+        // FCLASS.D: funct7=1010001, funct3=001
+        let insn_class_d = u32::from_le_bytes([code[16], code[17], code[18], code[19]]);
+        assert_eq!((insn_class_d >> 25) & 0x7f, 0b1010001, "FCLASS.D funct7");
+        assert_eq!((insn_class_d >> 12) & 0x7, 1, "FCLASS.D funct3=001");
+    }
+
+    // RVV 窄化钳位指令: VNCLIP.VV, VNCLIPU.VV
+    #[test]
+    fn riscv64_rvv_narrowing_clip() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_vnclip_vv(8, 16, 24, true);
+        cg.emit_vnclipu_vv(9, 17, 25, false);
+        let code = &cg.code;
+        assert!(code.len() >= 8, "expected 8 bytes for 2 instructions");
+        // VNCLIP: funct6=100110, funct3=011
+        let insn_nclip = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!((insn_nclip >> 26) & 0x3f, 0b100110, "VNCLIP funct6");
+        assert_eq!((insn_nclip >> 12) & 0x7, 3, "VNCLIP funct3=011");
+        assert_eq!((insn_nclip >> 25) & 1, 1, "VNCLIP vm=1");
+        // VNCLIPU: funct6=100110, funct3=010
+        let insn_nclipu = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
+        assert_eq!((insn_nclipu >> 26) & 0x3f, 0b100110, "VNCLIPU funct6");
+        assert_eq!((insn_nclipu >> 12) & 0x7, 2, "VNCLIPU funct3=010");
+        assert_eq!((insn_nclipu >> 25) & 1, 0, "VNCLIPU vm=0");
     }
 }

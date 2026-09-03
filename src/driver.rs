@@ -1000,6 +1000,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.fast_math = cfg.fast_math;
     // -ffp-contract=: FP 收缩模式
     target.fp_contract_mode = cfg.fp_contract_mode;
+    // -falign-loops/-falign-jumps: 代码段对齐
+    target.align_loops = cfg.align_loops;
+    target.align_jumps = cfg.align_jumps;
     target.short_wchar = cfg.short_wchar;
     // -fno-common: codegen 已将未初始化全局变量直接放入 .bss (而非
     // COMMON 段). 链接器 resolve.rs 处理跨 TU tentative definition 合并.

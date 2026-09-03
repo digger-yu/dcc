@@ -207,6 +207,10 @@ pub struct Config {
     pub fast_math: bool,
     /// -ffp-contract=: FP 收缩模式
     pub fp_contract_mode: FpContractMode,
+    /// -falign-loops=N: 循环头部对齐边界 (2 的幂, 0=不对齐)
+    pub align_loops: u32,
+    /// -falign-jumps=N: 跳转目标对齐边界 (2 的幂, 0=不对齐)
+    pub align_jumps: u32,
 }
 
 /// -ffp-contract= 模式: FP 收缩 (fma) 策略
@@ -1244,6 +1248,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut function_sections = false;
     let mut no_function_sections = false;
     let mut data_sections = false;
+    let mut align_loops: u32 = 0;
+    let mut align_jumps: u32 = 0;
     let mut gc_sections = false;
     let mut specs: Option<String> = None;
     let mut output_format = crate::output_format::OutputFormat::default();
@@ -2518,24 +2524,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             // -fno-plt: 内核不使用 PLT, 接受但无操作
             "-fno-plt" => {}
-            // -falign-jumps=N / -falign-loops=N: =1 等价于不对齐,
-            // 其他值 DCC 不执行对齐, 发警告
+            // -falign-jumps=N / -falign-loops=N: 存储实际值用于代码生成
             a if a.starts_with("-falign-jumps=") => {
                 let val = &a["-falign-jumps=".len()..];
-                if val != "1" {
-                    cli_warnings.push(format!(
-                        "ignoring '{}': DCC does not perform jump alignment",
-                        a
-                    ));
+                if let Ok(n) = val.parse::<u32>() {
+                    // 限制为 2 的幂, 最大 32
+                    align_jumps = if n <= 1 { 0 } else { n.min(32).next_power_of_two() };
                 }
             }
             a if a.starts_with("-falign-loops=") => {
                 let val = &a["-falign-loops=".len()..];
-                if val != "1" {
-                    cli_warnings.push(format!(
-                        "ignoring '{}': DCC does not perform loop alignment",
-                        a
-                    ));
+                if let Ok(n) = val.parse::<u32>() {
+                    align_loops = if n <= 1 { 0 } else { n.min(32).next_power_of_two() };
                 }
             }
             // -f* 其他选项 - 已知 GCC/Clang 选项安全忽略，未知选项警告
@@ -3022,6 +3022,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             float_abi,
             fast_math,
             fp_contract_mode,
+            align_loops,
+            align_jumps,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -3145,6 +3147,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             float_abi,
             fast_math,
             fp_contract_mode,
+            align_loops,
+            align_jumps,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

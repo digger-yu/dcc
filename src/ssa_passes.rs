@@ -82,6 +82,9 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
             Terminator::Branch { cond, .. } => {
                 used.extend(operand_uses_op(cond));
             }
+            Terminator::SwitchTable { idx, .. } => {
+                used.extend(operand_uses_op(idx));
+            }
             _ => {}
         }
         for p in &b.phis {
@@ -1364,6 +1367,15 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                     }
                 }
             }
+            // SwitchTable: 如果 idx 是常量, 记录以便后续解析
+            if let Terminator::SwitchTable { idx, .. } = &b.term {
+                if let Some(v) = operand_int(idx, &consts) {
+                    if consts.get(&format!("__sw__{}", b.name)) != Some(&v) {
+                        consts.insert(format!("__sw__{}", b.name), v);
+                        changed = true;
+                    }
+                }
+            }
         }
     }
     // 2. 用 consts 替换 operand
@@ -1373,6 +1385,22 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
             replace_op_in_inst(&mut inst.kind, &consts);
         }
         replace_op_in_term(&mut b.term, &consts);
+        // SwitchTable 常量解析: 如果 idx 是已知常量, 替换为 Jump
+        if let Terminator::SwitchTable { idx, values, targets, default } = &b.term {
+            let idx_val = match idx {
+                Operand::Int(v) => Some(*v),
+                Operand::Var(sv) => consts.get(&sv.name()).copied(),
+                _ => None,
+            };
+            if let Some(v) = idx_val {
+                let target = values.iter().position(|&cv| cv == v)
+                    .map(|i| targets[i].clone())
+                    .unwrap_or_else(|| default.clone());
+                b.succs = vec![target.clone()];
+                b.term = Terminator::Jump(target);
+                modified = true;
+            }
+        }
     }
     // 3. 收集所有被引用的 SSA 变量名 (操作数 + terminator)
     let mut used: HashSet<String> = HashSet::new();
@@ -1390,6 +1418,11 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
             }
             Terminator::Branch { cond, .. } => {
                 for u in operand_uses_op(cond) {
+                    used.insert(u);
+                }
+            }
+            Terminator::SwitchTable { idx, .. } => {
+                for u in operand_uses_op(idx) {
                     used.insert(u);
                 }
             }
@@ -1478,6 +1511,7 @@ fn replace_op_in_term(t: &mut Terminator, consts: &HashMap<String, i128>) {
     match t {
         Terminator::Ret { val: Some(v) } => replace_op(v, consts),
         Terminator::Branch { cond, .. } => replace_op(cond, consts),
+        Terminator::SwitchTable { idx, .. } => replace_op(idx, consts),
         _ => {}
     }
 }

@@ -418,6 +418,8 @@ mod tests {
             float_abi: crate::cli::FloatAbi::default(),
             fast_math: false,
             fp_contract_mode: crate::cli::FpContractMode::Default,
+            align_loops: 0,
+            align_jumps: 0,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         };

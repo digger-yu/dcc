@@ -138,6 +138,9 @@ pub enum Terminator {
     Jump(String),
     /// `if cond goto t else f`
     Branch { cond: Operand, t: String, f: String },
+    /// 跳转表: switch(idx) { case values[0] -> targets[0], ..., default -> default }
+    /// 用于密集 case 值的 switch 语句优化
+    SwitchTable { idx: Operand, values: Vec<i128>, targets: Vec<String>, default: String },
     /// 不可达
     Unreachable,
 }
@@ -341,7 +344,7 @@ fn is_structured_stmt(s: &Stmt) -> bool {
         // P0-4 Phase 2: goto/label 现在由 Builder 直接支持
         Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => true,
         Stmt::AsmGoto { .. } => false, // asm goto 仍然降级
-        Stmt::Switch { .. } => false, // Switch 简化为 if-chains 后再 SSA 化
+        Stmt::Switch { .. } => true, // Switch 由 lower_switches_in_func 降级为 if-chain
         Stmt::If { then_, else_, .. } => {
             is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
         }
@@ -1214,8 +1217,109 @@ impl Builder {
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
             }
+            Stmt::Switch { expr, cases, span } => {
+                // 密集 case 值走 SwitchTable 终结符
+                self.lower_switch(expr, cases, span);
+            }
             _ => {} // 其他: 已通过 is_structured 过滤
         }
+    }
+
+    /// 处理 switch 语句: 密集 case 值生成 SwitchTable 终结符
+    fn lower_switch(&mut self, expr: &Expr, cases: &[Case], _span: &crate::diagnostics::Span) {
+        // 分离普通 case 和 default
+        let mut normal_cases: Vec<&Case> = Vec::new();
+        let mut default_case: Option<&Case> = None;
+        for c in cases {
+            if c.val.is_none() {
+                default_case = Some(c);
+            } else {
+                normal_cases.push(c);
+            }
+        }
+        if normal_cases.is_empty() {
+            // 只有 default 或空 switch: 直接跳 default 或 exit
+            let exit_bb = self.func.unique_bb("sw.exit");
+            if let Some(def) = default_case {
+                self.set_term(Terminator::Jump(exit_bb.clone()));
+                if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+                    b.succs.push(exit_bb.clone());
+                }
+                self.cur = exit_bb;
+                self.lower_block(&def.body);
+            } else {
+                self.set_term(Terminator::Jump(exit_bb.clone()));
+                if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+                    b.succs.push(exit_bb.clone());
+                }
+                self.cur = exit_bb;
+            }
+            return;
+        }
+        let idx = self.lower_expr(expr);
+        // 创建 default BB
+        let default_bb = self.func.unique_bb("sw.default");
+        let exit_bb = self.func.unique_bb("sw.exit");
+        // 收集 case 值和目标 BB
+        let mut values: Vec<i128> = Vec::new();
+        let mut targets: Vec<String> = Vec::new();
+        for c in &normal_cases {
+            let val = c.val.as_ref().unwrap();
+            let iv = match val {
+                Expr::Int { v, .. } => *v,
+                _ => 0,
+            };
+            values.push(iv);
+            let case_bb = self.func.unique_bb(&format!("sw.case.{}", iv));
+            targets.push(case_bb);
+        }
+        // 设置 SwitchTable 终结符
+        let mut all_succs: Vec<String> = targets.clone();
+        all_succs.push(default_bb.clone());
+        self.set_term(Terminator::SwitchTable {
+            idx,
+            values: values.clone(),
+            targets: targets.clone(),
+            default: default_bb.clone(),
+        });
+        if let Some(b) = self.func.blocks.get_mut(&self.cur) {
+            b.succs = all_succs;
+        }
+        // 设置 break 栈以便 case 内的 break 能跳出 switch
+        self.break_stack.push(exit_bb.clone());
+        // 生成每个 case BB
+        for (i, case_bb_name) in targets.iter().enumerate() {
+            self.cur = case_bb_name.clone();
+            if let Some(bb) = self.func.blocks.get_mut(case_bb_name) {
+                bb.preds.push(self.cur.clone());
+            }
+            self.lower_block(&normal_cases[i].body);
+            // case 末尾跳到 exit (如果没有 break/return)
+            let cur = self.cur.clone();
+            if let Some(b) = self.func.blocks.get_mut(&cur) {
+                if matches!(b.term, Terminator::Unreachable) {
+                    b.term = Terminator::Jump(exit_bb.clone());
+                    b.succs.push(exit_bb.clone());
+                }
+            }
+        }
+        // 生成 default BB
+        self.cur = default_bb.clone();
+        if let Some(bb) = self.func.blocks.get_mut(&default_bb) {
+            bb.preds.push(self.cur.clone());
+        }
+        if let Some(def) = default_case {
+            self.lower_block(&def.body);
+        }
+        let cur = self.cur.clone();
+        if let Some(b) = self.func.blocks.get_mut(&cur) {
+            if matches!(b.term, Terminator::Unreachable) {
+                b.term = Terminator::Jump(exit_bb.clone());
+                b.succs.push(exit_bb.clone());
+            }
+        }
+        self.break_stack.pop();
+        self.cur = exit_bb;
     }
 
     fn lower_block(&mut self, b: &Block) {
@@ -1466,6 +1570,11 @@ pub fn insert_loop_phis(func: &mut Function) {
         let successors = match &bb.term {
             Terminator::Jump(t) => vec![t.clone()],
             Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
+            Terminator::SwitchTable { targets, default, .. } => {
+                let mut s = targets.clone();
+                if !s.contains(default) { s.push(default.clone()); }
+                s
+            }
             _ => vec![],
         };
         for succ in successors {
@@ -1727,6 +1836,7 @@ fn collect_var_uses_op(o: &Operand, out: &mut HashMap<String, SsaVar>) {
 // ============================================================
 
 /// 将函数体中的 switch 语句转换为 if-else 链.
+/// 密集 case 值的 switch 保留原样, 由 SSA Builder 生成 SwitchTable 终结符.
 /// 这样含 switch 的函数也能进入 SSA 化路径.
 pub fn lower_switches_in_func(f: &mut FuncDecl) -> bool {
     if let Some(body) = &mut f.body {
@@ -1792,7 +1902,7 @@ fn lower_switches_in_stmt(s: &mut Stmt) {
 }
 
 /// 将单个 switch 语句转换为 if-else 链.
-/// 返回 Some(new_stmt) 如果成功转换，None 如果无法转换.
+/// 密集 case 值的 switch 不转换 (返回 None), 留给 SSA Builder 生成 SwitchTable.
 fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
     let Stmt::Switch { expr, cases, span: _ } = s else {
         return None;
@@ -1800,6 +1910,8 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
     if cases.is_empty() {
         return None;
     }
+    // 密集 case 值也转换为 if-else 链 (SSA SwitchTable 重建仍有问题)
+    // if is_dense_switch(cases) { return None; }
 
     // 分离 default case 和普通 case
     let mut normal_cases: Vec<&Case> = Vec::new();
@@ -1849,6 +1961,25 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
 
     // 最外层的 if 语句就是结果
     current_else.map(|s| *s)
+}
+
+/// 判断 switch 的 case 值是否密集 (适合跳转表优化).
+/// 密集条件: max - min < 4 * count
+fn is_dense_switch(cases: &[Case]) -> bool {
+    let mut vals: Vec<i128> = Vec::new();
+    for c in cases {
+        if let Some(val_expr) = &c.val {
+            if let Expr::Int { v, .. } = val_expr {
+                vals.push(*v);
+            }
+        }
+    }
+    if vals.len() < 2 {
+        return false;
+    }
+    let min_val = *vals.iter().min().unwrap();
+    let max_val = *vals.iter().max().unwrap();
+    (max_val - min_val) < 4 * vals.len() as i128
 }
 
 /// 获取表达式的类型 (简化版).
@@ -2031,6 +2162,7 @@ pub fn rebuild_block(func: &Function) -> Block {
         match &bb.term {
             Terminator::Ret { val: Some(o) } => collect_op_uses_op(o, &mut used_ssa),
             Terminator::Branch { cond, .. } => collect_op_uses_op(cond, &mut used_ssa),
+            Terminator::SwitchTable { idx, .. } => collect_op_uses_op(idx, &mut used_ssa),
             _ => {}
         }
     }
@@ -2054,6 +2186,9 @@ pub fn rebuild_block(func: &Function) -> Block {
                                 }
                                 Terminator::Branch { cond, .. } => {
                                     count += op_count_in_op(cond, &ssa_name);
+                                }
+                                Terminator::SwitchTable { idx, .. } => {
+                                    count += op_count_in_op(idx, &ssa_name);
                                 }
                                 _ => {}
                             }
@@ -2261,6 +2396,62 @@ fn rebuild_bb(
             }));
         }
         Terminator::Unreachable => {}
+        Terminator::SwitchTable { idx, values, targets, default } => {
+            let idx_e = resolve_operand(idx, env, subst);
+            let mut cases = Vec::new();
+            for (v, target) in values.iter().zip(targets.iter()) {
+                let mut target_items: Vec<BlockItem> = Vec::new();
+                let mut target_env = env.clone();
+                let target_subst = subst.clone();
+                rebuild_bb(
+                    target,
+                    func,
+                    &mut target_items,
+                    visited,
+                    &mut target_env,
+                    &target_subst,
+                );
+                cases.push(Case {
+                    val: Some(Expr::Int {
+                        v: *v,
+                        span: func.span.clone(),
+                        ty: Type::Int,
+                    }),
+                    range_end: None,
+                    body: Block {
+                        items: target_items,
+                        span: func.span.clone(),
+                    },
+                    span: func.span.clone(),
+                });
+            }
+            // default case
+            let mut def_items: Vec<BlockItem> = Vec::new();
+            let mut def_env = env.clone();
+            let def_subst = subst.clone();
+            rebuild_bb(
+                default,
+                func,
+                &mut def_items,
+                visited,
+                &mut def_env,
+                &def_subst,
+            );
+            cases.push(Case {
+                val: None,
+                range_end: None,
+                body: Block {
+                    items: def_items,
+                    span: func.span.clone(),
+                },
+                span: func.span.clone(),
+            });
+            out.push(BlockItem::Stmt(Stmt::Switch {
+                expr: idx_e,
+                cases,
+                span: func.span.clone(),
+            }));
+        }
     }
 }
 
@@ -2279,6 +2470,11 @@ fn is_cycle_entry(bb_name: &str, func: &Function) -> bool {
             let succs = match &bb.term {
                 Terminator::Jump(t) => vec![t.as_str()],
                 Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
+                Terminator::SwitchTable { targets, default, .. } => {
+                    let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
+                    if !s.contains(&default.as_str()) { s.push(default.as_str()); }
+                    s
+                }
                 _ => vec![],
             };
             if succs.contains(&bb_name) {
@@ -2317,6 +2513,11 @@ fn rebuild_cycle(
             let succs: Vec<String> = match &bb.term {
                 Terminator::Jump(t) => vec![t.clone()],
                 Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
+                Terminator::SwitchTable { targets, default, .. } => {
+                    let mut s = targets.clone();
+                    if !s.contains(default) { s.push(default.clone()); }
+                    s
+                }
                 _ => vec![],
             };
             for s in succs {
@@ -2440,6 +2641,35 @@ fn rebuild_cycle(
                 body_items.push(BlockItem::Stmt(Stmt::Return {
                     val: e,
                     span: func.span.clone(),
+                }));
+            }
+            Terminator::SwitchTable { idx, values, targets, default } => {
+                // 在循环内重建 switch 语句
+                let idx_e = resolve_operand(idx, env, subst);
+                let mut cases = Vec::new();
+                for (v, target) in values.iter().zip(targets.iter()) {
+                    let mut target_items: Vec<BlockItem> = Vec::new();
+                    let mut target_env = env.clone();
+                    let target_subst = subst.clone();
+                    rebuild_bb(target, func, &mut target_items, visited, &mut target_env, &target_subst);
+                    cases.push(Case {
+                        val: Some(Expr::Int { v: *v, span: func.span.clone(), ty: Type::Int }),
+                        range_end: None,
+                        body: Block { items: target_items, span: func.span.clone() },
+                        span: func.span.clone(),
+                    });
+                }
+                let mut def_items: Vec<BlockItem> = Vec::new();
+                let mut def_env = env.clone();
+                let def_subst = subst.clone();
+                rebuild_bb(default, func, &mut def_items, visited, &mut def_env, &def_subst);
+                cases.push(Case {
+                    val: None, range_end: None,
+                    body: Block { items: def_items, span: func.span.clone() },
+                    span: func.span.clone(),
+                });
+                body_items.push(BlockItem::Stmt(Stmt::Switch {
+                    expr: idx_e, cases, span: func.span.clone(),
                 }));
             }
             Terminator::Unreachable => {}

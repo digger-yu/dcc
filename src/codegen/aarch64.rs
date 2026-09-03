@@ -90,6 +90,8 @@ pub struct Aarch64Codegen {
     break_continue_stack: Vec<(String, String)>,
     /// GNU asm label 映射: C 名 → asm("label") 覆盖名
     asm_label_map: HashMap<String, String>,
+    /// DWARF 行号表条目: (pc, source_line)
+    pub line_entries: Vec<(u64, u32)>,
 }
 
 /// AAPCS64 同构浮点聚合 (HFA) 描述
@@ -155,6 +157,7 @@ impl Aarch64Codegen {
             _target: target,
             break_continue_stack: Vec::new(),
             asm_label_map: HashMap::new(),
+            line_entries: Vec::new(),
         }
     }
 
@@ -1114,6 +1117,12 @@ impl Aarch64Codegen {
     }
 
     fn gen_stmt(&mut self, stmt: &Stmt, ir: &TypedStmt) {
+        // 记录 DWARF 行号表条目
+        let pc = self.code.len() as u64;
+        let line = ir.span.line;
+        if line > 0 {
+            self.line_entries.push((pc, line));
+        }
         match stmt {
             Stmt::Return { val, .. } => {
                 let ret_ty = self.current_return_ty.clone().unwrap_or(ValueType::Void);
@@ -1176,8 +1185,10 @@ impl Aarch64Codegen {
                 let lbl_else = self.fresh_label("Lelse");
                 let lbl_end = self.fresh_label("Lendif");
                 self.cbz_w0(&lbl_else);
+                self.maybe_align_jump();
                 self.gen_stmt(then_, &ir.nested[0]);
                 self.b(&lbl_end);
+                self.maybe_align_jump();
                 self.label(&lbl_else);
                 if let Some(el) = else_ {
                     if ir.nested.len() > 1 {
@@ -1198,6 +1209,7 @@ impl Aarch64Codegen {
             Stmt::While { body, .. } | Stmt::Do { body, .. } => {
                 let lbl_loop = self.fresh_label("Lwhile");
                 let lbl_exit = self.fresh_label("Lwend");
+                self.maybe_align_loop();
                 self.label(&lbl_loop);
                 self.break_continue_stack.push((lbl_exit.clone(), lbl_loop.clone()));
                 if let Some(cond) = ir.expressions.first() {
@@ -1223,6 +1235,7 @@ impl Aarch64Codegen {
                 let lbl_loop = self.fresh_label("Lfor");
                 let lbl_cont = self.fresh_label("Lfor_cont");
                 let lbl_exit = self.fresh_label("Lfend");
+                self.maybe_align_loop();
                 self.label(&lbl_loop);
                 self.break_continue_stack.push((lbl_exit.clone(), lbl_cont.clone()));
                 if cond.is_some() {
@@ -2899,6 +2912,33 @@ impl Aarch64Codegen {
             | Expr::VaArg { span, .. }
             | Expr::Offsetof { span, .. } => span.clone(),
             _ => crate::diagnostics::Span::point("", 0, 0),
+        }
+    }
+
+    /// 发射 NOP 填充到对齐边界 (AArch64: NOP = 0xD503201F, 4 字节)
+    fn emit_align_padding(&mut self, alignment: u32) {
+        if alignment <= 1 { return; }
+        let pos = self.code.len() as u64;
+        let aligned = (pos + alignment as u64 - 1) & !(alignment as u64 - 1);
+        let pad = (aligned - pos) as usize;
+        // AArch64 NOP 是 4 字节指令, 只能按 4 字节边界填充
+        let nop_count = pad / 4; // 整数个 NOP
+        for _ in 0..nop_count {
+            self.emit(&[0x1F, 0x20, 0x03, 0xD5]); // NOP
+        }
+    }
+
+    /// 如果配置了 align_loops, 在循环头部标签前发射对齐填充
+    fn maybe_align_loop(&mut self) {
+        if self._target.align_loops > 1 {
+            self.emit_align_padding(self._target.align_loops);
+        }
+    }
+
+    /// 如果配置了 align_jumps, 在跳转目标标签前发射对齐填充
+    fn maybe_align_jump(&mut self) {
+        if self._target.align_jumps > 1 {
+            self.emit_align_padding(self._target.align_jumps);
         }
     }
 

@@ -1638,7 +1638,19 @@ pub fn emit(
                     arch: debug::ArchKind::AArch64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
+                // 构建 DWARF 行号表条目
+                let aarch64_line_entries: Vec<debug::LineEntry> = cg.line_entries.iter().map(|&(pc, line)| {
+                    debug::LineEntry {
+                        pc,
+                        line,
+                        column: 1,
+                        file_idx: 0,
+                        discriminator: 0,
+                        is_stmt: true,
+                        basic_block: false,
+                    }
+                }).collect();
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, aarch64_line_entries);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1742,7 +1754,19 @@ pub fn emit(
                     arch: debug::ArchKind::RiscV64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
+                // 构建 DWARF 行号表条目
+                let riscv_line_entries: Vec<debug::LineEntry> = cg.line_entries.iter().map(|&(pc, line)| {
+                    debug::LineEntry {
+                        pc,
+                        line,
+                        column: 1,
+                        file_idx: 0,
+                        discriminator: 0,
+                        is_stmt: true,
+                        basic_block: false,
+                    }
+                }).collect();
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, riscv_line_entries);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {

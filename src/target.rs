@@ -122,6 +122,10 @@ pub struct Target {
     pub mips_has_msa: bool,
     /// MIPS DSP ASE
     pub mips_has_dsp: bool,
+    /// -falign-loops=N: 循环头部对齐边界 (2 的幂, 0=不对齐)
+    pub align_loops: u32,
+    /// -falign-jumps=N: 跳转目标对齐边界 (2 的幂, 0=不对齐)
+    pub align_jumps: u32,
 }
 
 impl Target {
@@ -233,6 +237,8 @@ impl Target {
             aarch64_has_crc32: non_x86.crc32,
             mips_has_msa: non_x86.msa,
             mips_has_dsp: non_x86.mips_dsp,
+            align_loops: 0,
+            align_jumps: 0,
         }
     }
 
