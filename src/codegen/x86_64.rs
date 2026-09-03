@@ -258,11 +258,12 @@ pub struct Codegen {
     callee_saved_pool: [u8; 4],
     /// 当前已分配的被调用者保存寄存器 (位掩码, bit i = callee_saved_pool[i])
     reg_allocated: u8,
-    /// 各被调用者保存寄存器对应的帧溢出槽偏移 (r13 相对).
-    /// 当寄存器在函数调用边界需要保留时, 值溢出到此槽.
-    reg_spill_slots: [i32; 4],
     /// 当前函数是否使用了任何被调用者保存寄存器 (用于 CFI / 序言优化)
     callee_saved_used: u8,
+    /// 序言/尾声中 callee-saved 保存/恢复指令的补丁点:
+    /// (code 偏移, 位掩码 bit). 函数体生成完毕后, 若该寄存器未被使用,
+    /// 将对应的 4 字节 mov 改写为 4×0x90 (nop), 避免叶子函数的冗余保存.
+    callee_save_patch_sites: Vec<(u64, u8)>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1441,8 +1442,8 @@ impl Codegen {
             // 寄存器分配器初始化
             callee_saved_pool: [3, 12, 14, 15], // rbx, r12, r14, r15
             reg_allocated: 0,
-            reg_spill_slots: [0; 4],
             callee_saved_used: 0,
+            callee_save_patch_sites: vec![],
         }
     }
 
@@ -1920,57 +1921,26 @@ impl Codegen {
         }
     }
 
-    /// 释放所有已分配的被调用者保存寄存器 (表达式求值结束时调用)
-    fn free_all_callee_saved(&mut self) {
-        self.reg_allocated = 0;
-    }
-
-    /// 检查被调用者保存寄存器是否已分配
-    fn is_callee_saved_allocated(&self, reg: u8) -> bool {
-        for i in 0..4 {
-            if self.callee_saved_pool[i] == reg && self.reg_allocated & (1 << i) != 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// 在函数调用边界溢出所有已分配的被调用者保存寄存器到帧槽.
-    /// 调用后寄存器仍可继续使用 (因为被调用者会保留它们的值),
-    /// 但溢出槽保存了调用前的值, 可在需要时重新加载.
-    fn spill_callee_saved_before_call(&mut self) {
-        for i in 0..4 {
-            if self.reg_allocated & (1 << i) != 0 {
-                let reg = self.callee_saved_pool[i];
-                let off = self.reg_spill_slots[i];
-                // mov [r13 + off], reg
-                self.store_stack(reg, off);
-            }
-        }
-    }
-
-    /// 函数调用后恢复被调用者保存寄存器的值.
-    fn reload_callee_saved_after_call(&mut self) {
-        for i in 0..4 {
-            if self.reg_allocated & (1 << i) != 0 {
-                let reg = self.callee_saved_pool[i];
-                let off = self.reg_spill_slots[i];
-                // mov reg, [r13 + off]
-                self.load_stack(reg, off);
-            }
-        }
-    }
-
     /// 重置寄存器跟踪状态 (每个函数开始时调用)
     fn reset_reg_tracker(&mut self) {
         self.reg_allocated = 0;
         self.callee_saved_used = 0;
-        self.reg_spill_slots = [0; 4];
     }
 
-    /// 计算当前函数使用的被调用者保存寄存器数量
-    fn callee_saved_count(&self) -> u32 {
-        self.callee_saved_used.count_ones()
+    /// 回填本函数序言/尾声的 callee-saved 保存/恢复指令.
+    /// 单遍编译下序言先于函数体发射, 无法预知函数体是否使用这些寄存器;
+    /// 函数体生成完毕后 callee_saved_used 已完整, 将未使用寄存器的
+    /// 4 字节 mov 改写为 4×0x90 (nop), 消除叶子函数的冗余保存/恢复.
+    /// 尾声可能在每个 return 处内联发射, 统一在此处回填, 不依赖生成顺序.
+    /// sites_base: compile_func 开头记录的 sites 起始下标 (嵌套函数隔离).
+    fn patch_callee_saves(&mut self, sites_base: usize) {
+        let used = self.callee_saved_used;
+        for (pos, bit) in self.callee_save_patch_sites.drain(sites_base..) {
+            if used & bit == 0 {
+                let p = pos as usize;
+                self.code[p..p + 4].fill(0x90);
+            }
+        }
     }
 
     /// 判断函数是否需要放入自定义 section
@@ -5628,6 +5598,8 @@ impl Codegen {
         self.max_expr_depth = 0;
         self.temp_slots = 0;
         self.reset_reg_tracker();
+        // 本函数序言/尾声补丁点在 sites 中的起始下标 (与嵌套函数隔离)
+        let callee_sites_base = self.callee_save_patch_sites.len();
         if let Some(body) = &f.body {
             self.max_expr_depth = Self::max_expr_depth_stmt(&body.items);
         }
@@ -5848,19 +5820,27 @@ impl Codegen {
             // 被调用者保存寄存器: rbx, r12, r14, r15 保存在帧顶部
             // (r13-16 到 r13-40), 用作表达式求值的额外暂存寄存器.
             // 这些寄存器在函数调用后被调用者保证保留, 因此可以跨 call 使用.
+            // 生成时先无条件发射 (单遍编译, 此时函数体尚未生成,
+            // callee_saved_used 未知), 记录补丁点; 函数体生成完毕后,
+            // 未使用的寄存器指令由 patch_callee_saves 改写为 nop.
             // mov [r13 - 16], rbx  (REX.WB: r13 needs REX.B)
+            self.callee_save_patch_sites.push((self.pos(), 0x01));
             self.emit(&[0x49, 0x89, 0x5d, 0xf0]);
             // mov [r13 - 24], r12  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
+            self.callee_save_patch_sites.push((self.pos(), 0x02));
             self.emit(&[0x4d, 0x89, 0x65, 0xe8]);
             // mov [r13 - 32], r14  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
+            self.callee_save_patch_sites.push((self.pos(), 0x04));
             self.emit(&[0x4d, 0x89, 0x75, 0xe0]);
             // mov [r13 - 40], r15  (REX.WRB: r15 needs REX.R+REX.B, r13 needs REX.B)
+            self.callee_save_patch_sites.push((self.pos(), 0x08));
             self.emit(&[0x4f, 0x89, 0x7d, 0xd8]);
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
             // 帧布局 (自下而上):
             //   r13+0 saved r13 / r13+8 ret addr
-            //   r13-16..-(16+temp_slots*8) binop temp_slots
-            //   r13-(16+temp_slots*8)..-(16+temp_slots*8+var_bytes) 变量
+            //   r13-16..-48 callee-saved 保存区 (rbx/r12/r14/r15)
+            //   r13-48..-(48+temp_slots*8) binop temp_slots (槽 d 在 -(48+d*8))
+            //   r13-(48+temp_slots*8)..-(48+temp_slots*8+var_bytes) 变量
             //   r13-frame_size..r13-frame_size+va_slots 变参 reg save area
             // 关键: save area 必须在变量下方, 否则 XMM 槽位会与
             //       变量 (尤其 for-init 的 i) 重叠, 导致变参读取
@@ -6090,6 +6070,10 @@ impl Codegen {
         let func_end = self.pos();
         self.func_sizes
             .insert(f.name.name.clone(), func_end - func_start);
+        // 函数体+尾声已生成, callee_saved_used 完整: 回填序言/尾声中
+        // 未使用寄存器的保存/恢复指令为 nop. 必须在嵌套函数生成前
+        // (嵌套函数会 reset tracker 并追加自己的 sites).
+        self.patch_callee_saves(callee_sites_base);
         // 父函数布局确定后再生成嵌套函数，把捕获变量的真实 r13 偏移传入。
         // 使用预收集的 nested_decls 和预注册的重命名
         if !nested_decls.is_empty() {
@@ -7301,11 +7285,13 @@ impl Codegen {
                 //       / r13-(48+temp*8).. 变量 (基址 hdr 含 temp_slots)
                 // 注意: binop 槽公式只用 48 (callee-saved 区大小),
                 // temp_slots 只体现在变量基址 hdr 中, 不可重复计入.
-                let hdr = 48 + self.temp_slots * 8;
                 let slot_off = -(48 + self.expr_depth as i32 * 8);
                 // 尝试使用被调用者保存寄存器代替帧槽 (减少内存访问).
-                // 仅当表达式不含函数调用时安全 (call 后帧槽值可能被破坏).
-                let use_callee_saved = !Self::expr_contains_call(e) && dst != 1;
+                // callee-saved 跨 call 保活 (ABI 保证 + 本编译器序言保存
+                // callee_saved_used 集合), 因此含 call 的表达式同样安全;
+                // 递归 binop 通过 reg_allocated 位图分配, 不冲突.
+                // dst==1 (rcx) 时左值可能是 shift 计数, 保守退回帧槽.
+                let use_callee_saved = dst != 1;
                 let callee_reg = if use_callee_saved {
                     self.alloc_callee_saved()
                 } else {
@@ -9216,7 +9202,6 @@ impl Codegen {
                     self.rodata.extend_from_slice(&data);
                     self.string_pool.insert(data.clone(), off);
                 }
-                let off = self.string_pool[&data];
                 // 加载地址到 dst (RIP-relative LEA)
                 let code_pos = self.pos();
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
@@ -12618,8 +12603,9 @@ impl Codegen {
         let slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
         let slots = slots.max(1) as i32;
         // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
-        // 帧布局: r13+0 saved r13 / r13+8 ret addr / r13-(16+temp_slots*8) temp_slots
-        //         / 变量(从此向下) / variadic reg_save_area 在 frame 底部.
+        // 帧布局: r13+0 saved r13 / r13+8 ret addr / r13-16..-48 callee-saved 保存区
+        //         / r13-48..-(48+temp_slots*8) binop temp_slots / 变量(从此向下)
+        //         / variadic reg_save_area 在 frame 底部.
         // 关键: 变量必须放在 temp_slots 区域下方, 否则会与 binop 临时槽
         // 冲突, 进一步破坏 va_list (ap.gp_offset / ap.reg_save_area 等) 读取.
         let used: i32 = self.var_map.values().map(|_| 8).sum();
@@ -14568,13 +14554,18 @@ impl Codegen {
             self.call_label("__stack_chk_fail");
         }
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15
+        // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop
         // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
+        self.callee_save_patch_sites.push((self.pos(), 0x01));
         self.emit(&[0x49, 0x8b, 0x5d, 0xf0]);
         // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
+        self.callee_save_patch_sites.push((self.pos(), 0x02));
         self.emit(&[0x4d, 0x8b, 0x65, 0xe8]);
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
+        self.callee_save_patch_sites.push((self.pos(), 0x04));
         self.emit(&[0x4d, 0x8b, 0x75, 0xe0]);
         // mov r15, [r13 - 40]  (REX.WRB: r15 needs REX.R+REX.B)
+        self.callee_save_patch_sites.push((self.pos(), 0x08));
         self.emit(&[0x4f, 0x8b, 0x7d, 0xd8]);
         // mov rsp, r13: 恢复栈指针
         self.emit(&[0x49, 0x8b, 0xe5]);
@@ -14930,41 +14921,6 @@ impl Codegen {
                 .max(Self::max_expr_depth_expr(then_))
                 .max(Self::max_expr_depth_expr(else_)),
             _ => 0,
-        }
-    }
-
-    /// 检查表达式是否包含函数调用 (用于寄存器分配决策).
-    /// 包含调用的表达式不使用被调用者保存寄存器, 因为 call 会破坏
-    /// 帧槽中保存的原始值, 导致函数尾声恢复错误的值.
-    fn expr_contains_call(e: &Expr) -> bool {
-        match e {
-            Expr::Call { .. } => true,
-            Expr::Binop { l, r, .. }
-            | Expr::Assign { l, r, .. }
-            | Expr::Comma { l, r, .. } => Self::expr_contains_call(l) || Self::expr_contains_call(r),
-            Expr::Unary { e, .. }
-            | Expr::Cast { e, .. }
-            | Expr::AddrOf { e, .. }
-            | Expr::Deref { e, .. }
-            | Expr::PostInc { e, .. }
-            | Expr::PostDec { e, .. }
-            | Expr::PreInc { e, .. }
-            | Expr::PreDec { e, .. } => Self::expr_contains_call(e),
-            Expr::Index { arr, idx, .. } => {
-                Self::expr_contains_call(arr) || Self::expr_contains_call(idx)
-            }
-            Expr::Member { expr, .. } => Self::expr_contains_call(expr),
-            Expr::Cond {
-                cond,
-                then_,
-                else_,
-                ..
-            } => {
-                Self::expr_contains_call(cond)
-                    || Self::expr_contains_call(then_)
-                    || Self::expr_contains_call(else_)
-            }
-            _ => false,
         }
     }
 
