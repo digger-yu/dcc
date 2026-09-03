@@ -375,6 +375,24 @@ C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
   参数；`va_arg` 支持 float/double/long double。
 - `register asm("reg")` 变量直接映射到指定物理寄存器；调用者仍需遵守
   目标寄存器的 SysV caller/callee-saved 约束。
+- **callee-saved 暂存池**：`rbx/r12/r14/r15` 显式建模为可分配池
+  (`callee_saved_pool` + `reg_allocated` 位图)。二元运算的左操作数优先
+  暂存到 callee-saved 寄存器 (免帧槽访存)，池耗尽时回退到帧内 binop
+  临时槽；右操作数中的 call 不破坏左值 (ABI 保证 callee-saved 跨调用
+  保活，且本编译器序言会保存本函数实际用到的集合)。递归子表达式通过
+  位图分配，天然不冲突。
+- **帧布局** (r13 相对)：`r13+0` 保存的 r13、`r13+8` 返回地址、
+  `r13-16..-48` callee-saved 保存区 (rbx@-16/r12@-24/r14@-32/r15@-40)、
+  `r13-48..-(48+temp_slots*8)` binop 临时槽 (深度 d 的槽在 `-(48+d*8)`，
+  不得把 temp_slots 重复计入槽公式)、变量区从 `-(48+temp_slots*8)` 向下、
+  变参 reg save area 在帧底。
+- **按需序言/尾声**：单遍编译下序言先于函数体发射，故保存/恢复指令先
+  无条件发射并记录补丁点；函数体生成完毕后 `patch_callee_saves` 将
+  未使用寄存器的 4 字节 mov 改写为 nop，叶子函数零保存开销。
+- **类型化变量加载**：`mov_from_stack` 按声明类型宽度读帧槽 — signed 4 字节
+  用 `movsxd` 符号扩展、unsigned 4 字节用 32 位 load 清零高位、1/2 字节用
+  movzx (符号语义由整数提升处理)。否则槽被窄写污染 (如 `*ip = v` 只写
+  4 字节) 时，64 位 load 会把栈残留高位一并读入，污染比较与传参。
 
 ## 函数级并行 Codegen（`codegen/x86_64.rs`）
 
