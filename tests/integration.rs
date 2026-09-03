@@ -10477,8 +10477,10 @@ int f(int n) {
 int main(void) { return f(4); }
 ";
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-vla-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-ubsan-vla-{}.s", std::process::id()));
+    // 文件名加 -asm 后缀: 避免与 ubsan_runtime_vla 的 run_compile_and_run
+    // (同名 dcc-ubsan-vla-{pid}.c) 在并行测试时竞争同一文件
+    let source_path = dir.join(format!("dcc-ubsan-vla-asm-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-ubsan-vla-asm-{}.s", std::process::id()));
     fs::write(&source_path, src).expect("write VLA fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsanitize=undefined", "-S", "-o"])
@@ -16808,7 +16810,9 @@ fn unknown_flags_emit_warnings() {
     );
     let _ = fs::remove_file(&obj_path);
 
-    // Non-default values should emit warnings
+    // Non-default stack boundary still warns (not implemented).
+    // -falign-jumps/-falign-loops 现已实现 (NOP 填充, 见 emit_align_padding),
+    // 非 1 值不再发警告.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "-c",
@@ -16829,13 +16833,13 @@ fn unknown_flags_emit_warnings() {
         stderr
     );
     assert!(
-        stderr.contains("DCC does not perform jump alignment"),
-        "should warn about non-default jump alignment, stderr: {}",
+        !stderr.contains("-falign-jumps=16"),
+        "jump alignment is implemented, should not warn, stderr: {}",
         stderr
     );
     assert!(
-        stderr.contains("DCC does not perform loop alignment"),
-        "should warn about non-default loop alignment, stderr: {}",
+        !stderr.contains("-falign-loops=8"),
+        "loop alignment is implemented, should not warn, stderr: {}",
         stderr
     );
     let _ = fs::remove_file(&src_path);
