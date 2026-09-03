@@ -392,7 +392,7 @@ fn validate_inline_asm_operands(
     );
     for err_msg in &constraint_errors {
         diags.push(
-            Diagnostic::err("E0311", err_msg.clone(), span.clone())
+            Diagnostic::warn("W0311", err_msg.clone(), span.clone())
                 .with_hint("use supported constraints: r, m, i, g, n, q, =r, =m, +r, +m, memory, cc"),
         );
     }
@@ -1252,7 +1252,9 @@ pub fn emit(
             cg.trapv = trapv;
             cg.kasan = sanitizers.kasan;
             cg.compile(module);
-            if !cg.diagnostics.is_empty() {
+            // 仅在有实际错误时失败，警告不阻止编译
+            let has_errors = cg.diagnostics.iter().any(|d| matches!(d.sev, crate::diagnostics::Severity::Error));
+            if has_errors {
                 return Err(cg.diagnostics);
             }
             if emit_asm {

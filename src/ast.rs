@@ -1099,7 +1099,11 @@ impl Type {
             | Type::ULongLong
             | Type::Double => 8,
             Type::Int128 | Type::UInt128 => 16,
-            Type::Array(elem, ArraySize::Const(n)) => elem.size() * n,
+            Type::Array(elem, ArraySize::Const(n)) => {
+                let elem_sz = elem.size();
+                // 防止超大数组大小导致内存分配失败 (如 [100000000000000001][3])
+                elem_sz.checked_mul(*n).unwrap_or(usize::MAX)
+            }
             Type::Array(_, ArraySize::Var(_)) => 8, // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,

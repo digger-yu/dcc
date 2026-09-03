@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# scripts/torture_compile_test.sh — GCC C Torture Suite 编译测试
+#
+# 用法:
+#   scripts/torture_compile_test.sh
+#
+# 环境变量:
+#   DCC          — dcc 编译器路径 (默认: target/release/dcc)
+#   TORTURE_DIR  — torture suite 根目录 (默认: tests/gcc-torture)
+#   JOBS         — 并行度 (默认: nproc)
+#   VERBOSE      — 非空时输出每个测试的详细结果
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+DCC="${DCC:-$REPO_ROOT/target/release/dcc}"
+TORTURE_DIR="${TORTURE_DIR:-$REPO_ROOT/tests/gcc-torture}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+VERBOSE="${VERBOSE:-}"
+SKIP_FILE="$REPO_ROOT/tests/torture_skip.txt"
+
+SUITE_DIR="$TORTURE_DIR/gcc/testsuite/gcc.c-torture"
+
+# ── 前置检查 ──
+if [[ ! -x "$DCC" ]]; then
+    echo "错误: dcc 不存在或不可执行: $DCC" >&2
+    echo "请先运行: cargo build --release" >&2
+    exit 1
+fi
+
+if [[ ! -d "$SUITE_DIR" ]]; then
+    echo "错误: torture suite 未安装: $SUITE_DIR" >&2
+    echo "请先运行: bash scripts/setup_torture.sh" >&2
+    exit 1
+fi
+
+# ── 跳过列表 ──
+declare -a SKIP_PATTERNS=()
+if [[ -f "$SKIP_FILE" ]]; then
+    while IFS= read -r line; do
+        line="${line%%#*}"           # 去注释
+        line="${line//[[:space:]]/}" # 去空白
+        [[ -n "$line" ]] && SKIP_PATTERNS+=("$line")
+    done < "$SKIP_FILE"
+fi
+
+should_skip() {
+    local name="$1"
+    for pat in "${SKIP_PATTERNS[@]+"${SKIP_PATTERNS[@]}"}"; do
+        # 支持 prefix* glob 和精确匹配
+        if [[ "$pat" == *"*" ]]; then
+            [[ "$name" == ${pat} ]] && return 0
+        else
+            [[ "$name" == "$pat" ]] && return 0
+        fi
+    done
+    return 1
+}
+
+# ── 临时目录 ──
+TMPDIR_TORTURE=$(mktemp -d /tmp/dcc-torture-compile.XXXXXX)
+trap 'rm -rf "$TMPDIR_TORTURE"' EXIT
+
+# ── compile 测试函数 ──
+run_compile_test() {
+    local src="$1"
+    local name
+    name="$(basename "$src")"
+    local out="$TMPDIR_TORTURE/${name}.o"
+
+    local rc=0
+    timeout 30 "$DCC" -c -std=gnu11 -o "$out" "$src" 2>/dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        rm -f "$out"
+        echo "PASS" 
+    elif [[ $rc -eq 124 ]]; then
+        rm -f "$out"
+        echo "TIMEOUT"
+    else
+        rm -f "$out"
+        echo "FAIL"
+    fi
+}
+export -f run_compile_test
+export DCC TMPDIR_TORTURE
+
+# ── 主流程 ──
+echo "== GCC C Torture Suite - Compile Tests =="
+echo "   dcc: $DCC"
+echo "   suite: $SUITE_DIR/compile"
+echo "   jobs: $JOBS"
+echo ""
+
+category="compile"
+dir="$SUITE_DIR/$category"
+
+if [[ ! -d "$dir" ]]; then
+    echo "错误: 编译测试目录不存在: $dir" >&2
+    exit 1
+fi
+
+pass=0 fail=0 skip=0 total=0
+declare -a failures=()
+
+# 收集 .c 文件 (仅顶层)
+find "$dir" -maxdepth 1 -name '*.c' | sort > "$TMPDIR_TORTURE/file_list.txt"
+total=$(wc -l < "$TMPDIR_TORTURE/file_list.txt")
+
+if [[ $total -eq 0 ]]; then
+    echo "无测试文件"
+    exit 0
+fi
+
+# 过滤跳过列表
+while IFS= read -r src; do
+    name="$(basename "$src")"
+    if should_skip "$name"; then
+        skip=$((skip + 1))
+    else
+        echo "$src" >> "$TMPDIR_TORTURE/run_list.txt"
+    fi
+done < "$TMPDIR_TORTURE/file_list.txt"
+
+run_count=0
+[[ -f "$TMPDIR_TORTURE/run_list.txt" ]] && run_count=$(wc -l < "$TMPDIR_TORTURE/run_list.txt")
+
+if [[ $run_count -eq 0 ]]; then
+    echo "total=$total  skip=$skip  (全部跳过)"
+    exit 0
+fi
+
+# 并行执行测试
+: > "$TMPDIR_TORTURE/results.txt"
+cat "$TMPDIR_TORTURE/run_list.txt" | xargs -P "$JOBS" -I{} bash -c '
+    src="$1"
+    name="$(basename "$src")"
+    result=$(run_compile_test "$src")
+    echo "$name $result"
+' _ {} > "$TMPDIR_TORTURE/results.txt"
+
+# 统计结果
+while IFS=' ' read -r name result; do
+    case "$result" in
+        PASS)
+            pass=$((pass + 1))
+            [[ -n "$VERBOSE" ]] && echo "  PASS  $name"
+            ;;
+        FAIL)
+            fail=$((fail + 1))
+            failures+=("$name")
+            [[ -n "$VERBOSE" ]] && echo "  FAIL  $name"
+            ;;
+        TIMEOUT)
+            fail=$((fail + 1))
+            failures+=("$name (timeout)")
+            [[ -n "$VERBOSE" ]] && echo "  FAIL  $name (timeout)"
+            ;;
+    esac
+done < "$TMPDIR_TORTURE/results.txt"
+
+# 汇总
+echo ""
+echo "=== Torture [compile] ==="
+echo "total=$total  pass=$pass  fail=$fail  skip=$skip"
+
+if [[ ${#failures[@]} -gt 0 ]]; then
+    echo "Failures:"
+    for f in "${failures[@]}"; do
+        echo "  FAIL  $f"
+    done
+fi
+
+echo ""
+echo "=== Total: pass=$pass  fail=$fail  skip=$skip ==="
+
+# 有失败则退出非零
+if [[ ${#failures[@]} -gt 0 ]]; then
+    exit 1
+fi
+exit 0

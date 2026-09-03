@@ -100,6 +100,11 @@ impl<'a> Dec<'a> {
         XMM[(idx & 7) as usize + if rex.r { 8 } else { 0 }]
     }
 
+    /// Compute effective operand width considering 0x66 prefix and REX.W
+    fn eff_width(&self, rex: &Rex, pfx: &Prefixes) -> u8 {
+        if rex.w { 8 } else if pfx.o16 { 2 } else { 4 }
+    }
+
     fn parse_rex(&mut self) -> Rex {
         let b = self.peek().unwrap_or(0);
         if (b & 0xF0) == 0x40 {
@@ -169,6 +174,7 @@ impl<'a> Dec<'a> {
         let base: String;
         let mut index = String::new();
         let mut scale = 1u32;
+        let mut rip_disp_off: Option<u64> = None; // disp32 起始偏移 (用于 data 符号查找)
         if rm == 4 {
             let sib = self.take()?;
             let scale_bits = sib >> 6;
@@ -181,16 +187,18 @@ impl<'a> Dec<'a> {
                     .to_string();
             }
             if mod_ == 0 && base_reg == 5 {
+                rip_disp_off = Some(self.abs_off());
                 disp = self.take_i32()?;
-                base = "rip".to_string();
+                base = "%rip".to_string();
             } else {
                 base = self
                     .reg(rex, base_reg | if rex.b { 8 } else { 0 }, ADDR_W)
                     .to_string();
             }
         } else if mod_ == 0 && rm == 5 {
+            rip_disp_off = Some(self.abs_off());
             disp = self.take_i32()?;
-            base = "rip".to_string();
+            base = "%rip".to_string();
         } else {
             base = self.reg(rex, rm_ext, ADDR_W).to_string();
         }
@@ -200,7 +208,9 @@ impl<'a> Dec<'a> {
             2 => disp = self.take_i32()?,
             _ => {}
         }
-        let sym = self.data.get(&self.abs_off()).cloned();
+        // RIP-relative 时, data 符号在 disp32 起始位置; 其他情况在指令末尾
+        let lookup_off = rip_disp_off.unwrap_or_else(|| self.abs_off());
+        let sym = self.data.get(&lookup_off).cloned();
         let mut inner = String::new();
         if let Some(s) = sym {
             inner.push_str(&s);
@@ -456,6 +466,13 @@ impl<'a> Dec<'a> {
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
             }
+            // cmovcc r, r/m (non-REX)
+            0x40..=0x4F => {
+                let rex = self.parse_rex();
+                let cc = CC_NAMES[(op - 0x40) as usize];
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
+            }
             0xC1 => {
                 let rex = self.parse_rex();
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
@@ -552,7 +569,7 @@ impl<'a> Dec<'a> {
 
     fn decode_rex(&mut self, start: usize, pfx: &Prefixes) -> Option<(usize, String)> {
         let rex = self.parse_rex();
-        let width = if rex.w { 8 } else { 4 };
+        let width = self.eff_width(&rex, pfx);
         let op = self.take()?;
         if (0x50..=0x5F).contains(&op) {
             let reg = (op & 7) as usize + if rex.b { 8 } else { 0 };
@@ -563,6 +580,7 @@ impl<'a> Dec<'a> {
             return self.decode_two_byte_rex(start, pfx, &rex);
         }
         match op {
+            // --- MOV ---
             0x89 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
@@ -571,6 +589,20 @@ impl<'a> Dec<'a> {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
             }
+            0x8A => {
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            0x88 => {
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            0xC6 => {
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
+            }
+            // --- XCHG / LEA ---
             0x87 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
@@ -579,54 +611,117 @@ impl<'a> Dec<'a> {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("lea {dst}, {src}")))
             }
+            // --- ALU r/m, r (reg=src, r/m=dst) ---
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 let mn = match op {
-                    0x01 => "add",
-                    0x09 => "or",
-                    0x21 => "and",
-                    0x29 => "sub",
-                    0x31 => "xor",
+                    0x01 => "add", 0x09 => "or", 0x21 => "and",
+                    0x29 => "sub", 0x31 => "xor", _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // --- ALU r, r/m (reg=dst, r/m=src) ---
+            0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
+                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let mn = match op {
+                    0x03 => "add", 0x0B => "or", 0x23 => "and",
+                    0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
             }
+            // --- ALU 8-bit r/m, r ---
+            0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                let mn = match op {
+                    0x00 => "add", 0x08 => "or", 0x20 => "and",
+                    0x28 => "sub", 0x30 => "xor", _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // --- ALU 8-bit r, r/m ---
+            0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                let mn = match op {
+                    0x02 => "add", 0x0A => "or", 0x22 => "and",
+                    0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",
+                    _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // --- ALU rax/eax, imm32 ---
+            0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D => {
+                let mn = match op {
+                    0x05 => "add", 0x0D => "or", 0x25 => "and",
+                    0x2D => "sub", 0x35 => "xor", 0x3D => "cmp",
+                    _ => "?",
+                };
+                let r = self.reg(&rex, if rex.b { 8 } else { 0 }, width);
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {r}")))
+            }
+            // --- CMP/TEST r/m, r ---
             0x39 | 0x85 => {
                 let (a, b) = self.modrm_gp(&rex, width)?;
                 let mn = if op == 0x39 { "cmp" } else { "test" };
                 Some(self.finish(start, pfx, &format!("{mn} {b}, {a}")))
             }
+            // --- TEST 8-bit ---
+            0x84 => {
+                let (a, b) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("test {b}, {a}")))
+            }
+            // --- XCHG 8-bit ---
+            0x86 => {
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
+            }
+            // --- ALU r/m, imm32 ---
             0x81 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add",
-                    5 => "sub",
-                    7 => "cmp",
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
             }
+            // --- ALU r/m, imm8 ---
             0x83 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add",
-                    5 => "sub",
-                    7 => "cmp",
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
             }
+            // --- ALU r/m8, imm8 ---
+            0x80 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    _ => "alu",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // --- MOV r/m, imm32 ---
             0xC7 => {
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
             }
+            // --- MOV r, imm ---
             0xB8..=0xBF => {
                 let reg = op - 0xB8;
                 let r = self.reg(&rex, reg | if rex.r { 8 } else { 0 }, width);
@@ -639,20 +734,128 @@ impl<'a> Dec<'a> {
                 };
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {r}")))
             }
-            0x98 => Some((self.pos - start, "cltq".into())),
-            0x99 => Some((self.pos - start, "cqo".into())),
+            // --- MOV r8, imm8 ---
+            0xB0..=0xB7 => {
+                let reg = op - 0xB0;
+                let r = self.reg(&rex, reg | if rex.b { 8 } else { 0 }, 1);
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("mov ${imm}, {r}")))
+            }
+            // --- MOVSXD r64, r/m32 ---
+            0x63 => {
+                let modrm = self.take()?;
+                let mod_ = modrm >> 6;
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let dst = self.reg(&rex, reg | if rex.r { 8 } else { 0 }, width).to_string();
+                let src = self.decode_mem(&rex, mod_, rm | if rex.b { 8 } else { 0 }, 4)?;
+                Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
+            }
+            // --- IMUL r, r/m, imm32 ---
+            0x69 => {
+                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
+            }
+            // --- IMUL r, r/m, imm8 ---
+            0x6B => {
+                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let imm = self.take_i8()? as i32;
+                Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
+            }
+            // --- Shift/Rotate r/m, imm8 ---
+            0xC0 | 0xC1 => {
+                let sw = if op == 0xC1 { width } else { 1 };
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
+                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, sw)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // --- Shift/Rotate r/m, 1 ---
+            0xD0 | 0xD1 => {
+                let sw = if op == 0xD1 { width } else { 1 };
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
+                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, sw)?;
+                Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
+            }
+            // --- Shift/Rotate r/m, cl ---
+            0xD2 | 0xD3 => {
+                let sw = if op == 0xD3 { width } else { 1 };
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
+                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, sw)?;
+                Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
+            }
+            // --- TEST r/m, imm ---
+            0xF6 => {
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
+            }
+            // --- NOT/NEG/MUL/IMUL/DIV/IDIV ---
+            0xF7 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let (_, mem) = self.modrm_gp(&rex, width)?;
+                let mn = match reg {
+                    0 => {
+                        let imm = self.take_i32()?;
+                        return Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")));
+                    }
+                    2 => "not",
+                    3 => "neg",
+                    4 => "mul",
+                    5 => "imul",
+                    6 => "div",
+                    7 => "idiv",
+                    _ => "f7",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+            }
+            // --- INC/DEC ---
+            0xFE => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = if reg == 0 { "inc" } else { "dec" };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+            }
+            // --- INC/DEC/ CALL/JMP/PUSH ---
             0xFF => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let mn = match reg {
-                    2 => "call",
-                    4 => "jmp",
-                    6 => "push",
+                    0 => "inc", 1 => "dec",
+                    2 => "call", 4 => "jmp", 6 => "push",
                     _ => "ff",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
             }
+            // --- Sign extension ---
+            0x98 => { self.take(); Some((self.pos - start, "cltq".into())) }
+            0x99 => { self.take(); Some((self.pos - start, "cqo".into())) }
+            // --- PUSHF/POPF ---
+            0x9C => { self.take(); Some((self.pos - start, "pushfq".into())) }
+            0x9D => { self.take(); Some((self.pos - start, "popfq".into())) }
+            // --- Fallback ---
             _ => {
                 self.pos = start + 1;
                 None
@@ -720,6 +923,12 @@ impl<'a> Dec<'a> {
                 let r = self.reg(rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
             }
+            // cmovcc r, r/m (REX)
+            0x40..=0x4F => {
+                let cc = CC_NAMES[(op - 0x40) as usize];
+                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
+            }
             _ => {
                 self.pos = start + 1;
                 None
@@ -731,17 +940,286 @@ impl<'a> Dec<'a> {
         let rex = Rex::default();
         let op = self.take()?;
         match op {
+            // ALU r/m32, r32
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
                 let mn = match op {
-                    0x01 => "add",
-                    0x09 => "or",
-                    0x21 => "and",
-                    0x29 => "sub",
-                    0x31 => "xor",
+                    0x01 => "add", 0x09 => "or", 0x21 => "and",
+                    0x29 => "sub", 0x31 => "xor", _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // ALU r32, r/m32
+            0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let mn = match op {
+                    0x03 => "add", 0x0B => "or", 0x23 => "and",
+                    0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // ALU 8-bit r/m, r
+            0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                let mn = match op {
+                    0x00 => "add", 0x08 => "or", 0x20 => "and",
+                    0x28 => "sub", 0x30 => "xor", _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // ALU 8-bit r, r/m
+            0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                let mn = match op {
+                    0x02 => "add", 0x0A => "or", 0x22 => "and",
+                    0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",
+                    _ => "?",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
+            }
+            // MOV r/m32, r32
+            0x89 => {
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            // MOV r32, r/m32
+            0x8B => {
+                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            // MOV r8, r/m8
+            0x8A => {
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            // MOV r/m8, r8
+            0x88 => {
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
+            }
+            // MOV r/m32, imm32
+            0xC7 => {
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
+            }
+            // MOV r/m8, imm8
+            0xC6 => {
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
+            }
+            // LEA r32, mem
+            0x8D => {
+                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("lea {dst}, {src}")))
+            }
+            // CMP/TEST r/m32, r32
+            0x39 | 0x85 => {
+                let (a, b) = self.modrm_gp(&rex, 4)?;
+                let mn = if op == 0x39 { "cmp" } else { "test" };
+                Some(self.finish(start, pfx, &format!("{mn} {b}, {a}")))
+            }
+            // TEST r/m8, r8
+            0x84 => {
+                let (a, b) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("test {b}, {a}")))
+            }
+            // ALU r/m32, imm32
+            0x81 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    _ => "alu",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // ALU r/m32, imm8
+            0x83 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    _ => "alu",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take_i8()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // ALU r/m8, imm8
+            0x80 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    _ => "alu",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // Shift/Rotate r/m32, imm8
+            0xC1 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // Shift/Rotate r/m8, imm8
+            0xC0 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                let imm = self.take()? as i32;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
+            }
+            // Shift/Rotate r/m32, 1
+            0xD1 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
+            }
+            // Shift/Rotate r/m8, 1
+            0xD0 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
+            }
+            // Shift/Rotate r/m32, cl
+            0xD3 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
+            }
+            // Shift/Rotate r/m8, cl
+            0xD2 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = match reg {
+                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
+                    6 => "sal", 7 => "sar", _ => "shift",
+                };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
+            }
+            // TEST r/m32, imm32
+            0xF7 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                if reg == 0 {
+                    let imm = self.take_i32()?;
+                    Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
+                } else {
+                    let mn = match reg {
+                        2 => "not", 3 => "neg", 4 => "mul", 5 => "imul",
+                        6 => "div", 7 => "idiv", _ => "f7",
+                    };
+                    Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+                }
+            }
+            // TEST r/m8, imm8
+            0xF6 => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                if reg == 0 {
+                    let imm = self.take()? as i32;
+                    Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
+                } else {
+                    let mn = match reg {
+                        2 => "not", 3 => "neg", _ => "f6",
+                    };
+                    Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+                }
+            }
+            // INC/DEC/CALL/JMP/PUSH r/m32
+            0xFF => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let mn = match reg {
+                    0 => "inc", 1 => "dec",
+                    2 => "call", 4 => "jmp", 6 => "push",
+                    _ => "ff",
+                };
+                Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+            }
+            // INC/DEC r/m8
+            0xFE => {
+                let modrm = self.code.get(self.pos)?;
+                let reg = (modrm >> 3) & 7;
+                let mn = if reg == 0 { "inc" } else { "dec" };
+                let (_, mem) = self.modrm_gp(&rex, 1)?;
+                Some(self.finish(start, pfx, &format!("{mn} {mem}")))
+            }
+            // XCHG r/m32, r32
+            0x87 => {
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
+            }
+            // MOVSXD r32, r/m32 (without REX, same as MOV r32, r/m32 on 64-bit)
+            0x63 => {
+                let modrm = self.take()?;
+                let mod_ = modrm >> 6;
+                let reg = (modrm >> 3) & 7;
+                let rm = modrm & 7;
+                let dst = self.reg(&rex, reg, 4).to_string();
+                let src = self.decode_mem(&rex, mod_, rm, 4)?;
+                Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
+            }
+            // IMUL r32, r/m32, imm32
+            0x69 => {
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
+            }
+            // IMUL r32, r/m32, imm8
+            0x6B => {
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let imm = self.take_i8()? as i32;
+                Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
+            }
+            // ALU eax, imm32
+            0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D => {
+                let mn = match op {
+                    0x05 => "add", 0x0D => "or", 0x25 => "and",
+                    0x2D => "sub", 0x35 => "xor", 0x3D => "cmp",
+                    _ => "?",
+                };
+                let imm = self.take_i32()?;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, %eax")))
             }
             _ => {
                 self.pos = start + 1;

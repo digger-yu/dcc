@@ -6,6 +6,18 @@ use std::env;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // 使用大栈线程运行编译器,避免深度嵌套声明 (如 limits-declparen.c 的
+    // 10000 层括号) 导致栈溢出. 256MB 足以处理极端嵌套场景.
+    let stack_size = 256 * 1024 * 1024; // 256 MB
+    let builder = std::thread::Builder::new().stack_size(stack_size);
+    let handler = builder.spawn(|| main_inner()).unwrap();
+    match handler.join() {
+        Ok(code) => code,
+        Err(_) => ExitCode::from(1),
+    }
+}
+
+fn main_inner() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let cfg = match dcc::cli::parse(&args) {
         Ok(c) => c,
@@ -25,7 +37,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(es) => {
             // 统一由 main.rs 兜底打印所有错误诊断;
-            // 正常路径下 driver 不再 emit,避免重复输出。
+            // 正常路径下 driver 不再 emit,避免重复输出.
             dcc::diagnostics::print_all(&es, &dcfg);
             ExitCode::from(1)
         }

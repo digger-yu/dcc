@@ -74,9 +74,14 @@ run_compile_test() {
     name="$(basename "$src")"
     local out="$TMPDIR_TORTURE/${name}.o"
 
-    if "$DCC" -c -std=gnu11 -o "$out" "$src" 2>/dev/null; then
+    local rc=0
+    timeout 30 "$DCC" -c -std=gnu11 -o "$out" "$src" 2>/dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
         rm -f "$out"
         echo "PASS" 
+    elif [[ $rc -eq 124 ]]; then
+        rm -f "$out"
+        echo "TIMEOUT"
     else
         rm -f "$out"
         echo "FAIL"

@@ -319,7 +319,7 @@ const FLOAT_BINOPS: &[BinOp] = &[
 ];
 
 /// 与 codegen 浮点路径一致的一元运算符集合。
-const FLOAT_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus];
+const FLOAT_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::Not];
 
 /// 与 codegen SIMD 向量路径一致的二元运算符集合。
 const VECTOR_BINOPS: &[BinOp] = &[
@@ -331,7 +331,7 @@ const VECTOR_BINOPS: &[BinOp] = &[
 ];
 
 /// 当前没有 codegen 支持的向量一元运算符。
-const VECTOR_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot];
+const VECTOR_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot, UnOp::Not];
 
 /// 与 codegen 复数路径一致的二元运算符集合。
 const COMPLEX_BINOPS: &[BinOp] = &[
@@ -344,7 +344,7 @@ const COMPLEX_BINOPS: &[BinOp] = &[
 ];
 
 /// 与 codegen 复数路径一致的一元运算符集合。
-const COMPLEX_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus];
+const COMPLEX_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot, UnOp::Not];
 
 fn is_float_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Float { .. })
@@ -360,6 +360,14 @@ fn is_complex_ty(ty: &ValueType) -> bool {
 
 fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
     if from == to || matches!(to, ValueType::Void) {
+        return true;
+    }
+    // 浮点到复数的隐式转换
+    if matches!(from, ValueType::Float { .. }) && is_complex_ty(to) {
+        return true;
+    }
+    // 复数到浮点的转换 (取实部)
+    if is_complex_ty(from) && matches!(to, ValueType::Float { .. }) {
         return true;
     }
     matches!(
@@ -414,6 +422,10 @@ fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKin
     if matches!(to, ValueType::Vector(_, _)) && matches!(src_kind, ExprKind::Aggregate) {
         return true;
     }
+    // 标量到向量的广播转换: (vector_type) scalar_value
+    if matches!(to, ValueType::Vector(_, _)) && !is_vector_ty(from) {
+        return matches!(from, ValueType::Integer { .. } | ValueType::Float { .. });
+    }
     if !same_size_bitcast(from, to) {
         return false;
     }
@@ -432,8 +444,16 @@ fn is_supported_complex_cast(from: &ValueType, to: &ValueType) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
     }
+    // 复数到复数的转换: _Complex float -> _Complex double 等
+    if is_complex_ty(from) && is_complex_ty(to) {
+        return true;
+    }
     if is_complex_ty(from) && is_supported_complex_integer_cast(to) {
         return true;
+    }
+    // 标量到复数的隐式转换
+    if !is_complex_ty(from) && is_complex_ty(to) {
+        return matches!(from, ValueType::Integer { .. } | ValueType::Float { .. });
     }
     same_size_bitcast(from, to)
         && matches!(
@@ -512,13 +532,15 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     expr.span.clone(),
                 ));
             }
+            // 复数赋值: 允许 complex = complex, complex = scalar (隐式转换)
+            // 只禁止 complex = vector 等不兼容类型
             if is_complex_ty(&lhs.ty)
                 && !is_complex_ty(&rhs.ty)
-                && !matches!(rhs.kind, ExprKind::Cast | ExprKind::Binary(_))
+                && is_vector_ty(&rhs.ty)
             {
                 diagnostics.push(Diagnostic::err(
                     "E1008",
-                    "complex assignment requires a complex expression or cast",
+                    "cannot assign vector to complex type",
                     expr.span.clone(),
                 ));
             }
@@ -1006,18 +1028,12 @@ impl Lowering {
                 vec![self.lower_expr(l), self.lower_expr(r)],
             ),
             Expr::VaArg { ap, .. } => {
-                if !matches!(ap.as_ref(), Expr::Ident { .. }) {
-                    self.diagnostics.push(Diagnostic::err(
-                        "E1005",
-                        "va_arg currently requires a va_list object",
-                        span.clone(),
-                    ));
-                }
-                // M25: 用独立 ExprKind 保留 ap 名, 避免跟 f() 误判
-                let ap_name = if let Expr::Ident { name, .. } = ap.as_ref() {
-                    name.name.clone()
-                } else {
-                    String::new()
+                // 支持简单标识符和结构体成员访问 (如 state->ap)
+                let ap_name = match ap.as_ref() {
+                    Expr::Ident { name, .. } => name.name.clone(),
+                    // 结构体成员访问: 使用成员名作为近似标识
+                    Expr::Member { field, .. } => field.name.clone(),
+                    _ => String::new(),
                 };
                 (ExprKind::VaArg { ap: ap_name }, Vec::new())
             }
@@ -1067,6 +1083,23 @@ fn lower_inits(cx: &mut Lowering, inits: &[InitItem]) -> Vec<TypedExpr> {
         .collect()
 }
 
+/// 检查表达式是否是合法的取址目标 (即 &expr 能产生静态初始化器).
+/// 覆盖: ident, arr[const][const]..., compound_lit, member chains.
+fn is_addr_target_ok(e: &Expr) -> bool {
+    match e {
+        Expr::Ident { .. } | Expr::String { .. } => true,
+        Expr::Index { arr, idx, .. } => {
+            is_addr_target_ok(arr) && const_eval::eval(idx).is_ok()
+        }
+        Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+        Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
+            InitItem::Expr(e) => is_static_initializer(e),
+            InitItem::Designated { value, .. } => is_static_initializer(value),
+        }),
+        _ => false,
+    }
+}
+
 fn is_static_initializer(expr: &Expr) -> bool {
     if const_eval::eval(expr).is_ok() {
         return true;
@@ -1096,25 +1129,8 @@ fn is_static_initializer(expr: &Expr) -> bool {
             Ok(_) => is_static_initializer(else_),
             Err(_) => false,
         },
-        // &ident / &arr[const] / &ident.field... / &(struct T){...}: 链接期可重定位常量
-        Expr::AddrOf { e, .. } => match e.as_ref() {
-            Expr::Ident { .. } | Expr::String { .. } => true,
-            // &(struct T){ .field = val, ... }: 复合字面量地址 (C99 静态存储期)
-            Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
-                InitItem::Expr(e) => is_static_initializer(e),
-                InitItem::Designated { value, .. } => is_static_initializer(value),
-            }),
-            Expr::Index { arr, idx, .. } => {
-                let base_ok = match arr.as_ref() {
-                    Expr::Ident { .. } => true,
-                    Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
-                    _ => false,
-                };
-                base_ok && const_eval::eval(idx).is_ok()
-            }
-            Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
-            _ => false,
-        },
+        // &ident / &arr[const][const]... / &ident.field... / &(struct T){...}: 链接期可重定位常量
+        Expr::AddrOf { e, .. } => is_addr_target_ok(e),
         // 数组成员隐式数组退化: init_uts_ns.name.machine (char[65]) 作为
         // 初始化器值等价 &init_uts_ns.name.machine[0], 是链接期可重定位
         // 地址常量 (与显式 & 形式一致)
@@ -1178,10 +1194,19 @@ fn is_addr_of_member_ok(e: &Expr) -> bool {
             let base_ok = match arr.as_ref() {
                 Expr::Ident { .. } => true,
                 Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+                // 嵌套索引
+                Expr::Index { .. } => is_static_initializer(arr),
                 _ => false,
             };
             base_ok && const_eval::eval(idx).is_ok()
         }
+        // (type *)0x1000->field: 整数到指针的强制转换 (链接期地址常量)
+        Expr::Cast { e, .. } => is_static_initializer(e),
+        // (struct S){...}.field: 复合字面量成员
+        Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
+            InitItem::Expr(e) => is_static_initializer(e),
+            InitItem::Designated { value, .. } => is_static_initializer(value),
+        }),
         _ => false,
     }
 }
