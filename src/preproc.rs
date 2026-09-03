@@ -2521,7 +2521,10 @@ impl Preprocessor {
                 active,
                 saw_else: false,
             });
-        } else if directive.starts_with("if ") || directive.starts_with("if\t") {
+        } else if directive.starts_with("if")
+            && directive.len() > 2
+            && !directive.as_bytes()[2].is_ascii_alphanumeric()
+        {
             let expr = directive[2..].trim();
             let val = if self.is_active() {
                 self.eval_const_expr(expr)
@@ -2533,7 +2536,10 @@ impl Preprocessor {
                 active: val,
                 saw_else: false,
             });
-        } else if directive.starts_with("elif ") || directive.starts_with("elif\t") {
+        } else if directive.starts_with("elif")
+            && directive.len() > 4
+            && !directive.as_bytes()[4].is_ascii_alphanumeric()
+        {
             let len = self.cond_stack.len();
             if len > 0 {
                 let parent_active = if len <= 1 {

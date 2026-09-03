@@ -62,7 +62,8 @@ git clone --depth 1 --filter=blob:none --sparse \
 cd "$TORTURE_DIR"
 git sparse-checkout set \
     gcc/testsuite/gcc.c-torture/execute \
-    gcc/testsuite/gcc.c-torture/compile
+    gcc/testsuite/gcc.c-torture/compile \
+    gcc/testsuite/gcc.dg
 
 # ── 统计 ──
 execute=$(find gcc/testsuite/gcc.c-torture/execute -maxdepth 1 -name '*.c' | wc -l)

@@ -1978,11 +1978,18 @@ impl<'a> Parser<'a> {
                 "__builtin_ilogb" | "__builtin_ilogbf" | "__builtin_ilogbl" |
                 "__builtin_iseqsig" | "__builtin_iseqsigf" | "__builtin_iseqsigl" |
                 "__builtin___snprintf_chk" | "__builtin_memcmp" |
-                "__builtin_strncmp" | "__builtin_strncasecmp" => {
+                "__builtin_strncmp" | "__builtin_strncasecmp" |
+                "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" |
+                "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" |
+                "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" |
+                "__builtin_printf" | "__builtin_fprintf" |
+                "__builtin_snprintf" | "__builtin_vsnprintf" |
+                "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" |
+                "__builtin_mul_overflow_p" => {
                     return int_t()
                 }
                 // 返回 size_t 的 builtin
-                "__builtin_object_size" => {
+                "__builtin_object_size" | "__builtin_strlen" => {
                     return Type::ULong
                 }
                 // 返回 float 的 builtin
@@ -1996,17 +2003,25 @@ impl<'a> Parser<'a> {
                 }
                 // 返回 void* 的 builtin
                 "__builtin_memcpy" | "__builtin_memset" | "__builtin_memmove" |
-                "__builtin_mempcpy" => {
+                "__builtin_mempcpy" |
+                "__builtin_return_address" | "__builtin_frame_address" => {
                     return Type::Ptr(Box::new(Type::Void.into()))
                 }
                 // 返回 char* 的 builtin
                 "__builtin_strdup" | "__builtin_strndup" |
-                "__builtin_stpncpy" | "__builtin_strncat" | "__builtin_strncpy" => {
+                "__builtin_stpncpy" | "__builtin_strncat" | "__builtin_strncpy" |
+                "__builtin_strcpy" | "__builtin_stpcpy" => {
                     return Type::Ptr(Box::new(Type::Char.into()))
                 }
                 // 返回 void 的 builtin (无返回值, 不需要警告)
                 "__builtin_va_end" | "__builtin_clear_padding" |
-                "__builtin___clear_cache" => return Type::Void,
+                "__builtin___clear_cache" | "__builtin_abort" |
+                "__builtin_va_start" => return Type::Void,
+                // 返回 long 的 builtin
+                "__builtin_expect" => return Type::Long,
+                // 返回 unsigned 的 builtin
+                "__builtin_bswap16" | "__builtin_bswap32" => return Type::UInt,
+                "__builtin_bswap64" => return Type::ULong,
                 // Vector 操作 (返回类型依赖参数, 暂时返回 int)
                 "__builtin_shufflevector" | "__builtin_convertvector" => return int_t(),
                 _ => {}
@@ -7204,6 +7219,10 @@ impl<'a> Parser<'a> {
         decl: Decl,
     ) -> (Decl, Option<(String, String)>) {
         if let Decl::Var(ref v) = decl {
+            // extern 声明引用全局符号, 不创建新的局部变量, 不参与遮蔽重命名
+            if v.is_extern {
+                return (decl, None);
+            }
             let name = &v.name.name;
             // 检查名字是否在外层作用域中存在 (即被遮蔽)
             if self.locals.exists_in_outer_scopes(name) {
@@ -8571,20 +8590,13 @@ impl<'a> Parser<'a> {
     fn assign_target_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident { name, .. } => Some(name.name.clone()),
-            // Penetrate through member and index chains
-            // to find the base variable name for const-ness checks
-            Expr::Member { expr, is_arrow, .. } => {
-                // Arrow (->) breaks the const chain: p->field writes through
-                // the pointer, so const-ness of p doesn't apply to the target.
-                if *is_arrow {
-                    None
-                } else {
-                    Self::assign_target_name(expr)
-                }
-            }
-            Expr::Index { arr, .. } => Self::assign_target_name(arr),
-            // Deref breaks the const chain: (*p).field writes through the pointer.
-            Expr::Deref { .. } => None,
+            // For member access (.field), don't penetrate to base variable.
+            // The const-ness of a struct member is determined by its own type,
+            // not the base variable's qualifiers. E.g., `struct S { const char *p; } x;`
+            // allows `x.p = ...` because the pointer itself is not const.
+            Expr::Member { .. } => None,
+            // Index and arrow also don't propagate base variable const-ness
+            Expr::Index { .. } | Expr::Deref { .. } => None,
             _ => None,
         }
     }
@@ -9717,6 +9729,19 @@ impl<'a> Parser<'a> {
                                     | "__builtin_stpncpy" | "__builtin_strncat" | "__builtin_strncpy"
                                     | "__builtin_strncmp" | "__builtin_strncasecmp"
                                     | "__builtin_modf"
+                                    | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll"
+                                    | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
+                                    | "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll"
+                                    | "__builtin_printf" | "__builtin_fprintf"
+                                    | "__builtin_snprintf" | "__builtin_vsnprintf"
+                                    | "__builtin_abs" | "__builtin_labs" | "__builtin_llabs"
+                                    | "__builtin_mul_overflow_p"
+                                    | "__builtin_strlen"
+                                    | "__builtin_return_address" | "__builtin_frame_address"
+                                    | "__builtin_strcpy" | "__builtin_stpcpy"
+                                    | "__builtin_abort" | "__builtin_va_start"
+                                    | "__builtin_expect"
+                                    | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
                             )
                         {
                             self.warn_here(

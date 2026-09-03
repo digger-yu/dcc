@@ -69,7 +69,7 @@ run_execute_test() {
     name="$(basename "$src" .c)"
     local exe="$TMPDIR_TORTURE/${name}.exe"
 
-    if ! "$DCC" -std=gnu11 -o "$exe" "$src" 2>/dev/null; then
+    if ! "$DCC" -std=gnu11 -lm -o "$exe" "$src" 2>/dev/null; then
         echo "COMPILE_FAIL"
         return
     fi
