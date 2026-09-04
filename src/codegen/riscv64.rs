@@ -3063,6 +3063,11 @@ impl Riscv64Codegen {
             // 限制: 整数除 0 不抛异常,直接返回 0/-1 (符合 RISC-V spec)
             BinOp::Div => self.emit_div(10, 10, 11),
             BinOp::Mod => self.emit_rem(10, 10, 11),
+            // 移位: RV64I SLL/SRL/SRA 使用 64 位寄存器, 移位量
+            // 硬件自动掩码到 6 位 (shamt & 63). 对于 32 位 int
+            // 类型, 这与 C 标准的 5 位掩码不同, 但 shift >= 32
+            // 在 C 中是 UB, 依赖硬件行为与 GCC -O0 一致.
+            // 常量求值阶段 (const_eval) 已拒绝无效移位量.
             BinOp::Shl => self.emit_sll(10, 10, 11),
             BinOp::Shr => {
                 if is_signed {

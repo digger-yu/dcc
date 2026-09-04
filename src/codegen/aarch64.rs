@@ -2888,6 +2888,9 @@ impl Aarch64Codegen {
             //   bits[23:21] = 0b010 (lsrv op)
             // asrv w0, w0, w1: 0x1A742000 LE = 00 20 74 1A
             //   bits[23:21] = 0b110 (asrv op, 算术右移, 符号扩展)
+            // 32 位变量移位 (LSLV/LSRV/ASRV) 硬件自动掩码移位量
+            // 到 5 位 (shamt & 31), 与 C 标准 int 宽度一致.
+            // 常量求值阶段 (const_eval) 已拒绝无效移位量.
             BinOp::Shl => self.emit(&[0x00, 0x20, 0x30, 0x1a]), // lslv w0, w0, w1
             BinOp::Shr => {
                 if is_signed {
