@@ -10693,11 +10693,23 @@ impl<'a> Parser<'a> {
     }
 
     /// glibc/linux 头文件对同一名字的重复 typedef（如 timer_t void* vs int）
+    /// 也允许不同作用域内元素类型相同的数组 typedef 重定义（如 pr41935）
     fn typedef_redef_allowed(old: &Type, new: &Type) -> bool {
         if matches!(old, Type::Named(_)) || matches!(new, Type::Named(_)) {
             return true;
         }
-        matches!(old, Type::Ptr(_)) || matches!(new, Type::Ptr(_))
+        if matches!(old, Type::Ptr(_)) || matches!(new, Type::Ptr(_)) {
+            return true;
+        }
+        // 允许元素类型相同的数组 typedef 重定义（如 int T[n] vs int T[5]）
+        // C11 6.7.3p4: 同一作用域内的重复 typedef 需要兼容类型，
+        // 但不同作用域允许重名。此处简化处理：只要元素类型相同即允许。
+        if let (Type::Array(old_elem, _), Type::Array(new_elem, _)) = (old, new) {
+            if Self::types_compatible(&old_elem.base, &new_elem.base) {
+                return true;
+            }
+        }
+        false
     }
 
     /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容
