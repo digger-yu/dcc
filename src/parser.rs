@@ -6155,6 +6155,38 @@ impl<'a> Parser<'a> {
                     self.decl_storage.is_register = true;
                     self.advance();
                 }
+                // C23 alignas(N) / alignas(type); _Alignas 为 C11 拼写
+                // 可出现在类型关键字之后: unsigned short _Alignas(16) in[SIZE]
+                TokKind::Ident
+                    if (self.cur.text == "alignas" && self.opts.is_c23)
+                        || self.cur.text == "_Alignas" =>
+                {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        if self.is_type_start() && self.cur.kind != TokKind::Number {
+                            // alignas(type): 取该类型的对齐值
+                            if let Some(t) = self.parse_type() {
+                                let a = t.align();
+                                let cur = self.decl_attrs.alignment.unwrap_or(0);
+                                self.decl_attrs.alignment = Some(cur.max(a));
+                            }
+                        } else {
+                            // alignas(常量表达式): 编译期求值
+                            if let Some(e) = self.parse_expr_bp(2) {
+                                if let Ok(v) = crate::const_eval::eval(&e) {
+                                    if v > 0 {
+                                        let cur = self.decl_attrs.alignment.unwrap_or(0);
+                                        self.decl_attrs.alignment = Some(cur.max(v as usize));
+                                    }
+                                }
+                            }
+                        }
+                        if self.cur.kind == TokKind::RParen {
+                            self.advance();
+                        }
+                    }
+                }
                 _ => break,
             }
         }
