@@ -17268,6 +17268,15 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_cpu_init(): 初始化 CPU 检测 (x86_64 上为 no-op)
+            "__builtin_cpu_init" => true,
+            // __builtin_cpu_supports(feature): 运行时 CPU 特性检测
+            // 简化实现: 返回 0 (不支持), 允许代码编译通过
+            // 完整实现需要 CPUID 指令和特性字符串解析
+            "__builtin_cpu_supports" => {
+                self.mov_imm(dst, 0);
+                true
+            }
             // ===== M12+ 补洞 builtins =====
             // __builtin_strcasecmp(s1, s2): 不区分大小写比较, 走 libc.
             // 链接时由 glibc strcasecmp 提供; freestanding 测试可在 fixture 中

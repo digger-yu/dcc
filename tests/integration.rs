@@ -5094,6 +5094,17 @@ fn builtin_shift_overflow_run_returns_zero() {
     assert_eq!(rc, 0, "builtin_shift_overflow should return 0, got {rc}");
 }
 
+/// __builtin_cpu_supports / __builtin_cpu_init: CPU 特性检测
+#[test]
+fn builtin_cpu_compiles() {
+    let source = include_str!("fixtures/c/builtin_cpu.c");
+    let (output, exe) = run_compile_and_run("builtin-cpu", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "builtin_cpu should return 0, got {rc}");
+}
+
 /// M12+ builtins: rotate/clrsb/fma/strcasecmp/FILE/LINE/FUNCTION/classify_type 等
 #[test]
 fn builtin_m12_extra_run_returns_zero() {
