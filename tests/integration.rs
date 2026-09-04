@@ -7803,6 +7803,23 @@ fn struct_abi_comprehensive() {
     let _ = fs::remove_file(&exe);
 }
 
+/// Struct/Union ABI 扩展测试: 对齐填充、混合 float/int、SIMD 向量、
+/// 联合、嵌套结构体、位域等复杂场景, 验证完整 SysV ABI 分类算法.
+#[test]
+#[cfg(unix)]
+fn struct_abi_extended() {
+    let src = include_str!("fixtures/c/struct_abi_extended.c");
+    let (out, exe) = run_compile_and_run("struct-abi-extended", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
 /// 浮点存储路径: double/float 数组下标、解引用、struct 字段赋值
 /// (值在 xmm0, 必须用 movss/movsd 而非 GP mov 存储)
 #[test]
