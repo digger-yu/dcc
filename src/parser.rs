@@ -8586,12 +8586,21 @@ impl<'a> Parser<'a> {
                 } else {
                     int_t()
                 };
-                lhs = Expr::Cond {
-                    cond: Box::new(cond),
-                    then_: Box::new(then_),
-                    else_: Box::new(else_),
-                    span: self.cur.span.clone(),
-                    ty: cond_ty,
+                lhs = if let Expr::Int { v, .. } = &cond {
+                    // Constant-fold ternary: 0 ? a : b → b, non-0 ? a : b → a
+                    if *v == 0 {
+                        else_
+                    } else {
+                        then_
+                    }
+                } else {
+                    Expr::Cond {
+                        cond: Box::new(cond),
+                        then_: Box::new(then_),
+                        else_: Box::new(else_),
+                        span: self.cur.span.clone(),
+                        ty: cond_ty,
+                    }
                 };
                 continue;
             }
