@@ -7076,7 +7076,26 @@ impl Codegen {
                                         self.load_stack(2, toff + 8);
                                     }
                                 } else {
-                                    self.gen_expr(e, 0);
+                                    // CompoundLit/InitList 等: gen_expr 返回地址 (CompoundLit)
+                                    // 或垃圾值 (InitList). 需要物化后加载到 rax/rdx.
+                                    if matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. }) {
+                                        // 使用帧底部临时区 (-frame_size+8)
+                                        let temp_off = -self.frame_size + 8;
+                                        let inits = match e {
+                                            Expr::CompoundLit { inits, .. } => Some(inits),
+                                            Expr::InitList { inits, .. } => Some(inits),
+                                            _ => None,
+                                        };
+                                        if let Some(inits) = inits {
+                                            self.gen_init_list_at(temp_off, &ret_ty, inits);
+                                        }
+                                        self.load_stack(0, temp_off); // rax = 前 8 字节
+                                        if ret_sz > 8 {
+                                            self.load_stack(2, temp_off + 8); // rdx = 后 8 字节
+                                        }
+                                    } else {
+                                        self.gen_expr(e, 0);
+                                    }
                                 }
                                 // SysV: SSE/SSEUP 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
                                 // 如 struct {double,double}. _Complex float/double 已由
