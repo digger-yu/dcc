@@ -1763,6 +1763,11 @@ fn make_kcsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -
 /// `__asan_loadN/storeN(addr[, size])` 运行时调用。
 /// N in {1,2,4,8,16} 使用固定大小接口；其他大小使用
 /// `__asan_loadN(addr, size_t)` / `__asan_storeN(addr, size_t)` 通用接口。
+///
+/// 5.2 注: 16 字节以上聚合类型 (struct/array > 16B) 正确回退到通用
+/// `__asan_loadN`/`__asan_storeN` 接口，这是 libasan/compiler-rt 的
+/// 标准行为。固定大小接口 {1,2,4,8,16} 由运行时直接提供；其他大小
+/// 走通用 N 接口并携带 size_t 第二参。不需要为每个大小生成专用代码。
 fn make_asan_call(
     addr: Expr,
     size: usize,
