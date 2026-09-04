@@ -6810,6 +6810,29 @@ int main(void) { return f(0); }\n";
     let _ = fs::remove_file(&exe_path);
 }
 
+/// UBSAN alignment: 对齐违规应调用 type_mismatch_v1 handler.
+/// 将 int 地址 +1 强转为 int* 后解引用, 指针不满足 4 字节对齐。
+#[test]
+#[cfg(unix)]
+fn ubsan_runtime_alignment_violation() {
+    let source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_type_mismatch_v1(void *data) {\n\
+    (void)data;\n\
+    exit(98);\n\
+}\n\
+int buf[4];\n\
+int main(void) {\n\
+    char *base = (char *)&buf[0];\n\
+    int *misaligned = (int *)(base + 1);\n\
+    return *misaligned;\n\
+}\n";
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("ubsan-align", source, &["-fsanitize=undefined"]);
+    assert_exit_code(&run, 98, &log);
+    let _ = fs::remove_file(&exe_path);
+}
+
 /// UBSAN float-cast: 浮点转换溢出应调用 float-cast runtime handler.
 #[test]
 #[cfg(unix)]

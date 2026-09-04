@@ -1095,7 +1095,8 @@ fn instrument_expr(
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &ptr, &span);
+                let align = expr.ty().align();
+                let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
         }
@@ -1113,7 +1114,8 @@ fn instrument_expr(
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &ptr, &span);
+                let align = expr.ty().align();
+                let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
         }
@@ -1131,7 +1133,8 @@ fn instrument_expr(
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &ptr, &span);
+                let align = expr.ty().align();
+                let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
         }
@@ -2090,10 +2093,88 @@ fn make_kernel_hwasan_check(addr: Expr, size: usize, is_write: bool, span: &Span
     }
 }
 
-/// 把 `expr` 包成 `(ptr == 0 ? null_check : 0, expr)`。
-fn wrap_with_null_check(expr: &Expr, ptr: &Expr, span: &Span) -> Expr {
+/// 生成 `__ubsan_handle_type_mismatch_v1(ptr)` 对齐违规调用表达式。
+/// 当指针地址不满足类型对齐要求时由 runtime 报告。
+/// 与 null_deref_check 共用同一 handler (GCC/LLVM UBSAN 约定)。
+fn alignment_check_handler(ptr: &Expr, span: &Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__ubsan_handle_type_mismatch_v1".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
+        }),
+        args: vec![ptr.clone()],
+        span: span.clone(),
+        ty: Type::Void,
+    }
+}
+
+/// 把 `expr` 包成 `((ptr & (align-1)) != 0 ? align_handler(ptr) : 0, expr)`。
+/// 当 `ptr` 的低位不满足类型对齐要求时触发 UBSAN handler。
+/// 此检查同时覆盖空指针 (NULL & (align-1) == 0 当 align > 1 时
+/// 不成立 — 实际上 0 & anything == 0, 所以空指针时条件为 false)。
+/// 因此 align > 1 时额外保留 null check 以正确报告空指针解引用。
+fn wrap_with_alignment_check(expr: &Expr, ptr: &Expr, align: usize, span: &Span) -> Expr {
     let inner_ty = expr.ty();
+    let mask = (align - 1) as i128;
+    // ptr & (align - 1)
+    let and_expr = Expr::Binop {
+        op: BinOp::And,
+        l: Box::new(ptr.clone()),
+        r: Box::new(Expr::Int {
+            v: mask,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    // (ptr & (align-1)) != 0
     let cond = Expr::Binop {
+        op: BinOp::Ne,
+        l: Box::new(and_expr),
+        r: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    let align_check = Expr::Cond {
+        cond: Box::new(cond),
+        then_: Box::new(alignment_check_handler(ptr, span)),
+        else_: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    Expr::Comma {
+        l: Box::new(align_check),
+        r: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+/// 把 `expr` 包成 `(ptr == 0 ? null_check : 0, expr)`。
+/// 当 `align > 1` 时额外插入对齐检查: 若指针地址不满足类型
+/// 对齐要求, 调用 `__ubsan_handle_type_mismatch_v1(ptr)`。
+/// align > 1 时对齐检查覆盖非空指针的对齐违规; null check
+/// 单独覆盖空指针解引用 (与 GCC UBSAN 行为一致)。
+fn wrap_with_null_check(expr: &Expr, ptr: &Expr, align: usize, span: &Span) -> Expr {
+    let inner_ty = expr.ty();
+    // 基础 null check: ptr == 0 ? handler : 0
+    let null_cond = Expr::Binop {
         op: BinOp::EqEq,
         l: Box::new(ptr.clone()),
         r: Box::new(Expr::Int {
@@ -2105,7 +2186,7 @@ fn wrap_with_null_check(expr: &Expr, ptr: &Expr, span: &Span) -> Expr {
         ty: Type::Int,
     };
     let null_check = Expr::Cond {
-        cond: Box::new(cond),
+        cond: Box::new(null_cond),
         then_: Box::new(null_deref_check(span)),
         else_: Box::new(Expr::Int {
             v: 0,
@@ -2115,9 +2196,60 @@ fn wrap_with_null_check(expr: &Expr, ptr: &Expr, span: &Span) -> Expr {
         span: span.clone(),
         ty: Type::Int,
     };
+    if align <= 1 {
+        // 对齐为 1 (char/byte): 无需对齐检查, 仅 null check
+        return Expr::Comma {
+            l: Box::new(null_check),
+            r: Box::new(expr.clone()),
+            span: span.clone(),
+            ty: inner_ty,
+        };
+    }
+    // align > 1: 先 null check, 再 alignment check
+    // (null_check, (align_check, expr))
+    let align_mask = (align - 1) as i128;
+    let and_expr = Expr::Binop {
+        op: BinOp::And,
+        l: Box::new(ptr.clone()),
+        r: Box::new(Expr::Int {
+            v: align_mask,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    let align_cond = Expr::Binop {
+        op: BinOp::Ne,
+        l: Box::new(and_expr),
+        r: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    let align_check = Expr::Cond {
+        cond: Box::new(align_cond),
+        then_: Box::new(alignment_check_handler(ptr, span)),
+        else_: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    let combined = Expr::Comma {
+        l: Box::new(align_check),
+        r: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: inner_ty.clone(),
+    };
     Expr::Comma {
         l: Box::new(null_check),
-        r: Box::new(expr.clone()),
+        r: Box::new(combined),
         span: span.clone(),
         ty: inner_ty,
     }
@@ -3588,6 +3720,116 @@ mod tests {
             names.iter().any(|n| n == "__ubsan_handle_type_mismatch_v1"),
             "null check missing: calls = {:?}",
             names
+        );
+    }
+
+    #[test]
+    fn ubsan_alignment_check_inserted_for_int_deref() {
+        // *int_ptr 应插入对齐检查 (int align=4 > 1)。
+        // 预期生成两次 __ubsan_handle_type_mismatch_v1 调用:
+        // 一次用于 null check, 一次用于 alignment check。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                ubsan: true,
+                ..Default::default()
+            },
+            Arch::X86_64,
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        let mismatch_count = names
+            .iter()
+            .filter(|n| *n == "__ubsan_handle_type_mismatch_v1")
+            .count();
+        assert!(
+            mismatch_count >= 2,
+            "expected null check + alignment check (2 calls to type_mismatch_v1), got {}: {:?}",
+            mismatch_count,
+            names
+        );
+    }
+
+    #[test]
+    fn ubsan_no_alignment_check_for_char_deref() {
+        // *char_ptr 不应插入对齐检查 (char align=1)。
+        // 仅应有一次 __ubsan_handle_type_mismatch_v1 调用 (null check)。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Char.into())),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Char,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                ubsan: true,
+                ..Default::default()
+            },
+            Arch::X86_64,
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        let mismatch_count = names
+            .iter()
+            .filter(|n| *n == "__ubsan_handle_type_mismatch_v1")
+            .count();
+        assert_eq!(
+            mismatch_count, 1,
+            "char deref should only have null check (1 call), got {}: {:?}",
+            mismatch_count, names
         );
     }
 
