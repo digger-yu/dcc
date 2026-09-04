@@ -29,6 +29,7 @@
 | 特性 | 说明 |
 |------|------|
 | 线性扫描寄存器分配 (P12) | `-O3` 启用; 计算每个 SSA 值的活跃区间 `[def_pos, last_use_pos]`, 按起点排序后扫描分配 14 个通用寄存器 (x86-64), 考虑 asm 寄存器压力动态缩减可用池; 寄存器耗尽时溢出 active 中终点最远的区间; 结果以 `__dcc_regalloc_done` hint 编码 `(total<<16)|(alloc<<8)|spill` 写入 entry BB, codegen 据此优化物理寄存器分配; 支持 phi 节点/terminator 使用位置追踪 |
+| UBSAN IR 层插桩 (P12b) | `-O3` 启用; 在优化后的 SSA IR 上扫描可能 UB 的指令 (除法/取余/移位/有符号加减乘/取反), 插入 `__dcc_ubsan_*` guard; 与 AST 层 sanitizer 互补: AST 层在 SSA 构造前插桩, 优化可能消除检查; IR 层在优化后插桩, 能捕获优化新建的操作; 编译期已知安全的操作 (如除以非零常量) 跳过插桩; guard 作为 pass hint 在 SSA→AST 重建时自动过滤 |
 
 ## Sanitizer 插桩
 

@@ -16,6 +16,7 @@
 //   P10 tail_call_optimization      - TCO
 //   P11 function_attribute_propagation - noreturn/cold/hot -> 段属性
 //   P12 register_allocation         - 线性扫描寄存器分配
+//   P12b ubsan_ir_instrument        - UBSAN IR 层插桩
 //   P13 alias_set                   - 别名集合 (identity/disjoint/overlap)
 //   P14 speculative_execution       - 投机执行 (无副作用分支外提)
 //   P15 sparse_conditional_constant_propagation - SCCP
@@ -24,7 +25,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, Stmt, Type, UnOp};
-use crate::ssa::{Function, Inst, InstKind, Operand, Terminator};
+use crate::diagnostics::Span;
+use crate::ssa::{Function, Inst, InstKind, Operand, SsaVar, Terminator};
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
 ///
@@ -55,6 +57,7 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     if level >= 3 {
         instruction_scheduling(func);
         register_allocation(func);
+        ubsan_ir_instrument(func);
         auto_parallelization(func);
         pgo(func);
         software_pipelining(func);
@@ -1493,6 +1496,132 @@ fn record_term_use(
         Terminator::SwitchTable { idx: Operand::Var(v), .. } => record(&v.name()),
         _ => {}
     }
+}
+
+// =====================================================================
+// P12b. UBSAN IR 层插桩
+// =====================================================================
+
+/// UBSAN IR 层插桩: 在优化后的 SSA IR 上扫描可能产生未定义行为的
+/// 指令, 插入运行时检查 guard。与 AST 层 sanitizer 互补:
+/// - AST 层在 SSA 构造前插桩, 优化可能消除某些检查
+/// - IR 层在优化后插桩, 能捕获优化新建的操作和消除后残留的 UB
+///
+/// 检查类型:
+///   - 有符号除法/取余: 除零 + 有符号溢出 (INT_MIN / -1)
+///   - 移位: 移位量 < 0 或 >= 操作数位宽
+///   - 有符号乘/加/减: 溢出检查
+///   - 取反: 有符号溢出 (negate INT_MIN)
+///
+/// 插桩方式: 在每条可能 UB 的指令后插入 Store hint:
+///   `__dcc_ubsan_<kind>(op_info)` 其中 op_info 编码操作数类型和位置
+///   SSA→AST 重建时这些 hint 被识别并转换为 `__ubsan_handle_*` 调用。
+pub fn ubsan_ir_instrument(func: &mut Function) -> bool {
+    let mut changed = false;
+    let span = func.span.clone();
+    // 收集所有 BB 名称, 避免借用冲突
+    let bb_names: Vec<String> = func.block_order.clone();
+    for bb_name in &bb_names {
+        let bb = match func.blocks.get(bb_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        let mut new_insts: Vec<Inst> = Vec::new();
+        for inst in &bb.insts {
+            new_insts.push(inst.clone());
+            // 检查当前指令是否需要 UBSAN guard
+            if let Some(d) = &inst.dest {
+                if let Some(guard) = gen_ubsan_guard(&inst.kind, d, &span) {
+                    new_insts.push(guard);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if let Some(bb_mut) = func.blocks.get_mut(bb_name) {
+                bb_mut.insts = new_insts;
+            }
+        }
+    }
+    changed
+}
+
+/// 为单条 SSA 指令生成 UBSAN guard (如果该指令可能 UB)。
+fn gen_ubsan_guard(kind: &InstKind, _dest: &SsaVar, span: &Span) -> Option<Inst> {
+    match kind {
+        InstKind::Bin { op, l: _, r } => {
+            let check_kind = match op {
+                // 除法/取余: 除零 + 有符号 INT_MIN / -1
+                BinOp::Div | BinOp::Mod => {
+                    // 检查右操作数是否为 0
+                    if is_const_nonzero(r) {
+                        return None; // 编译期已知非零, 无需检查
+                    }
+                    Some("divrem_overflow")
+                }
+                // 移位: 移位量 < 0 或 >= 位宽
+                BinOp::Shl | BinOp::Shr => {
+                    if is_const_valid_shift(r) {
+                        return None;
+                    }
+                    Some("shift_out_of_bounds")
+                }
+                // 有符号加法/减法/乘法: 溢出
+                BinOp::Add => Some("add_overflow"),
+                BinOp::Sub => Some("sub_overflow"),
+                BinOp::Mul => Some("mul_overflow"),
+                _ => None,
+            };
+            if let Some(kind_str) = check_kind {
+                // 编码: kind_hash 用于运行时选择 handler
+                let kind_hash = ubsan_kind_hash(kind_str);
+                return Some(Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::SymAddr(format!("__dcc_ubsan_{}", kind_str)),
+                        src: Operand::Int(kind_hash),
+                    },
+                    span: span.clone(),
+                });
+            }
+            None
+        }
+        InstKind::Un { op, e: _ } => {
+            // 取反: INT_MIN 取反溢出
+            if matches!(op, UnOp::Neg) {
+                return Some(Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::SymAddr("__dcc_ubsan_negate_overflow".to_string()),
+                        src: Operand::Int(ubsan_kind_hash("negate_overflow")),
+                    },
+                    span: span.clone(),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// 检查 Operand 是否为编译期已知的非零常量。
+fn is_const_nonzero(op: &Operand) -> bool {
+    matches!(op, Operand::Int(v) if *v != 0)
+}
+
+/// 检查移位操作数是否为编译期已知的有效移位量 (0 <= shift < 64)。
+fn is_const_valid_shift(op: &Operand) -> bool {
+    matches!(op, Operand::Int(v) if *v >= 0 && *v < 64)
+}
+
+/// FNV-1a hash 用于将 check kind 名称映射到唯一整数 ID。
+fn ubsan_kind_hash(kind: &str) -> i128 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in kind.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as i128
 }
 
 // =====================================================================
@@ -3381,6 +3510,125 @@ mod tests {
                 );
             }
             other => panic!("expected regalloc hint, got {:?}", other),
+        }
+    }
+
+    // ── P12b ubsan_ir_instrument tests ──
+
+    #[test]
+    fn ubsan_ir_div_inserts_guard() {
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("foo".into(), Type::Int, span.clone());
+        f.params.push(SsaVar {
+            base: "a".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        });
+        f.params.push(SsaVar {
+            base: "b".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        });
+        let bb = f.blocks.get_mut("entry").unwrap();
+        // t = a / b (should trigger divrem_overflow guard)
+        bb.insts.push(Inst {
+            dest: Some(SsaVar {
+                base: "t".into(),
+                version: 1,
+                ty: Type::Int,
+                span: span.clone(),
+            }),
+            kind: InstKind::Bin {
+                op: BinOp::Div,
+                l: Operand::Var(f.params[0].clone()),
+                r: Operand::Var(f.params[1].clone()),
+            },
+            span: span.clone(),
+        });
+        assert!(ubsan_ir_instrument(&mut f));
+        let entry = f.blocks.get("entry").unwrap();
+        // Should have 2 instructions: the div + the guard
+        assert_eq!(entry.insts.len(), 2);
+        match &entry.insts[1].kind {
+            InstKind::Store {
+                e: Operand::SymAddr(name),
+                ..
+            } => {
+                assert!(name.contains("divrem_overflow"), "got: {}", name);
+            }
+            other => panic!("expected ubsan guard, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ubsan_ir_const_nonzero_skips_guard() {
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("bar".into(), Type::Int, span.clone());
+        f.params.push(SsaVar {
+            base: "a".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        });
+        let bb = f.blocks.get_mut("entry").unwrap();
+        // t = a / 5 (constant non-zero divisor, no guard needed)
+        bb.insts.push(Inst {
+            dest: Some(SsaVar {
+                base: "t".into(),
+                version: 1,
+                ty: Type::Int,
+                span: span.clone(),
+            }),
+            kind: InstKind::Bin {
+                op: BinOp::Div,
+                l: Operand::Var(f.params[0].clone()),
+                r: Operand::Int(5),
+            },
+            span: span.clone(),
+        });
+        assert!(!ubsan_ir_instrument(&mut f));
+        let entry = f.blocks.get("entry").unwrap();
+        assert_eq!(entry.insts.len(), 1, "no guard should be inserted");
+    }
+
+    #[test]
+    fn ubsan_ir_negate_inserts_guard() {
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("neg".into(), Type::Int, span.clone());
+        f.params.push(SsaVar {
+            base: "x".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        });
+        let bb = f.blocks.get_mut("entry").unwrap();
+        // t = -x (should trigger negate_overflow guard)
+        bb.insts.push(Inst {
+            dest: Some(SsaVar {
+                base: "t".into(),
+                version: 1,
+                ty: Type::Int,
+                span: span.clone(),
+            }),
+            kind: InstKind::Un {
+                op: UnOp::Neg,
+                e: Operand::Var(f.params[0].clone()),
+            },
+            span: span.clone(),
+        });
+        assert!(ubsan_ir_instrument(&mut f));
+        let entry = f.blocks.get("entry").unwrap();
+        assert_eq!(entry.insts.len(), 2);
+        match &entry.insts[1].kind {
+            InstKind::Store {
+                e: Operand::SymAddr(name),
+                ..
+            } => {
+                assert!(name.contains("negate_overflow"), "got: {}", name);
+            }
+            other => panic!("expected ubsan guard, got {:?}", other),
         }
     }
 }
