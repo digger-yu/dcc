@@ -18466,6 +18466,77 @@ fn riscv64_atomic_tas_clear_cross_compile() {
     let _ = fs::remove_file(&op);
 }
 
+/// __sync_* legacy builtins compile and run on x86_64.
+#[test]
+#[cfg(unix)]
+fn sync_legacy_builtins_run() {
+    let src = r#"
+int counter = 0;
+int main(void) {
+    int old;
+    counter = 0;
+    old = __sync_fetch_and_add(&counter, 10);
+    if (old != 0 || counter != 10) return 1;
+    old = __sync_fetch_and_sub(&counter, 3);
+    if (old != 10 || counter != 7) return 2;
+    int nv = __sync_add_and_fetch(&counter, 3);
+    if (nv != 10) return 3;
+    __sync_synchronize();
+    int lk = 0;
+    old = __sync_lock_test_and_set(&lk, 1);
+    if (old != 0 || lk != 1) return 4;
+    __sync_lock_release(&lk);
+    if (lk != 0) return 5;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("sync-legacy", src);
+    assert!(out.status.success(),
+        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// AArch64: __sync_* legacy builtins cross-compile.
+#[test]
+fn aarch64_sync_legacy_cross_compile() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-a64-sync-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-a64-sync-{}.o", std::process::id()));
+    let src = "int c = 0;\nint main(void) {\n  __sync_fetch_and_add(&c, 1);\n  __sync_fetch_and_sub(&c, 1);\n  __sync_fetch_and_or(&c, 0xFF);\n  __sync_fetch_and_and(&c, 0x0F);\n  __sync_fetch_and_xor(&c, 0x55);\n  __sync_fetch_and_nand(&c, 0xFF);\n  __sync_add_and_fetch(&c, 1);\n  __sync_bool_compare_and_swap(&c, 0, 42);\n  __sync_val_compare_and_swap(&c, 0, 42);\n  __sync_lock_test_and_set(&c, 1);\n  __sync_lock_release(&c);\n  __sync_synchronize();\n  return 0;\n}\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "aarch64 sync compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&op).expect("read object");
+    let _ = fs::remove_file(&op);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
+/// RISC-V: __sync_* legacy builtins cross-compile.
+#[test]
+fn riscv64_sync_legacy_cross_compile() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-rv64-sync-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-rv64-sync-{}.o", std::process::id()));
+    let src = "int c = 0;\nint main(void) {\n  __sync_fetch_and_add(&c, 1);\n  __sync_fetch_and_sub(&c, 1);\n  __sync_fetch_and_or(&c, 0xFF);\n  __sync_fetch_and_and(&c, 0x0F);\n  __sync_fetch_and_xor(&c, 0x55);\n  __sync_fetch_and_nand(&c, 0xFF);\n  __sync_add_and_fetch(&c, 1);\n  __sync_bool_compare_and_swap(&c, 0, 42);\n  __sync_val_compare_and_swap(&c, 0, 42);\n  __sync_lock_test_and_set(&c, 1);\n  __sync_lock_release(&c);\n  __sync_synchronize();\n  return 0;\n}\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "riscv64 sync compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&op).expect("read object");
+    let _ = fs::remove_file(&op);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
 /// AArch64: __atomic_fetch_nand cross-compile.
 #[test]
 fn aarch64_atomic_fetch_nand_cross_compile() {

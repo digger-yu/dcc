@@ -1733,9 +1733,11 @@ impl Riscv64Codegen {
             self.li_a0(0);
             return;
         }
-        // __atomic_* 内建函数特殊处理 (生成 RISC-V 原子指令)
+        // __atomic_* / __sync_* 内建函数特殊处理 (生成 RISC-V 原子指令)
         let args = &expr.children[1..];
-        if callee.starts_with("__atomic_") && self.gen_atomic_builtin(&callee, args) {
+        if (callee.starts_with("__atomic_") || callee.starts_with("__sync_"))
+            && self.gen_atomic_builtin(&callee, args)
+        {
             return;
         }
 
@@ -2961,6 +2963,166 @@ impl Riscv64Codegen {
                 if ord == 5 { self.emit_fence(); }
                 self.emit_store_sz(10, 11, 0, sz);
                 true
+            }
+            // ===== __sync_* legacy atomic operations =====
+            "__sync_fetch_and_add" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoadd(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_sub" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.emit_neg(10, 10); self.mv_a_reg(12);
+                self.emit_amoadd(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_or" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoor(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_and" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoand(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_xor" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoxor(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_nand" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_fn"); let ld = self.fresh_label("sy_fn_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(13, 10, 12); self.emit_xori(13, 13, -1);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_add_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_af"); let ld = self.fresh_label("sy_af_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_add(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_sub_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_sf"); let ld = self.fresh_label("sy_sf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_sub(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_or_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_of"); let ld = self.fresh_label("sy_of_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_or(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_and_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_anf"); let ld = self.fresh_label("sy_anf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_xor_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_xf"); let ld = self.fresh_label("sy_xf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_xor(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_nand_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_nf"); let ld = self.fresh_label("sy_nf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(10, 10, 12); self.emit_xori(10, 10, -1);
+                self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_bool_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.gen_expr(&args[2]); self.mv_a_reg(13);
+                let lr = self.fresh_label("sy_cas");
+                let lf = self.fresh_label("sy_cas_f");
+                let ld = self.fresh_label("sy_cas_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &lf);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr);
+                self.li_a0(1); self.j(&ld);
+                self.label(&lf); self.li_a0(0);
+                self.label(&ld); true
+            }
+            "__sync_val_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.gen_expr(&args[2]); self.mv_a_reg(13);
+                let lr = self.fresh_label("sy_casv");
+                let lf = self.fresh_label("sy_casv_f");
+                let ld = self.fresh_label("sy_casv_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &lf);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr);
+                self.j(&ld);
+                self.label(&lf); // a0 = old value from lr
+                self.label(&ld); true
+            }
+            "__sync_lock_test_and_set" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoswap(sz, 10, 12, 11); true
+            }
+            "__sync_lock_release" => {
+                if args.len() < 1 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.li_reg(12, 0);
+                self.emit_store_sz(10, 11, 0, sz); true
+            }
+            "__sync_synchronize" => {
+                self.emit_fence(); true
             }
             _ => false,
         }

@@ -8612,8 +8612,8 @@ impl Codegen {
                 };
                 if let Some(fname) = direct_name {
                     let name_name = fname;
-                    // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
-                    if name_name.starts_with("__atomic_")
+                    // __atomic_* / __sync_* 内置函数特殊处理 (生成 lock 前缀指令)
+                    if (name_name.starts_with("__atomic_") || name_name.starts_with("__sync_"))
                         && self.gen_atomic_builtin(&name_name, args, dst)
                     {
                         // 已成功生成原子指令
