@@ -9831,9 +9831,16 @@ impl<'a> Parser<'a> {
                         ) {
                             if let TokKind::Number = self.cur.kind {
                                 let lit = self.cur.text.clone();
-                                self.advance();
-                                if self.expect(TokKind::RParen, "')'") {
-                                    if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                // 先尝试常量折叠, 失败则回退到普通函数调用
+                                if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                    // 保存状态, 以便回退
+                                    let saved_cur = self.cur.clone();
+                                    let saved_peek = self.peek.clone();
+                                    let saved_pos = self.lex.pos;
+                                    let saved_line = self.lex.line;
+                                    let saved_col = self.lex.col;
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
                                         let n = if v >= 0 { v as u64 } else { !v as u64 };
                                         e = Expr::Int {
                                             v: n.count_ones() as i128,
@@ -9842,6 +9849,12 @@ impl<'a> Parser<'a> {
                                         };
                                         continue;
                                     }
+                                    // 期望 ) 失败, 恢复状态
+                                    self.cur = saved_cur;
+                                    self.peek = saved_peek;
+                                    self.lex.pos = saved_pos;
+                                    self.lex.line = saved_line;
+                                    self.lex.col = saved_col;
                                 }
                             }
                         }
