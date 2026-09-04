@@ -5809,6 +5809,17 @@ impl Codegen {
         }
     }
 
+    /// 检查函数体是否包含嵌套函数声明
+    fn has_nested_func_decls(body: &Option<Block>) -> bool {
+        if let Some(body) = body {
+            let mut nested = Vec::new();
+            Self::collect_direct_nested_funcs(&body.items, &mut nested);
+            !nested.is_empty()
+        } else {
+            false
+        }
+    }
+
     fn register_func_sig(f: &FuncDecl, map: &mut HashMap<String, Vec<Type>>) {
         let params: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
         map.insert(f.name.name.clone(), params);
@@ -9800,8 +9811,22 @@ impl Codegen {
                 self.emit(&[0xF3, 0xA4]); // rep movsb
             }
             Expr::VaArg { ap, ty: arg_ty, .. } => {
+                // 检查 ap 的类型：如果是指向 va_list 结构的指针（函数参数退化），使用指针版本
+                let ap_is_ptr = matches!(ap.ty(), Type::Ptr(_));
                 if let Expr::Ident { name, .. } = ap.as_ref() {
-                    self.gen_va_arg(&name.name, arg_ty, dst);
+                    if ap_is_ptr {
+                        // va_list 作为函数参数时退化为指针，需要加载指针值
+                        self.gen_expr(ap, 0); // 加载指针值到 rax
+                        self.mov(1, 0); // rcx = rax
+                        self.gen_va_arg_ptr(arg_ty, dst);
+                    } else {
+                        self.gen_va_arg(&name.name, arg_ty, dst);
+                    }
+                } else if let Expr::Deref { e, .. } = ap.as_ref() {
+                    // va_arg(*ptr, type): 加载指针值到 rcx，然后使用基于寄存器的 va_arg
+                    self.gen_expr(e, 0); // 将指针值加载到 rax
+                    self.mov(1, 0); // rcx = rax (va_list 指针)
+                    self.gen_va_arg_ptr(arg_ty, dst);
                 } else {
                     self.mov_imm(dst, 0);
                 }
@@ -15633,6 +15658,94 @@ impl Codegen {
         }
     }
 
+    /// SysV va_arg (指针版本): rcx = va_list 指针，按 gp_offset/fp_offset 读取参数。
+    fn gen_va_arg_ptr(&mut self, arg_ty: &Type, dst: u8) {
+        if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) && self.target.sse {
+            self.gen_va_arg_ptr_fp(arg_ty, dst);
+            return;
+        }
+        let step = (arg_ty.size().div_ceil(8) * 8) as i32;
+        let overflow = self.fresh_label();
+        let done = self.fresh_label();
+        // eax = gp_offset (rcx + 0)
+        self.emit(&[0x8B, 0x01]); // mov eax, (rcx)
+        self.emit(&[0x83, 0xF8, 0x30]); // cmp $48, %eax
+        self.jmp_rel32(&overflow, JumpKind::Jge);
+        // reg_save_area + gp_offset: 从 (rcx+16) 加载 reg_save_area
+        self.emit(&[0x48, 0x8B, 0x59, 0x10]); // mov rbx, 16(rcx)
+        let sz = arg_ty.size();
+        match sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x04, 0x03]), // movzbl (rbx,rax), eax
+            2 => self.emit(&[0x0F, 0xB7, 0x04, 0x03]), // movzwl (rbx,rax), eax
+            4 => self.emit(&[0x8B, 0x04, 0x03]), // mov (rbx,rax), eax
+            _ => self.emit(&[0x48, 0x8B, 0x04, 0x03]), // mov (rbx,rax), rax
+        }
+        // gp_offset += step
+        self.emit(&[0x83, 0x01]); // add (rcx), imm8
+        self.emit(&step.to_le_bytes()[..1]);
+        self.jmp_rel32(&done, JumpKind::Jmp);
+        self.label(&overflow);
+        // overflow_arg_area: 从 (rcx+8) 加载
+        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        match sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x03]), // movzbl (rbx), eax
+            2 => self.emit(&[0x0F, 0xB7, 0x03]), // movzwl (rbx), eax
+            4 => self.emit(&[0x8B, 0x03]), // mov (rbx), eax
+            _ => self.emit(&[0x48, 0x8B, 0x03]), // mov (rbx), rax
+        }
+        self.push(0);
+        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        self.emit(&[0x48, 0x83, 0xC3]); // add rbx, step
+        self.emit(&step.to_le_bytes()[..1]);
+        self.emit(&[0x48, 0x89, 0x59, 0x08]); // mov 8(rcx), rbx
+        self.pop(0);
+        self.label(&done);
+        if dst != 0 {
+            self.mov(dst, 0);
+        }
+    }
+
+    /// SysV va_arg 浮点路径 (指针版本): rcx = va_list 指针。
+    fn gen_va_arg_ptr_fp(&mut self, arg_ty: &Type, dst: u8) {
+        let reg_step = 16i32;
+        let overflow_step = 8i32;
+        let overflow = self.fresh_label();
+        let done = self.fresh_label();
+        // eax = fp_offset (rcx + 4)
+        self.emit(&[0x8B, 0x41, 0x04]); // mov eax, 4(rcx)
+        self.emit(&[0x3D, 0xB0, 0x00, 0x00, 0x00]); // cmp $176, %eax
+        self.jmp_rel32(&overflow, JumpKind::Jge);
+        // reg_save_area + fp_offset
+        self.emit(&[0x48, 0x8B, 0x59, 0x10]); // mov rbx, 16(rcx)
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x03]); // movss (rbx,rax), xmm0
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x03]); // movsd (rbx,rax), xmm0
+        }
+        // fp_offset += reg_step
+        self.emit(&[0x83, 0x41, 0x04]); // add 4(rcx), reg_step
+        self.emit(&reg_step.to_le_bytes()[..1]);
+        self.jmp_rel32(&done, JumpKind::Jmp);
+        self.label(&overflow);
+        // overflow_arg_area
+        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x03]); // movss (rbx), xmm0
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x03]); // movsd (rbx), xmm0
+        }
+        self.push(0);
+        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        self.emit(&[0x48, 0x83, 0xC3]); // add rbx, overflow_step
+        self.emit(&overflow_step.to_le_bytes()[..1]);
+        self.emit(&[0x48, 0x89, 0x59, 0x08]); // mov 8(rcx), rbx
+        self.pop(0);
+        self.label(&done);
+        if dst != 0 {
+            self.mov_xmm(dst, 0);
+        }
+    }
+
     // 预扫描: 统计函数体中局部变量所需栈槽数 (数组按实际大小)
     fn count_locals(items: &[BlockItem]) -> usize {
         let mut n = 0;
@@ -19093,9 +19206,9 @@ impl Codegen {
         }
     }
 
-    /// 生成嵌套函数 trampoline: 在栈上分配空间并填充 trampoline 代码.
+    /// 生成嵌套函数 trampoline: 在栈帧底部 (trampoline reserve) 分配空间.
     /// Trampoline 设置 r10 = 父帧指针 (静态链) 后跳转到实际函数.
-    /// 返回 trampoline 在栈帧中的偏移.
+    /// 返回 trampoline 在栈帧中的偏移 (相对于 r13).
     fn gen_trampoline(&mut self, nested_name: &str) -> i32 {
         // 检查是否已为此嵌套函数生成 trampoline
         if let Some(&off) = self.trampoline_slots.get(nested_name) {
@@ -19103,45 +19216,100 @@ impl Codegen {
         }
         // 每个 trampoline 32 字节 (16 字节对齐)
         let tramp_size: i32 = 32;
+        // Trampoline 槽位位于帧底部 trampoline reserve (256 字节) 内
+        // 从 reserve 顶部向下分配: 第一个槽在 -frame_size + 256 - 32
+        let offset = -self.frame_size + (256 - self.trampoline_total_size - tramp_size);
         self.trampoline_total_size += tramp_size;
-        let offset = -self.trampoline_total_size;
         self.trampoline_slots.insert(nested_name.to_string(), offset);
         offset
     }
 
-    /// 在函数体开始处发射 trampoline 代码到栈上.
-    /// 将 trampoline 代码写入已分配的栈空间.
-    fn emit_trampoline_code(&mut self) {
+    /// 发射运行时代码，将 trampoline 字节写入栈帧。
+    /// 为每个嵌套函数生成 trampoline-writing 代码，在运行时将 trampoline 字节写入栈。
+    fn emit_trampoline_to_stack(&mut self) {
         if self.trampoline_slots.is_empty() {
             return;
         }
-        // Trampoline 布局 (x86-64, 32 字节):
-        //   48 8d 14 24       lea rdx, [rsp]     ; 父帧指针
-        //   49 ba <8bytes>    movabs r10, <func_addr>  ; 实际函数地址
-        //   41 ff e2          jmp r10             ; 跳转 (r10=静态链)
-        //   90 * N            padding 到 32 字节
+        // 收集所有 trampoline 名称，避免借用冲突
         let tramp_names: Vec<String> = self.trampoline_slots.keys().cloned().collect();
         for name in &tramp_names {
-            let _offset = self.trampoline_slots[name]; // reserved for stack write
-            // 保存当前 code 位置
-            let save_pos = self.pos();
-            // lea rdx, [rsp] - 父帧指针
-            self.emit(&[0x48, 0x8D, 0x14, 0x24]);
-            // movabs r10, <func_addr> - 实际函数地址 (占位)
-            self.emit(&[0x49, 0xBA]);
-            let addr_pos = self.pos();
-            self.emit(&[0u8; 8]); // 占位 8 字节
-            // 记录重定位: resolve 阶段修补函数地址
-            self.pending_data64_rels
-                .push((addr_pos, name.clone(), None, 1, 0));
-            // jmp r10
-            self.emit(&[0x41, 0xFF, 0xE2]);
-            // padding 到 32 字节
-            let written = self.pos() - save_pos;
-            for _ in written..32 {
-                self.emit(&[0x90]); // nop
-            }
+            let tramp_off = self.trampoline_slots[name];
+            // 加载嵌套函数地址到 rax
+            self.emit_func_addr(0, name);
+            // rdi = trampoline 目标地址 = r13 + tramp_off
+            // lea rdi, [r13 + tramp_off]
+            let rex = 0x49u8; // REX.W + REX.B (r13)
+            self.emit(&[rex, 0x8D]);
+            let modrm = 0xBD; // [r13 + disp32], rdi
+            self.emit(&[modrm]);
+            self.emit(&tramp_off.to_le_bytes());
+            // 写入 trampoline 字节到 [rdi + offset]
+            // Trampoline 布局 (32 字节):
+            // [0..3)   lea r10, [r13]       = 4c 8d 13
+            // [3..5)   movabs r10, imm64    = 49 ba
+            // [5..13)  <func_addr 8 bytes>
+            // [13..16) jmp r10              = 41 ff e2
+            // [16..32) nop padding
+            // 写入前 3 字节: lea r10, [r13] = 4c 8d 13
+            // mov BYTE PTR [rdi], 0x4c
+            self.emit(&[0x48, 0xC6, 0x07, 0x4C]);
+            // mov BYTE PTR [rdi+1], 0x8d
+            self.emit(&[0x48, 0xC6, 0x47, 0x01, 0x8D]);
+            // mov BYTE PTR [rdi+2], 0x13
+            self.emit(&[0x48, 0xC6, 0x47, 0x02, 0x13]);
+            // 写入字节 3-4: movabs r10 = 49 ba
+            // mov BYTE PTR [rdi+3], 0x49
+            self.emit(&[0x48, 0xC6, 0x47, 0x03, 0x49]);
+            // mov BYTE PTR [rdi+4], 0xba
+            self.emit(&[0x48, 0xC6, 0x47, 0x04, 0xBA]);
+            // 写入字节 5-12: 函数地址 (rax 中的 8 字节)
+            // mov [rdi+5], rax
+            self.emit(&[0x48, 0x89, 0x47, 0x05]);
+            // 写入字节 13-15: jmp r10 = 41 ff e2
+            // mov BYTE PTR [rdi+13], 0x41
+            self.emit(&[0x48, 0xC6, 0x47, 0x0D, 0x41]);
+            // mov BYTE PTR [rdi+14], 0xff
+            self.emit(&[0x48, 0xC6, 0x47, 0x0E, 0xFF]);
+            // mov BYTE PTR [rdi+15], 0xe2
+            self.emit(&[0x48, 0xC6, 0x47, 0x0F, 0xE2]);
+            // 写入字节 16-31: nop 填充 (16 字节)
+            // mov DWORD PTR [rdi+16], 0x90909090
+            self.emit(&[0x48, 0xC7, 0x47, 0x10]);
+            self.emit(&0x90909090u32.to_le_bytes());
+            // mov DWORD PTR [rdi+20], 0x90909090
+            self.emit(&[0x48, 0xC7, 0x47, 0x14]);
+            self.emit(&0x90909090u32.to_le_bytes());
+            // mov DWORD PTR [rdi+24], 0x90909090
+            self.emit(&[0x48, 0xC7, 0x47, 0x18]);
+            self.emit(&0x90909090u32.to_le_bytes());
+            // mov DWORD PTR [rdi+28], 0x90909090
+            self.emit(&[0x48, 0xC7, 0x47, 0x1C]);
+            self.emit(&0x90909090u32.to_le_bytes());
         }
+    }
+
+    /// 发射 mprotect 系统调用，使栈帧页可执行。
+    /// 用于嵌套函数 trampoline 支持。
+    fn emit_mprotect_for_stack(&mut self) {
+        // mprotect(r13 & ~0xFFF, 4096, PROT_READ|PROT_WRITE|PROT_EXEC)
+        // rdi = r13 & ~0xFFF (页对齐地址)
+        self.emit(&[0x49, 0x89, 0xFD]); // mov rdi, r13
+        self.emit(&[0x48, 0x81, 0xE7]); // and rdi, ~0xFFF
+        self.emit(&0xFFFFF000u32.to_le_bytes());
+        // rsi = 4096 (大小)
+        self.emit(&[0x48, 0xC7, 0xC6]); // mov rsi, 4096
+        self.emit(&4096i32.to_le_bytes());
+        // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
+        self.emit(&[0x48, 0xC7, 0xC2]); // mov rdx, 7
+        self.emit(&7i32.to_le_bytes());
+        // rax = 10 (SYS_mprotect)
+        self.emit(&[0x48, 0xC7, 0xC0]); // mov rax, 10
+        self.emit(&10i32.to_le_bytes());
+        // syscall
+        self.emit(&[0x0F, 0x05]);
+        // syscall 破坏: rax, rcx, r11
+        // 恢复 rax (可能被后续代码使用)
+        // 注意: rcx, r11 被 syscall 破坏，但它们是 caller-saved，所以没问题
     }
 
     /// 加载函数指针（Ident / cast，用于 __builtin_apply 等）

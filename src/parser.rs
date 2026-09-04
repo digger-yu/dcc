@@ -5348,10 +5348,10 @@ impl<'a> Parser<'a> {
                 }
                 // SysV AMD64 va_list: gp_offset, fp_offset,
                 // overflow_arg_area, reg_save_area.  C ABI 中它是单元素数组；
-                // AST 内保留等价的 24 字节对象，builtin 操作直接取得其地址。
+                // 定义为数组类型使其在函数传参时自动退化为指针。
                 TokKind::Ident if self.cur.text == "__builtin_va_list" => {
                     self.advance();
-                    base = Some(Type::Struct(
+                    let va_struct = Type::Struct(
                         "__dcc_sysv_va_list".into(),
                         Arc::new(vec![
                             Field {
@@ -5396,7 +5396,9 @@ impl<'a> Parser<'a> {
                             },
                         ]),
                         8, // va_list align: max field = ptr (8)
-                    ));
+                    );
+                    // 包装为单元素数组，使其在传参时退化为指针
+                    base = Some(Type::Array(Box::new(va_struct.into()), ArraySize::Const(1)));
                 }
                 // constexpr: C23 编译期常量声明.
                 // 变量: 隐含 const, 必须以常量表达式初始化
@@ -9827,7 +9829,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_strlen"
                                     | "__builtin_return_address" | "__builtin_frame_address"
                                     | "__builtin_strcpy" | "__builtin_stpcpy"
-                                    | "__builtin_abort" | "__builtin_va_start"
+                                    | "__builtin_abort" | "__builtin_va_start" | "__builtin_va_copy"
                                     | "__builtin_expect"
                                     | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
                                     | "__builtin_sqrt" | "__builtin_sqrtf" | "__builtin_sqrtl"
