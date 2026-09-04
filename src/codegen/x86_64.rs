@@ -19385,6 +19385,39 @@ impl Codegen {
                 // Without optimisation passes, no-op is sufficient.
                 true
             }
+            "__atomic_test_and_set" => {
+                // args: (ptr, mem_order)
+                // Atomically set *ptr = 1, return old value
+                if args.len() < 2 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                self.emit(&[0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00]); // mov rsi, 1
+                self.emit_lock_xchg_rdi_rsi(sz);
+                let ord = self.eval_mem_order(&args[1]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
+                if dst != 6 { self.mov(dst, 6); }
+                true
+            }
+            "__atomic_clear" => {
+                // args: (ptr, mem_order)
+                // Atomically set *ptr = 0
+                if args.len() < 2 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[1]);
+                self.gen_expr(&args[0], 7); // rdi = ptr
+                match sz {
+                    1 => self.emit(&[0xC6, 0x07, 0x00]),
+                    2 => self.emit(&[0x66, 0xC7, 0x07, 0x00, 0x00]),
+                    4 => self.emit(&[0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]),
+                    _ => self.emit(&[0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]),
+                }
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
+                true
+            }
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
     }

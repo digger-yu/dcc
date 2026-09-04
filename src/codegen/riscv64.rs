@@ -2940,6 +2940,28 @@ impl Riscv64Codegen {
                 // Compiler barrier only, no hardware instruction
                 true
             }
+            "__atomic_test_and_set" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.li_reg(12, 1); // a2 = 1
+                self.emit_amoswap(sz, 10, 12, 11); // a0 = old
+                true
+            }
+            "__atomic_clear" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.li_reg(12, 0); // a2 = 0
+                let ord = self.eval_mem_order(&args[1]);
+                if ord == 5 { self.emit_fence(); }
+                self.emit_store_sz(10, 11, 0, sz);
+                true
+            }
             _ => false,
         }
     }

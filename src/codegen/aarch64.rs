@@ -5460,6 +5460,33 @@ impl Aarch64Codegen {
                 // Compiler barrier only, no hardware instruction
                 true
             }
+            "__atomic_test_and_set" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                self.mov_w0_imm(1);
+                self.mov_x_reg(1, 0); // x1 = 1
+                let l_retry = self.fresh_label("atomic_tas");
+                let l_done = self.fresh_label("atomic_tas_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2); // x0 = old
+                self.emit_stlxr(sz, 3, 1, 2);
+                self.emit_cbnz(3, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_clear" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(1, 0); // x1 = ptr
+                self.mov_w0_imm(0);
+                self.emit_stlr(sz, 0, 1);
+                true
+            }
             _ => false,
         }
     }

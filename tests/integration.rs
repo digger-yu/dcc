@@ -18408,6 +18408,64 @@ int main(void) {
     let _ = fs::remove_file(&exe);
 }
 
+/// __atomic_test_and_set / __atomic_clear compile and run on x86_64.
+#[test]
+#[cfg(unix)]
+fn atomic_test_and_set_clear_run() {
+    let src = r#"
+char lock = 0;
+int main(void) {
+    char old = __atomic_test_and_set(&lock, 5);
+    if (old != 0) return 1;
+    if (lock != 1) return 2;
+    __atomic_clear(&lock, 5);
+    if (lock != 0) return 3;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("atomic-tas-clear", src);
+    assert!(out.status.success(),
+        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// AArch64: __atomic_test_and_set / __atomic_clear cross-compile.
+#[test]
+fn aarch64_atomic_tas_clear_cross_compile() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-a64-tas-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-a64-tas-{}.o", std::process::id()));
+    let src = "char lock = 0;\nint main(void) {\n  __atomic_test_and_set(&lock, 5);\n  __atomic_clear(&lock, 5);\n  return 0;\n}\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "aarch64 tas/clear failed: {}", String::from_utf8_lossy(&output.stderr));
+    let _ = fs::remove_file(&op);
+}
+
+/// RISC-V: __atomic_test_and_set / __atomic_clear cross-compile.
+#[test]
+fn riscv64_atomic_tas_clear_cross_compile() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-rv64-tas-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-rv64-tas-{}.o", std::process::id()));
+    let src = "char lock = 0;\nint main(void) {\n  __atomic_test_and_set(&lock, 5);\n  __atomic_clear(&lock, 5);\n  return 0;\n}\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "riscv64 tas/clear failed: {}", String::from_utf8_lossy(&output.stderr));
+    let _ = fs::remove_file(&op);
+}
+
 /// AArch64: __atomic_fetch_nand cross-compile.
 #[test]
 fn aarch64_atomic_fetch_nand_cross_compile() {
