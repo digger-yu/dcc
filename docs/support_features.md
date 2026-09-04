@@ -195,6 +195,12 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_nonzero_p` | 编译期判断参数是否为已知非零常量；非常量时保守返回 0；全后端支持 |
 | `__builtin_strlen` / `abs` / `labs` / `llabs` / `expect` / `popcount*` | 编译期折叠 |
 | `__builtin___memcpy_chk` / `memmove_chk` / `memset_chk` / `strcpy_chk` / `strncpy_chk` / `strcat_chk` / `strncat_chk` | Linux FORTIFY：识别 `__builtin___*_chk` 并剥离 `__builtin_` 前缀，链接到 libc `__*_chk` 符号；汇编输出 `call __memcpy_chk` |
+| `__builtin_clear_cache` / `__builtin___clear_cache` | x86_64 上为 no-op (缓存一致)；其他架构需确认实现 |
+| `__builtin_cpu_init` | x86_64 上为 no-op (CPUID 始终可用) |
+| `__builtin_cpu_supports` | 运行时 CPU 特性检测；简化实现返回 0，完整实现需 CPUID 指令 |
+| `__builtin_shl_overflow` / `__builtin_shr_overflow` | 移位溢出检测；检查移位量是否在有效范围内 (0 <= shift < type_width) |
+| `__builtin_shuffle` / `__builtin_shufflevector` | 向量 shuffle 操作；当前为 stub 实现 (返回第一个参数) |
+| `__builtin_convertvector` | 向量类型转换；当前为 stub 实现 (返回第一个参数) |
 
 ## 内联汇编
 
