@@ -21763,3 +21763,99 @@ fn cpp_namespace_typedef_qualify_name_consistent() {
         stripped
     );
 }
+
+// ── Linear scan register allocator integration tests ──
+
+/// Verify -O3 compilation with many local variables succeeds and
+/// produces correct results. The register allocator must handle
+/// register pressure gracefully (spilling when > 14 live values).
+#[test]
+fn regalloc_many_locals_o3_compile_and_run() {
+    let src = r#"
+#include <stdio.h>
+int main(void) {
+    int a=1,b=2,c=3,d=4,e=5,f=6,g=7,h=8;
+    int i=9,j=10,k=11,l=12,m=13,n=14,o=15,p=16;
+    int sum = a+b+c+d+e+f+g+h+i+j+k+l+m+n+o+p;
+    printf("%d\n", sum);
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-regalloc-many-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-regalloc-many-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O3", "-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile with -O3");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "O3 compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run binary");
+    let _ = std::fs::remove_file(&bin_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.trim() == "136",
+        "expected sum=136, got: {}",
+        stdout.trim()
+    );
+}
+
+/// Verify -O2 with nested loops (high register pressure in loop body)
+/// compiles and produces correct results.
+#[test]
+fn regalloc_nested_loops_o2() {
+    let src = r#"
+#include <stdio.h>
+int main(void) {
+    int sum = 0;
+    for (int i = 0; i < 10; i++)
+        for (int j = 0; j < 10; j++)
+            sum += i * j;
+    printf("%d\n", sum);
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-regalloc-loops-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-regalloc-loops-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile with -O2");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "O2 compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run binary");
+    let _ = std::fs::remove_file(&bin_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.trim() == "2025",
+        "expected 2025, got: {}",
+        stdout.trim()
+    );
+}

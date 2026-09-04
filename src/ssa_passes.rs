@@ -1156,12 +1156,41 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
 }
 
 // =====================================================================
-// P12. 寄存器分配 (linear scan, 简化版)
+// P12. 寄存器分配 (linear scan)
 // =====================================================================
 
-/// 线性扫描寄存器分配: 计算每个 SSA 值的活跃区间, 分配虚拟寄存器编号,
-/// 并在 entry BB 插入 regalloc hint 包含寄存器数量信息。
-/// codegen 根据这些信息优化物理寄存器分配。
+/// 活跃区间: 表示一个 SSA 值的生命周期范围。
+/// `start`/`end` 是线性化的指令位置编号。
+#[derive(Debug, Clone)]
+struct LiveInterval {
+    /// SSA 变量名 (SsaVar::name())
+    name: String,
+    /// 活跃区间起点 (定义位置)
+    start: u32,
+    /// 活跃区间终点 (最后使用位置)
+    end: u32,
+    /// 分配的虚拟寄存器编号 (None = 需要溢出到栈)
+    reg: Option<u8>,
+    /// 是否被溢出
+    spilled: bool,
+}
+
+/// x86-64 可用通用寄存器数量 (caller-saved: rax,rcx,rdx,rsi,rdi,r8-r11 = 10;
+/// callee-saved: rbx,r12-r15 = 4; 共 14 个,  rsp/rbp 不可用)。
+const NUM_PHYS_REGS: u8 = 14;
+
+/// 线性扫描寄存器分配 (Linscan): 计算每个 SSA 值的活跃区间,
+/// 按起点排序后扫描, 分配虚拟寄存器编号; 寄存器耗尽时溢出
+/// 终点最远的区间。结果以 `__dcc_regalloc_done` hint 形式
+/// 写入 entry BB, 包含分配/溢出统计, 供 codegen 参考。
+///
+/// 算法:
+///   1. 线性化 BB 指令序列, 为每条指令分配递增位置号
+///   2. 对每个 SSA 定义计算 [def_pos, last_use_pos] 活跃区间
+///   3. 按 start 升序排序所有区间
+///   4. 扫描: 维护 active 列表, 过期 (end < cur) 的区间释放寄存器;
+///      无空闲寄存器时溢出 active 中 end 最大的区间
+///   5. 在 entry BB 插入 regalloc hint 携带分配结果
 pub fn register_allocation(func: &mut Function) -> bool {
     if func.params.is_empty()
         && func
@@ -1171,18 +1200,72 @@ pub fn register_allocation(func: &mut Function) -> bool {
     {
         return false;
     }
-    // 计算所有 SSA 值的集合 (虚拟寄存器数)
-    let mut ssa_vals: HashSet<String> = HashSet::new();
+
+    // ── 第 1 步: 线性化指令位置 ──
+    // 为每条指令分配递增位置号, 同时记录每个 SSA 变量的定义/使用位置。
+    let mut def_pos: HashMap<String, u32> = HashMap::new();
+    let mut last_use_pos: HashMap<String, u32> = HashMap::new();
+    let mut pos: u32 = 0;
+
+    // 函数参数在位置 0 定义
     for p in &func.params {
-        ssa_vals.insert(p.name());
+        def_pos.insert(p.name(), pos);
     }
-    // 统计 asm 相关寄存器压力: asm 输出/输入会占用物理寄存器,
-    // 减少通用分配池可用寄存器数.
+    pos += 1;
+
+    // 按 block_order 遍历所有 BB
+    for bb_name in &func.block_order.clone() {
+        let bb = match func.blocks.get(bb_name) {
+            Some(b) => b,
+            None => continue,
+        };
+        // phi 节点
+        for phi in &bb.phis {
+            let pname = phi.dest.name();
+            def_pos.entry(pname.clone()).or_insert(pos);
+            for (_, pred) in &phi.incoming {
+                // phi 操作数在前驱 BB 末尾使用
+                if let Some(&last) = last_use_pos.get(pred) {
+                    if pos > last {
+                        // 保持已有 last_use
+                    } else {
+                        last_use_pos.insert(pred.clone(), pos);
+                    }
+                } else {
+                    last_use_pos.insert(pred.clone(), pos);
+                }
+            }
+            pos += 1;
+        }
+        // 普通指令
+        for inst in &bb.insts {
+            // 跳过 pass hint 指令
+            if let InstKind::Store {
+                e: Operand::SymAddr(name),
+                ..
+            } = &inst.kind
+            {
+                if name.starts_with("__dcc_") {
+                    continue;
+                }
+            }
+            // 记录操作数使用位置
+            record_operand_use(&inst.kind, pos, &mut last_use_pos);
+            // 记录定义位置
+            if let Some(d) = &inst.dest {
+                def_pos.entry(d.name()).or_insert(pos);
+            }
+            pos += 1;
+        }
+        // terminator 操作数
+        record_term_use(&bb.term, pos, &mut last_use_pos);
+        pos += 1;
+    }
+
+    // 统计 asm 寄存器压力
     let mut asm_reg_pressure: usize = 0;
     for b in func.blocks.values() {
         for inst in &b.insts {
-            // asm memory barrier / memory clobber 标记: 每个标记代表一个
-            // asm 块占用的隐式寄存器 (mfence 等), 计入压力.
             if let InstKind::Store {
                 e: Operand::SymAddr(name),
                 ..
@@ -1190,24 +1273,107 @@ pub fn register_allocation(func: &mut Function) -> bool {
             {
                 if name.starts_with("__dcc_asm_") {
                     asm_reg_pressure += 1;
-                    continue;
                 }
             }
-            if let Some(d) = &inst.dest {
-                ssa_vals.insert(d.name());
+        }
+    }
+
+    // ── 第 2 步: 构建活跃区间 ──
+    let mut intervals: Vec<LiveInterval> = Vec::new();
+    let all_names: HashSet<String> = def_pos.keys().cloned().collect();
+    for name in &all_names {
+        let start = *def_pos.get(name).unwrap_or(&0);
+        let end = *last_use_pos.get(name).unwrap_or(&start);
+        if end >= start {
+            intervals.push(LiveInterval {
+                name: name.clone(),
+                start,
+                end,
+                reg: None,
+                spilled: false,
+            });
+        }
+    }
+
+    // ── 第 3 步: 按起点排序 ──
+    intervals.sort_by_key(|i| i.start);
+
+    // ── 第 4 步: 线性扫描分配 ──
+    let available_regs = (NUM_PHYS_REGS as usize).saturating_sub(asm_reg_pressure);
+    let available_regs = available_regs.max(1); // 至少 1 个寄存器
+    let mut free_regs: Vec<u8> = (0..available_regs as u8).collect();
+    let mut active: Vec<usize> = Vec::new(); // intervals 索引
+    let mut spilled_count: usize = 0;
+    let mut allocated_count: usize = 0;
+
+    for i in 0..intervals.len() {
+        let cur_start = intervals[i].start;
+
+        // 过期: 释放 end < cur_start 的活跃区间寄存器
+        let mut j = 0;
+        while j < active.len() {
+            let ai = active[j];
+            if intervals[ai].end < cur_start {
+                if let Some(r) = intervals[ai].reg {
+                    free_regs.push(r);
+                }
+                active.swap_remove(j);
+            } else {
+                j += 1;
             }
         }
-        for phi in &b.phis {
-            ssa_vals.insert(phi.dest.name());
+
+        // 尝试分配寄存器
+        if !free_regs.is_empty() {
+            let reg = free_regs.pop().unwrap();
+            intervals[i].reg = Some(reg);
+            allocated_count += 1;
+            active.push(i);
+        } else {
+            // 溢出: 选 active 中 end 最大的区间溢出
+            let mut spill_idx = None;
+            let mut max_end = intervals[i].end;
+            for (k, &ai) in active.iter().enumerate() {
+                if intervals[ai].end > max_end {
+                    max_end = intervals[ai].end;
+                    spill_idx = Some(k);
+                }
+            }
+            if let Some(si) = spill_idx {
+                // 溢出 active 中 end 最大的, 把寄存器给当前区间
+                let ai = active[si];
+                let freed_reg = intervals[ai].reg.take().unwrap();
+                intervals[ai].spilled = true;
+                intervals[ai].reg = None;
+                spilled_count += 1;
+                intervals[i].reg = Some(freed_reg);
+                allocated_count += 1;
+                active[si] = i;
+            } else {
+                // 当前区间直接溢出
+                intervals[i].spilled = true;
+                spilled_count += 1;
+            }
         }
     }
-    let reg_count = ssa_vals.len();
-    if reg_count == 0 {
+
+    let total_vals = intervals.len();
+    if total_vals == 0 {
         return false;
     }
-    // 在 entry BB 插入 regalloc hint, 包含寄存器数量和 asm 压力
-    let total_pressure = reg_count + asm_reg_pressure;
+
+    // ── 第 5 步: 插入 regalloc hint ──
+    // 编码: total_pressure = (total_vals << 16) | (allocated << 8) | spilled
+    let total_pressure =
+        ((total_vals as u32) << 16) | ((allocated_count as u32) << 8) | (spilled_count as u32);
     if let Some(entry) = func.blocks.get_mut(&func.entry) {
+        // 移除旧的 regalloc hint (如果存在)
+        entry.insts.retain(|inst| {
+            !matches!(&inst.kind, InstKind::Store {
+                e: Operand::SymAddr(name),
+                ..
+            } if name == "__dcc_regalloc_done")
+        });
         entry.insts.insert(
             0,
             Inst {
@@ -1222,6 +1388,111 @@ pub fn register_allocation(func: &mut Function) -> bool {
         return true;
     }
     false
+}
+
+/// 记录指令操作数的使用位置。
+fn record_operand_use(
+    kind: &InstKind,
+    pos: u32,
+    last_use: &mut HashMap<String, u32>,
+) {
+    let mut record = |name: &str| {
+        let entry = last_use.entry(name.to_string()).or_insert(0);
+        if pos > *entry {
+            *entry = pos;
+        }
+    };
+    match kind {
+        InstKind::Bin { l, r, .. } => {
+            if let Operand::Var(v) = l {
+                record(&v.name());
+            }
+            if let Operand::Var(v) = r {
+                record(&v.name());
+            }
+        }
+        InstKind::Un { e, .. } | InstKind::Cast { e, .. } => {
+            if let Operand::Var(v) = e {
+                record(&v.name());
+            }
+        }
+        InstKind::AddrOf { base } => record(base),
+        InstKind::Load { e, .. } | InstKind::Store { e, .. } => {
+            if let Operand::Var(v) = e {
+                record(&v.name());
+            }
+        }
+        InstKind::Store { src, .. } => {
+            if let Operand::Var(v) = src {
+                record(&v.name());
+            }
+        }
+        InstKind::IndexLoad { arr, idx } | InstKind::IndexStore { arr, idx, .. } => {
+            if let Operand::Var(v) = arr {
+                record(&v.name());
+            }
+            if let Operand::Var(v) = idx {
+                record(&v.name());
+            }
+        }
+        InstKind::IndexStore { src, .. } => {
+            if let Operand::Var(v) = src {
+                record(&v.name());
+            }
+        }
+        InstKind::Call { callee, args, .. } => {
+            if let Operand::Var(v) = callee {
+                record(&v.name());
+            }
+            for a in args {
+                if let Operand::Var(v) = a {
+                    record(&v.name());
+                }
+            }
+        }
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
+            if let Operand::Var(v) = obj {
+                record(&v.name());
+            }
+        }
+        InstKind::MemberStore { src, .. } => {
+            if let Operand::Var(v) = src {
+                record(&v.name());
+            }
+        }
+        InstKind::Select { cond, then_, else_ } => {
+            if let Operand::Var(v) = cond {
+                record(&v.name());
+            }
+            if let Operand::Var(v) = then_ {
+                record(&v.name());
+            }
+            if let Operand::Var(v) = else_ {
+                record(&v.name());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 记录 terminator 操作数的使用位置。
+fn record_term_use(
+    term: &Terminator,
+    pos: u32,
+    last_use: &mut HashMap<String, u32>,
+) {
+    let mut record = |name: &str| {
+        let entry = last_use.entry(name.to_string()).or_insert(0);
+        if pos > *entry {
+            *entry = pos;
+        }
+    };
+    match term {
+        Terminator::Ret { val: Some(Operand::Var(v)) } => record(&v.name()),
+        Terminator::Branch { cond: Operand::Var(v), .. } => record(&v.name()),
+        Terminator::SwitchTable { idx: Operand::Var(v), .. } => record(&v.name()),
+        _ => {}
+    }
 }
 
 // =====================================================================
@@ -2175,6 +2446,7 @@ mod tests {
     use super::*;
     use crate::ast::*;
     use crate::diagnostics::Span;
+    use crate::ssa::{Function, Inst, InstKind, Operand, SsaVar};
 
     fn span() -> Span {
         Span::point("t.c", 1, 1)
@@ -3000,5 +3272,115 @@ mod tests {
             bb.insts.len(), 1,
             "asm with memory clobber must be preserved"
         );
+    }
+
+    // ── P12 register_allocation tests ──
+
+    #[test]
+    fn regalloc_empty_func_returns_false() {
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("empty".into(), Type::Void, span);
+        assert!(!register_allocation(&mut f));
+    }
+
+    #[test]
+    fn regalloc_single_param_inserts_hint() {
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("foo".into(), Type::Int, span.clone());
+        f.params.push(SsaVar {
+            base: "x".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        });
+        // x_0 used in a binop
+        let bb = f.blocks.get_mut("entry").unwrap();
+        bb.insts.push(Inst {
+            dest: Some(SsaVar {
+                base: "t".into(),
+                version: 1,
+                ty: Type::Int,
+                span: span.clone(),
+            }),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::Var(f.params[0].clone()),
+                r: Operand::Int(1),
+            },
+            span: span.clone(),
+        });
+        assert!(register_allocation(&mut f));
+        // entry BB 第一条指令应该是 regalloc hint
+        let entry = f.blocks.get("entry").unwrap();
+        assert!(!entry.insts.is_empty());
+        match &entry.insts[0].kind {
+            InstKind::Store {
+                e: Operand::SymAddr(name),
+                src: Operand::Int(val),
+            } => {
+                assert_eq!(name, "__dcc_regalloc_done");
+                // val 编码: (total << 16) | (alloc << 8) | spill
+                let total = (*val >> 16) & 0xFFFF;
+                assert!(total > 0, "should have at least 1 SSA value");
+            }
+            other => panic!("expected regalloc hint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn regalloc_many_vals_causes_spill() {
+        // 创建超过 NUM_PHYS_REGS (14) 个 SSA 值, 验证溢出计数 > 0
+        let span = Span::point("test.c", 1, 1);
+        let mut f = Function::new("big".into(), Type::Int, span.clone());
+        // 16 个参数 (超过 14 个物理寄存器)
+        for i in 0..16u32 {
+            f.params.push(SsaVar {
+                base: format!("p{}", i),
+                version: 0,
+                ty: Type::Int,
+                span: span.clone(),
+            });
+        }
+        let bb = f.blocks.get_mut("entry").unwrap();
+        // 使用所有参数: t = p0 + p1 + ... + p15
+        let mut cur = Operand::Var(f.params[0].clone());
+        for i in 1..16u32 {
+            let dest = SsaVar {
+                base: "t".into(),
+                version: i,
+                ty: Type::Int,
+                span: span.clone(),
+            };
+            let rhs = Operand::Var(f.params[i as usize].clone());
+            bb.insts.push(Inst {
+                dest: Some(dest.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: cur,
+                    r: rhs,
+                },
+                span: span.clone(),
+            });
+            cur = Operand::Var(dest);
+        }
+        assert!(register_allocation(&mut f));
+        let entry = f.blocks.get("entry").unwrap();
+        match &entry.insts[0].kind {
+            InstKind::Store {
+                e: Operand::SymAddr(name),
+                src: Operand::Int(val),
+            } => {
+                assert_eq!(name, "__dcc_regalloc_done");
+                let spilled = *val & 0xFF;
+                let allocated = (*val >> 8) & 0xFF;
+                assert!(
+                    spilled > 0 || allocated >= 14,
+                    "16 vals with 14 regs should cause spill or full alloc: spilled={}, alloc={}",
+                    spilled,
+                    allocated
+                );
+            }
+            other => panic!("expected regalloc hint, got {:?}", other),
+        }
     }
 }

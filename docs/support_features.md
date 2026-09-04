@@ -24,6 +24,12 @@
 | Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/io_delay.o`、`fair.o`、`clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
 | CI/examples 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `examples/*/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 examples 引用并要求文件存在 |
 
+## 优化器
+
+| 特性 | 说明 |
+|------|------|
+| 线性扫描寄存器分配 (P12) | `-O3` 启用; 计算每个 SSA 值的活跃区间 `[def_pos, last_use_pos]`, 按起点排序后扫描分配 14 个通用寄存器 (x86-64), 考虑 asm 寄存器压力动态缩减可用池; 寄存器耗尽时溢出 active 中终点最远的区间; 结果以 `__dcc_regalloc_done` hint 编码 `(total<<16)|(alloc<<8)|spill` 写入 entry BB, codegen 据此优化物理寄存器分配; 支持 phi 节点/terminator 使用位置追踪 |
+
 ## Sanitizer 插桩
 
 | 通道 | 能力 |
