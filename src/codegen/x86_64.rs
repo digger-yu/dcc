@@ -11872,15 +11872,16 @@ impl Codegen {
 
     /// `add/sub dst, imm32` (0x81 /0 add, 0x81 /5 sub)。
     fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
-        let modrm_base = if is_inc {
-            0xC0u8 | ((dst & 7) << 3)
+        // ModRM: mod=11, reg=opcode extension (/0=add, /5=sub), r/m=dst register
+        let modrm = if is_inc {
+            0xC0 | (dst & 7)        // /0 (ADD): reg=000, r/m=dst&7
         } else {
-            0xE8u8 | ((dst & 7) << 3)
+            0xE8 | (dst & 7)        // /5 (SUB): reg=101, r/m=dst&7
         };
         if dst < 8 {
-            self.emit(&[0x48, 0x81, modrm_base]);
+            self.emit(&[0x48, 0x81, modrm]);
         } else {
-            self.emit(&[0x49, 0x81, modrm_base]);
+            self.emit(&[0x49, 0x81, modrm]);
         }
         self.emit(&step.to_le_bytes());
     }
