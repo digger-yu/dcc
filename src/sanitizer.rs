@@ -1643,6 +1643,17 @@ fn chain_mem_checks(checks: Vec<Expr>, inner: Expr, span: &Span, ty: Type) -> Ex
 
 /// 根据当前启用的 sanitizer 生成内存访问检查调用列表 (按序执行)。
 ///
+/// 5.3 注: KCSAN 使用完全独立的专用路径，不依赖 KASAN:
+/// - KCSAN kernel mode: `__kcsan_check_access(addr, size, is_write)`
+///   三参调用，LLVM runtime 签名 (const volatile void*, size_t, int)。
+/// - KCSAN user mode (TSan): `__tsan_readN/writeN(addr)` 或
+///   `__tsan_read_range/write_range(addr, size)` libtsan 兼容接口。
+/// - KASAN: 独立的 `__asan_loadN/storeN` 或内联 shadow 检查。
+///
+/// 当仅启用 KCSAN 时 (kasan=false)，不会发射任何 __asan_* 调用。
+/// 当同时启用 KCSAN + KASAN 时，两组调用都会发射 (线程安全 + 内存安全)。
+/// KCSAN 初始化也使用独立的 `__kcsan_init` / `__tsan_init`，不复用 KASAN。
+///
 /// - ThreadSanitizer user mode: `__tsan_readN/writeN(addr)` or
 ///   `__tsan_read_range/write_range(addr, size)`.
 /// - KCSAN kernel mode: `__kcsan_check_access(addr, size, is_write)`.
