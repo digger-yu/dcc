@@ -368,6 +368,14 @@ C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
 - 普通标量值使用 `rax`，`__int128` 使用 `rax:rdx`（低 64 位在 `rax`）。
   16 字节整数按 SysV ABI 分类为两个 `INTEGER` 类，函数调用占两个 GP
   参数槽（`rdi/rsi/...` 或栈），返回值同样在 `rax:rdx`。
+- **聚合类型 ABI 分类**：完整实现 SysV AMD64 ABI 结构体/联合体分类
+  算法。`AbiClass` 枚举包含 `NoClass`/`Integer`/`Sse`/`SseUp`/`X87`/
+  `X87Up`/`ComplexX87`/`Memory` 八种类别。算法分三阶段：(1) 初始化
+  所有 eightbyte 为 NoClass，(2) 逐字段分类并合并（联合字段在同一
+  基址重叠合并），(3) 后处理：NoClass 填充转 Memory；若首 eightbyte
+  为 SSE 且其余均为 SSE/SSEUP 或无数据填充，填充转 SSEUP（向量延续）；
+  否则全部转 Memory。影响场景：对齐填充结构体、混合浮点/整数字段、
+  SIMD 向量成员、嵌套结构体/联合体、位域结构体。
 - 后端以 `r13` 作为稳定帧基址。嵌套函数调用通过 `r10` 传递静态链，
   被调函数保存父级 `r13` 后按已解析的父帧偏移访问捕获变量。
 - 简化 `va_list` 会在可变参数函数序言中按

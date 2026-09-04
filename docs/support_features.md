@@ -292,6 +292,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
+| x86_64 聚合类型 ABI 分类 | 完整 SysV AMD64 ABI 结构体/联合体分类算法: NoClass/Integer/Sse/SseUp/X87/X87Up/ComplexX87/Memory 八种类别; 三阶段算法 (初始化→逐字段分类合并→后处理); 覆盖对齐填充结构体、混合浮点/整数字段、SIMD 向量成员、嵌套结构体/联合体、位域; 测试: `tests/fixtures/c/struct_abi_extended.c` |
 | 聚合类型 by-ref | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate` / `Array` / `Complex`，local 参数传地址 |
 | 聚合类型 sret 返回 | 返回 > 16 字节时 caller 分配 `<sret>` local；aarch64 `memcpy_sp_to_x0`；riscv64 `memcpy_sp_to_a0`；aarch64 嵌套 sret 支持多层调用链 (gen_function 入口保存 x0 到 `<sret_ptr>`, return 时恢复) |
 | aarch64/riscv64 整数除/取模 | aarch64 `sdiv` + `msub`；riscv64 RV64M `div` / `rem` |
