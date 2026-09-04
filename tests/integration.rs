@@ -18362,6 +18362,85 @@ T max_val(T a, T b) { return a > b ? a : b; }
 // AArch64/RISC-V __atomic_* builtins and TLS tests
 // ============================================================================
 
+/// __atomic_thread_fence / __atomic_signal_fence compile and run on x86_64.
+/// Verifies that both fence builtins compile without errors and produce
+/// correct behaviour (fences are no-ops in single-threaded test).
+#[test]
+#[cfg(unix)]
+fn atomic_fence_builtins_run() {
+    let src = r#"
+int x = 0;
+int main(void) {
+    x = 42;
+    __atomic_thread_fence(5);  /* __ATOMIC_SEQ_CST = 5 */
+    __atomic_signal_fence(5);
+    return x == 42 ? 0 : 1;
+}
+"#;
+    let (out, exe) = run_compile_and_run("atomic-fence", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// AArch64: __atomic_thread_fence / __atomic_signal_fence cross-compile.
+#[test]
+fn aarch64_atomic_fence_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-fence-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-fence-{}.o", std::process::id()));
+    let src = r#"
+int main(void) {
+    __atomic_thread_fence(5);
+    __atomic_signal_fence(5);
+    return 0;
+}
+"#;
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
+               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(output.status.success(),
+        "aarch64 fence compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+}
+
+/// RISC-V: __atomic_thread_fence / __atomic_signal_fence cross-compile.
+#[test]
+fn riscv64_atomic_fence_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-rv64-fence-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-rv64-fence-{}.o", std::process::id()));
+    let src = r#"
+int main(void) {
+    __atomic_thread_fence(5);
+    __atomic_signal_fence(5);
+    return 0;
+}
+"#;
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
+               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(output.status.success(),
+        "riscv64 fence compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 243);
+}
+
 /// AArch64: __atomic_* builtins compile and produce valid ELF.
 /// Verifies that atomic load/store/exchange/fetch_add/sub/and/or/xor/
 /// compare_exchange all compile without errors for aarch64 target.

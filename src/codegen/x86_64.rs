@@ -19348,6 +19348,18 @@ impl Codegen {
                 self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
                 true
             }
+            "__atomic_thread_fence" => {
+                // args: (mem_order)
+                // Hardware memory barrier (mfence for all orders on x86_64)
+                self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+                true
+            }
+            "__atomic_signal_fence" => {
+                // args: (mem_order)
+                // Compiler barrier only — no hardware instruction needed.
+                // Without optimisation passes, no-op is sufficient.
+                true
+            }
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
     }

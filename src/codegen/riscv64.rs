@@ -2912,6 +2912,14 @@ impl Riscv64Codegen {
                 self.label(&l_done);
                 true
             }
+            "__atomic_thread_fence" => {
+                self.emit_fence();
+                true
+            }
+            "__atomic_signal_fence" => {
+                // Compiler barrier only, no hardware instruction
+                true
+            }
             _ => false,
         }
     }

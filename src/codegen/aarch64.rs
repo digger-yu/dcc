@@ -5432,6 +5432,15 @@ impl Aarch64Codegen {
                 self.label(&l_done);
                 true
             }
+            "__atomic_thread_fence" => {
+                // args: (mem_order)
+                self.emit_dmb_ish();
+                true
+            }
+            "__atomic_signal_fence" => {
+                // Compiler barrier only, no hardware instruction
+                true
+            }
             _ => false,
         }
     }
