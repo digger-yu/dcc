@@ -18969,6 +18969,31 @@ impl Codegen {
                 }
                 true
             }
+            "__atomic_fetch_nand" => {
+                // args: (ptr, val, order)
+                // new = ~(old & val) (NAND)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg, s| {
+                    cg.emit_and_rdx_rsi(s);
+                    match s {
+                        1 => cg.emit(&[0x40, 0xF6, 0xD2]), // not dl
+                        2 => cg.emit(&[0x66, 0xF7, 0xD2]), // not dx
+                        4 => cg.emit(&[0xF7, 0xD2]),       // not edx
+                        _ => cg.emit(&[0x48, 0xF7, 0xD2]), // not rdx
+                    }
+                });
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
+                if dst != 1 {
+                    self.mov(dst, 1);
+                }
+                true
+            }
             "__atomic_compare_exchange_n" => {
                 // args: (ptr, expected, desired, weak, success_order, failure_order)
                 if args.len() < 3 {

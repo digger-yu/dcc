@@ -18387,6 +18387,79 @@ int main(void) {
     let _ = fs::remove_file(&exe);
 }
 
+/// __atomic_fetch_nand compiles and runs on x86_64.
+/// Verifies NAND semantics: old = *ptr; *ptr = ~(old & val); return old.
+#[test]
+#[cfg(unix)]
+fn atomic_fetch_nand_run() {
+    let src = r#"
+int x = 0x0F;
+int main(void) {
+    int old = __atomic_fetch_nand(&x, 0xFF, 5);
+    if (old != 0x0F) return 1;
+    if (x != (int)(~(0x0F & 0xFF))) return 2;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("atomic-nand", src);
+    assert!(out.status.success(),
+        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// AArch64: __atomic_fetch_nand cross-compile.
+#[test]
+fn aarch64_atomic_fetch_nand_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-nand-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-nand-{}.o", std::process::id()));
+    let src = r#"
+int x = 0;
+int main(void) {
+    __atomic_fetch_nand(&x, 0xFF, 0);
+    return 0;
+}
+"#;
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
+               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(output.status.success(),
+        "aarch64 nand compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
+/// RISC-V: __atomic_fetch_nand cross-compile.
+#[test]
+fn riscv64_atomic_fetch_nand_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-rv64-nand-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-rv64-nand-{}.o", std::process::id()));
+    let src = r#"
+int x = 0;
+int main(void) {
+    __atomic_fetch_nand(&x, 0xFF, 0);
+    return 0;
+}
+"#;
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
+               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(output.status.success(),
+        "riscv64 nand compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
 /// AArch64: __atomic_thread_fence / __atomic_signal_fence cross-compile.
 #[test]
 fn aarch64_atomic_fence_cross_compile() {

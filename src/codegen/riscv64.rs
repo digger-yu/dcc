@@ -2822,6 +2822,26 @@ impl Riscv64Codegen {
                 self.emit_amoxor(sz, 10, 12, 11);
                 true
             }
+            "__atomic_fetch_nand" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12); // a2 = val
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                let l_retry = self.fresh_label("atomic_nand");
+                let l_done = self.fresh_label("atomic_nand_done");
+                self.label(&l_retry);
+                self.emit_lr(sz, 10, 11);    // a0 = old
+                self.emit_and(13, 10, 12);    // a3 = old & val
+                self.emit_xori(13, 13, -1);   // a3 = ~(old & val)
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &l_retry);
+                self.label(&l_done);
+                true
+            }
             "__atomic_compare_exchange_n" => {
                 // args: (ptr, expected, desired, weak, success_order, failure_order)
                 if args.len() < 3 {

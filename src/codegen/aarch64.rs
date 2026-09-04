@@ -5346,6 +5346,25 @@ impl Aarch64Codegen {
                 self.label(&l_done);
                 true
             }
+            "__atomic_fetch_nand" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mov_x_reg(2, 0); // x2 = ptr
+                self.gen_expr(&args[1]);
+                self.mov_x_reg(1, 0); // x1 = val
+                let l_retry = self.fresh_label("atomic_nand");
+                let l_done = self.fresh_label("atomic_nand_done");
+                self.label(&l_retry);
+                self.emit_ldaxr(sz, 0, 2);     // x0 = old
+                self.emit_and_x_reg(3, 0, 1);  // x3 = old & val
+                self.emit_mvn_x(3, 3);         // x3 = ~(old & val)
+                self.emit_stlxr(sz, 4, 3, 2);
+                self.emit_cbnz(4, &l_retry);
+                self.label(&l_done);
+                // x0 = old value
+                true
+            }
             "__atomic_compare_exchange_n" => {
                 // args: (ptr, expected, desired, weak, success_order, failure_order)
                 if args.len() < 3 {
