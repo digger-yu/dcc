@@ -1,0 +1,49 @@
+name: GCC Torture Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  torture-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build dcc
+        run: cargo build --release
+
+      - name: Download GCC torture suite
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://gcc.gnu.org/git/gcc.git tests/gcc-torture
+          cd tests/gcc-torture && git sparse-checkout set \
+            gcc/testsuite/gcc.c-torture/execute \
+            gcc/testsuite/gcc.c-torture/compile \
+            gcc/testsuite/gcc.dg
+
+      - name: Run compile tests
+        run: |
+          bash scripts/torture_compile_test.sh 2>&1 | tee compile_test.log || true
+
+      - name: Run execute tests
+        run: |
+          bash scripts/torture_execute_test.sh 2>&1 | tee execute_test.log || true
+
+      - name: Generate summary
+        if: always()
+        run: bash scripts/torture_summary.sh compile_test.log execute_test.log >> "$GITHUB_STEP_SUMMARY"
