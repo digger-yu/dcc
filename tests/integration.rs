@@ -6851,6 +6851,24 @@ int main(void) { return f(1e20f); }\n";
     let _ = fs::remove_file(&exe_path);
 }
 
+/// -ftrapv: 有符号取负溢出 (e.g. -INT_MIN) 应调用 __dcc_trapv_overflow.
+#[test]
+#[cfg(unix)]
+fn trapv_negation_overflow() {
+    // 用函数参数避免编译期常量折叠: x 在运行期为 INT_MIN
+    let source = "extern void exit(int);\n\
+void __dcc_trapv_overflow(void) {\n\
+    exit(99);\n\
+}\n\
+int negate(int x) { return -x; }\n\
+int get_int_min(void) { return -2147483647 - 1; }\n\
+int main(void) { return negate(get_int_min()); }\n";
+    let (_, run, log, exe_path) =
+        run_sanitized_binary("trapv-neg", source, &["-ftrapv"]);
+    assert_exit_code(&run, 99, &log);
+    let _ = fs::remove_file(&exe_path);
+}
+
 /// KCSAN 竞态: kernel-kcsan 路径链接后应调用访问检查 handler.
 #[test]
 #[cfg(unix)]

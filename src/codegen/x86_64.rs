@@ -2742,6 +2742,7 @@ impl Codegen {
                 JumpKind::Jb => 0x82,
                 JumpKind::Ja => 0x87,
                 JumpKind::Jns => 0x89,
+                JumpKind::Jo => 0x80,
                 _ => unreachable!(),
             };
             self.emit(&[0x0F, cc, 0, 0, 0, 0]);
@@ -8550,9 +8551,34 @@ impl Codegen {
                 self.gen_expr(e, dst);
                 match op {
                     UnOp::Neg => {
-                        // neg r64 (带 REX.W 确保 64 位操作, 避免 32 位零扩展问题)
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
+                        // neg r/m: 根据类型大小选择操作数尺寸。
+                        // 64 位类型用 REX.W; 32 位用 REX (无 .W); 
+                        // 16/8 位需要额外处理但当前仅覆盖 >= 32 位。
+                        let ty_size = e.ty().size();
+                        if ty_size >= 8 {
+                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
+                        } else {
+                            // 32 位: REX 前缀无 .W (0x40 + REX.B)
+                            let rex = 0x40 | if dst >= 8 { 0x44 } else { 0 };
+                            self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
+                        }
+                        // -ftrapv: 有符号取负溢出检查 (e.g. -INT_MIN)
+                        // neg 在操作数为类型最小值时置 OF=1
+                        if self.trapv && Self::is_signed_int(&e.ty()) {
+                            let trap_label = self.fresh_label();
+                            let ok = self.fresh_label();
+                            self.jmp_rel32(&trap_label, JumpKind::Jo);
+                            self.jmp_rel32(&ok, JumpKind::Jmp);
+                            self.label(&trap_label);
+                            self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32
+                            let call_at = self.code.len() as u64 - 4;
+                            self.pending_func_rels.push((
+                                call_at,
+                                "__dcc_trapv_overflow".to_string(),
+                            ));
+                            self.label(&ok);
+                        }
                     }
                     UnOp::Not => {
                         // 逻辑非: !x = (x == 0) ? 1 : 0
