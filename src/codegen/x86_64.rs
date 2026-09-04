@@ -11586,7 +11586,10 @@ impl Codegen {
         }
         if let Expr::Ident { name, .. } = lv {
             // 全局变量: 使用 RIP-relative 寻址读-改-写
-            if self.globals.contains_key(&name.name) {
+            // 必须排除同名局部变量 (C 作用域: 局部遮蔽全局)
+            if self.globals.contains_key(&name.name)
+                && !self.is_local_name(&name.name)
+            {
                 // 全局变量 inc/dec: 读-改-写 via RIP-relative
                 // 1. 加载当前值到 rax
                 self.emit_global_addr(0, &name.name); // rax = &c

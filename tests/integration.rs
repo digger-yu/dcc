@@ -3547,6 +3547,21 @@ fn ternary_ptr_deref_compiles() {
     );
 }
 
+/// 三元表达式中 post-increment 副作用须正确;
+/// 局部变量遮蔽全局时 gen_inc_dec 走栈路径而非 RIP-relative。
+/// GCC torture 20000715-1.c
+#[test]
+#[cfg(unix)]
+fn ternary_side_effects_local_shadows_global() {
+    let src = include_str!("fixtures/c/ternary_side_effects.c");
+    let (out, _exe) = run_compile_and_run("ternary-side-effects", src);
+    assert!(
+        out.status.success(),
+        "ternary_side_effects compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {
