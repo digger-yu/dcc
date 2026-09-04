@@ -178,6 +178,12 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__sync_lock_test_and_set` | xchg |
 | `__sync_lock_release` | mov [ptr], 0 |
 | `__sync_synchronize` | mfence |
+| `__atomic_thread_fence` | mfence (x86_64) / DMB ISH (aarch64) / FENCE (riscv64) |
+| `__atomic_signal_fence` | no-op (编译器屏障) |
+| `__atomic_fetch_nand` | CAS loop: AND + NOT |
+| `__atomic_test_and_set` | lock xchg / LDAXR+STLXR / AMOSWAP |
+| `__atomic_clear` | mov [ptr], 0 / STLR 0 / store 0 |
+| `__atomic_is_lock_free` | 常量折叠为 1 (所有标准整数尺寸均无锁) |
 | `__builtin_alloca_uninitialized` | 同 alloca |
 | `__builtin_strcat` | 转发到 libc strcat |
 | `__builtin_warning` | 返回 0 |
@@ -284,8 +290,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 架构 | 状态 | 说明 |
 |------|------|------|
 | x86_64 | ✅ 完整 | 主后端 |
-| aarch64 | ✅ 完整（compile/ELF 层） | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) + `__atomic_*` 内建函数 (LDAR/STLR/LDAXR/STLXR 原子指令) |
-| riscv64 | ✅ 完整（compile/ELF 层） | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 + `__atomic_*` 内建函数 (AMO/LR/SC 原子指令) + TLS Local Exec 支持 (tp 寄存器) |
+| aarch64 | ✅ 完整（compile/ELF 层） | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) + `__atomic_*`/`__sync_*` 内建函数 (LDAR/STLR/LDAXR/STLXR 原子指令) |
+| riscv64 | ✅ 完整（compile/ELF 层） | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 + `__atomic_*`/`__sync_*` 内建函数 (AMO/LR/SC 原子指令) + TLS Local Exec 支持 (tp 寄存器) |
 | mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
 | mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 64-bit LD/SD 指令 + 帧布局适配 |
 | arm | ✅ 完整 | ELF32, little-endian, ARM AAPCS; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |

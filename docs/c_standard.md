@@ -89,6 +89,9 @@ DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process
   add_and_fetch/sub_and_fetch/or_and_fetch/and_and_fetch/xor_and_fetch/nand_and_fetch、
   bool_compare_and_swap、val_compare_and_swap、lock_test_and_set、
   lock_release、synchronize）
+- `__atomic_*` 原子内建函数（load_n、store_n、exchange_n、
+  fetch_add/sub/and/or/xor/nand、compare_exchange_n、compare_exchange、
+  thread_fence、signal_fence、test_and_set、clear、is_lock_free）
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
 - `__VA_ARGS__` 可变参数宏
