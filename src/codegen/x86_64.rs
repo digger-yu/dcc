@@ -8614,14 +8614,20 @@ impl Codegen {
                 match op {
                     UnOp::Neg => {
                         // neg r/m: 根据类型大小选择操作数尺寸。
-                        // 64 位类型用 REX.W; 32 位用 REX (无 .W); 
+                        // 64 位类型用 REX.W; 32 位有符号也用 REX.W
+                        // (寄存器保存符号扩展值, 32 位 neg 会破坏上 32 位);
+                        // 32 位无符号用 REX (无 .W) 保持零扩展;
                         // 16/8 位需要额外处理但当前仅覆盖 >= 32 位。
                         let ty_size = e.ty().size();
-                        if ty_size >= 8 {
+                        let is_signed = Self::is_signed_int(&e.ty());
+                        if ty_size >= 8 || (ty_size >= 4 && is_signed) {
+                            // 64-bit neg: 对有符号 32+ 位类型,
+                            // 寄存器值已符号扩展到 64 位, 必须用
+                            // REX.W neg 保持上 32 位一致
                             let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                             self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                         } else {
-                            // 32 位: REX 前缀无 .W (0x40 + REX.B)
+                            // 32 位无符号: REX 前缀无 .W
                             let rex = 0x40 | if dst >= 8 { 0x44 } else { 0 };
                             self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                         }
