@@ -2115,57 +2115,6 @@ fn alignment_check_handler(ptr: &Expr, span: &Span) -> Expr {
     }
 }
 
-/// 把 `expr` 包成 `((ptr & (align-1)) != 0 ? align_handler(ptr) : 0, expr)`。
-/// 当 `ptr` 的低位不满足类型对齐要求时触发 UBSAN handler。
-/// 此检查同时覆盖空指针 (NULL & (align-1) == 0 当 align > 1 时
-/// 不成立 — 实际上 0 & anything == 0, 所以空指针时条件为 false)。
-/// 因此 align > 1 时额外保留 null check 以正确报告空指针解引用。
-fn wrap_with_alignment_check(expr: &Expr, ptr: &Expr, align: usize, span: &Span) -> Expr {
-    let inner_ty = expr.ty();
-    let mask = (align - 1) as i128;
-    // ptr & (align - 1)
-    let and_expr = Expr::Binop {
-        op: BinOp::And,
-        l: Box::new(ptr.clone()),
-        r: Box::new(Expr::Int {
-            v: mask,
-            span: span.clone(),
-            ty: Type::Int,
-        }),
-        span: span.clone(),
-        ty: Type::Int,
-    };
-    // (ptr & (align-1)) != 0
-    let cond = Expr::Binop {
-        op: BinOp::Ne,
-        l: Box::new(and_expr),
-        r: Box::new(Expr::Int {
-            v: 0,
-            span: span.clone(),
-            ty: Type::Int,
-        }),
-        span: span.clone(),
-        ty: Type::Int,
-    };
-    let align_check = Expr::Cond {
-        cond: Box::new(cond),
-        then_: Box::new(alignment_check_handler(ptr, span)),
-        else_: Box::new(Expr::Int {
-            v: 0,
-            span: span.clone(),
-            ty: Type::Int,
-        }),
-        span: span.clone(),
-        ty: Type::Int,
-    };
-    Expr::Comma {
-        l: Box::new(align_check),
-        r: Box::new(expr.clone()),
-        span: span.clone(),
-        ty: inner_ty,
-    }
-}
-
 /// 把 `expr` 包成 `(ptr == 0 ? null_check : 0, expr)`。
 /// 当 `align > 1` 时额外插入对齐检查: 若指针地址不满足类型
 /// 对齐要求, 调用 `__ubsan_handle_type_mismatch_v1(ptr)`。
