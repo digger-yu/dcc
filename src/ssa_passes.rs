@@ -1420,17 +1420,20 @@ fn record_operand_use(
             }
         }
         InstKind::AddrOf { base } => record(base),
-        InstKind::Load { e, .. } | InstKind::Store { e, .. } => {
+        InstKind::Load { e, .. } => {
             if let Operand::Var(v) = e {
                 record(&v.name());
             }
         }
-        InstKind::Store { src, .. } => {
+        InstKind::Store { e, src } => {
+            if let Operand::Var(v) = e {
+                record(&v.name());
+            }
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
         }
-        InstKind::IndexLoad { arr, idx } | InstKind::IndexStore { arr, idx, .. } => {
+        InstKind::IndexLoad { arr, idx } => {
             if let Operand::Var(v) = arr {
                 record(&v.name());
             }
@@ -1438,7 +1441,13 @@ fn record_operand_use(
                 record(&v.name());
             }
         }
-        InstKind::IndexStore { src, .. } => {
+        InstKind::IndexStore { arr, idx, src } => {
+            if let Operand::Var(v) = arr {
+                record(&v.name());
+            }
+            if let Operand::Var(v) = idx {
+                record(&v.name());
+            }
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
@@ -1453,12 +1462,15 @@ fn record_operand_use(
                 }
             }
         }
-        InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
+        InstKind::MemberLoad { obj, .. } => {
             if let Operand::Var(v) = obj {
                 record(&v.name());
             }
         }
-        InstKind::MemberStore { src, .. } => {
+        InstKind::MemberStore { obj, src, .. } => {
+            if let Operand::Var(v) = obj {
+                record(&v.name());
+            }
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
@@ -1546,8 +1558,17 @@ pub fn ubsan_ir_instrument(func: &mut Function) -> bool {
     changed
 }
 
-/// 为单条 SSA 指令生成 UBSAN guard (如果该指令可能 UB)。
-fn gen_ubsan_guard(kind: &InstKind, _dest: &SsaVar, span: &Span) -> Option<Inst> {
+/// 判断类型是否为有符号整数 (有符号溢出才是 UB, 无符号回绕是定义行为).
+fn is_signed_int_ty(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+    )
+}
+
+/// 为单条 SSA 指令生成 UBSAN guard (如果该指令可能 UB).
+fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> {
+    let dest_signed = is_signed_int_ty(&dest.ty);
     match kind {
         InstKind::Bin { op, l: _, r } => {
             let check_kind = match op {
@@ -1566,10 +1587,10 @@ fn gen_ubsan_guard(kind: &InstKind, _dest: &SsaVar, span: &Span) -> Option<Inst>
                     }
                     Some("shift_out_of_bounds")
                 }
-                // 有符号加法/减法/乘法: 溢出
-                BinOp::Add => Some("add_overflow"),
-                BinOp::Sub => Some("sub_overflow"),
-                BinOp::Mul => Some("mul_overflow"),
+                // 有符号加法/减法/乘法: 溢出 (无符号回绕是定义行为, 不检查)
+                BinOp::Add if dest_signed => Some("add_overflow"),
+                BinOp::Sub if dest_signed => Some("sub_overflow"),
+                BinOp::Mul if dest_signed => Some("mul_overflow"),
                 _ => None,
             };
             if let Some(kind_str) = check_kind {
@@ -1587,8 +1608,8 @@ fn gen_ubsan_guard(kind: &InstKind, _dest: &SsaVar, span: &Span) -> Option<Inst>
             None
         }
         InstKind::Un { op, e: _ } => {
-            // 取反: INT_MIN 取反溢出
-            if matches!(op, UnOp::Neg) {
+            // 取反: 仅对有符号整数, INT_MIN 取反溢出
+            if matches!(op, UnOp::Neg) && dest_signed {
                 return Some(Inst {
                     dest: None,
                     kind: InstKind::Store {

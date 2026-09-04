@@ -6087,6 +6087,9 @@ impl Codegen {
             let vec_reserve = 128;
             // 位域 RMW 临时槽: 预留 32 字节 (2 级嵌套, 每级 16 字节)
             let bf_rmw_reserve = 32;
+            // 嵌套函数 trampoline 空间: 预留 256 字节 (最多 8 个 trampoline, 每个 32 字节)
+            // 实际 trampoline 代码在代码生成阶段按需写入栈帧
+            let tramp_reserve = 256;
             // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
             let hdr = 48 + temp_slots * 8;
             let raw = var_bytes
@@ -6095,6 +6098,7 @@ impl Codegen {
                 + va_slots
                 + vec_reserve
                 + bf_rmw_reserve
+                + tramp_reserve
                 + self.stack_reserve_bytes();
             self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
             self.vec_temp_off = -self.frame_size + va_slots + sc_slot + 8;
@@ -6216,7 +6220,8 @@ impl Codegen {
             let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
             // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
             let hdr = 48 + temp_slots * 8;
-            let raw = var_bytes + hdr + 128 + self.stack_reserve_bytes();
+            let tramp_reserve = 256; // 嵌套函数 trampoline 空间
+            let raw = var_bytes + hdr + 128 + tramp_reserve + self.stack_reserve_bytes();
             self.frame_size = ((raw + 15) / 16) * 16;
             self.vec_temp_off = -self.frame_size + 8;
             if self.frame_size > 0 {
@@ -18992,11 +18997,11 @@ impl Codegen {
                 self.emit(&[0xC1, 0xE8, 0x07]); // shr eax, 7
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 // 清除屏蔽位 (启用陷阱): 屏蔽位在 7-12
-                self.emit(&[0x89, 0xD6]); // mov esi, edx (save)
-                self.emit(&[0xC1, 0xE2, 0x07]); // shl edx, 7
-                self.emit(&[0x89, 0xD6]); // mov esi, edx
-                self.emit(&[0xF7, 0xDE]); // not esi
-                self.emit(&[0x21, 0xF1]); // and ecx, esi
+                // eax = excepts (from gen_expr above), copy to edx
+                self.emit(&[0x89, 0xC2]); // mov edx, eax (edx = excepts)
+                self.emit(&[0xC1, 0xE2, 0x07]); // shl edx, 7 (shift to mask position)
+                self.emit(&[0xF7, 0xD2]); // not edx (invert: clear bit = enable)
+                self.emit(&[0x21, 0xD1]); // and ecx, edx (clear mask bits in MXCSR)
                 self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
                 self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
                 self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
@@ -19016,23 +19021,25 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], 0); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
-                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x89, 0xC2]); // mov edx, eax (save excepts in edx)
+                self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
-                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
-                // 保存旧的启用掩码
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp] (ecx = MXCSR)
+                // 计算旧的启用掩码
                 self.emit(&[0x89, 0xC8]); // mov eax, ecx
                 self.emit(&[0xC1, 0xE8, 0x07]); // shr eax, 7
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                // 保存旧掩码到 [rsp+8]
+                self.emit(&[0x89, 0x44, 0x24, 0x08]); // mov [rsp+8], eax
                 // 设置屏蔽位 (禁用陷阱)
-                self.emit(&[0xC1, 0xE0, 0x07]); // shl eax_orig, 7 -- reuse
-                // 重新加载 excepts 到 edx
-                self.gen_expr(&args[0], 2); // rdx = excepts
-                self.emit(&[0x83, 0xE2, 0x3F]); // and edx, 0x3F
-                self.emit(&[0xC1, 0xE2, 0x07]); // shl edx, 7
-                self.emit(&[0x09, 0xD1]); // or ecx, edx
+                self.emit(&[0x89, 0xD0]); // mov eax, edx (eax = excepts)
+                self.emit(&[0xC1, 0xE0, 0x07]); // shl eax, 7
+                self.emit(&[0x09, 0xC1]); // or ecx, eax
                 self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
                 self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
-                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // 恢复旧掩码作为返回值
+                self.emit(&[0x8B, 0x44, 0x24, 0x08]); // mov eax, [rsp+8]
+                self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -19112,7 +19119,7 @@ impl Codegen {
         //   90 * N            padding 到 32 字节
         let tramp_names: Vec<String> = self.trampoline_slots.keys().cloned().collect();
         for name in &tramp_names {
-            let offset = self.trampoline_slots[name];
+            let _offset = self.trampoline_slots[name]; // reserved for stack write
             // 保存当前 code 位置
             let save_pos = self.pos();
             // lea rdx, [rsp] - 父帧指针
