@@ -306,6 +306,7 @@ pub struct Parser<'a> {
     opts: ParseOptions,
     shadow_counter: i32, // 嵌套块遮蔽重命名计数器
     parse_depth: u32,    // 递归深度计数器 (防止栈溢出)
+    paren_decl_ty: Option<Type>, // 括号化声明符的类型 (如 int *(p[25]))
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -349,6 +350,7 @@ impl<'a> Parser<'a> {
             opts,
             shadow_counter: 0,
             parse_depth: 0,
+            paren_decl_ty: None,
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
         // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
@@ -3525,13 +3527,80 @@ impl<'a> Parser<'a> {
         // __asm__ 后的 __attribute__: 如 var __asm__("name") __attribute__((visibility("hidden")))
         let pre_attrs = Self::merge_attrs(pre_attrs, self.parse_attributes());
         // 括号包函数名防宏展开: size_t (htab_size) (htab_t h)
+        // 也处理括号化声明符: int *(p[25]) 等价于 int *p[25]
         let name = if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
             self.advance(); // (
             let id = self.parse_ident()?;
-            if !self.expect(TokKind::RParen, "')'") {
-                return None;
+            // 检查是否是括号化声明符: (name[...]) 或 (name(...))
+            if self.cur.kind == TokKind::LBracket || self.cur.kind == TokKind::LParen {
+                // 括号化声明符: 恢复状态, 让后续逻辑处理
+                // 但我们需要先消费外层 (, 解析 name, 然后在 name 后处理 [ 或 (
+                // 不能简单恢复, 因为 ( 已消费. 改为: 直接在此处理数组/函数后缀
+                if self.cur.kind == TokKind::LBracket {
+                    // 括号化数组声明符: int *(p[25])
+                    // ty 已经是 int*, 需要包装为 array
+                    let mut arr_ty = ty.clone();
+                    let mut arr_sizes = Vec::new();
+                    while self.cur.kind == TokKind::LBracket {
+                        self.advance();
+                        let arr_size = if self.cur.kind != TokKind::RBracket {
+                            let e = self.parse_expr()?;
+                            if let Ok(v) = crate::const_eval::eval(&e) {
+                                ArraySize::Const(v.max(0) as usize)
+                            } else {
+                                match &e {
+                                    Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                                    _ => ArraySize::Var(Box::new(e)),
+                                }
+                            }
+                        } else {
+                            ArraySize::Const(0)
+                        };
+                        if !self.expect(TokKind::RBracket, "']'") {
+                            return None;
+                        }
+                        arr_sizes.push(arr_size);
+                    }
+                    for sz in arr_sizes.into_iter().rev() {
+                        arr_ty = Type::Array(Box::new(arr_ty.into()), sz);
+                    }
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    // 返回特殊标记: 使用空名, 但设置 ty 为数组类型
+                    // 后续代码会用 name_for_decl 和 ty
+                    // 我们需要一种方式把 arr_ty 传出去
+                    // 简单方案: 把 arr_ty 存到一个临时变量, 后面覆盖 ty
+                    // 但 ty 是函数参数... 改为: 返回 id, 并在外部处理
+                    // 实际上这里可以直接返回 id, 然后让后续 array 逻辑不再触发
+                    // 因为 array 已经在 parens 内解析完了
+                    // 但问题是 ty 不可变... 需要用 unsafe 或重构
+                    // 最简方案: 把解析完的 arr_ty 通过一个字段传出
+                    // 或者: 在此处直接构造 VarDecl 返回
+                    // 为了最小改动, 使用 self 的一个临时字段
+                    self.paren_decl_ty = Some(arr_ty);
+                    id
+                } else if self.cur.kind == TokKind::LParen {
+                    // 括号化函数声明符: int (name)(params)
+                    // 先消费内层 (, 解析参数, 然后期望 )
+                    // 但函数参数解析在后面统一处理, 这里只需消费外层 (
+                    // 让后续的 LParen 检查来处理函数参数
+                    // 问题: 外层 ( 已消费, 内层 ( 还在
+                    // 方案: 恢复状态, 不消费外层 (, 让后面逻辑处理
+                    // 但后面逻辑只处理 (name) 形式...
+                    // 改为: 消费外层 (, 解析 name, 然后让后续的 ( 检查处理函数参数
+                    // 即: 不消费内层 (, 直接返回 id, 后续代码会看到 ( 并处理
+                    id
+                } else {
+                    id
+                }
+            } else {
+                // 普通 (name) 形式
+                if !self.expect(TokKind::RParen, "')'") {
+                    return None;
+                }
+                id
             }
-            id
         } else if self.cur.kind == TokKind::LParen && self.peek.kind != TokKind::Star {
             // 无名函数定义: int () { ... } — IR 阶段报 E1002
             Ident {
@@ -3548,6 +3617,11 @@ impl<'a> Parser<'a> {
         self.parse_attributes();
         let sp = name.span.clone();
         let name_for_decl = name.clone();
+        // 括号化声明符: 如果 paren_decl_ty 被设置, 覆盖 ty
+        let mut ty = ty;
+        if let Some(paren_ty) = self.paren_decl_ty.take() {
+            ty = paren_ty;
+        }
         if self.cur.kind == TokKind::LParen {
             self.advance();
             let params = self.parse_params()?;
