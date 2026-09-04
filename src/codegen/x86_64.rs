@@ -10525,6 +10525,15 @@ impl Codegen {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
                 // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
                 // 支持 C99 brace elision: struct { int f[4]; } s = {1,2,3,4}
+                // C99: 未显式初始化的字段应零填充
+                let struct_size = ty.size();
+                if struct_size > 0 && struct_size <= 128 {
+                    // 零填充整个结构 (小结构逐字节, 大结构用 rep stosb)
+                    for i in 0..struct_size {
+                        self.mov_imm(0, 0i128);
+                        self.emit_store(0, base + i as i32, 1);
+                    }
+                }
                 let mut field_idx = 0;
                 // 跟踪已清零的位域容器偏移, 避免重复清零
                 let mut zeroed_containers: std::collections::HashSet<usize> = std::collections::HashSet::new();
