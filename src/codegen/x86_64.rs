@@ -10524,19 +10524,49 @@ impl Codegen {
             Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
                 // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
+                // 支持 C99 brace elision: struct { int f[4]; } s = {1,2,3,4}
                 let mut field_idx = 0;
                 // 跟踪已清零的位域容器偏移, 避免重复清零
                 let mut zeroed_containers: std::collections::HashSet<usize> = std::collections::HashSet::new();
-                for item in inits {
+                let mut init_idx = 0;
+                while init_idx < inits.len() {
+                    let item = &inits[init_idx];
                     // 提取字段信息: (offset, size, type, value, bit_width, bit_offset)
-                    let (off, sz, field_ty, value, bit_w, bit_o) = match item {
+                    let (off, sz, field_ty_opt, value, bit_w, bit_o) = match item {
                         InitItem::Expr(e) => {
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
+                                // Brace elision: 如果当前字段是聚合类型 (数组/结构体/联合体)
+                                // 但初始化值不是 InitList, 收集剩余标量值作为该字段的初始化器
+                                let is_agg_field = matches!(&f.ty, Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _));
+                                let is_plain_value = !matches!(e, Expr::InitList { .. });
+                                if is_agg_field && is_plain_value {
+                                    // 收集从这个字段开始的所有剩余标量 InitItem
+                                    let mut collected = Vec::new();
+                                    let mut j = init_idx;
+                                    while j < inits.len() {
+                                        if let InitItem::Expr(expr) = &inits[j] {
+                                            if !matches!(expr, Expr::InitList { .. }) {
+                                                collected.push(inits[j].clone());
+                                                j += 1;
+                                            } else {
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    // 用收集的初始化器递归初始化该聚合字段
+                                    self.gen_init_list_at(base + f.offset as i32, &f.ty, &collected);
+                                    field_idx += 1;
+                                    init_idx = j;
+                                    continue;
+                                }
                                 field_idx += 1;
                                 (f.offset, f.ty.size(), Some(f.ty.clone()), e,
                                  f.bit_width, f.bit_offset)
                             } else {
+                                init_idx += 1;
                                 continue;
                             }
                         }
@@ -10544,7 +10574,10 @@ impl Codegen {
                             // 链式 designator: resolve_designator 沿 .a.b.c 累积偏移
                             let resolved = match resolve_designator(ty, designator) {
                                 Some(r) => r,
-                                None => continue,
+                                None => {
+                                    init_idx += 1;
+                                    continue;
+                                }
                             };
                             // 查找位域信息 (处理直接字段和 designator 路径)
                             let (bf_w, bf_o) = if let InitItem::Designated { designator: d, .. } = item {
@@ -10565,8 +10598,9 @@ impl Codegen {
                     if let Expr::InitList { inits: nested, .. } = value {
                         // 嵌套初始化 (数组/结构体字段, 如 { int a[3] } = {{1,2,3}}):
                         // 递归展开字段初始化器, gen_expr 对 InitList 只输出 ud2+0
-                        if let Some(ft) = &field_ty {
+                        if let Some(ft) = &field_ty_opt {
                             self.gen_init_list_at(base + off as i32, ft, nested);
+                            init_idx += 1;
                             continue;
                         }
                     }
@@ -10574,7 +10608,7 @@ impl Codegen {
                     // 字符串初始化数组字段 (char c[8] = "val" / wchar_t w[4] = L"ab"):
                     // gen_expr(String) 返回 rodata 指针, 不能 emit_store (会存指针值);
                     // 改为整段清零后逐字节写内容 (C 6.7.9p14: 剩余元素补零).
-                    if let (Some(Type::Array(_, _)), Expr::String { data, .. }) = (&field_ty, value)
+                    if let (Some(Type::Array(_, _)), Expr::String { data, .. }) = (&field_ty_opt, value)
                     {
                         self.zero_mem(store_off, sz.max(1));
                         for (j, &b) in data.iter().enumerate() {
@@ -10662,7 +10696,7 @@ impl Codegen {
                         }
                     } else {
                         self.gen_expr(value, 0);
-                        if let Some(ft) = &field_ty {
+                        if let Some(ft) = &field_ty_opt {
                             if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_scalar_to_xmm0_if_needed(value, ft);
                                 if matches!(ft, Type::Float) {
@@ -10675,6 +10709,7 @@ impl Codegen {
                         }
                         self.emit_store(0, store_off, sz);
                     }
+                    init_idx += 1;
                 }
             }
             _ => {
