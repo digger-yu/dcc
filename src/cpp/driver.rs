@@ -83,6 +83,7 @@ pub fn compile_cpp(
         128,                                    /* macro_depth_limit */
         false,                                  /* trigraphs */
         false,                                  /* warn_undef */
+        0,                                      /* opt_level */
     );
     if !pp_out.diags.is_empty() {
         let mut out = Vec::new();

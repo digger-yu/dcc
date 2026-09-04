@@ -1221,7 +1221,7 @@ impl Lowering {
             } => {
                 let aggregate = if *is_arrow {
                     match base.ty() {
-                        Type::Ptr(inner) => inner.base.clone(),
+                        Type::Ptr(inner) | Type::Array(inner, _) => inner.base.clone(),
                         other => other,
                     }
                 } else {

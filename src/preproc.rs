@@ -504,6 +504,7 @@ pub fn preprocess(
     macro_depth_limit: usize,
     trigraphs: bool,
     warn_undef: bool,
+    opt_level: u8,
 ) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
@@ -653,7 +654,10 @@ pub fn preprocess(
     // GCC 兼容宏
     pp.define_builtin("__USER_LABEL_PREFIX__", "");
     pp.define_builtin("__VERSION__", "\"13.2.0\"");
-    pp.define_builtin("__OPTIMIZE__", "1");
+    // __OPTIMIZE__ 仅在启用优化时定义 (GCC 兼容)
+    if opt_level > 0 {
+        pp.define_builtin("__OPTIMIZE__", "1");
+    }
     pp.define_builtin("__NO_INLINE__", "1");
     // x86 段寄存器宏
     if matches!(target.arch, Arch::X86_64) {

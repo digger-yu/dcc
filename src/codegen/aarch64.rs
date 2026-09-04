@@ -1478,7 +1478,7 @@ impl Aarch64Codegen {
                         let child = &lhs.children[0];
                         let sn = match &child.ty {
                             ValueType::Aggregate { name, .. } => Some(name.clone()),
-                            ValueType::Pointer(inner) => {
+                            ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                                 if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                                     Some(name.clone())
                                 } else { None }
@@ -1769,7 +1769,7 @@ impl Aarch64Codegen {
                 // Look up field info
                 let struct_name = match &child.ty {
                     ValueType::Aggregate { name, .. } => Some(name.clone()),
-                    ValueType::Pointer(inner) => {
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                         if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                             Some(name.clone())
                         } else {
@@ -1945,7 +1945,7 @@ impl Aarch64Codegen {
                 // x0 = base address, add field offset
                 let struct_name = match &child.ty {
                     ValueType::Aggregate { name, .. } => Some(name.clone()),
-                    ValueType::Pointer(inner) => {
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                         if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                             Some(name.clone())
                         } else { None }

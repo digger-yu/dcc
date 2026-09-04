@@ -162,6 +162,7 @@ pub struct Codegen {
     nested_func_renames: HashMap<String, HashMap<String, String>>,
     nested_func_rename_counter: u32,
     current_func_name: String, // 当前正在编译的函数名
+    registered_static_locals: std::collections::HashSet<String>, // 本函数中成功注册为全局的 static 局部变量名
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
     current_func_is_nested: bool, // 当前编译的函数是否是嵌套函数
@@ -1400,6 +1401,7 @@ impl Codegen {
             nested_func_renames: HashMap::new(),
             nested_func_rename_counter: 0,
             current_func_name: String::new(),
+            registered_static_locals: std::collections::HashSet::new(),
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
             current_returns_nonnull: false,
@@ -4333,6 +4335,31 @@ impl Codegen {
             }
         }
 
+        // Static 局部变量符号: 在 self.globals 中但不在 prog.decls 中
+        for (name, g) in &self.globals {
+            if emitted_var_syms.contains(name.as_str()) {
+                continue;
+            }
+            if self.defined_funcs.contains(name.as_str()) {
+                continue;
+            }
+            // 跳过空名和外部引用 (section=UNDEF)
+            if name.is_empty() || g.section == SHN_UNDEF {
+                continue;
+            }
+            let sym = ElfSym {
+                name: name.clone(),
+                section: g.section,
+                value: g.offset,
+                size: g.size as u64,
+                bind: STB_LOCAL,
+                ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
+                visibility: STV_DEFAULT,
+            };
+            local_syms.push(sym);
+            emitted_var_syms.insert(name.clone());
+        }
+
         // extern 函数声明 (无函数体 = 外部引用, 排除 alias 声明)
         // 若本 TU 内有同名函数定义 (含 asm label 匹配), 则跳过 UND 符号
         let func_has_definition = |name: &str| -> bool {
@@ -5923,10 +5950,15 @@ impl Codegen {
         self.temp_slots = temp_slots;
         // KASAN 红区: 每个局部变量后追加 32 字节 (4 个 8 字节槽位)
         let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
+        // Static 局部变量: 注册到全局数据段 (.data/.bss), 不在栈上分配
+        self.registered_static_locals.clear();
+        if let Some(body) = &f.body {
+            self.registered_static_locals = self.register_static_locals_block(&body.items);
+        }
         if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.registered_static_locals);
             }
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
@@ -6225,7 +6257,7 @@ impl Codegen {
             }
         } else {
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.registered_static_locals);
             }
             // 包含 padding 条目, 每个占 8 字节
             let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
@@ -6286,6 +6318,9 @@ impl Codegen {
                 match item {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
+                        if v.is_static && self.registered_static_locals.contains(&v.name.name) {
+                            continue; // static 局部变量已在全局数据段分配
+                        }
                         if let Some(ref reg_name) = v.register_name {
                             if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
                                 self.reg_bindings.insert(v.name.name.clone(), reg_idx);
@@ -7086,15 +7121,23 @@ impl Codegen {
                 // 常量条件优化: if (1) 只生成 then, if (0) 只生成 else
                 // 这对 __compiletime_assert 等内核宏至关重要:
                 // 条件为真时不应生成对 __compiletime_assert_N 的调用
+                //
+                // 注意: 不能简单跳过死分支, 因为其中可能包含 goto 目标标签.
+                // 如果死分支含有标签, 必须正常生成该分支代码.
                 if let Ok(cv) = const_eval::eval(cond) {
+                    let has_labels_in_then = Self::stmt_contains_label(then_);
                     if cv != 0 {
                         // condition is true
                         self.gen_stmt(then_);
+                    } else if has_labels_in_then {
+                        // condition is false but then-body has labels that
+                        // external gotos may target — must generate it
+                        self.gen_stmt(then_);
                     } else if let Some(el) = else_ {
-                        // condition is false
+                        // condition is false, no labels in then-body
                         self.gen_stmt(el);
                     }
-                    // else: condition is false and no else branch → skip entirely
+                    // else: condition is false, no labels, no else → skip
                 } else {
                     self.gen_expr(cond, 0);
                     // 根据条件类型宽度选择 test 指令: 64 位类型必须用
@@ -7636,6 +7679,12 @@ impl Codegen {
                         return;
                     }
                     self.gen_float_binop(*op, l, r);
+                    // 浮点比较结果在 rax, 需要移动到 dst
+                    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne) {
+                        if dst != 0 {
+                            self.mov(0, dst);
+                        }
+                    }
                     return;
                 }
                 // SIMD 向量运算: 标量逐元素，结果写入帧临时区
@@ -13288,20 +13337,29 @@ impl Codegen {
                 }
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
+                // 确定比较的位宽: 如果两个操作数都是 32 位或更小, 使用 32 位比较
+                // 否则使用 64 位比较 (避免函数返回值高位垃圾数据问题)
+                let lt_size = lt.size();
+                let rt_size = rt.size();
+                let use_32bit = lt_size <= 4 && rt_size <= 4;
+                
                 // 无符号/混合符号比较: 零扩展操作数到 64 位.
                 // 混合比较时, 有符号操作数符号扩展 (高位为 1), 无符号操作数
                 // 零扩展 (高位为 0), 64 位 cmp 结果错误. 零扩展修正此问题.
-                if !is_signed {
+                if !is_signed && !use_32bit {
                     self.zero_extend_for_cmp(dst, lt);
                     self.zero_extend_for_cmp(src, rt);
                 }
-                let mut rex = 0x48u8;
+                let mut rex = if use_32bit { 0u8 } else { 0x48u8 };
                 if src >= 8 {
                     rex |= 0x44;
                 } else if dst >= 8 {
                     rex |= 0x41;
                 }
-                self.emit(&[rex, 0x39, 0xC0 | ((src & 7) << 3) | (dst & 7)]);
+                if rex != 0 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x39, 0xC0 | ((src & 7) << 3) | (dst & 7)]);
                 let cc = match op {
                     BinOp::Lt => {
                         if is_signed {
@@ -15825,16 +15883,186 @@ impl Codegen {
         n
     }
 
+    // 递归扫描函数体, 将 static 局部变量注册到全局数据段
+    // 返回成功注册的 static 局部变量名集合
+    fn register_static_locals_block(&mut self, items: &[BlockItem]) -> std::collections::HashSet<String> {
+        let mut registered = std::collections::HashSet::new();
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) if v.is_static => {
+                    if self.register_one_static_local(v) {
+                        registered.insert(v.name.name.clone());
+                    }
+                }
+                BlockItem::Stmt(s) => {
+                    let sub = self.register_static_locals_stmt(s);
+                    registered.extend(sub);
+                }
+                _ => {}
+            }
+        }
+        registered
+    }
+
+    fn register_static_locals_stmt(&mut self, s: &Stmt) -> std::collections::HashSet<String> {
+        let mut registered = std::collections::HashSet::new();
+        match s {
+            Stmt::Block { b, .. } => {
+                let sub = self.register_static_locals_block(&b.items);
+                registered.extend(sub);
+            }
+            Stmt::If { then_, else_, .. } => {
+                let sub1 = self.register_static_locals_stmt(then_);
+                registered.extend(sub1);
+                if let Some(e) = else_ {
+                    let sub2 = self.register_static_locals_stmt(e);
+                    registered.extend(sub2);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+                let sub = self.register_static_locals_stmt(body);
+                registered.extend(sub);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    let sub = self.register_static_locals_block(&case.body.items);
+                    registered.extend(sub);
+                }
+            }
+            Stmt::Label { stmt, .. } => {
+                let sub = self.register_static_locals_stmt(stmt);
+                registered.extend(sub);
+            }
+            _ => {}
+        }
+        registered
+    }
+
+    fn register_one_static_local(&mut self, v: &VarDecl) -> bool {
+        // 使用原名注册, 如果有冲突则跳过
+        if self.globals.contains_key(&v.name.name) {
+            return false; // 名称已被占用 (全局变量或另一个函数的 static local)
+        }
+        let sz = v.ty.size().max(1);
+        let align = v.alignment.unwrap_or(v.ty.align()).max(1);
+        let initialized = v.init.is_some();
+        // 如果有初始化式但无法在编译时求值, 跳过注册 (回退到栈分配)
+        if initialized {
+            let can_init = match v.init.as_ref().unwrap() {
+                Expr::String { .. } => true,
+                Expr::InitList { .. } => true, // 尝试, 可能失败
+                _ => {
+                    let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                    Self::global_init_bytes(v.init.as_ref().unwrap(), sz, is_float, matches!(v.ty, Type::Complex(_))).is_some()
+                }
+            };
+            if !can_init {
+                return false;
+            }
+        }
+        if initialized {
+            self.data_align = self.data_align.max(align as u64);
+        } else {
+            self.bss_align = self.bss_align.max(align as u64);
+        }
+        let offset = if initialized {
+            let off = (self.data_section.len() + align - 1) & !(align - 1);
+            while self.data_section.len() < off {
+                self.data_section.push(0);
+            }
+            self.data_section.len() as u64
+        } else {
+            self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
+            self.bss_size
+        };
+        // 尝试写入初始值 (与全局变量处理逻辑一致)
+        let has_init = if let Some(init) = &v.init {
+            match init {
+                Expr::String { data, .. } => {
+                    if matches!(&v.ty, Type::Ptr(_)) {
+                        // 指针: 字符串进 rodata, data 段写偏移
+                        // 简化: 直接将字符串地址写入 (需要在 resolve 时修补)
+                        // 这里先写零, 后续通过重定位修补
+                        self.data_section.resize(self.data_section.len() + sz, 0);
+                    } else if matches!(&v.ty, Type::Array(_, _)) {
+                        // 字符数组: 复制字符串内容, 剩余零填充
+                        let copy_len = data.len().min(sz);
+                        self.data_section.extend_from_slice(&data[..copy_len]);
+                        for _ in copy_len..sz {
+                            self.data_section.push(0);
+                        }
+                    } else {
+                        self.data_section.extend_from_slice(data);
+                        for _ in data.len()..sz {
+                            self.data_section.push(0);
+                        }
+                    }
+                    true
+                }
+                Expr::InitList { inits, .. } => {
+                    // struct/array 初始化: 使用 gen_global_init_list
+                    if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, None, false) {
+                        self.data_section.extend_from_slice(&init_data);
+                        for _ in init_data.len()..sz {
+                            self.data_section.push(0);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => {
+                    let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                    if let Some(bytes) = Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_))) {
+                        self.data_section.extend_from_slice(&bytes);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        } else {
+            false
+        };
+        if !has_init {
+            if initialized {
+                self.data_section.resize(self.data_section.len() + sz, 0);
+            } else {
+                self.bss_size += sz as u64;
+            }
+        }
+        self.globals.insert(
+            v.name.name.clone(),
+            GlobalVar {
+                offset,
+                size: sz,
+                ty: v.ty.clone(),
+                init: None,
+                section: if initialized { 3 } else { 4 },
+                is_tls: false,
+            },
+        );
+        true
+    }
+
     // 预注册所有局部变量到 var_map (数组分配多槽, 保证帧大小计算正确)
     fn pre_register_vars(
         var_map: &mut HashMap<String, (i32, Type)>,
         items: &[BlockItem],
         temp_slots: i32,
         kasan_rz_slots: i32,
+        registered_static: &std::collections::HashSet<String>,
     ) {
         for item in items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
+                    if v.is_static {
+                        // 只有成功注册为全局的 static 局部变量才跳过栈分配
+                        if registered_static.contains(&v.name.name) {
+                            continue;
+                        }
+                        // 未注册的 static local (名称冲突) 回退到栈分配
+                    }
                     let slots = v.ty.size().div_ceil(8).max(1) as i32;
                     let used: i32 = var_map.values().map(|_| 8).sum();
                     // KASAN 红区: 每个变量后追加 kasan_rz_slots 个 8 字节槽位
@@ -15860,7 +16088,7 @@ impl Codegen {
                     }
                 }
                 BlockItem::Stmt(s) => {
-                    Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots)
+                    Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots, registered_static)
                 }
                 _ => {}
             }
@@ -15871,23 +16099,24 @@ impl Codegen {
         s: &Stmt,
         temp_slots: i32,
         kasan_rz_slots: i32,
+        registered_static: &std::collections::HashSet<String>,
     ) {
         match s {
             Stmt::Block { b, .. } => {
-                Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots)
+                Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots, registered_static)
             }
             Stmt::If { then_, else_, .. } => {
-                Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots);
+                Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots, registered_static);
                 if let Some(e) = else_ {
-                    Self::pre_register_stmt(var_map, e, temp_slots, kasan_rz_slots);
+                    Self::pre_register_stmt(var_map, e, temp_slots, kasan_rz_slots, registered_static);
                 }
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-                Self::pre_register_stmt(var_map, body, temp_slots, kasan_rz_slots);
+                Self::pre_register_stmt(var_map, body, temp_slots, kasan_rz_slots, registered_static);
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    Self::pre_register_vars(var_map, &case.body.items, temp_slots, kasan_rz_slots);
+                    Self::pre_register_vars(var_map, &case.body.items, temp_slots, kasan_rz_slots, registered_static);
                 }
             }
             _ => {}
@@ -15935,6 +16164,28 @@ impl Codegen {
                 Self::stmt_ends_with_return(then_)
                     && else_.as_ref().is_some_and(|e| Self::stmt_ends_with_return(e))
             }
+            _ => false,
+        }
+    }
+
+    /// Check if a statement tree contains any label declarations.
+    /// Used to decide whether dead-code elimination of if(0) is safe:
+    /// if the dead branch has labels, external gotos may target them.
+    fn stmt_contains_label(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Label { .. } => true,
+            Stmt::Block { b, .. } => b.items.iter().any(|item| match item {
+                BlockItem::Stmt(s) => Self::stmt_contains_label(s),
+                _ => false,
+            }),
+            Stmt::If { then_, else_, .. } => {
+                Self::stmt_contains_label(then_)
+                    || else_.as_ref().is_some_and(|e| Self::stmt_contains_label(e))
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+                Self::stmt_contains_label(body)
+            }
+            Stmt::For { body, .. } => Self::stmt_contains_label(body),
             _ => false,
         }
     }

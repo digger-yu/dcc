@@ -1185,9 +1185,9 @@ impl ArmCodegen {
                 // r0 现在是结构体地址 (is_arrow) 或结构体值 (.)
                 // 从 aggregate_fields 查找字段实际偏移
                 let struct_name = if *is_arrow {
-                    // ptr->member: expr.ty() 是指针, 取 pointee 类型
+                    // ptr->member: expr.ty() 是指针或数组, 取元素类型
                     match expr.ty() {
-                        Type::Ptr(inner) => match &inner.base {
+                        Type::Ptr(inner) | Type::Array(inner, _) => match &inner.base {
                             Type::Struct(name, _, _) | Type::Union(name, _, _) => Some(name.clone()),
                             _ => None,
                         },

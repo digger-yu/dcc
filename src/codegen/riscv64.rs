@@ -1484,7 +1484,7 @@ impl Riscv64Codegen {
                 // a0 = base address
                 let struct_name = match &child.ty {
                     ValueType::Aggregate { name, .. } => Some(name.clone()),
-                    ValueType::Pointer(inner) => {
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                         if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                             Some(name.clone())
                         } else { None }
@@ -1654,7 +1654,7 @@ impl Riscv64Codegen {
                 }
                 let struct_name = match &child.ty {
                     ValueType::Aggregate { name, .. } => Some(name.clone()),
-                    ValueType::Pointer(inner) => {
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                         if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                             Some(name.clone())
                         } else { None }

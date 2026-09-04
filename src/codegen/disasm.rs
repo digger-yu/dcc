@@ -613,7 +613,7 @@ impl<'a> Dec<'a> {
             }
             // --- ALU r/m, r (reg=src, r/m=dst) ---
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
-                let (dst, src) = self.modrm_gp(&rex, width)?;
+                let (src, dst) = self.modrm_gp(&rex, width)?;
                 let mn = match op {
                     0x01 => "add", 0x09 => "or", 0x21 => "and",
                     0x29 => "sub", 0x31 => "xor", _ => "?",
@@ -622,7 +622,7 @@ impl<'a> Dec<'a> {
             }
             // --- ALU r, r/m (reg=dst, r/m=src) ---
             0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
-                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let (dst, src) = self.modrm_gp(&rex, width)?;
                 let mn = match op {
                     0x03 => "add", 0x0B => "or", 0x23 => "and",
                     0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
@@ -632,7 +632,7 @@ impl<'a> Dec<'a> {
             }
             // --- ALU 8-bit r/m, r ---
             0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
-                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
                     0x00 => "add", 0x08 => "or", 0x20 => "and",
                     0x28 => "sub", 0x30 => "xor", _ => "?",
@@ -641,7 +641,7 @@ impl<'a> Dec<'a> {
             }
             // --- ALU 8-bit r, r/m ---
             0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
-                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
                     0x02 => "add", 0x0A => "or", 0x22 => "and",
                     0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",
@@ -942,7 +942,7 @@ impl<'a> Dec<'a> {
         match op {
             // ALU r/m32, r32
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
-                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, 4)?;
                 let mn = match op {
                     0x01 => "add", 0x09 => "or", 0x21 => "and",
                     0x29 => "sub", 0x31 => "xor", _ => "?",
@@ -951,7 +951,7 @@ impl<'a> Dec<'a> {
             }
             // ALU r32, r/m32
             0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (dst, src) = self.modrm_gp(&rex, 4)?;
                 let mn = match op {
                     0x03 => "add", 0x0B => "or", 0x23 => "and",
                     0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
@@ -961,7 +961,7 @@ impl<'a> Dec<'a> {
             }
             // ALU 8-bit r/m, r
             0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
-                let (dst, src) = self.modrm_gp(&rex, 1)?;
+                let (src, dst) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
                     0x00 => "add", 0x08 => "or", 0x20 => "and",
                     0x28 => "sub", 0x30 => "xor", _ => "?",
@@ -970,7 +970,7 @@ impl<'a> Dec<'a> {
             }
             // ALU 8-bit r, r/m
             0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
-                let (src, dst) = self.modrm_gp(&rex, 1)?;
+                let (dst, src) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
                     0x02 => "add", 0x0A => "or", 0x22 => "and",
                     0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",

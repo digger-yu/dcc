@@ -3614,7 +3614,9 @@ impl<'a> Parser<'a> {
         self.parse_std_attributes();
         // 变量名后的 __asm__ 和 __attribute__: 如 type name __asm__("label") __attribute__((visibility("hidden")))
         self.skip_asm_label();
-        self.parse_attributes();
+        let trailing_attrs = self.parse_attributes();
+        // 合并尾随属性到 pre_attrs (如 int b __attribute__((alias("a"))))
+        let pre_attrs = Self::merge_attrs(pre_attrs, trailing_attrs);
         let sp = name.span.clone();
         let name_for_decl = name.clone();
         // 括号化声明符: 如果 paren_decl_ty 被设置, 覆盖 ty
