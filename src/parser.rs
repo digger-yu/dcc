@@ -4002,6 +4002,12 @@ impl<'a> Parser<'a> {
             {
                 arr_ty = Type::Array(elem.clone(), ArraySize::Const(inits.len()));
             }
+            // 从 String 推断字符数组大小: data[] = "string" → data[7]
+            if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::String { data, .. })) =
+                (&arr_ty, &init)
+            {
+                arr_ty = Type::Array(elem.clone(), ArraySize::Const(data.len()));
+            }
             self.locals
                 .insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function {
