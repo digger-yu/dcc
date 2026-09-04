@@ -6231,7 +6231,7 @@ impl<'a> Parser<'a> {
 
     fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
         if let Some(
-            ty @ (Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _) | Type::Atomic(_)),
+            ty @ (Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _) | Type::Atomic(_) | Type::Array(_, _)),
         ) = base
         {
             return ty;
@@ -7284,6 +7284,8 @@ impl<'a> Parser<'a> {
             // 数组后缀后的属性: char *argv[] __attribute__((unused))
             self.skip_attributes();
             let ty = match ty {
+                // 数组参数退化为指针: 包括显式数组后缀 (int arr[]) 和
+                // 类型本身就是数组的 typedef (如 va_list = __va_list_tag[1])
                 Type::Array(e, _) => Type::Ptr(e),
                 o => o,
             };
