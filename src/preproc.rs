@@ -7512,6 +7512,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -7546,6 +7547,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7583,6 +7585,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7621,6 +7624,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7651,6 +7655,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7680,6 +7685,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let diags = out.diags;
 
@@ -7714,6 +7720,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7742,6 +7749,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7773,6 +7781,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7811,6 +7820,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7857,6 +7867,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7887,6 +7898,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7919,6 +7931,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7959,6 +7972,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -7994,6 +8008,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8030,6 +8045,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8066,6 +8082,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8099,6 +8116,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8137,6 +8155,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8174,6 +8193,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8211,6 +8231,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8249,6 +8270,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8278,6 +8300,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8310,6 +8333,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8342,6 +8366,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_off.diags.is_empty(),
@@ -8368,6 +8393,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_on.diags.is_empty(),
@@ -8394,6 +8420,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_def.diags.is_empty(),
@@ -8420,6 +8447,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_lower.diags.is_empty(),
@@ -8467,6 +8495,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 至少一个 W0001 警告
         assert!(
@@ -8509,6 +8538,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             on.diags.is_empty(),
@@ -8539,6 +8569,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             default.diags.is_empty(),
@@ -8599,6 +8630,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -8620,6 +8652,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
@@ -8657,6 +8690,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -8680,6 +8714,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -8703,6 +8738,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert_eq!(out.charset, "UTF-8");
     }
@@ -8847,6 +8883,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_create.diags.is_empty(),
@@ -8883,6 +8920,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out_with_pch.diags.is_empty(),
@@ -8921,6 +8959,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
         assert!(
@@ -8980,6 +9019,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(pch_path.exists());
 
@@ -9008,6 +9048,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 应有 warning (W0400) 但不致命
         let has_warn = out.diags.iter().any(|d| d.code == "W0400");
@@ -9044,6 +9085,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -9091,6 +9133,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -9137,6 +9180,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0402"),
@@ -9184,6 +9228,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0203"),
@@ -9226,6 +9271,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             !pch_path.exists(),
@@ -9268,6 +9314,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let err = out
             .diags
@@ -9323,6 +9370,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let err = out
             .diags
@@ -9364,6 +9412,7 @@ n\
                 128,
                 false,
                 false, // warn_undef
+                0, // opt_level
             );
             assert!(
                 out.diags.iter().any(|d| d.code == "E0203"),
@@ -9410,6 +9459,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
@@ -9433,6 +9483,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out2.text.contains("(52 + 10)"),
@@ -9473,6 +9524,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9510,6 +9562,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9544,6 +9597,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9581,6 +9635,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9618,6 +9673,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0200"),
@@ -9659,6 +9715,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9695,6 +9752,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9729,6 +9787,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9762,6 +9821,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -9801,6 +9861,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -9841,6 +9902,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -9882,6 +9944,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -9922,6 +9985,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -9966,6 +10030,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10000,6 +10065,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10043,6 +10109,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10077,6 +10144,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10110,6 +10178,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10150,6 +10219,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10184,6 +10254,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10217,6 +10288,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10250,6 +10322,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10286,6 +10359,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10322,6 +10396,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags
@@ -10358,6 +10433,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
     }
@@ -10384,6 +10460,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.diags
@@ -10431,6 +10508,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10474,6 +10552,7 @@ n\
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let has_w0201 = out
             .diags
@@ -10629,6 +10708,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 不应有任何 #error 触发的诊断
         let errors: Vec<_> = out
@@ -10686,6 +10766,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let diags = &out.diags;
         let errors: Vec<_> = diags
@@ -10730,6 +10811,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 只有第一个 #warning 应该产生 W0200,
         // system_header 后的 #warning 应被抑制
@@ -10790,6 +10872,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_file(hdr);
         let _ = fs::remove_file(&src_path);
@@ -10846,6 +10929,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&sys_dir);
@@ -10899,6 +10983,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&user_dir);
@@ -10940,6 +11025,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let w0200_count = out
             .diags
@@ -10998,6 +11084,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_file(&inner_hdr);
         let _ = fs::remove_file(&mid_hdr);
@@ -11051,6 +11138,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 检查 visibility_history 记录了变化
         assert!(
@@ -11111,6 +11199,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -11159,6 +11248,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -11220,6 +11310,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -11280,6 +11371,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
@@ -11332,6 +11424,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -11378,6 +11471,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let e0210_count = out
             .diags
@@ -11416,6 +11510,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let e0210_count = out
             .diags
@@ -11453,6 +11548,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let e0210_count = out
             .diags
@@ -11489,6 +11585,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let e0210_count = out
             .diags
@@ -11527,6 +11624,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let w0200_count = out
             .diags
@@ -11567,6 +11665,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let w0200_count = out
             .diags
@@ -11604,6 +11703,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // 应该被升级为错误 (Severity::Error)
         let promoted = out
@@ -11645,6 +11745,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let w0200_count = out
             .diags
@@ -11681,6 +11782,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let e0210_count = out
             .diags
@@ -11717,6 +11819,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out.fenv_access, "fenv_access should be ON via _Pragma");
         assert!(
@@ -11749,6 +11852,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.weak_symbols.contains("my_weak_sym"),
@@ -11781,6 +11885,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.text.contains("f(0)"),
@@ -11812,6 +11917,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.text.contains("f(0 , 1, 2)") || out.text.contains("f(0, 1, 2)"),
@@ -11843,6 +11949,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(
             out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),
@@ -11873,6 +11980,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         // __LINE__ should be expanded to 100 (the remapped line number)
@@ -11901,6 +12009,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         // __LINE__ should be 50
@@ -11950,6 +12059,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -11986,6 +12096,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12028,6 +12139,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12066,6 +12178,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         // 结构体定义应出现在输出中
@@ -12105,6 +12218,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12136,6 +12250,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12173,6 +12288,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12204,6 +12320,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12234,6 +12351,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         // Should not produce any diagnostics
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12262,6 +12380,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
+            0, // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         assert!(out.text.contains("int y;"), "output: {}", out.text);

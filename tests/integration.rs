@@ -3562,6 +3562,21 @@ fn ternary_side_effects_local_shadows_global() {
     );
 }
 
+/// 链式赋值类型截断: 赋值表达式的值是左值转换后的值 (C11 6.5.16p3),
+/// 内层窄类型赋值的结果须按左值宽度/符号性重扩展后再传播给外层.
+/// GCC torture 960801-1.c, 921218-2.c
+#[test]
+#[cfg(unix)]
+fn chained_assignment_value_truncated_to_lvalue_type() {
+    let src = include_str!("fixtures/c/chained_assign_truncation.c");
+    let (out, _exe) = run_compile_and_run("chained-assign-truncation", src);
+    assert!(
+        out.status.success(),
+        "chained_assign_truncation failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {

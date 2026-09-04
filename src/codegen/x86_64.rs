@@ -7975,6 +7975,39 @@ impl Codegen {
                         self.gen_aggregate_assign(&name.name, l_ty, r);
                     } else {
                         self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
+                        // 赋值表达式的值是左值转换后的值 (C11 6.5.16p3),
+                        // 而非右值原值: `ul = us = -1` 中内层 us=-1 的结果须
+                        // 先截断到 unsigned short (65535) 再传播给外层, 否则
+                        // dst 中未截断的 64 位 -1 直接作为内层表达式的值传出,
+                        // ul 得到 0xFFFFFFFFFFFFFFFF.
+                        // 仅窄于 4 字节的整数左值需要重扩展: 4/8 字节槽由
+                        // mov_from_stack/emit_global_store 按声明宽度读取,
+                        // 低位已含正确值; 浮点右值在 xmm0 不经 dst.
+                        let r_ty = r.ty();
+                        let l_sz = l_ty.size();
+                        if l_sz < 4
+                            && (Self::is_integer_type(&r_ty)
+                                || matches!(r_ty, Type::Enum(_, _, _)))
+                        {
+                            // 重扩展方向由左值类型符号性决定 (char 按有符号,
+                            // 固定底层类型枚举按底层类型), 取 dst 低 8/16 位
+                            // 重扩展到 64 位: 有符号 movsx, 无符号 movzx
+                            let l_signed = match l_ty {
+                                Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+                                Type::Bool | Type::UChar | Type::UShort => false,
+                                _ => true,
+                            };
+                            // reg 与 r/m 同为 dst: dst >= r8 时 REX 需同时置 R|B
+                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                            let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
+                            match (l_sz, l_signed) {
+                                (1, true) => self.emit(&[rex, 0x0F, 0xBE, modrm]),
+                                (1, false) => self.emit(&[rex, 0x0F, 0xB6, modrm]),
+                                (2, true) => self.emit(&[rex, 0x0F, 0xBF, modrm]),
+                                (2, false) => self.emit(&[rex, 0x0F, 0xB7, modrm]),
+                                _ => {}
+                            }
+                        }
                         if matches!(l_ty, Type::Int128 | Type::UInt128) {
                             if self.globals.contains_key(&name.name)
                                 && !self.is_local_name(&name.name)
@@ -10568,7 +10601,11 @@ impl Codegen {
                                 // 但初始化值不是 InitList, 收集剩余标量值作为该字段的初始化器
                                 let is_agg_field = matches!(&f.ty, Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _));
                                 let is_plain_value = !matches!(e, Expr::InitList { .. });
-                                if is_agg_field && is_plain_value {
+                                // 聚合字段被同类型聚合值初始化 (如 `struct A a = {2, b}` 中 b 是 struct B):
+                                // 直接复制整个聚合值, 不走 brace elision (后者将 b 误作标量初始化 b.x)
+                                let expr_ty = e.ty();
+                                let expr_is_agg = matches!(&expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _));
+                                if is_agg_field && is_plain_value && !expr_is_agg {
                                     // 收集从这个字段开始的所有剩余标量 InitItem
                                     let mut collected = Vec::new();
                                     let mut j = init_idx;
@@ -10723,6 +10760,30 @@ impl Codegen {
                             _ => {}
                         }
                     } else {
+                        // 聚合字段被聚合值初始化 (struct/union 复制):
+                        // 用 rep movsb 整块复制, 避免 gen_expr 只加载前 8 字节
+                        let val_ty = value.ty();
+                        let val_is_agg = matches!(&val_ty, Type::Struct(_, _, _) | Type::Union(_, _, _));
+                        if val_is_agg && sz > 0 {
+                            // 获取源地址 (value 必须是 Ident)
+                            let mut src_addr_ok = false;
+                            if let Expr::Ident { name: src_name, .. } = value {
+                                if let Some(src_off) = self.var_map.get(&src_name.name).map(|(o, _)| *o) {
+                                    // rdi = 目标地址
+                                    self.emit_lea_r13(7, store_off); // rdi = dest
+                                    // rsi = 源地址
+                                    self.emit_lea_r13(6, src_off); // rsi = src
+                                    self.mov_imm(1, sz as i128); // rcx = count
+                                    self.emit(&[0xFC]); // cld
+                                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                    src_addr_ok = true;
+                                }
+                            }
+                            if src_addr_ok {
+                                init_idx += 1;
+                                continue;
+                            }
+                        }
                         self.gen_expr(value, 0);
                         if let Some(ft) = &field_ty_opt {
                             if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
@@ -15850,30 +15911,24 @@ impl Codegen {
         }
     }
 
-    /// SysV va_arg long double: 始终从 overflow_arg_area 读取 16 字节.
-    /// Long double 是 MEMORY 类, 不经过寄存器保存区.
-    fn gen_va_arg_long_double(&mut self, ap_name: &str, dst: u8) {
+    /// SysV va_arg long double: 始终从 overflow_arg_area 读取.
+    /// Long double 是 MEMORY 类 (80-bit x87), 用 fld tbyte 加载到 x87 栈.
+    fn gen_va_arg_long_double(&mut self, ap_name: &str, _dst: u8) {
         let ap_off = self.var_offset(ap_name);
         // rax = overflow_arg_area (va_list + 8)
         self.emit(&[0x49, 0x8B, 0x85]);
         self.emit(&(ap_off + 8).to_le_bytes());
-        // rax = overflow_arg_area 指针, 保存到 rcx
+        // 保存指针到 rcx (fld 不 GP 寄存器)
         self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-        // 加载 16 字节: 低 8 字节到 rax, 高 8 字节到 rdx
-        self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-        self.emit(&[0x48, 0x8B, 0x51, 0x08]); // mov rdx, [rcx+8]
+        // fld tbyte [rcx]: 加载 80-bit 长浮点到 st(0)
+        // DB /5 mod=00 reg=101 rm=001 → DB 0x29
+        self.emit(&[0xDB, 0x29]);
         // 推进 overflow_arg_area 16 字节
-        self.push(0); // 保存 rax (低 8 字节)
-        self.push(2); // 保存 rdx (高 8 字节)
         self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-        self.emit(&[0x49, 0x89, 0x8D]); // mov [r13+ap_off+8], rcx
+        // mov [r13+ap_off+8], rcx (回写更新后的指针)
+        self.emit(&[0x49, 0x89, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
-        self.pop(2); // rdx = 高 8 字节
-        self.pop(0); // rax = 低 8 字节
-        // 结果在 rax:rdx (低:高), 与 long double 加载约定一致
-        if dst != 0 {
-            self.mov(dst, 0);
-        }
+        // 结果在 st(0) (x87 栈顶), 与 long double 常规约定一致
     }
 
     /// SysV va_arg (指针版本): rcx = va_list 指针，按 gp_offset/fp_offset 读取参数。
