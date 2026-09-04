@@ -851,6 +851,7 @@ fn is_known_f_option(opt: &str) -> bool {
     if match opt {
         // 已在上层单独处理的选项（不应到达这里，但保险起见列出）
         "-fno-plt" | "-fplt" |
+        "-ftrampolines" | "-fno-trampolines" |
         // PIC/PIE
         "-fpic" | "-fPIC" | "-fpie" | "-fPIE" | "-fno-pic" | "-fno-PIC" |
         "-fno-pie" | "-fno-PIE" |
@@ -2332,6 +2333,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-fconserve-stack"
             | "-fverbose-asm"
             | "-fno-plt"
+            | "-ftrampolines"
+            | "-fno-trampolines"
             | "-mno-mmx"
             | "-mno-80387"
             | "-mno-fp-ret-in-387"
@@ -2524,6 +2527,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             // -fno-plt: 内核不使用 PLT, 接受但无操作
             "-fno-plt" => {}
+            // 5.4: -ftrampolines / -fno-trampolines: 嵌套函数 trampoline 控制.
+            // 当前 dcc 不生成栈上 trampoline (需要可执行栈), 接受选项但无操作.
+            // 嵌套函数直接调用通过 __builtin_call_with_static_chain 支持;
+            // 取地址场景需用户确保不使用函数指针间接调用嵌套函数.
+            "-ftrampolines" | "-fno-trampolines" => {}
             // -falign-jumps=N / -falign-loops=N: 存储实际值用于代码生成
             a if a.starts_with("-falign-jumps=") => {
                 let val = &a["-falign-jumps=".len()..];
