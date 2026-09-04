@@ -313,8 +313,13 @@ struct GlobalVar {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbiClass {
+    NoClass,
     Integer,
     Sse,
+    SseUp,
+    X87,
+    X87Up,
+    ComplexX87,
     Memory,
 }
 
@@ -1706,70 +1711,227 @@ impl Codegen {
         format!(".L{}", n)
     }
 
+    /// SysV AMD64 ABI 聚合类型分类算法.
+    /// 将类型按 8 字节块 (eightbyte) 分类为 Integer/Sse/SseUp/Memory 等.
+    /// 算法步骤:
+    ///   1. 大小 > 16 或 long double → Memory
+    ///   2. 初始化所有 eightbyte 为 NoClass
+    ///   3. 逐字段分类, 对重叠 eightbyte 执行 merge 合并
+    ///   4. Post-merger: NoClass 填充 → Memory; 若首个 eightbyte 为 Sse
+    ///      且其余均为 Sse/SseUp 或无数据填充, 填充转 SseUp; 否则全部转 Memory
     fn abi_classes(ty: &Type) -> Vec<AbiClass> {
         let size = ty.size();
         if size == 0 {
             return Vec::new();
         }
+        // Linux 调用约定: long double 为 Memory 类 (16 字节栈传)
         if size > 16 || matches!(ty, Type::LongDouble) {
             return vec![AbiClass::Memory];
         }
-        let mut classes = vec![AbiClass::Sse; size.div_ceil(8)];
-        if !Self::classify_at(ty, 0, &mut classes) {
-            return vec![AbiClass::Memory];
+        let num_eightbytes = size.div_ceil(8);
+        let mut classes = vec![AbiClass::NoClass; num_eightbytes];
+        Self::classify_field(ty, 0, &mut classes);
+        // Post-merger pass 1: NoClass → Memory
+        for c in classes.iter_mut() {
+            if *c == AbiClass::NoClass {
+                *c = AbiClass::Memory;
+            }
+        }
+        // Post-merger pass 2: SSE 规则
+        // 若首个 eightbyte 为 SSE, 检查其余:
+        //   - SSE/SSEUP 或无数据填充 → 填充转 SSEUP
+        //   - 含非 SSE/SSEUP 数据 → 全部转 MEMORY
+        if num_eightbytes > 1 && classes[0] == AbiClass::Sse {
+            let mut all_sse_compatible = true;
+            for i in 1..num_eightbytes {
+                if classes[i] != AbiClass::Sse && classes[i] != AbiClass::SseUp {
+                    // 检查该 eightbyte 是否有字段数据
+                    let lo = i * 8;
+                    let hi = lo + 8;
+                    if Self::has_field_data_in_range(ty, lo, hi) {
+                        all_sse_compatible = false;
+                        break;
+                    }
+                }
+            }
+            if all_sse_compatible {
+                for i in 1..num_eightbytes {
+                    if classes[i] == AbiClass::Memory {
+                        // NoClass 填充 → SSEUP (向量延续)
+                        classes[i] = AbiClass::SseUp;
+                    }
+                }
+            } else {
+                for c in classes.iter_mut() {
+                    *c = AbiClass::Memory;
+                }
+            }
+        }
+        // 归一化: 全 Memory 时压缩为单元素, 保证 needs_memory_return 判断正确
+        if classes.len() > 1 && classes.iter().all(|c| *c == AbiClass::Memory) {
+            classes.truncate(1);
         }
         classes
     }
 
-    fn classify_at(ty: &Type, base: usize, classes: &mut [AbiClass]) -> bool {
-        if ty.align() > 1 && !base.is_multiple_of(ty.align()) {
-            return false;
-        }
+    /// 检查类型在 [lo, hi) 字节范围内是否有字段数据.
+    /// 用于区分 eightbyte 含字段数据 vs 纯对齐填充.
+    fn has_field_data_in_range(ty: &Type, lo: usize, hi: usize) -> bool {
         match ty {
-            // Vector 不留 Sse: dcc 内部把 vector 标量化, 按 GP 8 字节块传递
-            Type::Float | Type::Double => {}
-            // _Complex float/double: 两个 eightbyte 均为 SSE (SysV,
-            // 与 gcc ubsan.cc 一致), 保持初始 [Sse, Sse]
-            Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {}
-            // _Imaginary float/double: 单个 SSE eightbyte (同普通浮点)
-            Type::Imaginary(inner) if matches!(&inner.base, Type::Float | Type::Double) => {}
             Type::Struct(_, fields, _) => {
-                for field in fields.iter() {
-                    if !Self::classify_at(&field.ty, base + field.offset, classes) {
-                        return false;
+                for f in fields.iter() {
+                    let f_lo = f.offset;
+                    let f_hi = f.offset + f.ty.size();
+                    if f_lo < hi && f_hi > lo {
+                        return true;
                     }
                 }
-                return true;
+                false
             }
             Type::Union(_, fields, _) => {
-                for field in fields.iter() {
-                    if !Self::classify_at(&field.ty, base, classes) {
-                        return false;
+                for f in fields.iter() {
+                    if 0 < hi && f.ty.size() > lo {
+                        return true;
                     }
                 }
-                return true;
+                false
             }
             Type::Array(elem, ArraySize::Const(n)) => {
-                for i in 0..*n {
-                    if !Self::classify_at(&elem.base, base + i * elem.size(), classes) {
-                        return false;
+                for j in 0..*n {
+                    let e_lo = j * elem.size();
+                    let e_hi = e_lo + elem.size();
+                    if e_lo < hi && e_hi > lo {
+                        return true;
                     }
                 }
-                return true;
+                false
             }
-            Type::Atomic(inner) => return Self::classify_at(&inner.base, base, classes),
-            _ => {
-                let first = base / 8;
-                let last = (base + ty.size().saturating_sub(1)) / 8;
-                for i in first..=last {
-                    if i >= classes.len() {
-                        return false;
+            Type::Atomic(inner) => Self::has_field_data_in_range(&inner.base, lo, hi),
+            // 标量/向量/浮点: 整个范围都是数据
+            _ => true,
+        }
+    }
+
+    /// 按字段分类, 将结果 merge 到 classes[base/8 ..].
+    /// 每个字段先分类到临时数组, 再合并到父级.
+    fn classify_field(ty: &Type, base: usize, classes: &mut [AbiClass]) {
+        let size = ty.size();
+        if size == 0 {
+            return;
+        }
+        match ty {
+            Type::Struct(_, fields, _) => {
+                for field in fields.iter() {
+                    Self::classify_field(&field.ty, base + field.offset, classes);
+                }
+            }
+            Type::Union(_, fields, _) => {
+                // 联合各字段共享同一基址, 各自分类后合并
+                for field in fields.iter() {
+                    let f_sz = field.ty.size();
+                    if f_sz == 0 {
+                        continue;
                     }
-                    classes[i] = AbiClass::Integer;
+                    let n = f_sz.div_ceil(8).min(classes.len() - base / 8);
+                    let mut f_classes = vec![AbiClass::NoClass; n];
+                    Self::classify_field(&field.ty, 0, &mut f_classes);
+                    let start = base / 8;
+                    for i in 0..n {
+                        if start + i < classes.len() {
+                            classes[start + i] =
+                                Self::merge_classes(classes[start + i], f_classes[i]);
+                        }
+                    }
+                }
+            }
+            Type::Array(elem, ArraySize::Const(n)) => {
+                for j in 0..*n {
+                    Self::classify_field(&elem.base, base + j * elem.size(), classes);
+                }
+            }
+            Type::Atomic(inner) => Self::classify_field(&inner.base, base, classes),
+            Type::Vector(_, _) => {
+                // SIMD 向量: 首 eightbyte Sse, 后续 SseUp (向量延续)
+                let start = base / 8;
+                let end = (base + size.saturating_sub(1)) / 8;
+                for i in start..=end {
+                    if i < classes.len() {
+                        let cls = if i == start {
+                            AbiClass::Sse
+                        } else {
+                            AbiClass::SseUp
+                        };
+                        classes[i] = Self::merge_classes(classes[i], cls);
+                    }
+                }
+            }
+            _ => {
+                // 叶类型: 直接分类到 classes
+                let start = base / 8;
+                let end = (base + size.saturating_sub(1)) / 8;
+                let cls = Self::leaf_abi_class(ty);
+                for i in start..=end {
+                    if i < classes.len() {
+                        classes[i] = Self::merge_classes(classes[i], cls);
+                    }
                 }
             }
         }
-        true
+    }
+
+    /// SysV ABI 分类合并表.
+    /// 决定两个 eightbyte 分类重叠时的最终分类.
+    fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
+        use AbiClass::*;
+        if a == b {
+            return a;
+        }
+        // NO_CLASS 为初始值, 合并时取另一方
+        if a == NoClass {
+            return b;
+        }
+        if b == NoClass {
+            return a;
+        }
+        // 含 MEMORY 则结果为 MEMORY
+        if a == Memory || b == Memory {
+            return Memory;
+        }
+        match (a, b) {
+            (Integer, Sse) | (Sse, Integer) => Memory,
+            (Integer, X87) | (X87, Integer) => Memory,
+            (Integer, X87Up) | (X87Up, Integer) => Memory,
+            (Integer, ComplexX87) | (ComplexX87, Integer) => Memory,
+            (Sse, X87) | (X87, Sse) => Memory,
+            (Sse, X87Up) | (X87Up, Sse) => Memory,
+            (Sse, ComplexX87) | (ComplexX87, Sse) => Memory,
+            (X87, X87Up) | (X87Up, X87) => Memory,
+            (X87, ComplexX87) | (ComplexX87, X87) => Memory,
+            (X87Up, ComplexX87) | (ComplexX87, X87Up) => Memory,
+            // SSEUP 仅与 SSE 合并产生 SSEUP (向量延续)
+            (Sse, SseUp) | (SseUp, Sse) => SseUp,
+            _ => Memory,
+        }
+    }
+
+    /// 叶类型的 ABI 分类.
+    fn leaf_abi_class(ty: &Type) -> AbiClass {
+        match ty {
+            Type::Float | Type::Double => AbiClass::Sse,
+            Type::LongDouble => AbiClass::Memory,
+            // _Complex long double: Linux 为 Memory
+            Type::Complex(inner) if matches!(&inner.base, Type::LongDouble) => AbiClass::Memory,
+            // _Complex float/double: 各分量均为 SSE
+            Type::Complex(_) => AbiClass::Sse,
+            // _Imaginary float/double: 同 SSE
+            Type::Imaginary(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
+                AbiClass::Sse
+            }
+            // SIMD 向量: 首 eightbyte SSE, 后续 SseUp
+            Type::Vector(_, _) => AbiClass::Sse,
+            // 整数/指针/枚举等
+            _ => AbiClass::Integer,
+        }
     }
 
     fn emit_sub_rsp(&mut self, bytes: usize) {
@@ -5780,7 +5942,10 @@ impl Codegen {
                         let classes = Self::abi_classes(&p.ty);
                         let chunks = p.ty.size().div_ceil(8);
                         let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-                        let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
+                        let need_fp = classes
+                            .iter()
+                            .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+                            .count();
                         let used: i32 = self
                             .var_map
                             .values()
@@ -5801,7 +5966,7 @@ impl Codegen {
                                         gp_idx += 1;
                                         self.variadic_named_gp += 1;
                                     }
-                                    AbiClass::Sse => {
+                                    AbiClass::Sse | AbiClass::SseUp => {
                                         xmm_param_stores.push((
                                             fp_idx as u8,
                                             off + (c as i32 * 8),
@@ -5810,11 +5975,12 @@ impl Codegen {
                                         fp_idx += 1;
                                         self.variadic_named_fp += 1;
                                     }
-                                    AbiClass::Memory => {
+                                    AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
                                         stack_param_stores
                                             .push((stack_arg_idx, off + (c as i32 * 8)));
                                         stack_arg_idx += 1;
                                     }
+                                    AbiClass::NoClass => unreachable!(),
                                 }
                             }
                         } else {
@@ -6424,9 +6590,13 @@ impl Codegen {
             };
             let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-            let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
-            let force_mem =
-                classes == [AbiClass::Memory] || gp + need_gp > gp_regs.len() || fp + need_fp > 8;
+            let need_fp = classes
+                .iter()
+                .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+                .count();
+            let force_mem = classes.iter().any(|c| matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87))
+                || gp + need_gp > gp_regs.len()
+                || fp + need_fp > 8;
             if force_mem {
                 stack = (stack + 7) & !7;
                 let size = effective_ty.size().max(8);
@@ -6441,11 +6611,14 @@ impl Codegen {
                             arg_locs.push(ArgLoc::Gp(gp_regs[gp]));
                             gp += 1;
                         }
-                        AbiClass::Sse => {
+                        AbiClass::Sse | AbiClass::SseUp => {
                             arg_locs.push(ArgLoc::Xmm(fp as u8));
                             fp += 1;
                         }
-                        AbiClass::Memory => unreachable!(),
+                        AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
+                            unreachable!()
+                        }
+                        AbiClass::NoClass => unreachable!(),
                     }
                 }
                 locs.push(arg_locs);
@@ -6841,12 +7014,12 @@ impl Codegen {
                                 } else {
                                     self.gen_expr(e, 0);
                                 }
-                                // SysV: SSE 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
+                                // SysV: SSE/SSEUP 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
                                 // 如 struct {double,double}. _Complex float/double 已由
                                 // gen_complex_sse_return 直接填充返回寄存器。
                                 let ret_classes = Self::abi_classes(&ret_ty);
                                 for (c, cls) in ret_classes.iter().enumerate() {
-                                    if *cls == AbiClass::Sse {
+                                    if matches!(cls, AbiClass::Sse | AbiClass::SseUp) {
                                         let src = if c == 0 { 0u8 } else { 2u8 };
                                         self.emit_movq_gp_to_xmm(c as u8, src);
                                     }
@@ -14963,7 +15136,7 @@ impl Codegen {
                     self.emit_lea_r13(7, dst_off); // rdi = 目标地址
                     call_sret_handled = true;
                 } else {
-                    // 寄存器返回: 按 abi_classes 存储 (INTEGER→rax:rdx, SSE→xmm0:xmm1)
+                    // 寄存器返回: 按 abi_classes 存储 (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
                     self.emit_sysv_call(Some(&name.name), None, args, None);
                     let ret_classes = Self::abi_classes(call_ty);
                     for (c, cls) in ret_classes.iter().enumerate() {
@@ -14973,8 +15146,13 @@ impl Codegen {
                                 let reg = if c == 0 { 0u8 } else { 2u8 };
                                 self.store_stack(reg, off);
                             }
-                            AbiClass::Sse => self.store_xmm64_stack(c as u8, off),
-                            AbiClass::Memory => unreachable!(),
+                            AbiClass::Sse | AbiClass::SseUp => {
+                                self.store_xmm64_stack(c as u8, off);
+                            }
+                            AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
+                                unreachable!()
+                            }
+                            AbiClass::NoClass => unreachable!(),
                         }
                     }
                     return;
