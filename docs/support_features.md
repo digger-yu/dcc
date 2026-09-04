@@ -248,7 +248,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；函数和数据符号地址均使用直接 PC-relative (R_X86_64_PC32/PLT32) 而非 GOT 间接寻址；全局变量 load/store/取地址均走 RIP-relative 路径，不经过 GOT |
 | `-ftrivial-auto-var-init=zero` | 安全特性，CONFIG_INIT_STACK_ALL_ZERO 依赖；零初始化整个栈帧：x86_64 使用 rep stosq，AArch64 使用 stp xzr/xzr，RISC-V64 使用 sd zero/sp，ARM 使用 str r0/[fp,#off]，MIPS 使用 sw zero/fp_off(fp) |
 | 栈保护非可重定位路径 | canary 失败始终调用 `__stack_chk_fail`（STB_GLOBAL/STT_FUNC 未定义符号），不再对 ET_EXEC 走 exit(255) syscall；`m3_10_stack_canary` 测试验证 |
-| 无符号整数 ↔ 浮点转换 | Cast 节点完整覆盖 unsigned (Bool/UChar/UShort/UInt/ULong/ULongLong) ↔ float/double 双向转换；<=32 位无符号零扩展后 cvtsi2ss/sd；64 位无符号 shr+convert+double 算法；浮点→无符号 cvttss2si/cvttsd2si + 负值钳位/2^64 校正 |
+| 无符号整数 ↔ 浮点转换 | Cast 节点完整覆盖 unsigned (Bool/UChar/UShort/UInt/ULong/ULongLong) ↔ float/double 双向转换；<=32 位无符号零扩展后 cvtsi2ss/sd；64 位无符号 shr+convert+double 算法；浮点→无符号 cvttss2si/cvttsd2si + 负值钳位/2^64 校正；AArch64 使用 FCVTZS/FCVTZU (float→int) 和 SCVTF/UCVTF (int→float)；RISC-V 使用 FCVT.W.S/FCVT.WU.S (float→int) 和 FCVT.S.W/FCVT.S.WU (int→float) |
 | Assign 通用 lvalue 回退 | Expr::Assign 在 Ident/Index/Deref/Member/Real/Imag 之外增加通用 `gen_lvalue_addr` 回退，覆盖 Cast-lvalue 等非标量左值 |
 | ET_EXEC 外部符号优雅处理 | `collect_exec_symbols` 预注册外部函数声明为 SHN_UNDEF 符号；`resolve` 对未解析符号发出 E1100 诊断而非 panic |
 | ftrace 插桩 | `-pg` 在函数 prologue 后插入 `call mcount`；`-mfentry` 在函数标签后立即（prologue 前）插入 `call __fentry__`；`-mrecord-mcount` 同时生成 `__mcount_loc` 段记录所有 call site 地址（带 R_X86_64_64 重定位指向 .text）；三种模式均添加对应未定义符号到 ELF 符号表 |
@@ -296,12 +296,14 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 聚合类型 sret 返回 | 返回 > 16 字节时 caller 分配 `<sret>` local；aarch64 `memcpy_sp_to_x0`；riscv64 `memcpy_sp_to_a0`；aarch64 嵌套 sret 支持多层调用链 (gen_function 入口保存 x0 到 `<sret_ptr>`, return 时恢复) |
 | aarch64/riscv64 整数除/取模 | aarch64 `sdiv` + `msub`；riscv64 RV64M `div` / `rem` |
 | aarch64/riscv64 浮点函数调用 | 浮点表达式中的 `ExprKind::Call` 复用普通调用路径；AArch64 结果保留在 `s0/d0`，RISC-V 结果保留在 `fa0`，compile/ELF 层有回归测试 |
-| aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv` / `asrv` (有符号右移算术移位)；riscv64 `sll` / `srl` / `sra` (有符号右移算术移位) |
+| aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv` / `asrv` (有符号右移算术移位)；riscv64 `sll` / `srl` / `sra` (有符号右移算术移位)；32 位操作数移位量由硬件自动掩码到 5 位 (AArch64) 或 6 位 (RISCV64)，与 C 标准行为一致 |
 | aarch64 va_arg GP + float + 栈溢出 | x0..x7 + v0..v7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
 | riscv64 va_arg GP + float + 栈溢出 | a0..a7 + fa0..fa7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
 | mips va_arg GP | $a0-$a3 保存区 + 顺序读；超出 4 个从 caller 栈读取；O32 ABI |
 | arm va_arg GP | r0-r3 保存区 + 顺序读；超出 4 个从 caller 栈读取；AAPCS ABI |
 | aarch64 gen_float_expr Local/Conditional | 浮点局部变量从栈加载到 s0；浮点条件表达式用分支实现；避免未处理表达式静默返回 0.0 |
+| aarch64/riscv64 整数提升 | 窄类型 (char/short) 从 32 位栈槽加载后需符号/零扩展到完整宽度；AArch64 使用 SXTB/SXTH (有符号) 和 UXTB/UXTH (无符号) 指令；RISC-V 使用 SLLI+SRAI (有符号) 和 SLLI+SRLI (无符号) 指令对；与 x86_64 movsx/movzx 语义一致 |
+| aarch64/riscv64 浮点↔整数转换 | Cast 节点处理 float↔int 双向转换：AArch64 float→int 使用 FCVTZS/FCVTZU，int→float 使用 SCVTF/UCVTF；RISC-V float→int 使用 FCVT.W.S/FCVT.WU.S/FCVT.W.D/FCVT.WU.D，int→float 使用 FCVT.S.W/FCVT.S.WU；支持 float/double 与 signed/unsigned int 全部组合 |
 
 ## C++ 前端
 
@@ -582,7 +584,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `char16_t` / `char32_t` (C11/C++11) | uint16/uint32 + u""/U"" 字符串 |
 | 原子混合大小 | `__atomic_*` 1/2 字节变体（lock xadd/xchg/cmpxchg 8/16 位）；AArch64 全尺寸 (1/2/4/8B LDAR/STLR/LDAXR/STLXR)；RISC-V 全尺寸 (1/2/4/8B AMO/LR/SC) |
 | `stdatomic.h` 全部 | `atomic_flag` / `atomic_signal_fence` / `atomic_thread_fence` |
-| 浮点环境 (`fenv.h`) | `fegetround`/`fesetround`/`feclearexcept`/`feraiseexcept`/`fetestexcept`/`fegetexceptflag`/`fesetexceptflag`/`fetestexceptflag`/`fegetenv`/`fesetenv`/`feholdexcept`/`feupdateenv` 内联为 MXCSR/x87 指令 (不依赖 libm)；`pragma STDC FENV_ACCESS` ON/OFF/DEFAULT 驱动 opt 阶段浮点折叠开关 |
+| 浮点环境 (`fenv.h`) | `fegetround`/`fesetround`/`feclearexcept`/`feraiseexcept`/`fetestexcept`/`fegetexceptflag`/`fesetexceptflag`/`fetestexceptflag`/`fegetenv`/`fesetenv`/`feholdexcept`/`feupdateenv` 内联为架构特定指令 (不依赖 libm)：x86_64 使用 MXCSR/x87 指令，AArch64 使用 FPCR/FPSR (MRS/MSR 系统寄存器)，RISC-V 使用 CSR (frm/fflags/fcsr via CSRRW/CSRRS/CSRC)；`pragma STDC FENV_ACCESS` ON/OFF/DEFAULT 驱动 opt 阶段浮点折叠开关 |
 | 复杂数学函数 | `cproj` / `cabs` / `carg` 走 libm |
 | executable `.pushsection` jump targets | `.fixup` / `.altinstr_replacement` code moved from `.text` keeps valid PC32 relocations for objtool jump-destination checks; executable section alignment padding is emitted as `nop` bytes so objtool can keep decoding through function/section tails |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |

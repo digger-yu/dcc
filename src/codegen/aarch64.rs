@@ -1652,6 +1652,34 @@ impl Aarch64Codegen {
                 if is_vector_ty(&child.ty) {
                     self.gen_vector_expr(child);
                     self.extract_vector_lane_w0(0);
+                } else if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int conversion: child eval puts result in s0,
+                    // emit FCVTZS/FCVTZU to convert to integer in w0
+                    self.gen_expr(child);
+                    let is_unsigned = matches!(&expr.ty,
+                        ValueType::Integer { signed: false, .. });
+                    match &child.ty {
+                        ValueType::Float { bits: 32 } => {
+                            if is_unsigned {
+                                // FCVTZU W0, S0: 0x1E190000
+                                self.emit(&0x1E190000u32.to_le_bytes());
+                            } else {
+                                // FCVTZS W0, S0: 0x1E180000
+                                self.emit(&0x1E180000u32.to_le_bytes());
+                            }
+                        }
+                        ValueType::Float { bits: 64 } => {
+                            if is_unsigned {
+                                // FCVTZU W0, D0: 0x9E190000
+                                self.emit(&0x9E190000u32.to_le_bytes());
+                            } else {
+                                // FCVTZS W0, D0: 0x9E180000
+                                self.emit(&0x9E180000u32.to_le_bytes());
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.truncate_w0_to(&expr.ty);
                 } else {
                     self.gen_expr(child);
                     self.truncate_w0_to(&expr.ty);
@@ -2368,17 +2396,40 @@ impl Aarch64Codegen {
                 self.neg_s0();
                 return true;
             }
-            // Cast: 若目标本身是 float 则保留 float, 否则按整数提升处理.
-            // 关键: 调 self.gen_expr(child) 而不是 self.gen_float_expr(child),
-            //       避免 (double)x 这种 noop cast 死循环 (child 仍是 double).
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
-                if is_float_ty(&expr.ty) {
-                    // 浮点 cast: 直接求值 child (它会自己走 gen_float_expr)
-                    self.gen_expr(child);
-                } else {
-                    // 整数 cast (如 (int)sum(d)): 求值 child 后用 trunc_*
-                    self.gen_expr(child);
+                if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int: delegate to gen_expr which handles it
+                    return self.gen_expr(expr);
+                }
+                // Target is float
+                self.gen_expr(child);
+                if !is_float_ty(&child.ty) && is_float_ty(&expr.ty) {
+                    // Int → Float: gen_expr put integer in w0,
+                    // emit SCVTF to convert to float in s0/d0
+                    let is_unsigned = matches!(&child.ty,
+                        ValueType::Integer { signed: false, .. });
+                    match &expr.ty {
+                        ValueType::Float { bits: 32 } => {
+                            if is_unsigned {
+                                // UCVTF S0, W0: 0x1E190000
+                                self.emit(&0x1E190000u32.to_le_bytes());
+                            } else {
+                                // SCVTF S0, W0: 0x1E180000
+                                self.emit(&0x1E180000u32.to_le_bytes());
+                            }
+                        }
+                        ValueType::Float { bits: 64 } => {
+                            if is_unsigned {
+                                // UCVTF D0, W0: 0x9E190000
+                                self.emit(&0x9E190000u32.to_le_bytes());
+                            } else {
+                                // SCVTF D0, W0: 0x9E180000
+                                self.emit(&0x9E180000u32.to_le_bytes());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 return true;
             }

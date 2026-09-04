@@ -1392,7 +1392,37 @@ impl Riscv64Codegen {
                 return true;
             }
             ExprKind::Cast if !expr.children.is_empty() => {
-                self.gen_expr(&expr.children[0]);
+                let child = &expr.children[0];
+                if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int: child eval puts float in fa0,
+                    // emit FCVT.W.S/FCVT.WU.S to convert to int in a0
+                    self.gen_expr(child);
+                    let is_unsigned = matches!(&expr.ty,
+                        ValueType::Integer { signed: false, .. });
+                    match &child.ty {
+                        ValueType::Float { bits: 32 } => {
+                            if is_unsigned {
+                                // FCVT.WU.S a0, fa0
+                                self.emit_fcvt_wu_s(10, 10);
+                            } else {
+                                // FCVT.W.S a0, fa0
+                                self.emit_fcvt_w_s(10, 10);
+                            }
+                        }
+                        ValueType::Float { bits: 64 } => {
+                            if is_unsigned {
+                                // FCVT.WU.D a0, fa0
+                                self.emit_fcvt_wu_d(10, 10);
+                            } else {
+                                // FCVT.W.D a0, fa0
+                                self.emit_fcvt_w_d(10, 10);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.gen_expr(child);
+                }
                 return true;
             }
             ExprKind::VaArg { ap } => {
@@ -2157,6 +2187,30 @@ impl Riscv64Codegen {
                         return true;
                     }
                 }
+            }
+            // Cast: float→float or int→float
+            ExprKind::Cast if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int: delegate to gen_expr
+                    return self.gen_expr(expr);
+                }
+                // Target is float: evaluate child
+                self.gen_expr(child);
+                if !is_float_ty(&child.ty) && is_float_ty(&expr.ty) {
+                    // Int → Float: gen_expr put integer in a0,
+                    // emit FCVT.S.W to convert to float in fa0
+                    let is_unsigned = matches!(&child.ty,
+                        ValueType::Integer { signed: false, .. });
+                    if is_unsigned {
+                        // FCVT.S.WU fa0, a0
+                        self.emit_fcvt_s_wu(10, 10);
+                    } else {
+                        // FCVT.S.W fa0, a0
+                        self.emit_fcvt_s_w_fa0();
+                    }
+                }
+                return true;
             }
             _ => {
                 // expr.ty 已是 float/vector 时不能再回 gen_expr (死循环).
@@ -4808,6 +4862,30 @@ impl Riscv64Codegen {
     /// FCVT.W.D rd, fs1: 双精度转整数
     fn emit_fcvt_w_d(&mut self, rd: u8, fs1: u8) {
         let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100000 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.W.S rd, fs1: 单精度转 32-bit 有符号整数
+    fn emit_fcvt_w_s(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100000 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.WU.S rd, fs1: 单精度转 32-bit 无符号整数
+    fn emit_fcvt_wu_s(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100001 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.WU.D rd, fs1: 双精度转 32-bit 无符号整数
+    fn emit_fcvt_wu_d(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100001 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.S.WU fd, rs1: 无符号 32-bit 整数转单精度
+    fn emit_fcvt_s_wu(&mut self, fd: u8, rs1: u8) {
+        let insn = 0xC8000053u32 | ((rs1 as u32) << 15) | ((fd as u32) << 7);
         self.emit(&insn.to_le_bytes());
     }
 
