@@ -7611,6 +7611,22 @@ fn math_builtin_rounding_inline_sse() {
     let _ = fs::remove_file(&exe);
 }
 
+/// __builtin_fmin/fmax/fminf/fmaxf: inline SSE minsd/maxsd
+#[test]
+#[cfg(unix)]
+fn math_builtin_fmin_fmax_inline_sse() {
+    let src = include_str!("fixtures/c/math_builtin_fmin_fmax.c");
+    let (out, exe) = run_compile_and_run("math-builtin-fmin-fmax", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "fmin/fmax test should return 0");
+    let _ = fs::remove_file(&exe);
+}
+
 /// const_eval 增强: 位域宽度常量表达式 + sizeof/alignof + 三元 + 类型转换 + 枚举
 #[test]
 #[cfg(unix)]

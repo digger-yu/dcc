@@ -18145,37 +18145,59 @@ impl Codegen {
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
-            // __builtin_fmax/fmaxf/fmaxl: 转发到 libc
-            "__builtin_fmax" | "__builtin_fmin" => {
-                if args.len() >= 2 {
-                    self.gen_expr(&args[0], 0);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
-                    self.gen_expr(&args[1], 0);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
+            // __builtin_fmin: inline SSE minsd (double)
+            "__builtin_fmin" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
                 }
-                let lib_fn = if name == "__builtin_fmax" { "fmax" } else { "fmin" };
-                self.emit(&[0x54]);
-                self.call_label(lib_fn);
-                self.emit(&[0x5c]);
+                self.gen_expr(&args[0], 0); // xmm0 = a
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
+                self.gen_expr(&args[1], 0); // xmm0 = b
+                self.emit(&[0xF2, 0x0F, 0x5D, 0xC2]); // minsd xmm0, xmm2
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
-            "__builtin_fmaxf" | "__builtin_fminf" => {
-                if args.len() >= 2 {
-                    self.gen_expr(&args[0], 0);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
-                    self.gen_expr(&args[1], 0);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
-                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
+            // __builtin_fminf: inline SSE minss (float)
+            "__builtin_fminf" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
                 }
-                let lib_fn = if name == "__builtin_fmaxf" { "fmaxf" } else { "fminf" };
-                self.emit(&[0x54]);
-                self.call_label(lib_fn);
-                self.emit(&[0x5c]);
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0xF3, 0x0F, 0x11, 0xC2]); // movss xmm2, xmm0
+                self.gen_expr(&args[1], 0);
+                self.emit(&[0xF3, 0x0F, 0x5D, 0xC2]); // minss xmm0, xmm2
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
+            // __builtin_fmax: inline SSE maxsd (double)
+            "__builtin_fmax" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
+                self.gen_expr(&args[1], 0);
+                self.emit(&[0xF2, 0x0F, 0x5F, 0xC2]); // maxsd xmm0, xmm2
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fmaxf: inline SSE maxss (float)
+            "__builtin_fmaxf" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0xF3, 0x0F, 0x11, 0xC2]); // movss xmm2, xmm0
+                self.gen_expr(&args[1], 0);
+                self.emit(&[0xF3, 0x0F, 0x5F, 0xC2]); // maxss xmm0, xmm2
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fminl/fmaxl: long double -> libm (80-bit)
             "__builtin_fmaxl" | "__builtin_fminl" => {
                 if args.len() >= 2 {
                     self.gen_expr(&args[0], 0);
