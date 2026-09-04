@@ -21859,3 +21859,107 @@ int main(void) {
         stdout.trim()
     );
 }
+
+// ── Floating-point exception support tests ──
+
+/// Verify fenv.h functions compile and produce correct results.
+/// Tests fegetround, fesetround, feclearexcept, feraiseexcept, fetestexcept.
+#[test]
+fn fenv_exception_functions_compile_and_run() {
+    let src = r#"
+#include <stdio.h>
+#include <fenv.h>
+int main(void) {
+    // Test fegetround
+    int round_mode = fegetround();
+    printf("round=%d\n", round_mode);
+    // Test feclearexcept + fetestexcept
+    feclearexcept(FE_ALL_EXCEPT);
+    int result = fetestexcept(FE_ALL_EXCEPT);
+    printf("cleared=%d\n", result);
+    // Test feraiseexcept + fetestexcept
+    feraiseexcept(FE_INVALID);
+    result = fetestexcept(FE_INVALID);
+    printf("invalid=%d\n", result != 0);
+    feclearexcept(FE_ALL_EXCEPT);
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-fenv-except-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-fenv-except-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile fenv test");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "fenv compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run binary");
+    let _ = std::fs::remove_file(&bin_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("round=0"), "fegetround: {}", stdout);
+    assert!(stdout.contains("cleared=0"), "feclearexcept: {}", stdout);
+    assert!(stdout.contains("invalid=1"), "feraiseexcept: {}", stdout);
+}
+
+/// Verify fegetenv/fesetenv save and restore floating-point environment.
+#[test]
+fn fenv_save_restore_env() {
+    let src = r#"
+#include <stdio.h>
+#include <fenv.h>
+int main(void) {
+    fenv_t env;
+    fegetenv(&env);
+    feraiseexcept(FE_OVERFLOW);
+    int before = fetestexcept(FE_OVERFLOW);
+    fesetenv(&env);
+    int after = fetestexcept(FE_OVERFLOW);
+    printf("before=%d after=%d\n", before != 0, after != 0);
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-fenv-save-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-fenv-save-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile fenv save/restore test");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "fenv save/restore compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run binary");
+    let _ = std::fs::remove_file(&bin_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("before=1 after=0"),
+        "fegetenv/fesetenv: {}",
+        stdout
+    );
+}

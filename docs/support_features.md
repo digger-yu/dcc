@@ -98,7 +98,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#pragma GCC system_header` | 标记后续文件内容为系统头文件, 抑制警告 (不影响错误); `_Pragma("GCC system_header")` 等价; `-isystem` 路径及标准系统目录 (`/usr/include` 等) 下的头文件自动标记为 system header; 进入/退出 `#include` 时保存/恢复父文件状态, 防止标记泄漏; 测试: `tests/fixtures/c/system_header.c` + preproc 单测 (gcc_system_header_*) |
 | `#pragma GCC poison` | 标记标识符为禁用, 后续预处理中遇到被 poison 的标识符时发出 E0210 错误; 系统头文件中豁免 (与 GCC 行为一致); 支持多个标识符空格分隔; `_Pragma("GCC poison ...")` 等价; poison 前已出现的不报错; 测试: preproc 单测 `gcc_poison_*` |
 | `#pragma pack` 影响 struct 布局 | `preproc.pack_history` 携带行号；`Parser::pack_at_line(line)` 二分查找；`layout_struct_with_pack(max_align)` cap 到 `min(nat, n)` |
-| `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；ON 时 opt 禁用浮点常量折叠/GVN-CSE（舍入模式可被运行时修改） |
+| `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；ON 时 opt 禁用浮点常量折叠/GVN-CSE（舍入模式可被运行时修改）；fenv.h 完整 C11 函数集内联实现 (fegetround/fesetround/feclearexcept/feraiseexcept/fetestexcept/fegetexceptflag/fesetexceptflag/fegetenv/fesetenv/feholdexcept/feupdateenv) + C17 `fesetexcept` + GNU 扩展 `feenableexcept`/`fedisableexcept`/`fegetexcept` 异常陷阱控制；SSE (MXCSR) 和 x87 FPU 双路径异常标志维护 |
 | `#pragma STDC FP_CONTRACT` | ON/OFF/DEFAULT 三态；ON 时 x86_64 后端把 `a*b+c` / `a*b-c` 收缩为 `fma` / `fmaf` / `fmal` 调用，OFF/DEFAULT 保持独立乘加 |
 | `#pragma STDC CX_LIMITED_RANGE` | ON/OFF/DEFAULT 三态；ON 时 x86_64 complex 乘除法使用内联有限范围公式，OFF/DEFAULT 使用 `__mulsc3` / `__muldc3` / `__divsc3` / `__divdc3` range-safe helper |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |

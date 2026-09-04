@@ -18908,6 +18908,102 @@ impl Codegen {
                 self.mov_imm(dst, 0); // 返回 0
                 true
             }
+            // fesetexcept(excepts): C17 设置异常标志 (不触发陷阱)
+            // 与 feraiseexcept 类似但不调用 fwait (不检查屏蔽)
+            "fesetexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x09, 0xC1]); // or ecx, eax
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0);
+                true
+            }
+            // feenableexcept(excepts): GNU extension 启用异常陷阱
+            // 清除 MXCSR 中对应的异常屏蔽位 (位 7-12)
+            // 返回之前启用的异常掩码
+            "feenableexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                // 保存旧的启用掩码 (屏蔽位取反 = 启用位)
+                self.emit(&[0x89, 0xC8]); // mov eax, ecx
+                self.emit(&[0xC1, 0xE8, 0x07]); // shr eax, 7
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                // 清除屏蔽位 (启用陷阱): 屏蔽位在 7-12
+                self.emit(&[0x89, 0xD6]); // mov esi, edx (save)
+                self.emit(&[0xC1, 0xE2, 0x07]); // shl edx, 7
+                self.emit(&[0x89, 0xD6]); // mov esi, edx
+                self.emit(&[0xF7, 0xDE]); // not esi
+                self.emit(&[0x21, 0xF1]); // and ecx, esi
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // eax = 旧的启用掩码
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // fedisableexcept(excepts): GNU extension 禁用异常陷阱
+            // 设置 MXCSR 中对应的异常屏蔽位 (位 7-12)
+            // 返回之前启用的异常掩码
+            "fedisableexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                // 保存旧的启用掩码
+                self.emit(&[0x89, 0xC8]); // mov eax, ecx
+                self.emit(&[0xC1, 0xE8, 0x07]); // shr eax, 7
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                // 设置屏蔽位 (禁用陷阱)
+                self.emit(&[0xC1, 0xE0, 0x07]); // shl eax_orig, 7 -- reuse
+                // 重新加载 excepts 到 edx
+                self.gen_expr(&args[0], 2); // rdx = excepts
+                self.emit(&[0x83, 0xE2, 0x3F]); // and edx, 0x3F
+                self.emit(&[0xC1, 0xE2, 0x07]); // shl edx, 7
+                self.emit(&[0x09, 0xD1]); // or ecx, edx
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // fegetexcept(): GNU extension 返回当前启用的异常掩码
+            "fegetexcept" => {
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp]
+                self.emit(&[0xC1, 0xE8, 0x07]); // shr eax, 7
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             _ => false,
         }
     }
