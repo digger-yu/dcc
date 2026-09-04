@@ -18624,12 +18624,16 @@ impl Codegen {
 
     /// fenv.h 运行时调用内联实现 (x86-64, C11 7.6 / C99 F.8)。
     ///
-    /// SSE 浮点异常标志在 MXCSR 低 6 位 (0x01=invalid, 0x02=denorm,
-    /// 0x04=div-by-zero, 0x08=overflow, 0x10=underflow, 0x20=inexact),
-    /// 舍入模式在 MXCSR 位 13-14 (0x0/0x2000/0x4000/0x6000)。dcc 的浮点
-    /// 运算走 SSE, 因此舍入/异常以 MXCSR 为准; fenv_t 布局与 glibc x86-64
-    /// 对齐 (fnstenv 28 字节 + offset 28 的 __mxcsr)。所有函数返回 int,
-    /// 失败路径 (参数不齐) 按 0 处理。
+    /// 5.5: 同时处理 SSE (MXCSR) 和 x87 FPU 异常标志:
+    /// - SSE 异常标志在 MXCSR 低 6 位 (0x01=invalid, 0x02=denorm,
+    ///   0x04=div-by-zero, 0x08=overflow, 0x10=underflow, 0x20=inexact)
+    /// - x87 异常标志在 FPU 状态字低 6 位 (fnstsw 读取)
+    /// - 舍入模式在 MXCSR 位 13-14 (0x0/0x2000/0x4000/0x6000)
+    ///
+    /// dcc 的浮点运算走 SSE, 因此舍入/异常以 MXCSR 为准; x87 状态字
+    /// 通过 fnclex (清除) / fnstsw (读取) / fwait (同步) 维护。
+    /// fenv_t 布局与 glibc x86-64 对齐 (fnstenv 28 字节 + offset 28 的
+    /// __mxcsr)。所有函数返回 int, 失败路径 (参数不齐) 按 0 处理。
     fn gen_fenv_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             // fegetround(): 返回当前舍入模式 (FE_TONEAREST=0, FE_DOWNWARD=0x400, ...)
@@ -18665,7 +18669,8 @@ impl Codegen {
                 self.mov_imm(dst, 0); // 返回 0
                 true
             }
-            // feclearexcept(excepts): 清除 MXCSR 中选中的异常标志, 返回 0
+            // feclearexcept(excepts): 清除 MXCSR 和 x87 状态字中选中的异常标志, 返回 0
+            // 5.5: 同时处理 SSE (MXCSR) 和 x87 FPU 异常标志
             "feclearexcept" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
@@ -18674,6 +18679,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 0); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0xF7, 0xD0]); // not eax
+                // 清除 MXCSR 异常标志
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
                 self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
@@ -18681,10 +18687,15 @@ impl Codegen {
                 self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
                 self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
                 self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // 清除 x87 FPU 状态字异常标志 (fnclex 清除所有异常)
+                // 注: fnclex 清除所有 6 个异常标志, 与 excepts 掩码无关
+                // 这是安全的因为 C11 允许清除额外的异常
+                self.emit(&[0xDB, 0xE2]); // fnclex
                 self.mov_imm(dst, 0); // 返回 0
                 true
             }
             // feraiseexcept(excepts): 置位 MXCSR 中选中的异常标志, 返回 0
+            // 5.5: x87 异常通过 MXCSR 同步 (fwait 检查 MXCSR 异常标志)
             "feraiseexcept" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
@@ -18699,10 +18710,14 @@ impl Codegen {
                 self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
                 self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
                 self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // fwait 同步 x87: 检查 MXCSR 中刚置位的异常标志
+                // 如果异常未被屏蔽, x87 会产生相应的异常
+                self.emit(&[0x9B]); // fwait
                 self.mov_imm(dst, 0); // 返回 0
                 true
             }
-            // fetestexcept(excepts): 返回 MXCSR 中选中异常标志的位与
+            // fetestexcept(excepts): 返回 MXCSR 和 x87 状态字中选中异常标志的位与
+            // 5.5: 同时测试 SSE (MXCSR) 和 x87 FPU 异常标志
             "fetestexcept" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
@@ -18710,12 +18725,22 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], 0); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                // 测试 MXCSR 异常标志
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
                 self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
                 self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
-                self.emit(&[0x21, 0xC1]); // and ecx, eax
+                self.emit(&[0x21, 0xC1]); // and ecx, eax (ecx = MXCSR & excepts)
                 self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // 测试 x87 FPU 状态字异常标志
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0xDF, 0xE0]); // fnstsw ax (x87 状态字 -> ax)
+                self.emit(&[0x66, 0x25, 0x3F, 0x00]); // and ax, 0x3F
+                self.emit(&[0x66, 0x21, 0xC0]); // and ax, ax (保留 excepts 位)
+                self.emit(&[0x0F, 0xB7, 0xC0]); // movzx eax, ax (零扩展到 eax)
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // 合并 MXCSR 和 x87 结果 (OR)
+                self.emit(&[0x09, 0xC1]); // or ecx, eax
                 self.mov(0, 1); // rax = rcx
                 if dst != 0 {
                     self.mov(dst, 0);
