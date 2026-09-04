@@ -17199,6 +17199,75 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_shl_overflow(a, b, &result): 左移溢出检测
+            // 溢出条件: b >= 类型宽度 或 b < 0
+            // 策略: 先检查移位量, 再执行移位, 比较检测溢出
+            "__builtin_shl_overflow" | "__builtin_shr_overflow" => {
+                if args.len() < 3 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let op_size = args[0].ty().size().max(4); // 至少 32 位
+                let type_bits = op_size * 8;
+                // 1. 求值 ptr → r10
+                self.gen_expr(&args[2], 0);
+                self.emit(&[0x49, 0x89, 0xc2]); // mov r10, rax
+                // 2. 求值 b (移位量) → push
+                self.gen_expr(&args[1], 0);
+                self.push(0);
+                // 3. 求值 a (被移值) → rax
+                self.gen_expr(&args[0], 0);
+                // 4. pop b → rcx (移位量)
+                self.pop(1);
+                // rax = a (被移值), rcx = b (移位量), r10 = ptr
+                // 5. 检查移位量是否溢出 (b >= type_bits 或 b < 0)
+                let overflow_label = self.fresh_label();
+                let end_label = self.fresh_label();
+                self.emit(&[0x48, 0x83, 0xf9, 0x00]); // cmp rcx, 0
+                self.jmp_rel32(&overflow_label, JumpKind::Jl); // jl overflow (负数)
+                self.emit(&[0x48, 0x83, 0xf9]); // cmp rcx, type_bits
+                self.emit(&[type_bits as u8]);
+                self.jmp_rel32(&overflow_label, JumpKind::Jge); // jge overflow (>= type_bits)
+                // 6. 正常移位
+                // rax = a (被移值), rcx = b (移位量)
+                // x86 移位指令使用 cl 作为移位计数
+                if name == "__builtin_shl_overflow" {
+                    self.emit(&[0x48, 0xd3, 0xe0]); // shl rax, cl
+                } else {
+                    // 对于有符号类型使用 sar, 无符号使用 shr
+                    let unsigned = matches!(
+                        args[0].ty(),
+                        Type::Bool
+                            | Type::UChar
+                            | Type::UShort
+                            | Type::UInt
+                            | Type::ULong
+                            | Type::ULongLong
+                            | Type::UInt128
+                    );
+                    if unsigned {
+                        self.emit(&[0x48, 0xd3, 0xe8]); // shr rax, cl
+                    } else {
+                        self.emit(&[0x48, 0xd3, 0xf8]); // sar rax, cl
+                    }
+                }
+                // 7. 存储结果到 *ptr
+                self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                // 8. 返回 0 (无溢出)
+                self.mov_imm(dst, 0);
+                self.jmp_rel32(&end_label, JumpKind::Jmp);
+                // overflow 处理:
+                self.label(&overflow_label);
+                // 存储 0 到 *ptr (溢出时结果为 0)
+                self.emit(&[0x49, 0xc7, 0x02, 0x00, 0x00, 0x00, 0x00]); // mov qword [r10], 0
+                // 返回 1 (有溢出)
+                self.mov_imm(dst, 1);
+                self.label(&end_label);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             // ===== M12+ 补洞 builtins =====
             // __builtin_strcasecmp(s1, s2): 不区分大小写比较, 走 libc.
             // 链接时由 glibc strcasecmp 提供; freestanding 测试可在 fixture 中

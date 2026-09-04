@@ -5083,6 +5083,17 @@ fn builtin_clear_cache_compiles() {
     assert_eq!(rc, 0, "builtin_clear_cache should return 0, got {rc}");
 }
 
+/// __builtin_shl_overflow / __builtin_shr_overflow: 移位溢出检测
+#[test]
+fn builtin_shift_overflow_run_returns_zero() {
+    let source = include_str!("fixtures/c/builtin_shift_overflow.c");
+    let (output, exe) = run_compile_and_run("builtin-shift-overflow", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "builtin_shift_overflow should return 0, got {rc}");
+}
+
 /// M12+ builtins: rotate/clrsb/fma/strcasecmp/FILE/LINE/FUNCTION/classify_type 等
 #[test]
 fn builtin_m12_extra_run_returns_zero() {
