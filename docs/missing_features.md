@@ -14,7 +14,7 @@
 | `-falign-jumps=N` / `-falign-loops=N` (N>1) | DCC 不执行代码段对齐；`=1` 等价于不对齐，静默接受；其他值发出警告 |
 | `-mpreferred-stack-boundary=N` (N≠2) | DCC 不调整栈对齐；`=2` 为内核默认，静默接受；其他值发出警告 |
 | `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
-| `-ftrampolines` / `-fno-trampolines` | 接受但无操作；嵌套函数直接调用通过 `__builtin_call_with_static_chain` 支持，但取地址场景不生成栈上 trampoline（需要可执行栈），用户需确保不通过函数指针间接调用嵌套函数 |
+| `-ftrampolines` / `-fno-trampolines` | 接受但无操作；嵌套函数直接调用通过 `__builtin_call_with_static_chain` 支持；嵌套函数取地址时生成栈上 trampoline (设置 r10=父帧指针后跳转)，用户需确保栈可执行 (mprotect PROT_EXEC) 或通过 `-z execstack` 链接 |
 | 优化器 `-fno-strict-aliasing` | 已实现：`-fno-strict-aliasing` 时别名分析合并所有指针到同一 alias set (保守)；默认 `-fstrict-aliasing` 按类型标签区分 alias set (C 标准语义) |
 
 

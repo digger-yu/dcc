@@ -21963,3 +21963,95 @@ int main(void) {
         stdout
     );
 }
+
+// ── Nested function trampoline tests ──
+
+/// Verify nested function address-taking compiles.
+/// The trampoline mechanism allows nested functions to be used
+/// as function pointers.
+#[test]
+fn nested_func_trampoline_compile() {
+    let src = r#"
+#include <stdio.h>
+int main(void) {
+    int x = 42;
+    void nested(void) {
+        printf("x=%d\n", x);
+    }
+    // 取嵌套函数地址应触发 trampoline 生成
+    void (*fp)(void) = nested;
+    fp();
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-tramp-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-tramp-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile trampoline test");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "trampoline compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&bin_path);
+}
+
+/// Verify nested function direct call with static chain works.
+#[test]
+fn nested_func_direct_call() {
+    let src = r#"
+#include <stdio.h>
+int main(void) {
+    int x = 10;
+    int add_x(int y) {
+        return x + y;
+    }
+    int result = add_x(32);
+    printf("%d\n", result);
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!(
+        "dcc-nested-direct-{}.c",
+        std::process::id()
+    ));
+    let bin_path = dir.join(format!(
+        "dcc-nested-direct-{}",
+        std::process::id()
+    ));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-o"])
+        .arg(&bin_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile nested func test");
+    let _ = std::fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "nested func compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(&bin_path).output().expect("run binary");
+    let _ = std::fs::remove_file(&bin_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.trim() == "42",
+        "expected 42, got: {}",
+        stdout.trim()
+    );
+}

@@ -265,6 +265,13 @@ pub struct Codegen {
     /// (code 偏移, 位掩码 bit). 函数体生成完毕后, 若该寄存器未被使用,
     /// 将对应的 4 字节 mov 改写为 4×0x90 (nop), 避免叶子函数的冗余保存.
     callee_save_patch_sites: Vec<(u64, u8)>,
+    // ── 嵌套函数 trampoline ──
+    /// 嵌套函数 trampoline 栈槽: 函数名 → 帧偏移.
+    /// 当嵌套函数地址被取时, 在栈上生成 trampoline 代码,
+    /// 设置 r10 = 父帧指针后跳转到实际函数.
+    trampoline_slots: HashMap<String, i32>,
+    /// trampoline 代码大小 (每函数 32 字节)
+    trampoline_total_size: i32,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1451,6 +1458,9 @@ impl Codegen {
             reg_allocated: 0,
             callee_saved_used: 0,
             callee_save_patch_sites: vec![],
+            // 嵌套函数 trampoline
+            trampoline_slots: HashMap::new(),
+            trampoline_total_size: 0,
         }
     }
 
@@ -5824,6 +5834,8 @@ impl Codegen {
         // noreturn: 函数末尾插入 trap 指令
         self.current_is_noreturn = f.is_noreturn;
         self.upvar_offsets.clear();
+        self.trampoline_slots.clear();
+        self.trampoline_total_size = 0;
         if f.is_nested {
             for (name, off) in &f.upvars {
                 self.upvar_offsets.insert(name.clone(), *off);
@@ -7454,7 +7466,22 @@ impl Codegen {
                         .and_then(|m| m.get(&name.name))
                         .cloned()
                         .unwrap_or_else(|| name.name.clone());
-                    self.emit_func_addr(dst, &effective_name);
+                    // 检查是否为嵌套函数: 需要生成 trampoline
+                    if self.nested_funcs.contains_key(&name.name) {
+                        let tramp_off = self.gen_trampoline(&effective_name);
+                        // lea dst, [rbp + tramp_off] - trampoline 地址
+                        let rex = 0x48u8 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex, 0x8D]);
+                        let modrm = 0x45 | ((dst & 7) << 3); // [rbp + disp8]
+                        if tramp_off.abs() < 128 {
+                            self.emit(&[modrm, tramp_off as i8 as u8]);
+                        } else {
+                            self.emit(&[modrm | 0x40]); // 切换到 disp32
+                            self.emit(&tramp_off.to_le_bytes());
+                        }
+                    } else {
+                        self.emit_func_addr(dst, &effective_name);
+                    }
                 } else if matches!(ty, Type::Vector(_, _)) {
                     // 向量变量: 标量逐元素加载到帧临时区 slot 0
                     self.gen_vector_load(e);
@@ -9380,7 +9407,27 @@ impl Codegen {
                 {
                     if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
                         // &func: 函数地址
-                        self.emit_func_addr(dst, &name.name);
+                        // 检查是否为嵌套函数: 需要生成 trampoline
+                        if self.nested_funcs.contains_key(&name.name) {
+                            let effective_name = self.nested_func_renames
+                                .get(&self.current_func_name)
+                                .and_then(|m| m.get(&name.name))
+                                .cloned()
+                                .unwrap_or_else(|| name.name.clone());
+                            let tramp_off = self.gen_trampoline(&effective_name);
+                            // lea dst, [rbp + tramp_off]
+                            let rex = 0x48u8 | if dst >= 8 { 0x04 } else { 0 };
+                            self.emit(&[rex, 0x8D]);
+                            let modrm = 0x45 | ((dst & 7) << 3);
+                            if tramp_off.abs() < 128 {
+                                self.emit(&[modrm, tramp_off as i8 as u8]);
+                            } else {
+                                self.emit(&[modrm | 0x40]);
+                                self.emit(&tramp_off.to_le_bytes());
+                            }
+                        } else {
+                            self.emit_func_addr(dst, &name.name);
+                        }
                     } else if self.globals.contains_key(&name.name)
                         && !self.is_local_name(&name.name)
                     {
@@ -19033,6 +19080,57 @@ impl Codegen {
             let disp32_pos = self.pos() - 4;
             self.pending_func_addr_rels
                 .push((disp32_pos, name.to_string()));
+        }
+    }
+
+    /// 生成嵌套函数 trampoline: 在栈上分配空间并填充 trampoline 代码.
+    /// Trampoline 设置 r10 = 父帧指针 (静态链) 后跳转到实际函数.
+    /// 返回 trampoline 在栈帧中的偏移.
+    fn gen_trampoline(&mut self, nested_name: &str) -> i32 {
+        // 检查是否已为此嵌套函数生成 trampoline
+        if let Some(&off) = self.trampoline_slots.get(nested_name) {
+            return off;
+        }
+        // 每个 trampoline 32 字节 (16 字节对齐)
+        let tramp_size: i32 = 32;
+        self.trampoline_total_size += tramp_size;
+        let offset = -self.trampoline_total_size;
+        self.trampoline_slots.insert(nested_name.to_string(), offset);
+        offset
+    }
+
+    /// 在函数体开始处发射 trampoline 代码到栈上.
+    /// 将 trampoline 代码写入已分配的栈空间.
+    fn emit_trampoline_code(&mut self) {
+        if self.trampoline_slots.is_empty() {
+            return;
+        }
+        // Trampoline 布局 (x86-64, 32 字节):
+        //   48 8d 14 24       lea rdx, [rsp]     ; 父帧指针
+        //   49 ba <8bytes>    movabs r10, <func_addr>  ; 实际函数地址
+        //   41 ff e2          jmp r10             ; 跳转 (r10=静态链)
+        //   90 * N            padding 到 32 字节
+        let tramp_names: Vec<String> = self.trampoline_slots.keys().cloned().collect();
+        for name in &tramp_names {
+            let offset = self.trampoline_slots[name];
+            // 保存当前 code 位置
+            let save_pos = self.pos();
+            // lea rdx, [rsp] - 父帧指针
+            self.emit(&[0x48, 0x8D, 0x14, 0x24]);
+            // movabs r10, <func_addr> - 实际函数地址 (占位)
+            self.emit(&[0x49, 0xBA]);
+            let addr_pos = self.pos();
+            self.emit(&[0u8; 8]); // 占位 8 字节
+            // 记录重定位: resolve 阶段修补函数地址
+            self.pending_data64_rels
+                .push((addr_pos, name.clone(), None, 1, 0));
+            // jmp r10
+            self.emit(&[0x41, 0xFF, 0xE2]);
+            // padding 到 32 字节
+            let written = self.pos() - save_pos;
+            for _ in written..32 {
+                self.emit(&[0x90]); // nop
+            }
         }
     }
 
