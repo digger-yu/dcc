@@ -16142,8 +16142,6 @@ impl Codegen {
             // __builtin___clear_cache: no-op (x86 不需要显式 cache flush)
             "__builtin___clear_cache" => true,
             // 数学函数: 转发到 libc
-            "__builtin_ceilf" | "__builtin_floorf" | "__builtin_roundf" |
-            "__builtin_ceil" | "__builtin_floor" | "__builtin_round" |
             "__builtin_pow" | "__builtin_powf" | "__builtin_powl" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 let ar = [7u8, 6, 2, 1, 8, 9];
@@ -18334,6 +18332,135 @@ impl Codegen {
                 self.emit(&[0x54]); // push rsp
                 self.call_label("sqrtl");
                 self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_floor/floorf: inline SSE roundsd/roundss (mode 01 = toward -inf)
+            // roundsd: 66 0F 3A 0B /r ib
+            "__builtin_floor" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_floorf" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x01]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_floorl: long double -> libm (80-bit)
+            "__builtin_floorl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("floorl");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_ceil/ceilf: inline SSE roundsd/roundss (mode 10 = toward +inf)
+            "__builtin_ceil" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x02]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_ceilf" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x02]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_ceill: long double -> libm (80-bit)
+            "__builtin_ceill" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("ceill");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_round/roundf: inline SSE roundsd/roundss (mode 00 = nearest)
+            "__builtin_round" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x00]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_roundf" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x00]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_roundl: long double -> libm (80-bit)
+            "__builtin_roundl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("roundl");
+                self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_trunc/truncf: inline SSE roundsd/roundss (mode 03 = toward zero)
+            "__builtin_trunc" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x03]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_truncf" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x03]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_truncl: long double -> libm (80-bit)
+            "__builtin_truncl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                self.emit(&[0x54]);
+                self.call_label("truncl");
+                self.emit(&[0x5c]);
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
