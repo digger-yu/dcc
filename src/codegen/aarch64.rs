@@ -1632,7 +1632,7 @@ impl Aarch64Codegen {
                 self.gen_expr(&expr.children[1]);
                 self.mov_w1_w0();
                 self.mov_w0_w14();
-                self.binop_w0_w1(*op);
+                self.binop_w0_w1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
                 return true;
             }
             ExprKind::Unary(op) if !expr.children.is_empty() => {
@@ -2619,7 +2619,7 @@ impl Aarch64Codegen {
                 self.gen_expr_from_ast(r);
                 self.mov_w1_w0();
                 self.mov_w0_w14();
-                self.binop_w0_w1(*op);
+                self.binop_w0_w1(*op, Self::is_signed_ast_type(&l.ty()));
             }
             Expr::Unary { op, e, .. } => {
                 self.gen_expr_from_ast(e);
@@ -2805,7 +2805,15 @@ impl Aarch64Codegen {
         }
     }
 
-    fn binop_w0_w1(&mut self, op: BinOp) {
+    /// 判断 AST 类型是否为有符号整数 (用于移位等有符号性判定)
+    fn is_signed_ast_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+        )
+    }
+
+    fn binop_w0_w1(&mut self, op: BinOp, is_signed: bool) {
         match op {
             BinOp::Add => self.emit(&[0x00, 0x00, 0x01, 0x0b]),
             BinOp::Sub => self.emit(&[0x00, 0x00, 0x01, 0x4b]),
@@ -2822,8 +2830,18 @@ impl Aarch64Codegen {
             //   bits[4:0] = Rd (0 for w0)
             // lsrv w0, w0, w1: 0x1A342000 LE = 00 20 34 1A
             //   bits[23:21] = 0b010 (lsrv op)
+            // asrv w0, w0, w1: 0x1A742000 LE = 00 20 74 1A
+            //   bits[23:21] = 0b110 (asrv op, 算术右移, 符号扩展)
             BinOp::Shl => self.emit(&[0x00, 0x20, 0x30, 0x1a]), // lslv w0, w0, w1
-            BinOp::Shr => self.emit(&[0x00, 0x20, 0x34, 0x1a]), // lsrv w0, w0, w1
+            BinOp::Shr => {
+                if is_signed {
+                    // asrv: 算术右移, 高位补符号位 (C11 6.5.7)
+                    self.emit(&[0x00, 0x20, 0x74, 0x1a]);
+                } else {
+                    // lsrv: 逻辑右移, 高位补 0
+                    self.emit(&[0x00, 0x20, 0x34, 0x1a]);
+                }
+            }
             // M7 修复: 真 sdiv / msub 替代 0
             // binop_w0_w1 之前已把 w0=left, w1=right, w14=left (保存)
             //   Div: sdiv w0, w0, w1   => 0x9AC00C20

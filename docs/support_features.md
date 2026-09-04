@@ -296,7 +296,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 聚合类型 sret 返回 | 返回 > 16 字节时 caller 分配 `<sret>` local；aarch64 `memcpy_sp_to_x0`；riscv64 `memcpy_sp_to_a0`；aarch64 嵌套 sret 支持多层调用链 (gen_function 入口保存 x0 到 `<sret_ptr>`, return 时恢复) |
 | aarch64/riscv64 整数除/取模 | aarch64 `sdiv` + `msub`；riscv64 RV64M `div` / `rem` |
 | aarch64/riscv64 浮点函数调用 | 浮点表达式中的 `ExprKind::Call` 复用普通调用路径；AArch64 结果保留在 `s0/d0`，RISC-V 结果保留在 `fa0`，compile/ELF 层有回归测试 |
-| aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv`；riscv64 `sll` / `srl` / `sra` |
+| aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv` / `asrv` (有符号右移算术移位)；riscv64 `sll` / `srl` / `sra` (有符号右移算术移位) |
 | aarch64 va_arg GP + float + 栈溢出 | x0..x7 + v0..v7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
 | riscv64 va_arg GP + float + 栈溢出 | a0..a7 + fa0..fa7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
 | mips va_arg GP | $a0-$a3 保存区 + 顺序读；超出 4 个从 caller 栈读取；O32 ABI |

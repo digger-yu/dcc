@@ -1055,9 +1055,12 @@ impl<'a> Parser<'a> {
         if rank(higher) > rank(lower) {
             return higher.clone();
         }
+        // 同秩时: 有符号无法表示无符号的全部值, 转为对应无符号类型
         match higher {
+            Int => UInt,
             Long => ULong,
             LongLong => ULongLong,
+            Int128 => UInt128,
             _ => higher.clone(),
         }
     }
@@ -8536,6 +8539,14 @@ impl<'a> Parser<'a> {
                         } else {
                             Self::usual_arith_type(&lt, &rt)
                         }
+                    } else if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        // C11 6.5.7: 移位运算结果类型 = 左操作数整数提升后的类型.
+                        // 不使用通常算术转换 (右操作数仅为移位计数).
+                        match &lt {
+                            Type::Char | Type::SChar | Type::UChar
+                            | Type::Short | Type::UShort => Type::Int,
+                            _ => lt,
+                        }
                     } else if matches!(&lt, Type::Int128 | Type::UInt128)
                         || matches!(&rt, Type::Int128 | Type::UInt128)
                     {
@@ -8645,11 +8656,13 @@ impl<'a> Parser<'a> {
             TokKind::Tilde => {
                 self.advance();
                 let e = self.parse_unary()?;
+                // C 标准: ~ 的结果类型与提升后的操作数类型相同
+                let result_ty = e.ty();
                 Some(Expr::Unary {
                     op: UnOp::BitNot,
                     e: Box::new(e),
                     span: sp,
-                    ty: int_t(),
+                    ty: result_ty,
                 })
             }
             TokKind::Star => {
@@ -10547,25 +10560,74 @@ fn parse_int_lit(s: &str) -> i128 {
 fn parse_str(raw: &str) -> Vec<u8> {
     let inner = &raw[1..raw.len() - 1];
     let mut d = vec![];
-    let mut it = inner.chars();
-    while let Some(c) = it.next() {
-        if c == '\\' {
-            match it.next() {
-                Some('n') => d.push(b'\n'),
-                Some('t') => d.push(b'\t'),
-                Some('r') => d.push(b'\r'),
-                Some('0') => d.push(0),
-                Some('\\') => d.push(b'\\'),
-                Some('"') => d.push(b'"'),
-                Some('\'') => d.push(b'\''),
-                Some(c) => {
-                    d.push(b'\\');
-                    d.push(c as u8);
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 1;
+            match bytes[i] {
+                b'n' => { d.push(b'\n'); i += 1; }
+                b't' => { d.push(b'\t'); i += 1; }
+                b'r' => { d.push(b'\r'); i += 1; }
+                b'a' => { d.push(0x07); i += 1; }
+                b'b' => { d.push(0x08); i += 1; }
+                b'f' => { d.push(0x0c); i += 1; }
+                b'v' => { d.push(0x0b); i += 1; }
+                b'\\' => { d.push(b'\\'); i += 1; }
+                b'"' => { d.push(b'"'); i += 1; }
+                b'\'' => { d.push(b'\''); i += 1; }
+                b'?' => { d.push(b'?'); i += 1; }
+                b'x' => {
+                    // 十六进制转义: \xNN (1+ 位十六进制数字)
+                    i += 1;
+                    let mut val: u8 = 0;
+                    let mut count = 0;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() && count < 2 {
+                        let digit = if bytes[i] <= b'9' {
+                            bytes[i] - b'0'
+                        } else {
+                            (bytes[i] & 0xdf) - b'A' + 10
+                        };
+                        val = val.wrapping_mul(16).wrapping_add(digit);
+                        i += 1;
+                        count += 1;
+                    }
+                    d.push(val);
                 }
-                None => d.push(b'\\'),
+                c if c >= b'0' && c <= b'7' => {
+                    // 八进制转义: \NNN (1-3 位八进制数字)
+                    let mut val: u16 = 0;
+                    for _ in 0..3 {
+                        if i < bytes.len() && bytes[i] >= b'0' && bytes[i] <= b'7' {
+                            val = val * 8 + (bytes[i] - b'0') as u16;
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    d.push(val as u8);
+                }
+                other => {
+                    // 未知转义: 保留反斜杠和字符 (GCC 兼容)
+                    d.push(b'\\');
+                    d.push(other);
+                    i += 1;
+                }
             }
         } else {
-            d.extend_from_slice(c.to_string().as_bytes());
+            // 普通字符 (包括 UTF-8 多字节序列)
+            if bytes[i] < 0x80 {
+                d.push(bytes[i]);
+                i += 1;
+            } else {
+                // UTF-8 多字节字符: 逐字节复制
+                d.push(bytes[i]);
+                i += 1;
+                while i < bytes.len() && bytes[i] & 0xc0 == 0x80 {
+                    d.push(bytes[i]);
+                    i += 1;
+                }
+            }
         }
     }
     d

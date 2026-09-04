@@ -1376,7 +1376,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_expr(&expr.children[1]);
-                self.binop_a0_a1(*op);
+                self.binop_a0_a1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
                 return true;
             }
             ExprKind::Unary(op) if !expr.children.is_empty() => {
@@ -2073,7 +2073,7 @@ impl Riscv64Codegen {
                 self.gen_vector_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_vector_expr(&expr.children[1]);
-                self.binop_a0_a1(*op);
+                self.binop_a0_a1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
                 return true;
             }
             ExprKind::Local(ref name) => {
@@ -2363,7 +2363,7 @@ impl Riscv64Codegen {
                 self.gen_expr_from_ast(l);
                 self.mv_a1_a0();
                 self.gen_expr_from_ast(r);
-                self.binop_a0_a1(*op);
+                self.binop_a0_a1(*op, Self::is_signed_ast_type(&l.ty()));
             }
             Expr::Call { callee, args, .. } => {
                 // GCC 兼容内建函数: AST 路径编译期折叠
@@ -3024,7 +3024,15 @@ impl Riscv64Codegen {
         off
     }
 
-    fn binop_a0_a1(&mut self, op: BinOp) {
+    /// 判断 AST 类型是否为有符号整数 (用于移位等有符号性判定)
+    fn is_signed_ast_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+        )
+    }
+
+    fn binop_a0_a1(&mut self, op: BinOp, is_signed: bool) {
         match op {
             BinOp::Add => self.emit_add(10, 10, 11),
             BinOp::Sub => self.emit_sub(10, 10, 11),
@@ -3049,7 +3057,15 @@ impl Riscv64Codegen {
             BinOp::Div => self.emit_div(10, 10, 11),
             BinOp::Mod => self.emit_rem(10, 10, 11),
             BinOp::Shl => self.emit_sll(10, 10, 11),
-            BinOp::Shr => self.emit_srl(10, 10, 11),
+            BinOp::Shr => {
+                if is_signed {
+                    // sra: 算术右移, 高位补符号位 (C11 6.5.7)
+                    self.emit_sra(10, 10, 11);
+                } else {
+                    // srl: 逻辑右移, 高位补 0
+                    self.emit_srl(10, 10, 11);
+                }
+            }
             BinOp::AndAnd | BinOp::OrOr => self.cmp_a0_zero(),
         }
     }
