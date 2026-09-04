@@ -7097,7 +7097,14 @@ impl Codegen {
                     // else: condition is false and no else branch → skip entirely
                 } else {
                     self.gen_expr(cond, 0);
-                    self.emit(&[0x85, 0xc0]);
+                    // 根据条件类型宽度选择 test 指令: 64 位类型必须用
+                    // test %rax,%rax (48 85 C0), 否则高 32 位非零值会被
+                    // test %eax,%eax (85 C0) 误判为零.
+                    if cond.ty().size() > 4 {
+                        self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
+                    } else {
+                        self.emit(&[0x85, 0xc0]); // test %eax, %eax
+                    }
                     let le = self.fresh_label();
                     let lend = self.fresh_label();
                     self.jmp_rel32(&le, JumpKind::Je);
@@ -7124,7 +7131,11 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 self.gen_expr(cond, 0);
-                self.emit(&[0x85, 0xc0]);
+                if cond.ty().size() > 4 {
+                    self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
+                } else {
+                    self.emit(&[0x85, 0xc0]); // test %eax, %eax
+                }
                 self.jmp_rel32(&le, JumpKind::Je);
                 self.gen_stmt(body);
                 self.jmp_rel32(&ls, JumpKind::Jmp);
@@ -7154,7 +7165,11 @@ impl Codegen {
                 self.label(&ls);
                 if let Some(c) = cond {
                     self.gen_expr(c, 0);
-                    self.emit(&[0x85, 0xc0]);
+                    if c.ty().size() > 4 {
+                        self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
+                    } else {
+                        self.emit(&[0x85, 0xc0]); // test %eax, %eax
+                    }
                     self.jmp_rel32(&le, JumpKind::Je);
                 }
                 self.gen_stmt(body);
@@ -7179,7 +7194,11 @@ impl Codegen {
                 self.label(&ls);
                 self.gen_stmt(body);
                 self.gen_expr(cond, 0);
-                self.emit(&[0x85, 0xc0]);
+                if cond.ty().size() > 4 {
+                    self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
+                } else {
+                    self.emit(&[0x85, 0xc0]); // test %eax, %eax
+                }
                 self.jmp_rel32(&ls, JumpKind::Jne);
                 self.label(&le);
                 self.loop_continue = sc;
@@ -8769,9 +8788,48 @@ impl Codegen {
             },
             Expr::AlignofTy { ty, .. } => self.mov_imm(dst, ty.align() as i128),
             Expr::AlignofExpr { e, .. } => self.mov_imm(dst, e.ty().align() as i128),
-            Expr::Offsetof { ty, ref member, .. } => {
-                let off = Self::compute_offset(ty, member);
-                self.mov_imm(dst, off as i128);
+            Expr::Offsetof { ty, ref member, ref indices, .. } => {
+                let base_off = Self::compute_offset(ty, member);
+                if indices.is_empty() {
+                    self.mov_imm(dst, base_off as i128);
+                } else {
+                    // 找到字段的类型
+                    let field_ty = Self::find_offsetof_field_type(ty, member);
+                    // dst = base_off
+                    self.mov_imm(dst, base_off as i128);
+                    // 对每个下标: dst += idx * stride
+                    let mut cur_ty = field_ty;
+                    for idx_expr in indices.iter() {
+                        if let Type::Array(elem, _) = &cur_ty {
+                            // 计算下标值到 rcx
+                            self.gen_expr(idx_expr, 1); // rcx = idx
+                            // 计算 stride = sizeof(elem) 并乘到 rcx
+                            if Self::type_has_vla(&elem.base) {
+                                // VLA: 运行时计算 stride 到 r11
+                                self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
+                                // rcx *= r11
+                                self.imul_reg(1, 11);
+                            } else {
+                                // 常量 stride
+                                let stride = elem.size() as u128;
+                                if stride > 1 {
+                                    if stride.is_power_of_two() {
+                                        let shift = (stride.trailing_zeros() as u8).min(31);
+                                        self.emit(&[0x48, 0xC1, 0xE1, shift]); // shl rcx, shift
+                                    } else {
+                                        self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
+                                    }
+                                }
+                            }
+                            // dst += rcx
+                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 }
+                                | if 1 >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
+                            // 下降到元素类型
+                            cur_ty = elem.base.clone();
+                        }
+                    }
+                }
             }
             Expr::Comma { l, r, .. } => {
                 // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
@@ -17056,9 +17114,12 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], dst);
+                // GCC 语义: 无后缀 → int 宽度(32), l → long 宽度, ll → long long 宽度.
+                let bits = match name {
+                    "__builtin_clz" => 32,
+                    _ => args[0].ty().size() as i32 * 8,
+                };
                 let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                // 根据参数类型大小确定位宽
-                let bits = args[0].ty().size() as i32 * 8;
                 // bsr dst, dst → dst = 最高位位置
                 self.emit(&[rex, 0x0F, 0xBD, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 // clz = (bits - 1) - dst
@@ -17647,7 +17708,11 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                let bits = args[0].ty().size() as i32 * 8;
+                // GCC 语义: 无后缀 → int 宽度(32), l → long 宽度, ll → long long 宽度.
+                let bits = match name {
+                    "__builtin_clrsb" => 32,
+                    _ => args[0].ty().size() as i32 * 8,
+                };
                 self.gen_expr(&args[0], 0); // rax = x
                 if bits == 64 {
                     // 64-bit clrsb: 用 cqo 复制符号到 rdx, 然后 xor rax, rdx.
@@ -19328,6 +19393,7 @@ impl Codegen {
     }
 
     /// 计算结构体成员偏移 (用于 __builtin_offsetof)
+    /// 支持常量数组下标 (如 "b[2]" 或 "b[2][3]")
     fn compute_offset(ty: &Type, member: &str) -> usize {
         let fields = match ty {
             Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields,
@@ -19337,14 +19403,37 @@ impl Codegen {
         let mut offset = 0usize;
         let mut current_fields = fields.as_ref();
         for (i, part) in parts.iter().enumerate() {
-            let name = if part.contains('[') {
-                &part[..part.find('[').unwrap()]
+            let (name, bracket_part) = if part.contains('[') {
+                let pos = part.find('[').unwrap();
+                (&part[..pos], &part[pos..])
             } else {
-                part
+                (*part, "")
             };
             // 使用 find_field 支持匿名 struct/union 成员穿透查找
             if let Some((field, inner_off)) = find_field(current_fields, name) {
                 offset += field.offset + inner_off;
+                // 处理常量数组下标: "b[2][3]" → 加 2*stride1 + 3*stride2
+                if !bracket_part.is_empty() {
+                    let mut cur_ty = field.ty.clone();
+                    for idx_str in bracket_part.split(|c| c == '[' || c == ']') {
+                        if idx_str.is_empty() { continue; }
+                        if let Ok(idx_val) = idx_str.parse::<usize>() {
+                            // stride = 当前数组元素类型的大小
+                            let stride = match &cur_ty {
+                                Type::Array(elem, _) => elem.size(),
+                                _ => break,
+                            };
+                            offset += idx_val * stride;
+                            // 下降到元素类型
+                            match &cur_ty {
+                                Type::Array(elem, _) => cur_ty = elem.base.clone(),
+                                _ => break,
+                            };
+                        } else {
+                            break; // 非常量下标 "?", 由运行时计算
+                        }
+                    }
+                }
                 if i < parts.len() - 1 {
                     if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
                         current_fields = sub.as_ref();
@@ -19357,6 +19446,31 @@ impl Codegen {
             }
         }
         offset
+    }
+
+    /// 查找 __builtin_offsetof 中字段的类型
+    fn find_offsetof_field_type(ty: &Type, member: &str) -> Type {
+        let fields = match ty {
+            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields,
+            _ => return Type::Int,
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut current_fields = fields.as_ref();
+        let mut result_ty = Type::Int;
+        for part in &parts {
+            let name = if part.contains('[') {
+                &part[..part.find('[').unwrap()]
+            } else {
+                part
+            };
+            if let Some((field, _)) = find_field(current_fields, name) {
+                result_ty = field.ty.clone();
+                if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
+                    current_fields = sub.as_ref();
+                }
+            }
+        }
+        result_ty
     }
 
     /// 获取指针参数所指元素的大小

@@ -377,8 +377,11 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
                 }
                 _ => 64,
             };
-            let n = (v as u64).leading_zeros() as i128;
-            Ok(Some(n - (64 - bits) as i128))
+            // 截断到对应类型宽度, 避免超宽零扩展影响前导零计数
+            let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let truncated = (v as u128) & mask;
+            let lz = if truncated == 0 { bits as u32 } else { 128 - truncated.leading_zeros() };
+            Ok(Some(bits as i128 - lz as i128))
         }
         "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" if argc == 1 => {
             let v = take1(args)?;
@@ -387,16 +390,21 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
             } // GCC 约定: 输入 0 时结果未定义, 取 0
             Ok(Some((v as u64).trailing_zeros() as i128))
         }
-        "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" if argc == 1 => {
-            let v = take1(args)?;
-            Ok(Some((v as u64).count_ones() as i128))
-        }
         "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" if argc == 1 => {
             let v = take1(args)?;
             if v == 0 {
                 return Ok(Some(0));
             }
-            Ok(Some((v as u64).trailing_zeros() as i128 + 1))
+            // 截断到对应类型宽度, 避免超宽零扩展影响
+            let bits = match name {
+                "__builtin_ffs" => 32,
+                "__builtin_ffsl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                _ => 64,
+            };
+            let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let truncated = (v as u128) & mask;
+            if truncated == 0 { return Ok(Some(0)); }
+            Ok(Some(truncated.trailing_zeros() as i128 + 1))
         }
         "__builtin_bswap16" if argc == 1 => {
             let v = take1(args)?;
@@ -409,6 +417,52 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
         "__builtin_bswap64" if argc == 1 => {
             let v = take1(args)?;
             Ok(Some((v as u64).swap_bytes() as i128))
+        }
+        // __builtin_clrsb/clrsbl/clrsbll: 计算符号位冗余位数
+        "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" if argc == 1 => {
+            let bits = match name {
+                "__builtin_clrsb" => 32,
+                "__builtin_clrsbl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                _ => 64,
+            };
+            let v = take1(args)?;
+            let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let truncated = (v as u128) & mask;
+            // 符号位
+            let sign_bit = (truncated >> (bits - 1)) & 1;
+            // 计算与符号位不同的最高位
+            let xored = truncated ^ (if sign_bit == 0 { 0 } else { mask });
+            if xored == 0 {
+                // 所有位都与符号位相同
+                Ok(Some((bits - 1) as i128))
+            } else {
+                let lz = 128 - xored.leading_zeros();
+                Ok(Some((bits as u32 - lz) as i128 - 1))
+            }
+        }
+        // __builtin_parity/parityl/parityll
+        "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" if argc == 1 => {
+            let bits = match name {
+                "__builtin_parity" => 32,
+                "__builtin_parityl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                _ => 64,
+            };
+            let v = take1(args)?;
+            let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let truncated = (v as u128) & mask;
+            Ok(Some((truncated.count_ones() as i128) & 1))
+        }
+        // __builtin_popcount/popcountl/popcountll
+        "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" if argc == 1 => {
+            let bits = match name {
+                "__builtin_popcount" => 32,
+                "__builtin_popcountl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                _ => 64,
+            };
+            let v = take1(args)?;
+            let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let truncated = (v as u128) & mask;
+            Ok(Some(truncated.count_ones() as i128))
         }
         _ => {
             // Unknown __builtin_* functions are not silently ignored;

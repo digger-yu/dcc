@@ -505,6 +505,8 @@ pub enum Expr {
     Offsetof {
         ty: Type,
         member: String,
+        /// 数组下标表达式 (按出现顺序), 用于运行时偏移计算
+        indices: Vec<Box<Expr>>,
         span: Span,
         result_ty: Type,
     },

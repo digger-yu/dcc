@@ -9673,6 +9673,7 @@ impl<'a> Parser<'a> {
                             }
                             // 解析成员设计器: field, field.sub, field[idx].sub 等
                             let mut member = String::new();
+                            let mut indices: Vec<Expr> = Vec::new();
                             if self.cur.kind == TokKind::Ident {
                                 member = self.cur.text.clone();
                                 self.advance();
@@ -9688,11 +9689,21 @@ impl<'a> Parser<'a> {
                                     }
                                 } else if self.cur.kind == TokKind::LBracket {
                                     self.advance();
-                                    let _idx = self.parse_expr_bp(2);
+                                    let idx_expr = self.parse_expr_bp(2);
                                     if self.cur.kind == TokKind::RBracket {
                                         self.advance();
                                     }
-                                    member.push_str("[]");
+                                    if let Some(idx) = idx_expr {
+                                        // 保留常量下标文本以便 compute_offset 计算偏移
+                                        member.push('[');
+                                        if let Ok(v) = const_eval::eval(&idx) {
+                                            member.push_str(&v.to_string());
+                                        } else {
+                                            member.push_str("?");
+                                        }
+                                        member.push(']');
+                                        indices.push(idx);
+                                    }
                                 } else {
                                     break;
                                 }
@@ -9703,6 +9714,7 @@ impl<'a> Parser<'a> {
                             e = Expr::Offsetof {
                                 ty: base_ty,
                                 member,
+                                indices: indices.into_iter().map(Box::new).collect(),
                                 span: sp.clone(),
                                 result_ty: int_t(),
                             };
