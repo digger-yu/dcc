@@ -3129,8 +3129,42 @@ impl<'a> Parser<'a> {
             }
             let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
             if self.cur.kind == TokKind::Semi {
+                // 单独的 struct/union/enum 定义: 发射类型定义声明以便 IR 层保留类型信息 (5.1 修复)
+                let span = self.cur.span.clone();
+                let type_decl = match &ty {
+                    Type::Struct(name, fields, _) => {
+                        let tag_name = name.strip_prefix("struct ").unwrap_or(name);
+                        Some(Decl::StructDef(crate::ast::StructDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            fields: (**fields).clone(),
+                            is_union: false,
+                            span,
+                        }))
+                    }
+                    Type::Union(name, fields, _) => {
+                        let tag_name = name.strip_prefix("union ").unwrap_or(name);
+                        Some(Decl::UnionDef(crate::ast::StructDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            fields: (**fields).clone(),
+                            is_union: true,
+                            span,
+                        }))
+                    }
+                    Type::Enum(name, variants, _) => {
+                        let tag_name = name.strip_prefix("enum ").unwrap_or(name);
+                        let variant_idents: Vec<(Ident, Option<i64>)> = variants.iter().map(|(n, v)| {
+                            (Ident { name: n.clone(), span: span.clone() }, Some(*v))
+                        }).collect();
+                        Some(Decl::EnumDef(crate::ast::EnumDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            variants: variant_idents,
+                            span,
+                        }))
+                    }
+                    _ => None,
+                };
                 self.advance();
-                return Some(vec![]);
+                return Some(type_decl.into_iter().collect());
             }
             // 支持 `struct T *a, *b;` 多声明符
             let mut decls = vec![];
@@ -3172,14 +3206,47 @@ impl<'a> Parser<'a> {
             }
             // 单独的 struct/union/enum 定义: `__declspec(...) struct S { int x; };`
             // 解析说明符后类型是 struct/union/enum, 而当前 token 是分号,
-            // 直接吃掉分号返回空 decl, 避免后面误调 parse_var_or_func.
+            // 发射类型定义声明以便 IR 层保留类型信息 (5.1 修复).
             if matches!(
                 ty,
                 Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _)
             ) && self.cur.kind == TokKind::Semi
             {
+                let span = self.cur.span.clone();
+                let type_decl = match &ty {
+                    Type::Struct(name, fields, _) => {
+                        let tag_name = name.strip_prefix("struct ").unwrap_or(name);
+                        Some(Decl::StructDef(crate::ast::StructDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            fields: (**fields).clone(),
+                            is_union: false,
+                            span,
+                        }))
+                    }
+                    Type::Union(name, fields, _) => {
+                        let tag_name = name.strip_prefix("union ").unwrap_or(name);
+                        Some(Decl::UnionDef(crate::ast::StructDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            fields: (**fields).clone(),
+                            is_union: true,
+                            span,
+                        }))
+                    }
+                    Type::Enum(name, variants, _) => {
+                        let tag_name = name.strip_prefix("enum ").unwrap_or(name);
+                        let variant_idents: Vec<(Ident, Option<i64>)> = variants.iter().map(|(n, v)| {
+                            (Ident { name: n.clone(), span: span.clone() }, Some(*v))
+                        }).collect();
+                        Some(Decl::EnumDef(crate::ast::EnumDef {
+                            name: Ident { name: tag_name.to_string(), span: span.clone() },
+                            variants: variant_idents,
+                            span,
+                        }))
+                    }
+                    _ => None,
+                };
                 self.advance();
-                return Some(vec![]);
+                return Some(type_decl.into_iter().collect());
             }
             let storage = self.decl_storage;
             let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));

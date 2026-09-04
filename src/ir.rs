@@ -105,6 +105,53 @@ pub struct Global {
     pub is_tls: bool,
 }
 
+/// Structured type information extracted from AST type definitions.
+///
+/// Optimization passes and LTO can use this to reason about aggregate
+/// types without walking the raw AST.  Each variant carries enough
+/// metadata for size/alignment queries and member lookups that the
+/// IR-level `ValueType::Aggregate` alone cannot provide.
+#[derive(Debug, Clone)]
+pub enum TypeDefInfo {
+    /// `struct S { ... }` — fields with offsets.
+    Struct {
+        name: String,
+        fields: Vec<TypeFieldInfo>,
+        size: usize,
+        align: usize,
+    },
+    /// `union U { ... }` — all fields share offset 0.
+    Union {
+        name: String,
+        fields: Vec<TypeFieldInfo>,
+        size: usize,
+        align: usize,
+    },
+    /// `enum E { A = 0, B = 1, ... }`
+    Enum {
+        name: String,
+        variants: Vec<(String, i64)>,
+    },
+    /// `typedef OldName NewName;`
+    Typedef {
+        name: String,
+        underlying: ValueType,
+    },
+    /// `__asm__("...")` at file scope — preserved for codegen.
+    GlobalAsm { asm: String },
+}
+
+/// A single field inside a struct / union `TypeDefInfo`.
+#[derive(Debug, Clone)]
+pub struct TypeFieldInfo {
+    pub name: String,
+    pub ty: ValueType,
+    /// Byte offset from the start of the containing aggregate.
+    pub offset: usize,
+    /// Field size in bytes.
+    pub size: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub functions: Vec<Function>,
@@ -113,6 +160,9 @@ pub struct Module {
     /// GlobalAsm declarations that do not produce IR but must be
     /// preserved for the backend (debug info, codegen, etc.).
     pub type_defs: Vec<ast::Decl>,
+    /// Structured type information derived from `type_defs`.
+    /// Optimization passes can query this without walking the AST.
+    type_info_cache: Vec<TypeDefInfo>,
     source: ast::Program,
 }
 
@@ -122,6 +172,247 @@ impl Module {
     }
     pub(crate) fn source_mut(&mut self) -> &mut ast::Program {
         &mut self.source
+    }
+
+    /// Return structured type definition information for all type
+    /// definitions in this module.  The result is lazily computed on
+    /// first call and cached until the module is mutated (e.g. by
+    /// `resync`).
+    pub fn type_info(&mut self) -> &[TypeDefInfo] {
+        if self.type_info_cache.is_empty() && !self.type_defs.is_empty() {
+            self.type_info_cache = build_type_info(&self.type_defs);
+        }
+        &self.type_info_cache
+    }
+
+    /// Look up a struct/union type by its tag name (e.g. `"struct foo"`).
+    pub fn find_aggregate(&mut self, tag: &str) -> Option<&TypeDefInfo> {
+        self.type_info();
+        self.type_info_cache
+            .iter()
+            .find(|info| matches!(info, TypeDefInfo::Struct { name, .. } | TypeDefInfo::Union { name, .. } if name == tag))
+    }
+
+    /// Look up an enum type by its tag name (e.g. `"enum color"`).
+    pub fn find_enum(&mut self, tag: &str) -> Option<&TypeDefInfo> {
+        self.type_info();
+        self.type_info_cache
+            .iter()
+            .find(|info| matches!(info, TypeDefInfo::Enum { name, .. } if name == tag))
+    }
+
+    /// Look up a typedef by its alias name.
+    pub fn find_typedef(&mut self, alias: &str) -> Option<&TypeDefInfo> {
+        self.type_info();
+        self.type_info_cache
+            .iter()
+            .find(|info| matches!(info, TypeDefInfo::Typedef { name, .. } if name == alias))
+    }
+
+    /// Collect all `GlobalAsm` strings (file-scope `__asm__` directives).
+    pub fn global_asm_strings(&mut self) -> Vec<&str> {
+        self.type_info();
+        self.type_info_cache
+            .iter()
+            .filter_map(|info| match info {
+                TypeDefInfo::GlobalAsm { asm } => Some(asm.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Build structured type info from raw AST declarations.
+fn build_type_info(decls: &[ast::Decl]) -> Vec<TypeDefInfo> {
+    let mut out = Vec::new();
+    for decl in decls {
+        match decl {
+            ast::Decl::StructDef(sd) => {
+                let (fields, size, align) = layout_struct_fields(&sd.fields);
+                out.push(TypeDefInfo::Struct {
+                    name: format!("struct {}", sd.name.name),
+                    fields,
+                    size,
+                    align,
+                });
+            }
+            ast::Decl::UnionDef(sd) => {
+                let (fields, size, align) = layout_union_fields(&sd.fields);
+                out.push(TypeDefInfo::Union {
+                    name: format!("union {}", sd.name.name),
+                    fields,
+                    size,
+                    align,
+                });
+            }
+            ast::Decl::EnumDef(ed) => {
+                let variants: Vec<(String, i64)> = ed
+                    .variants
+                    .iter()
+                    .map(|(id, val)| (id.name.clone(), val.unwrap_or(0)))
+                    .collect();
+                out.push(TypeDefInfo::Enum {
+                    name: format!("enum {}", ed.name.name),
+                    variants,
+                });
+            }
+            ast::Decl::Typedef { name, ty, .. } => {
+                // We cannot fully lower the type without a Lowering
+                // context, but we store a best-effort ValueType so
+                // that passes can at least see the alias.
+                let underlying = best_effort_lower_type(ty);
+                out.push(TypeDefInfo::Typedef {
+                    name: name.name.clone(),
+                    underlying,
+                });
+            }
+            ast::Decl::GlobalAsm { asm_str, .. } => {
+                out.push(TypeDefInfo::GlobalAsm {
+                    asm: asm_str.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Compute field layout for a struct (sequential, with padding).
+fn layout_struct_fields(fields: &[ast::Field]) -> (Vec<TypeFieldInfo>, usize, usize) {
+    let mut out = Vec::new();
+    let mut offset: usize = 0;
+    let mut max_align: usize = 1;
+    for f in fields {
+        let (sz, al) = type_size_align(&f.ty);
+        if al > 1 {
+            // Align to field alignment
+            offset = (offset + al - 1) & !(al - 1);
+        }
+        out.push(TypeFieldInfo {
+            name: f.name.clone(),
+            ty: best_effort_lower_type(&f.ty),
+            offset,
+            size: sz,
+        });
+        offset += sz;
+        if al > max_align {
+            max_align = al;
+        }
+    }
+    // Pad struct size to alignment
+    if max_align > 1 {
+        offset = (offset + max_align - 1) & !(max_align - 1);
+    }
+    (out, offset.max(1), max_align)
+}
+
+/// Compute field layout for a union (all fields at offset 0).
+fn layout_union_fields(fields: &[ast::Field]) -> (Vec<TypeFieldInfo>, usize, usize) {
+    let mut out = Vec::new();
+    let mut max_size: usize = 0;
+    let mut max_align: usize = 1;
+    for f in fields {
+        let (sz, al) = type_size_align(&f.ty);
+        out.push(TypeFieldInfo {
+            name: f.name.clone(),
+            ty: best_effort_lower_type(&f.ty),
+            offset: 0,
+            size: sz,
+        });
+        if sz > max_size {
+            max_size = sz;
+        }
+        if al > max_align {
+            max_align = al;
+        }
+    }
+    // Pad union size to alignment
+    if max_align > 1 {
+        max_size = (max_size + max_align - 1) & !(max_align - 1);
+    }
+    (out, max_size.max(1), max_align)
+}
+
+/// Best-effort size/alignment for an AST type (without full context).
+fn type_size_align(ty: &ast::Type) -> (usize, usize) {
+    let sz = ty.size();
+    let al = sz.max(1).min(16);
+    (sz.max(1), al)
+}
+
+/// Best-effort AST→IR type lowering for type_info only.
+/// This does NOT have access to the full type_map, so Named types
+/// remain as opaque Aggregate placeholders.
+fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
+    match ty {
+        ast::Type::Void => ValueType::Void,
+        ast::Type::Bool => ValueType::Integer { bits: 8, signed: false },
+        ast::Type::Char | ast::Type::SChar => ValueType::Integer { bits: 8, signed: true },
+        ast::Type::UChar | ast::Type::Char8 => ValueType::Integer { bits: 8, signed: false },
+        ast::Type::Char16 => ValueType::Integer { bits: 16, signed: false },
+        ast::Type::Char32 => ValueType::Integer { bits: 32, signed: false },
+        ast::Type::Short => ValueType::Integer { bits: 16, signed: true },
+        ast::Type::UShort => ValueType::Integer { bits: 16, signed: false },
+        ast::Type::Int => ValueType::Integer { bits: 32, signed: true },
+        ast::Type::UInt => ValueType::Integer { bits: 32, signed: false },
+        ast::Type::Long => ValueType::Integer { bits: 64, signed: true },
+        ast::Type::ULong => ValueType::Integer { bits: 64, signed: false },
+        ast::Type::LongLong => ValueType::Integer { bits: 64, signed: true },
+        ast::Type::ULongLong => ValueType::Integer { bits: 64, signed: false },
+        ast::Type::Int128 => ValueType::Integer { bits: 128, signed: true },
+        ast::Type::UInt128 => ValueType::Integer { bits: 128, signed: false },
+        ast::Type::Float => ValueType::Float { bits: 32 },
+        ast::Type::Double => ValueType::Float { bits: 64 },
+        ast::Type::LongDouble => ValueType::Float { bits: 128 },
+        ast::Type::Fract => ValueType::Integer { bits: 32, signed: true },
+        ast::Type::Accum => ValueType::Integer { bits: 64, signed: true },
+        ast::Type::Ptr(inner) => {
+            ValueType::Pointer(Box::new(best_effort_lower_type(&inner.base)))
+        }
+        ast::Type::Array(inner, sz) => {
+            let elem = best_effort_lower_type(&inner.base);
+            let n = match sz {
+                ast::ArraySize::Const(n) => Some(*n),
+                _ => None,
+            };
+            ValueType::Array(Box::new(elem), n)
+        }
+        ast::Type::Vector(inner, count) => {
+            let elem = best_effort_lower_type(&inner.base);
+            ValueType::Vector(Box::new(elem), *count)
+        }
+        ast::Type::Struct(name, _, _) => ValueType::Aggregate {
+            name: name.clone(),
+            size: ty.size().max(1),
+            is_union: false,
+        },
+        ast::Type::Union(name, _, _) => ValueType::Aggregate {
+            name: name.clone(),
+            size: ty.size().max(1),
+            is_union: true,
+        },
+        ast::Type::Enum(_, _, _) => ValueType::Integer { bits: 32, signed: true },
+        ast::Type::Func(ret, params) => ValueType::Function {
+            ret: Box::new(best_effort_lower_type(&ret.base)),
+            params: params.iter().map(|p| best_effort_lower_type(&p.base)).collect(),
+        },
+        ast::Type::Complex(inner) => {
+            ValueType::Complex(Box::new(best_effort_lower_type(&inner.base)))
+        }
+        ast::Type::Imaginary(inner) => {
+            ValueType::Imaginary(Box::new(best_effort_lower_type(&inner.base)))
+        }
+        ast::Type::Atomic(inner) => {
+            best_effort_lower_type(&inner.base)
+        }
+        ast::Type::Named(name) => {
+            // Cannot resolve without type_map; use opaque aggregate
+            ValueType::Aggregate {
+                name: name.clone(),
+                size: ty.size().max(1),
+                is_union: false,
+            }
+        }
     }
 }
 
@@ -246,6 +537,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                 functions,
                 globals,
                 type_defs,
+                type_info_cache: Vec::new(),
                 source,
             },
             warnings,
@@ -289,6 +581,7 @@ pub fn resync(module: &mut Module) -> Result<(), Vec<Diagnostic>> {
     module.functions = fresh.functions;
     module.globals = fresh.globals;
     module.type_defs = fresh.type_defs;
+    module.type_info_cache = Vec::new(); // invalidate cache
     Ok(())
 }
 
@@ -1531,5 +1824,76 @@ mod tests {
             module.functions[0].body[0].expressions[0].literal,
             Some(ExprLiteral::Int(5))
         );
+    }
+
+    // 5.1: type_info() exposes structured type definitions to IR consumers.
+    #[test]
+    fn type_info_exposes_struct_layout() {
+        let src = b"struct point { int x; int y; };\n\
+                     int main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "type-info-struct.c");
+        let (mut module, _) = lower(program).expect("lower");
+        let info = module.type_info();
+        assert!(!info.is_empty(), "type_info should not be empty");
+        let found = info.iter().any(|t| matches!(t, TypeDefInfo::Struct { name, .. } if name == "struct point"));
+        assert!(found, "struct point should be in type_info");
+    }
+
+    #[test]
+    fn type_info_exposes_union_and_enum() {
+        let src = b"union data { int i; float f; };\n\
+                     enum color { RED = 0, GREEN = 1, BLUE = 2 };\n\
+                     int main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "type-info-union-enum.c");
+        let (mut module, _) = lower(program).expect("lower");
+        let info = module.type_info();
+        let has_union = info.iter().any(|t| matches!(t, TypeDefInfo::Union { name, .. } if name == "union data"));
+        let has_enum = info.iter().any(|t| matches!(t, TypeDefInfo::Enum { name, .. } if name == "enum color"));
+        assert!(has_union, "union data should be in type_info");
+        assert!(has_enum, "enum color should be in type_info");
+    }
+
+    #[test]
+    fn type_info_exposes_typedef() {
+        let src = b"typedef unsigned long size_t;\n\
+                     int main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "type-info-typedef.c");
+        let (mut module, _) = lower(program).expect("lower");
+        let info = module.type_info();
+        let has_td = info.iter().any(|t| matches!(t, TypeDefInfo::Typedef { name, .. } if name == "size_t"));
+        assert!(has_td, "typedef size_t should be in type_info");
+    }
+
+    #[test]
+    fn find_aggregate_returns_struct_fields() {
+        let src = b"struct pair { int a; long b; };\n\
+                     int main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "find-agg.c");
+        let (mut module, _) = lower(program).expect("lower");
+        let agg = module.find_aggregate("struct pair");
+        assert!(agg.is_some(), "find_aggregate should find struct pair");
+        if let Some(TypeDefInfo::Struct { fields, size, align, .. }) = agg {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "a");
+            assert_eq!(fields[1].name, "b");
+            assert!(*size > 0);
+            assert!(*align > 0);
+        } else {
+            panic!("expected Struct variant");
+        }
+    }
+
+    #[test]
+    fn resync_invalidates_type_info_cache() {
+        let src = b"struct foo { int x; };\nint main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "resync-cache.c");
+        let (mut module, _) = lower(program).expect("lower");
+        // Populate cache
+        let info1 = module.type_info().len();
+        assert!(info1 > 0);
+        // resync should invalidate and rebuild
+        resync(&mut module).expect("resync");
+        let info2 = module.type_info().len();
+        assert_eq!(info1, info2, "type_info count should match after resync");
     }
 }

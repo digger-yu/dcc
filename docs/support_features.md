@@ -8,7 +8,7 @@
 
 | 特性 | 证据 |
 |------|------|
-| typed IR + 严格语义 | `cargo test` integration（static_assert / unknown typedef / int128）+ `tests/errors.rs` snapshot（E1003–E1008 等）；IR lowering 保留类型定义 (StructDef/UnionDef/EnumDef/Typedef)；`Type::Named` 预扫描解析 + W1013 降级；`ArraySize::Var` 尝试常量求值；StmtExpr 保留所有 block items |
+| typed IR + 严格语义 | `cargo test` integration（static_assert / unknown typedef / int128）+ `tests/errors.rs` snapshot（E1003–E1008 等）；IR lowering 保留类型定义 (StructDef/UnionDef/EnumDef/Typedef)；`Module::type_info()` 提供结构化类型信息查询（struct/union 字段布局、enum 变体、typedef 别名），优化 pass 和 LTO 可直接查询而无需回溯 AST；`Type::Named` 预扫描解析 + W1013 降级；`ArraySize::Var` 尝试常量求值；StmtExpr 保留所有 block items |
 | SysV va_list（GP） | `examples/test_p4_va_list.c` |
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
 | asm goto + computed goto | `examples/test_asm_goto.c` |
