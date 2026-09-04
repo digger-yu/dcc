@@ -1750,6 +1750,20 @@ impl Riscv64Codegen {
             return;
         }
 
+        // fenv.h 运行时调用 (C11 7.6): 内联为 CSR 指令序列,
+        // 不依赖 libm (freestanding 无 libc).
+        match callee.as_str() {
+            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept"
+            | "fetestexcept" | "fegetenv" | "fesetenv" | "feholdexcept"
+            | "feupdateenv"
+                if !self.labels.contains_key(&callee) =>
+            {
+                self.gen_fenv_builtin(&callee, args);
+                return;
+            }
+            _ => {}
+        }
+
         // D 扩展内建函数: sqrt/fmin/fmax 直接使用硬件浮点指令
         if callee == "__builtin_sqrt" || callee == "sqrt" || callee == "sqrtf" {
             let is_double = callee == "__builtin_sqrt" || callee == "sqrt";
@@ -1848,6 +1862,107 @@ impl Riscv64Codegen {
             _ => "unknown".to_string(),
         };
         self.emit_jal_to(&callee_final);
+    }
+
+    /// fenv.h 内联实现 (C11 7.6): RISCV64 CSR 指令序列
+    /// frm CSR (0x002): 舍入模式 [7:5]
+    /// fflags CSR (0x001): 异常标志 [4:0]
+    /// fcsr CSR (0x003): 完整浮点控制/状态寄存器
+    fn gen_fenv_builtin(&mut self, name: &str, args: &[TypedExpr]) {
+        match name {
+            // fegetround(): CSRRW a0, frm, x0; SRLI a0, a0, 5
+            "fegetround" => {
+                // CSRRW a0, frm, x0 = 0xC010F573
+                self.emit(&0xC010F573u32.to_le_bytes());
+                // SRLI a0, a0, 5
+                self.emit_srli(10, 10, 5);
+            }
+            // fesetround(mode): SLLI a0, a0, 5; CSRRW x0, frm, a0; li a0, 0
+            "fesetround" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // a0 = mode
+                self.emit_slli(10, 10, 5); // 移到 frm 位 [7:5]
+                // CSRRW x0, frm, a0 = 0xC0151073
+                self.emit(&0xC0151073u32.to_le_bytes());
+                self.li_a0(0); // 返回 0
+            }
+            // feclearexcept(excepts): CSRC x0, fflags, a0; li a0, 0
+            "feclearexcept" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // a0 = excepts
+                // ANDI a0, a0, 0x1F (保留 5 位)
+                self.emit_andi(10, 10, 0x1F);
+                // CSRC x0, fflags, a0 = 0x40153073
+                self.emit(&0x40153073u32.to_le_bytes());
+                self.li_a0(0);
+            }
+            // feraiseexcept(excepts): CSRS x0, fflags, a0; li a0, 0
+            "feraiseexcept" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]);
+                self.emit_andi(10, 10, 0x1F);
+                // CSRS x0, fflags, a0 = 0x40152073
+                self.emit(&0x40152073u32.to_le_bytes());
+                self.li_a0(0);
+            }
+            // fetestexcept(excepts): CSRRS a0, fflags, x0; AND a0, a0, a1
+            "fetestexcept" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // a0 = excepts
+                self.emit_andi(10, 10, 0x1F);
+                // MV a1, a0 (保存)
+                self.mv_a1_a0();
+                // CSRRS a0, fflags, x0 = 0xC0102573
+                self.emit(&0xC0102573u32.to_le_bytes());
+                // AND a0, a0, a1
+                self.emit_and(10, 10, 11);
+            }
+            // fegetenv/fesetenv/feholdexcept/feupdateenv:
+            // 简化实现: 保存/恢复 fcsr 到/从内存
+            "fegetenv" | "feholdexcept" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // a0 = envp
+                // CSRRS a1, fcsr, x0 (读取 fcsr)
+                self.emit(&0xC03025F3u32.to_le_bytes()); // CSRRS a1, fcsr, x0
+                // SW a1, 0(a0) (存储到 [envp])
+                self.emit_sw(11, 10, 0);
+                if name == "feholdexcept" {
+                    // CSRW fcsr, x0 (清除所有标志)
+                    self.emit(&0xC0301073u32.to_le_bytes());
+                }
+                self.li_a0(0);
+            }
+            "fesetenv" | "feupdateenv" => {
+                if args.is_empty() {
+                    self.li_a0(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // a0 = envp
+                // LW a1, 0(a0) (从 [envp] 加载)
+                self.emit_lw(11, 10, 0);
+                // CSRRW x0, fcsr, a1 (写入 fcsr)
+                self.emit(&0xC0359073u32.to_le_bytes());
+                self.li_a0(0);
+            }
+            _ => {
+                self.li_a0(0);
+            }
+        }
     }
 
     // 初始化 RISC-V va_list 变量.

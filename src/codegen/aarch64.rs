@@ -2055,6 +2055,21 @@ impl Aarch64Codegen {
             return;
         }
 
+        // fenv.h 运行时调用 (C11 7.6): 内联为 FPCR/FPSR 指令序列,
+        // 不依赖 libm (freestanding 无 libc). 用户在本 TU
+        // 自行定义同名函数时 (labels 命中) 回退到普通调用.
+        match callee.as_str() {
+            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept"
+            | "fetestexcept" | "fegetenv" | "fesetenv" | "feholdexcept"
+            | "feupdateenv"
+                if !self.labels.contains_key(&callee) =>
+            {
+                self.gen_fenv_builtin(&callee, args);
+                return;
+            }
+            _ => {}
+        }
+
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)
         // 限制: 仅当 caller 有显式 local sret 时使用; 简化版只在调用方分配
         //       一个 <sret> 局部, callee 写到 [x0]
@@ -2128,6 +2143,141 @@ impl Aarch64Codegen {
         } else if let Some(hfa) = classify_hfa(&expr.ty, &self.aggregate_fields) {
             // HFA 返回值已在 v0/s0
             let _ = hfa;
+        }
+    }
+
+    /// fenv.h 内联实现 (C11 7.6): AArch64 FPCR/FPSR 指令序列
+    /// fegetround/fesetround 操作 FPCR 舍入位 [23:22],
+    /// feclearexcept/feraiseexcept/fetestexcept 操作 FPSR 异常标志 [4:0].
+    /// 系统寄存器编码:
+    ///   MRS Xd, FPCR = 0xD53B4400|Rd  MSR FPCR, Xt = 0xD51B4400|Rt
+    ///   MRS Xd, FPSR = 0xD53B4420|Rd  MSR FPSR, Xt = 0xD51B4420|Rt
+    fn gen_fenv_builtin(&mut self, name: &str, args: &[TypedExpr]) {
+        match name {
+            // fegetround(): 返回当前舍入模式 (不覆盖为 0)
+            "fegetround" => {
+                // MRS X0, FPCR
+                self.emit(&0xD53B4400u32.to_le_bytes());
+                // LSR W0, W0, #22 (UBFM W0,W0,#22,#31)
+                self.emit(&0x531C0000u32.to_le_bytes());
+                // AND W0, W0, #3
+                self.emit(&0x12000003u32.to_le_bytes());
+                // W0 已包含舍入模式, 直接返回 (不设 0)
+            }
+            // fesetround(mode): 设置 FPCR 舍入位, 返回 0
+            "fesetround" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // W0 = mode
+                // AND W0, W0, #3
+                self.emit(&0x12000003u32.to_le_bytes());
+                // MOV W1, W0 (保存)
+                self.mov_w1_w0();
+                // MRS X2, FPCR
+                self.emit(&(0xD53B4400u32 | 2).to_le_bytes());
+                // MOVZ W3, #0xFF3F (掩码低 16 位)
+                self.emit(&0x529FFC03u32.to_le_bytes());
+                // MOVK W3, #0xFF3F, LSL #16 (掩码高 16 位)
+                self.emit(&0x729FFC03u32.to_le_bytes());
+                // AND X2, X2, X3 (清除位 [23:22])
+                self.emit(&0x8A030042u32.to_le_bytes());
+                // LSL W1, W1, #22 (移到 FPCR 位)
+                self.emit(&0x531C0021u32.to_le_bytes());
+                // ORR X2, X2, X1 (合并新舍入模式)
+                self.emit(&0xAA010042u32.to_le_bytes());
+                // MSR FPCR, X2
+                self.emit(&(0xD51B4400u32 | 2).to_le_bytes());
+                self.mov_w0_imm(0);
+            }
+            // feclearexcept(excepts): 清除 FPSR 异常标志, 返回 0
+            "feclearexcept" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // W0 = excepts
+                // AND W0, W0, #0x1F
+                self.emit(&0x12000800u32.to_le_bytes());
+                // MRS X1, FPSR
+                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                // BIC X1, X1, X0 (清除选中的标志)
+                self.emit(&0x8A200021u32.to_le_bytes());
+                // MSR FPSR, X1
+                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.mov_w0_imm(0);
+            }
+            // feraiseexcept(excepts): 置位 FPSR 异常标志, 返回 0
+            "feraiseexcept" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // W0 = excepts
+                self.emit(&0x12000800u32.to_le_bytes()); // AND W0, W0, #0x1F
+                // MRS X1, FPSR
+                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                // ORR X1, X1, X0 (置位选中的标志)
+                self.emit(&0xAA000021u32.to_le_bytes());
+                // MSR FPSR, X1
+                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.mov_w0_imm(0);
+            }
+            // fetestexcept(excepts): 返回 FPSR 中选中的异常标志位与
+            "fetestexcept" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // W0 = excepts
+                self.emit(&0x12000800u32.to_le_bytes()); // AND W0, W0, #0x1F
+                // MRS X1, FPSR
+                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                // AND W0, W1, W0 (返回选中的标志)
+                self.emit(&0x0A000020u32.to_le_bytes());
+            }
+            // fegetenv(envp): 保存 FPCR+FPSR 到 [envp]
+            "fegetenv" | "feholdexcept" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // X0 = envp
+                // MOV X10, X0 (保存 envp)
+                self.emit_mov_x_reg(10, 0);
+                // MRS X1, FPCR; STR X1, [X10]
+                self.emit(&(0xD53B4400u32 | 1).to_le_bytes());
+                self.emit(&0xF9000141u32.to_le_bytes());
+                // MRS X1, FPSR; STR X1, [X10, #8]
+                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                self.emit(&0xF9000141u32.to_le_bytes() /* STR X1, [X10, #8] */);
+                if name == "feholdexcept" {
+                    // 清除异常标志: MSR FPSR, XZR
+                    self.emit(&0xD51B443Fu32.to_le_bytes());
+                }
+                self.mov_w0_imm(0);
+            }
+            // fesetenv(envp): 从 [envp] 恢复 FPCR+FPSR
+            "fesetenv" | "feupdateenv" => {
+                if args.is_empty() {
+                    self.mov_w0_imm(0);
+                    return;
+                }
+                self.gen_expr(&args[0]); // X0 = envp
+                // MOV X10, X0 (保存 envp)
+                self.emit_mov_x_reg(10, 0);
+                // LDR X1, [X10]; MSR FPCR, X1
+                self.emit(&0xF9400141u32.to_le_bytes());
+                self.emit(&(0xD51B4400u32 | 1).to_le_bytes());
+                // LDR X1, [X10, #8]; MSR FPSR, X1
+                self.emit(&0xF9400141u32.to_le_bytes() /* LDR X1, [X10, #8] */);
+                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.mov_w0_imm(0);
+            }
+            _ => {
+                self.mov_w0_imm(0);
+            }
         }
     }
 
