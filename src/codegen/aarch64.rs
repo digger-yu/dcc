@@ -1585,6 +1585,8 @@ impl Aarch64Codegen {
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_w0(off);
+                    // 整数提升: char/short → int
+                    self.gen_int_promote_ir(&expr.ty);
                     return true;
                 }
                 if self.global_rodata.contains_key(name) {
@@ -2607,6 +2609,11 @@ impl Aarch64Codegen {
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.load_w0(off);
+                    // 整数提升: char/short → int
+                    let ty = expr.ty();
+                    if ty.is_int() {
+                        self.gen_int_promote(&ty);
+                    }
                 } else if self.global_rodata.contains_key(&name.name) {
                     self.load_global_addr_w0(&name.name);
                 } else {
@@ -2752,6 +2759,55 @@ impl Aarch64Codegen {
             let pos = self.pos();
             self.emit_adr_placeholder(0);
             self.pending_adr_exec.push((pos, 0, target));
+        }
+    }
+
+    /// 整数提升: 将小于 int 的整数类型提升到 32 位
+    /// char/short → 符号扩展 (SXTB/SXTH); uchar/ushort/bool → 零扩展 (UXTB/UXTH)
+    fn gen_int_promote(&mut self, ty: &Type) {
+        match ty {
+            Type::Char | Type::SChar | Type::Bool => {
+                // SXTB W0, W0: 0x13000000
+                self.emit(&[0x00, 0x00, 0x18, 0x13]);
+            }
+            Type::Short => {
+                // SXTH W0, W0: 0x13000400
+                self.emit(&[0x00, 0x04, 0x18, 0x13]);
+            }
+            Type::UChar => {
+                // UXTB W0, W0: 0x53000000
+                self.emit(&[0x00, 0x00, 0x00, 0x53]);
+            }
+            Type::UShort => {
+                // UXTH W0, W0: 0x53000400
+                self.emit(&[0x00, 0x04, 0x00, 0x53]);
+            }
+            _ => {} // int/long/ptr 等不需要提升
+        }
+    }
+
+    /// IR 级别整数提升: ValueType 版本的整数提升
+    fn gen_int_promote_ir(&mut self, ty: &ValueType) {
+        if let ValueType::Integer { bits, signed } = ty {
+            match (*bits, *signed) {
+                (1, _) | (8, true) => {
+                    // SXTB W0, W0 (bool/char → sign-extend from 8 bits)
+                    self.emit(&[0x00, 0x00, 0x18, 0x13]);
+                }
+                (8, false) => {
+                    // UXTB W0, W0 (uchar → zero-extend from 8 bits)
+                    self.emit(&[0x00, 0x00, 0x00, 0x53]);
+                }
+                (16, true) => {
+                    // SXTH W0, W0 (short → sign-extend from 16 bits)
+                    self.emit(&[0x00, 0x04, 0x18, 0x13]);
+                }
+                (16, false) => {
+                    // UXTH W0, W0 (ushort → zero-extend from 16 bits)
+                    self.emit(&[0x00, 0x04, 0x00, 0x53]);
+                }
+                _ => {} // 32-bit 及以上不需要提升
+            }
         }
     }
 

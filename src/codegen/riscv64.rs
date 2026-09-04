@@ -1334,6 +1334,8 @@ impl Riscv64Codegen {
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_a0(off);
+                    // 整数提升: char/short → int
+                    self.gen_int_promote_ir(&expr.ty);
                     return true;
                 }
                 if self.global_rodata.contains_key(name) {
@@ -2355,6 +2357,11 @@ impl Riscv64Codegen {
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.load_a0(off);
+                    // 整数提升: char/short → int
+                    let ty = expr.ty();
+                    if ty.is_int() {
+                        self.gen_int_promote(&ty);
+                    }
                 } else {
                     self.li_a0(0);
                 }
@@ -3250,6 +3257,59 @@ impl Riscv64Codegen {
         self.emit_lw(10, 2, off);
     }
 
+    /// 整数提升: 将小于 int 的整数类型提升到 64 位
+    /// char/short → 符号扩展; uchar/ushort/bool → 零扩展
+    fn gen_int_promote(&mut self, ty: &Type) {
+        match ty {
+            Type::Char | Type::SChar | Type::Bool => {
+                // 符号扩展 8 位: SLLI a0, a0, 56; SRAI a0, a0, 56
+                self.emit_slli(10, 10, 56);
+                self.emit_srai(10, 10, 56);
+            }
+            Type::Short => {
+                // 符号扩展 16 位: SLLI a0, a0, 48; SRAI a0, a0, 48
+                self.emit_slli(10, 10, 48);
+                self.emit_srai(10, 10, 48);
+            }
+            Type::UChar => {
+                // 零扩展 8 位: SLLI a0, a0, 56; SRLI a0, a0, 56
+                self.emit_slli(10, 10, 56);
+                self.emit_srli(10, 10, 56);
+            }
+            Type::UShort => {
+                // 零扩展 16 位: SLLI a0, a0, 48; SRLI a0, a0, 48
+                self.emit_slli(10, 10, 48);
+                self.emit_srli(10, 10, 48);
+            }
+            _ => {} // int/long/ptr 等不需要提升
+        }
+    }
+
+    /// IR 级别整数提升: ValueType 版本的整数提升
+    fn gen_int_promote_ir(&mut self, ty: &ValueType) {
+        if let ValueType::Integer { bits, signed } = ty {
+            match (*bits, *signed) {
+                (1, _) | (8, true) => {
+                    self.emit_slli(10, 10, 56);
+                    self.emit_srai(10, 10, 56);
+                }
+                (8, false) => {
+                    self.emit_slli(10, 10, 56);
+                    self.emit_srli(10, 10, 56);
+                }
+                (16, true) => {
+                    self.emit_slli(10, 10, 48);
+                    self.emit_srai(10, 10, 48);
+                }
+                (16, false) => {
+                    self.emit_slli(10, 10, 48);
+                    self.emit_srli(10, 10, 48);
+                }
+                _ => {} // 32-bit 及以上不需要提升
+            }
+        }
+    }
+
     fn mv_a1_a0(&mut self) {
         self.emit_addi(11, 10, 0);
     }
@@ -3821,6 +3881,15 @@ impl Riscv64Codegen {
         if shamt == 0 { return; }
         let shamt = (shamt as u32) & 0x3f;
         let insn = shamt << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x13;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SRAI rd, rs1, shamt — 64-bit arithmetic right shift immediate
+    fn emit_srai(&mut self, rd: u8, rs1: u8, shamt: u8) {
+        if shamt == 0 { return; }
+        let shamt = (shamt as u32) & 0x3f;
+        // I-type: imm[11:0] = 0100000|shamt[5:0], rs1, funct3=101, rd, opcode=0010011
+        let insn = 0x40000000 | shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
         self.emit(&insn.to_le_bytes());
     }
 
