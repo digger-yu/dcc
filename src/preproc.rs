@@ -7035,6 +7035,14 @@ impl Preprocessor {
                 | "__builtin_shuffle"
                 | "__builtin_shufflevector"
                 | "__builtin_convertvector"
+                // cache / CPU builtins
+                | "__builtin_clear_cache"
+                | "__builtin___clear_cache"
+                | "__builtin_cpu_supports"
+                | "__builtin_cpu_init"
+                // shift overflow builtins
+                | "__builtin_shl_overflow"
+                | "__builtin_shr_overflow"
         )
     }
 

@@ -16139,8 +16139,8 @@ impl Codegen {
             }
             // __builtin_clear_padding: no-op
             "__builtin_clear_padding" => true,
-            // __builtin___clear_cache: no-op (x86 不需要显式 cache flush)
-            "__builtin___clear_cache" => true,
+            // __builtin___clear_cache / __builtin_clear_cache: no-op (x86 不需要显式 cache flush)
+            "__builtin___clear_cache" | "__builtin_clear_cache" => true,
             // 数学函数: 转发到 libc (float 参数走 xmm0/xmm1, SysV ABI)
             "__builtin_pow" | "__builtin_powf" | "__builtin_powl" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();

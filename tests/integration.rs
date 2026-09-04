@@ -5072,6 +5072,17 @@ fn builtin_constant_p_full_run_returns_zero() {
     assert_eq!(rc, 0, "builtin_constant_p_full should return 0, got {rc}");
 }
 
+/// __builtin_clear_cache / __builtin___clear_cache: 编译通过即可 (x86 为 no-op)
+#[test]
+fn builtin_clear_cache_compiles() {
+    let source = include_str!("fixtures/c/builtin_clear_cache.c");
+    let (output, exe) = run_compile_and_run("builtin-clear-cache", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "builtin_clear_cache should return 0, got {rc}");
+}
+
 /// M12+ builtins: rotate/clrsb/fma/strcasecmp/FILE/LINE/FUNCTION/classify_type 等
 #[test]
 fn builtin_m12_extra_run_returns_zero() {
