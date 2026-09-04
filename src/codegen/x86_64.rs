@@ -16141,13 +16141,18 @@ impl Codegen {
             "__builtin_clear_padding" => true,
             // __builtin___clear_cache: no-op (x86 不需要显式 cache flush)
             "__builtin___clear_cache" => true,
-            // 数学函数: 转发到 libc
+            // 数学函数: 转发到 libc (float 参数走 xmm0/xmm1, SysV ABI)
             "__builtin_pow" | "__builtin_powf" | "__builtin_powl" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
-                let ar = [7u8, 6, 2, 1, 8, 9];
-                for (i, a) in args.iter().enumerate() {
-                    if i >= 6 { break; }
-                    self.gen_expr(a, ar[i]);
+                // SysV ABI: float/double 参数在 xmm0, xmm1
+                if args.len() >= 1 {
+                    self.gen_expr(&args[0], 0); // xmm0 = arg0
+                }
+                if args.len() >= 2 {
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
+                    self.gen_expr(&args[1], 0); // xmm0 = arg1
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
+                    self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 }
                 self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
@@ -18483,6 +18488,21 @@ impl Codegen {
                 self.emit(&[0x54]);
                 self.call_label("truncl");
                 self.emit(&[0x5c]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // libm 数学函数: 转发到 libc (log/exp/sin 及 f/l 变体)
+            // 运行时依赖 libm, 优化级别下可被 const/pure 折叠.
+            "__builtin_log" | "__builtin_logf" | "__builtin_logl" |
+            "__builtin_exp" | "__builtin_expf" | "__builtin_expl" |
+            "__builtin_sin" | "__builtin_sinf" | "__builtin_sinl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }

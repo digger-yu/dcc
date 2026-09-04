@@ -1959,9 +1959,13 @@ impl<'a> Parser<'a> {
                 "__builtin_sqrt" | "__builtin_ceil" | "__builtin_floor" |
                 "__builtin_round" | "__builtin_trunc" => return Type::Double,
                 "__builtin_sqrtl" | "__builtin_ceill" | "__builtin_floorl" |
-                "__builtin_roundl" | "__builtin_truncl" => return Type::LongDouble,
-                "__builtin_powl" => return Type::LongDouble,
-                "__builtin_pow" | "__builtin_powf" => return Type::Double,
+                "__builtin_roundl" | "__builtin_truncl" |
+                "__builtin_powl" | "__builtin_logl" | "__builtin_expl" |
+                "__builtin_sinl" => return Type::LongDouble,
+                "__builtin_pow" | "__builtin_powf" |
+                "__builtin_log" | "__builtin_logf" |
+                "__builtin_exp" | "__builtin_expf" |
+                "__builtin_sin" | "__builtin_sinf" => return Type::Double,
                 // 复数函数
                 "__builtin_cpow" | "__builtin_cpowf" | "__builtin_cpowl" |
                 "__builtin_cexpi" | "__builtin_cexpif" | "__builtin_cexpil" => {
@@ -9761,6 +9765,9 @@ impl<'a> Parser<'a> {
                                     | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
                                     | "__builtin_sqrt" | "__builtin_sqrtf" | "__builtin_sqrtl"
                                     | "__builtin_trunc" | "__builtin_truncf" | "__builtin_truncl"
+                                    | "__builtin_log" | "__builtin_logf" | "__builtin_logl"
+                                    | "__builtin_exp" | "__builtin_expf" | "__builtin_expl"
+                                    | "__builtin_sin" | "__builtin_sinf" | "__builtin_sinl"
                             )
                         {
                             self.warn_here(

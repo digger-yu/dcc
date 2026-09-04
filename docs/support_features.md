@@ -135,6 +135,11 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽）；MIPS O32 ($a0-$a3 保存区)；ARM AAPCS (r0-r3 保存区) |
 | `__builtin_strcasecmp` / `strncasecmp` | 转发到 libc |
 | `__builtin_fma` / `fmaf` / `fmal` | 调 libm 对应函数 |
+| `__builtin_sqrt` / `sqrtf` / `sqrtl` | double/float 内联 SSE `sqrtsd`/`sqrtss`；long double 转发 libm |
+| `__builtin_floor` / `ceil` / `round` / `trunc` 及 f/l 变体 | double/float 内联 SSE `roundsd`/`roundss`（模式 01/10/00/03）；long double 转发 libm |
+| `__builtin_fmin` / `fmax` 及 f 变体 | double/float 内联 SSE `minsd`/`maxsd`/`minss`/`maxss`；long double 转发 libm |
+| `__builtin_copysign` / `copysignf` | 转发到 libc copysign/copysignf |
+| `__builtin_pow` / `log` / `exp` / `sin` 及 f/l 变体 | 转发到 libm（运行时依赖 -lm）；SysV ABI xmm0/xmm1 参数传递 |
 | `__builtin_rotateleft/right{8,16,32,64}` | ROL/ROR + cl |
 | `__builtin_clrsb/clrsbl/clrsbll` | cdq/cqo 符号扩展 + bsr |
 | `__builtin_{add,sub,mul}_overflow` | 64 位运算 + 截断 + 比较 SETcc |

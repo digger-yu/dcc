@@ -6986,7 +6986,7 @@ impl Preprocessor {
                 | "__builtin_fread"
                 | "__builtin_ulabs"
                 | "__builtin_ullabs"
-                // 数学 builtin: sqrt/floor/ceil/round/trunc
+                // 数学 builtin: sqrt/floor/ceil/round/trunc/log/exp/sin
                 | "__builtin_sqrt"
                 | "__builtin_sqrtf"
                 | "__builtin_sqrtl"
@@ -6996,6 +6996,15 @@ impl Preprocessor {
                 | "__builtin_trunc"
                 | "__builtin_truncf"
                 | "__builtin_truncl"
+                | "__builtin_log"
+                | "__builtin_logf"
+                | "__builtin_logl"
+                | "__builtin_exp"
+                | "__builtin_expf"
+                | "__builtin_expl"
+                | "__builtin_sin"
+                | "__builtin_sinf"
+                | "__builtin_sinl"
                 // _FloatN/FloatNx builtin variants (GCC torture test)
                 | "__builtin_nansf128"
                 | "__builtin_nansf64"
