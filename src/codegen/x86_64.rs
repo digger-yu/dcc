@@ -19418,6 +19418,12 @@ impl Codegen {
                 if ord == 5 { self.emit(&[0x0F, 0xAE, 0xF0]); }
                 true
             }
+            "__atomic_is_lock_free" => {
+                // args: (size [, ptr])
+                // On x86_64, all standard integer sizes are always lock-free
+                self.mov_imm(dst, 1);
+                true
+            }
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
     }

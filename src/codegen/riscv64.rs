@@ -2964,6 +2964,10 @@ impl Riscv64Codegen {
                 self.emit_store_sz(10, 11, 0, sz);
                 true
             }
+            "__atomic_is_lock_free" => {
+                self.li_a0(1);
+                true
+            }
             // ===== __sync_* legacy atomic operations =====
             "__sync_fetch_and_add" => {
                 if args.len() < 2 { return false; }

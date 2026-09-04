@@ -5489,6 +5489,11 @@ impl Aarch64Codegen {
                 self.emit_stlr(sz, 0, 1);
                 true
             }
+            "__atomic_is_lock_free" => {
+                // On AArch64, all standard integer sizes are always lock-free
+                self.mov_w0_imm(1);
+                true
+            }
             // ===== __sync_* legacy atomic operations =====
             "__sync_fetch_and_add" => {
                 if args.len() < 2 { return false; }

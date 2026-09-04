@@ -18466,6 +18466,61 @@ fn riscv64_atomic_tas_clear_cross_compile() {
     let _ = fs::remove_file(&op);
 }
 
+/// __atomic_is_lock_free compiles and runs on x86_64.
+#[test]
+#[cfg(unix)]
+fn atomic_is_lock_free_run() {
+    let src = r#"
+int main(void) {
+    if (!__atomic_is_lock_free(1, 0)) return 1;
+    if (!__atomic_is_lock_free(2, 0)) return 2;
+    if (!__atomic_is_lock_free(4, 0)) return 3;
+    if (!__atomic_is_lock_free(8, 0)) return 4;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("atomic-lockfree", src);
+    assert!(out.status.success(),
+        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// AArch64/RISC-V: __atomic_is_lock_free cross-compile.
+#[test]
+fn aarch64_atomic_is_lock_free_cross() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-a64-lf-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-a64-lf-{}.o", std::process::id()));
+    let src = "int main(void) { return !__atomic_is_lock_free(4, 0); }\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "aarch64 is_lock_free failed: {}", String::from_utf8_lossy(&output.stderr));
+    let _ = fs::remove_file(&op);
+}
+
+#[test]
+fn riscv64_atomic_is_lock_free_cross() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-rv64-lf-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-rv64-lf-{}.o", std::process::id()));
+    let src = "int main(void) { return !__atomic_is_lock_free(4, 0); }\n";
+    fs::write(&sp, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
+               op.to_str().unwrap(), sp.to_str().unwrap()])
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(),
+        "riscv64 is_lock_free failed: {}", String::from_utf8_lossy(&output.stderr));
+    let _ = fs::remove_file(&op);
+}
+
 /// __sync_* legacy builtins compile and run on x86_64.
 #[test]
 #[cfg(unix)]
