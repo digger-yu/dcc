@@ -1,0 +1,50 @@
+========================================
+   DIFFERENTIAL TEST REPORT
+========================================
+
+Test: simple_add
+Date: 2026-09-04T19:24:03+08:00
+
+========================================
+         SYMBOL TABLE COMPARISON
+========================================
+
+[0;34m[i] Symbols only in GCC:[0m
+  - simple_add.c
+
+[0;32m[✓] Common symbols attribute comparison:[0m
+  [0;31m✗ add: SIZE(dcc=78 vs gcc=24)[0m
+  [0;31m✗ call_external: TYPE(dcc=FUNC vs gcc=NOTYPE)[0m
+  [0;31m✗ get_global: SIZE(dcc=57 vs gcc=16)[0m
+  [0;31m✗ mul: SIZE(dcc=79 vs gcc=23)[0m
+  [0;31m✗ sub: SIZE(dcc=78 vs gcc=22)[0m
+  [0;31m✗ use_external: SIZE(dcc=108 vs gcc=30)[0m
+  [0;32mAll common symbols match![0m
+
+Summary:
+  DCC-only symbols: 0
+  GCC-only symbols: 1
+  Attribute mismatches: 0
+
+========================================
+       RELOCATION TABLE COMPARISON
+========================================
+
+Relocations by symbol:
+
+  [0;31m✗ .text: count mismatch (dcc=0 vs gcc=5)[0m
+
+Detailed relocation type analysis:
+
+Relocation type distribution:
+  DCC:
+    1 x R_X86_64_PLT32
+    1 x R_X86_64_PC32
+  GCC:
+    6 x R_X86_64_PC32
+    1 x R_X86_64_PLT32
+
+Summary:
+  Total DCC relocations: 2
+  Total GCC relocations: 7
+
