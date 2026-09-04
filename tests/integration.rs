@@ -7579,6 +7579,22 @@ fn m15_builtin_fold() {
     let _ = fs::remove_file(&exe);
 }
 
+/// __builtin_sqrt/sqrtf: inline SSE sqrtsd/sqrtss
+#[test]
+#[cfg(unix)]
+fn math_builtin_sqrt_inline_sse() {
+    let src = include_str!("fixtures/c/math_builtin_sqrt.c");
+    let (out, exe) = run_compile_and_run("math-builtin-sqrt", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "sqrt test should return 0");
+    let _ = fs::remove_file(&exe);
+}
+
 /// const_eval 增强: 位域宽度常量表达式 + sizeof/alignof + 三元 + 类型转换 + 枚举
 #[test]
 #[cfg(unix)]

@@ -1954,8 +1954,11 @@ impl<'a> Parser<'a> {
                 "__builtin_fmaf" => return Type::Float,
                 "__builtin_fmal" => return Type::LongDouble,
                 // 数学函数
-                "__builtin_ceilf" | "__builtin_floorf" | "__builtin_roundf" => return Type::Float,
-                "__builtin_ceil" | "__builtin_floor" | "__builtin_round" => return Type::Double,
+                "__builtin_sqrtf" | "__builtin_ceilf" | "__builtin_floorf" |
+                "__builtin_roundf" => return Type::Float,
+                "__builtin_sqrt" | "__builtin_ceil" | "__builtin_floor" |
+                "__builtin_round" => return Type::Double,
+                "__builtin_sqrtl" => return Type::LongDouble,
                 "__builtin_powl" => return Type::LongDouble,
                 "__builtin_pow" | "__builtin_powf" => return Type::Double,
                 // 复数函数
@@ -9755,6 +9758,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_abort" | "__builtin_va_start"
                                     | "__builtin_expect"
                                     | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
+                                    | "__builtin_sqrt" | "__builtin_sqrtf" | "__builtin_sqrtl"
                             )
                         {
                             self.warn_here(

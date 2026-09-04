@@ -18302,6 +18302,41 @@ impl Codegen {
                 true
             }
             // __builtin_convertvector: vector type conversion (stub: return first arg)
+            // __builtin_sqrt: inline SSE sqrtsd (double)
+            // sqrtsd: F2 0F 51 /r
+            "__builtin_sqrt" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.emit(&[0xF2, 0x0F, 0x51, 0xC0]); // sqrtsd xmm0, xmm0
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_sqrtf: inline SSE sqrtss (float)
+            // sqrtss: F3 0F 51 /r
+            "__builtin_sqrtf" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0xF3, 0x0F, 0x51, 0xC0]); // sqrtss xmm0, xmm0
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_sqrtl: long double -> libm sqrtl (80-bit, no SSE)
+            "__builtin_sqrtl" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("sqrtl");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
             "__builtin_convertvector" => {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], dst);

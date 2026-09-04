@@ -6986,6 +6986,10 @@ impl Preprocessor {
                 | "__builtin_fread"
                 | "__builtin_ulabs"
                 | "__builtin_ullabs"
+                // 数学 builtin: sqrt
+                | "__builtin_sqrt"
+                | "__builtin_sqrtf"
+                | "__builtin_sqrtl"
                 // _FloatN/FloatNx builtin variants (GCC torture test)
                 | "__builtin_nansf128"
                 | "__builtin_nansf64"
