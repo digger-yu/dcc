@@ -1,22 +1,23 @@
-codegen/x86_64: fix static local InitList with &&label
+codegen/x86_64: fix scalar-vector casts via movq
 
 Root cause:
-When registering static local variables with InitList initializers,
-register_one_static_local() called gen_global_init_list() with
-rel=None, preventing &&label expressions from generating data
-relocations in ET_REL mode.
-
-This caused static const void *l[] = {&&lab0, &&end} to write
-zeros to .data without .rela.data entries, making computed goto
-through label address arrays jump to address 0 (segfault).
+Casting between scalar integers and vectors of the same size
+(e.g., (V2SI) 0LL or (long long) vector_var) went through
+gen_same_size_bitcast which used a complex memory-copy path
+via rep movsb. This path had bugs in source address calculation,
+causing segfaults when trying to copy from address 0.
 
 Fix:
-Pass Some((base, None)) to gen_global_init_list() where base is
-the current data_section offset, matching the pattern used for
-global variables. This allows eval_const_expr() to properly
-populate pending_data64_rels for &&label references.
+Add direct handling for scalar<->vector casts of size <= 8 bytes:
+- Scalar to vector: use movq xmm0, rax to move GP register bits
+  directly into XMM register low bits
+- Vector to scalar: load vector from temp slot 0 into xmm0 via
+  movq xmm0, [r13+off], then movq rax, xmm0 to extract low bits
+
+This matches GCC's codegen pattern and avoids the buggy memory
+copy path entirely.
 
 Impact:
-Fixes 14 computed goto tests including 920415-1.c, 920501-3.c,
-920721-4.c, 20040302-1.c, and other tests using static label
-address arrays.
+Fixes basic scalar-vector cast operations. More complex vector
+operations may still have issues, but this establishes correct
+foundations for the common cast patterns.

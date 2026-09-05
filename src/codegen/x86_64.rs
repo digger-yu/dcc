@@ -6934,6 +6934,16 @@ impl Codegen {
                 }
             } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, 0);
+                // C 语义: 可变参数函数的 float 参数默认提升为 double
+                // printf("%f", 1.0f) 实际传递的是 double 1.0
+                let is_variadic = direct
+                    .and_then(|name| self.variadic_funcs.get(name))
+                    .copied()
+                    .unwrap_or(false);
+                if is_variadic && matches!(effective_ty, Type::Float) {
+                    // cvtss2sd xmm0, xmm0: float → double
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+                }
                 match arg_locs[0] {
                     ArgLoc::Stack(off) => self.store_rsp_xmm(0, off),
                     loc => {
