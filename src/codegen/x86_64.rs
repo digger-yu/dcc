@@ -7258,27 +7258,27 @@ impl Codegen {
                                 let is_signed = Self::is_signed_int(func_ret_ty);
                                 match ret_bits {
                                     8 if is_signed => {
-                                        // movsx %al, %eax
-                                        self.emit(&[0x0F, 0xBE, 0xC0]);
+                                        // movsbq %al, %rax (sign-extend to 64-bit)
+                                        self.emit(&[0x48, 0x0F, 0xBE, 0xC0]);
                                     }
                                     8 => {
-                                        // movzx %al, %eax
-                                        self.emit(&[0x0F, 0xB6, 0xC0]);
+                                        // movzbq %al, %rax (zero-extend to 64-bit)
+                                        self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
                                     }
                                     16 if is_signed => {
-                                        // movsx %ax, %eax
-                                        self.emit(&[0x0F, 0xBF, 0xC0]);
+                                        // movswq %ax, %rax (sign-extend to 64-bit)
+                                        self.emit(&[0x48, 0x0F, 0xBF, 0xC0]);
                                     }
                                     16 => {
-                                        // movzx %ax, %eax
-                                        self.emit(&[0x0F, 0xB7, 0xC0]);
+                                        // movzwq %ax, %rax (zero-extend to 64-bit)
+                                        self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
                                     }
                                     32 if is_signed => {
-                                        // movsxd %eax, %eax
+                                        // movsxd %eax, %rax (sign-extend to 64-bit)
                                         self.emit(&[0x48, 0x63, 0xC0]);
                                     }
                                     32 => {
-                                        // mov %eax, %eax (zero-extend)
+                                        // mov %eax, %eax (zero-extend to 64-bit)
                                         self.emit(&[0x89, 0xC0]);
                                     }
                                     _ => {}
