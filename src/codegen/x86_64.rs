@@ -9846,8 +9846,12 @@ impl Codegen {
                             // call returning struct), dst holds the struct VALUE
                             // not a pointer. We must spill it to a temp slot
                             // and use that slot's address as the base.
+                            // Exception: CompoundLit already returns an ADDRESS
+                            // (the stack slot where it was built), so we can
+                            // use dst directly without spilling.
                             let expr_ty = expr.ty();
-                            if matches!(expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                            let is_compound = matches!(expr.as_ref(), Expr::CompoundLit { .. });
+                            if matches!(expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) && !is_compound {
                                 let struct_size = expr_ty.size();
                                 // Allocate temp space on stack: sub rsp, aligned_size
                                 let aligned = (struct_size + 7) & !7;
@@ -10050,40 +10054,13 @@ impl Codegen {
                 // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
                 let size = ty.size();
                 let aligned_size = (size + 15) & !15; // 16 字节对齐
-                // 在栈上分配空间
-                if aligned_size > 0 {
-                    self.emit(&[0x48, 0x83, 0xEC, aligned_size as u8]); // sub rsp, aligned_size
-                }
-                // dst = rsp (栈顶地址)
-                self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]); // mov dst, rsp
-                // 生成初始化数据到 rodata
-                let data = self
-                    .gen_global_init_list(ty, inits, None, false)
-                    .unwrap_or_else(|| vec![0; size]);
-                if !self.string_pool.contains_key(&data) {
-                    let off = self.rodata.len() as u64;
-                    self.rodata.extend_from_slice(&data);
-                    self.string_pool.insert(data.clone(), off);
-                }
-                // 用 RIP-relative LEA 加载 rodata 源地址到 rsi
-                let code_pos = self.pos();
-                self.emit(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]); // lea rsi, [rip+off]
-                self.string_refs.push((code_pos, data.clone()));
-                // rdi = 目标地址 (rsp, 保存在 rsi 中; dst 可能被后续 LEA 覆盖)
-                // 注意: 上面 LEA rsi,[rip+off] 会覆盖 rsi, 但 rdi 需要在
-                // LEA 之后设置, 所以这里从 rsp 的副本取目标地址.
-                // rsp 在 sub 后未变, 可以直接用 rsp; 但更安全的做法是
-                // 在 LEA 前保存 rsp 到 rdi, 然后 LEA 用另一个寄存器.
-                // 简化: 交换 LEA 和 mov rdi 的顺序, 或在 LEA 后用 mov rdi, rsp.
-                self.emit(&[0x48, 0x89, 0xE7]); // mov %rsp, %rdi (rdi = 目标地址)
-                // rcx = size (寄存器 1 = rcx; rep movsb 计数器必须是 rcx)
-                self.mov_imm(1, size as i64 as i128); // rcx = size
-                // cld 清方向标志 (DF 可能被 std 置位, 反向复制会写爆栈), 然后
-                // rep movsb: 复制 rcx 字节从 [rsi] 到 [rdi]
-                self.emit(&[0xFC]); // cld
-                self.emit(&[0xF3, 0xA4]); // rep movsb
-                // dst = rsp (compound lit address, for subsequent use)
-                self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]); // mov dst, rsp
+                // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
+                let compound_name = format!("__compound_lit_{}", self.pos());
+                let base_offset = self.register_var(&compound_name, ty);
+                // 生成初始化代码
+                self.gen_init_list_at(base_offset, ty, inits);
+                // dst = r13 + base_offset (compound lit address)
+                self.emit_lea_r13(dst, base_offset);
             }
             Expr::VaArg { ap, ty: arg_ty, .. } => {
                 // 检查 ap 的类型：如果是指向 va_list 结构的指针（函数参数退化），使用指针版本
