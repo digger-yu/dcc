@@ -10400,12 +10400,17 @@ impl Codegen {
     /// 与 emit_zero_extend 不同, 此方法也处理有符号类型
     /// (混合符号比较时, 有符号操作数需要零扩展而非符号扩展).
     fn zero_extend_for_cmp(&mut self, dst: u8, ty: &Type) {
-        let (mask, is_32bit) = match ty {
-            Type::Bool | Type::UChar | Type::Char | Type::SChar => (0xFFu32, false),
-            Type::UShort | Type::Short => (0xFFFFu32, false),
-            Type::UInt | Type::Int => (0, true),
+        let (mask, is_32bit, is_signed) = match ty {
+            Type::Bool | Type::UChar | Type::Char | Type::SChar => (0xFFu32, false, matches!(ty, Type::Char | Type::SChar)),
+            Type::UShort | Type::Short => (0xFFFFu32, false, matches!(ty, Type::Short)),
+            Type::UInt | Type::Int => (0, true, matches!(ty, Type::Int)),
             _ => return, // Long/ULong/ULongLong/Ptr 已是 64 位, 无需扩展
         };
+        // 有符号类型: 符号扩展已在存储时完成, 无需额外处理
+        // 无符号类型: 需要零扩展清除高位符号位
+        if is_signed {
+            return;
+        }
         if is_32bit {
             // mov dst32, dst32: 32 位写自动零扩展高 32 位
             let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
