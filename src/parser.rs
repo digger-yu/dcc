@@ -2830,22 +2830,9 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
             let mut ty = self.parse_type_mode(true)?;
-            // __attribute__((mode(...))): 覆盖基类大小/符号性
-            // 例如: typedef int __attribute__((mode(DI))) int64_t;
-            // 将 int (32-bit) 覆盖为 DI (64-bit long)
-            if let Some(ref mode) = self.decl_attrs.mode_name {
-                let is_unsigned = matches!(
-                    ty,
-                    Type::UInt
-                        | Type::ULong
-                        | Type::ULongLong
-                        | Type::UChar
-                        | Type::UShort
-                );
-                if let Some(mode_ty) = self.mode_to_type(mode, is_unsigned) {
-                    ty = mode_ty;
-                }
-            }
+            // mode 和 vector_size 均已由 parse_type_mode → finish_type 处理:
+            // mode 先改变基类型大小, 然后 vector_size 将基类型包装为 Vector.
+            // typedef 路径无需额外处理这两个属性.
             ty = self.parse_ptr_suffix(ty);
             // typedef ret_type (name)(params) — 无 * 的函数 typedef
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
@@ -6215,6 +6202,20 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                // __attribute__: 在类型关键字后面出现, 解析并合并到 decl_attrs
+                // 例如: int __attribute__((vector_size(16))) v;
+                TokKind::Ident if self.cur.text == "__attribute__" => {
+                    let attrs = self.parse_attributes();
+                    self.decl_attrs.merge(attrs);
+                }
+                // __asm__("label"): 在类型后面出现, 跳过
+                TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" => {
+                    self.skip_asm_label();
+                }
+                // __extension__: GNU 扩展, 抑制警告, 直接跳过
+                TokKind::Ident if self.cur.text == "__extension__" => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
@@ -6231,6 +6232,26 @@ impl<'a> Parser<'a> {
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex || is_imaginary {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            // __attribute__((mode(...))): 在 vector_size 之前应用到基类型
+            // 例如: int __attribute__((mode(DI))) __attribute__((vector_size(16)))
+            // 先将 int 覆盖为 DI (8 bytes), 然后 vector_size(16) 计算 count=2
+            let ty = if let Some(ref mode) = self.decl_attrs.mode_name {
+                let is_uns = matches!(
+                    ty,
+                    Type::UInt
+                        | Type::ULong
+                        | Type::ULongLong
+                        | Type::UChar
+                        | Type::UShort
+                );
+                if let Some(mode_ty) = self.mode_to_type(mode, is_uns) {
+                    mode_ty
+                } else {
+                    ty
+                }
+            } else {
+                ty
+            };
             let ty = if is_complex {
                 Type::Complex(Box::new(ty.into()))
             } else if is_imaginary {

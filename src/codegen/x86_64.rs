@@ -10680,6 +10680,7 @@ impl Codegen {
     // 局部变量初始化入口: 解析变量栈偏移后递归展开初始化器
     fn gen_init_list(&mut self, var_name: &str, ty: &Type, inits: &[InitItem]) {
         let var_off = self.var_offset(var_name);
+
         if matches!(
             ty,
             Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _)
@@ -10799,8 +10800,10 @@ impl Codegen {
             }
             Type::Vector(elem_ty, n) => {
                 // SIMD 向量初始化: v4si a = {1, 2, 3, 4}
+
                 let elem_size = elem_ty.size();
                 for (i, item) in inits.iter().enumerate() {
+
                     if i >= *n {
                         break;
                     }
