@@ -7697,6 +7697,50 @@ impl Codegen {
                         || matches!(ty, Type::Imaginary(_))
                     {
                         self.emit_global_float_load_to_xmm(0, &name.name, ty);
+                    } else if matches!(ty, Type::Complex(_)) {
+                        // _Complex 全局变量: 加载实部和虚部到帧临时区
+                        // rax 指向结果区, 供后续 spill_complex_operand 使用
+                        let inner_sz = match ty {
+                            Type::Complex(ref inner) => inner.size(),
+                            _ => 8,
+                        };
+                        let total_sz = inner_sz * 2;
+                        let result_off = self.vector_temp_base(0, total_sz);
+                        let is_float_inner = matches!(
+                            ty,
+                            Type::Complex(ref inner)
+                                if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble)
+                        );
+                        if is_float_inner {
+                            let pfx = if matches!(
+                                ty,
+                                Type::Complex(ref inner) if matches!(inner.base, Type::Float)
+                            ) { 0xF3u8 } else { 0xF2u8 };
+                            // 加载实部: global → xmm0 → [r13+result_off]
+                            self.emit_global_float_load_to_xmm(0, &name.name, &match ty {
+                                Type::Complex(ref inner) => inner.base.clone(),
+                                _ => Type::Double,
+                            });
+                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                            // 加载虚部: global+inner_sz → xmm0 → [r13+result_off+inner_sz]
+                            self.emit_global_float_load_to_xmm_offset(
+                                0, &name.name, inner_sz as i32,
+                                &match ty {
+                                    Type::Complex(ref inner) => inner.base.clone(),
+                                    _ => Type::Double,
+                                },
+                            );
+                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz as i32);
+                        } else {
+                            // 整数 complex 全局: 加载 16 字节到临时区
+                            self.emit_global_addr(0, &name.name);
+                            // rax = global addr, 拷贝到临时区
+                            self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
+                            self.emit_lea_r13(7, result_off); // rdi = r13 + result_off
+                            self.mov_imm(1, total_sz as i128);
+                            self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+                        }
+                        self.emit_lea_r13(0, result_off);
                     } else {
                         self.emit_global_load(dst, &name.name);
                     }
@@ -14829,6 +14873,39 @@ impl Codegen {
         } else {
             self.pending_data_rels.push((disp_pos, name.to_string()));
         }
+    }
+
+    /// 全局浮点变量 RIP-relative 加载到 xmm, 带偏移 (用于 complex 虚部)
+    /// global_addr = &name + offset, 然后 xmm = [global_addr]
+    fn emit_global_float_load_to_xmm_offset(
+        &mut self, xmm: u8, name: &str, offset: i32, ty: &Type,
+    ) {
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            &inner.base
+        } else {
+            ty
+        };
+        let is_float = matches!(effective_ty, Type::Float);
+        // 加载全局地址到 rax
+        self.emit_global_addr(0, name);
+        // 加偏移
+        if offset != 0 {
+            if (-128..=127).contains(&offset) {
+                self.emit(&[0x48, 0x83, 0xC0, offset as u8]); // add rax, imm8
+            } else {
+                self.emit(&[0x48, 0x05]); // will use add rax, imm32
+                // Actually: 48 05 is add rax, imm32 without ModRM
+                // Correction: REX.W + 05 = add rax, imm32
+                self.emit(&offset.to_le_bytes());
+            }
+        }
+        // 从 [rax] 加载到 xmm
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        let xmm_rex = if xmm >= 8 { 0x04u8 } else { 0u8 };
+        if xmm_rex != 0 {
+            self.emit(&[xmm_rex]);
+        }
+        self.emit(&[pfx, 0x0F, 0x10, 0x00]); // movss/movsd xmm0, [rax]
     }
 
     /// 全局浮点变量 RIP-relative 存储: xmm → [global]
