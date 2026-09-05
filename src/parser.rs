@@ -4377,8 +4377,8 @@ impl<'a> Parser<'a> {
         // 例如: void (*(*x)(void))(float) 中的内层 (*x)
         if self.cur.kind == TokKind::RParen {
             self.advance(); // 关闭 (*name)
-            let mut decl_ty = ty.clone();
-            // 可选的数组后缀
+            // 收集数组后缀
+            let mut array_sizes = Vec::new();
             while self.cur.kind == TokKind::LBracket {
                 self.advance();
                 let sz = if self.cur.kind != TokKind::RBracket {
@@ -4393,8 +4393,26 @@ impl<'a> Parser<'a> {
                     }
                 } else { ArraySize::Const(0) };
                 self.expect(TokKind::RBracket, "']'");
-                decl_ty = Type::Array(Box::new(decl_ty.into()), sz);
+                array_sizes.push(sz);
             }
+            // 构造类型: 数组后缀属于被指向类型
+            // int (*a)[N] → Ptr(Array(int, N))
+            // 注意: ty 此时不含 Ptr (* 在括号内已被消费)
+            // 需要构造 Ptr(Array(ty, N))
+            let mut decl_ty = if !array_sizes.is_empty() {
+                let mut base = ty.clone();
+                for sz in array_sizes.into_iter().rev() {
+                    base = Type::Array(Box::new(base.into()), sz);
+                }
+                // extra_stars 属于被指向类型层面
+                for _ in 0..extra_stars {
+                    base = Type::Ptr(Box::new(base.into()));
+                }
+                // 包裹指针: (*name) 中的 * 表示结果是 Ptr(...)
+                Type::Ptr(Box::new(base.into()))
+            } else {
+                ty.clone()
+            };
             // 函数参数列表 (如果后面是 ( 而非 ) 或 ,)
             if self.cur.kind == TokKind::LParen {
                 self.advance();

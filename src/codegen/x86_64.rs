@@ -9843,7 +9843,8 @@ impl Codegen {
                 } else {
                     // 通用路径: 基址来自任意 lvalue/指针表达式 (如 s.i[k])
                     let arr_ty = arr.ty();
-                    if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                    let arr_is_arr = matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _));
+                    if arr_is_arr {
                         if !self.gen_lvalue_addr(arr, 0) {
                             self.gen_expr(arr, 0);
                         }
@@ -15983,8 +15984,20 @@ impl Codegen {
                 // 数组/向量 lvalue: 取其地址; 指针: 求值指针本身
                 let arr_ty = arr.ty();
                 if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                    if !self.gen_lvalue_addr(arr, 0) {
-                        return false;
+                    // 数组 rvalue (如指针索引 a[i] 或解引用 (*p)[i])
+                    // 衰减为首元素指针, 需加载值而非取地址。
+                    // Ident/Index 可能是指针变量或指针索引结果,
+                    // 先尝试 gen_lvalue_addr, 失败则回退到 gen_expr。
+                    // Deref/Member 等非纯 lvalue 形式直接用 gen_expr。
+                    match &**arr {
+                        Expr::Ident { .. } | Expr::Index { .. } => {
+                            if !self.gen_lvalue_addr(arr, 0) {
+                                self.gen_expr(arr, 0);
+                            }
+                        }
+                        _ => {
+                            self.gen_expr(arr, 0);
+                        }
                     }
                 } else {
                     self.gen_expr(arr, 0);
