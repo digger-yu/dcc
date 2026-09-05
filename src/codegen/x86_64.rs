@@ -9842,6 +9842,38 @@ impl Codegen {
                         // 通用路径: 嵌套成员/下标等复合 lvalue (如 s.a.b)
                         if !self.gen_lvalue_addr(expr, dst) {
                             self.gen_expr(expr, dst);
+                            // If expr is a non-lvalue aggregate (e.g. function
+                            // call returning struct), dst holds the struct VALUE
+                            // not a pointer. We must spill it to a temp slot
+                            // and use that slot's address as the base.
+                            let expr_ty = expr.ty();
+                            if matches!(expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                                let struct_size = expr_ty.size();
+                                // Allocate temp space on stack: sub rsp, aligned_size
+                                let aligned = (struct_size + 7) & !7;
+                                let rex_sub = 0x48u8;
+                                self.emit(&[rex_sub, 0x81, 0xEC]);
+                                self.emit(&(aligned as u32).to_le_bytes());
+                                // Store dst (struct value) to [rsp]
+                                // SysV ABI returns structs <=16 bytes in rax/rdx.
+                                // For structs <=8 bytes, the entire value is in rax.
+                                // Store it based on the aligned size to avoid partial writes.
+                                if struct_size <= 8 {
+                                    match aligned {
+                                        1 => self.emit(&[0x40, 0x88, 0x04, 0x24]), // mov [rsp], al
+                                        2 => self.emit(&[0x66, 0x89, 0x04, 0x24]), // mov [rsp], ax
+                                        4 => self.emit(&[0x89, 0x04, 0x24]),       // mov [rsp], eax
+                                        8 => self.emit(&[0x48, 0x89, 0x04, 0x24]), // mov [rsp], rax
+                                        _ => self.emit(&[0x48, 0x89, 0x04, 0x24]), // default to 8 bytes
+                                    }
+                                } else {
+                                    // TODO: handle >8 byte structs (rax + rdx)
+                                    // For now, store rax (first 8 bytes)
+                                    self.emit(&[0x48, 0x89, 0x04, 0x24]); // mov [rsp], rax
+                                }
+                                // dst = rsp (address of spilled struct)
+                                self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]);
+                            }
                         }
                     }
                 }
@@ -13942,10 +13974,24 @@ impl Codegen {
                 // 需在此处补 movsx 符号扩展.
                 let sn = s < 4
                     && matches!(t, Type::Enum(_, _, Some(u)) if Self::is_signed_int(&u.base));
-                (s, signed(t), sn)
+                // For struct/union types, treat as unsigned to avoid
+                // sign-extension loads that truncate the value.
+                let is_struct = matches!(t, Type::Struct(_, _, _) | Type::Union(_, _, _));
+                (s, signed(t) && !is_struct, sn)
             }
             None => (8, true, false),
         };
+        // For struct/union types, always load 8 bytes to avoid truncation.
+        // Structs may have sizes like 6 bytes, but we need to load the full
+        // 8-byte register to preserve all fields.
+        let is_struct_type = match self.var_map.get(name) {
+            Some((_, t)) => matches!(t, Type::Struct(_, _, _) | Type::Union(_, _, _)),
+            None => false,
+        };
+        if is_struct_type {
+            self.load_stack(reg, off);
+            return;
+        }
         match sz {
             4 => {
                 let rex_r = if reg >= 8 { 0x04 } else { 0 };
@@ -13967,7 +14013,7 @@ impl Codegen {
                 self.load_stack_sized(reg, off, sz);
                 if signed_narrow {
                     // movsx reg, reg_lowN: 窄有符号枚举 (C23 enum E : signed char/short)
-                    // 零扩展读入后符号扩展到 64 位 (调用方 promote 不覆盖枚举)
+                    // 零扩展读后符号扩展到 64 位 (调用方 promote 不覆盖枚举)
                     let rex = 0x48 | if reg >= 8 { 0x44 } else { 0 };
                     let op = if sz == 1 { 0xBE } else { 0xBF };
                     self.emit(&[rex, 0x0F, op, 0xC0 | ((reg & 7) << 3) | (reg & 7)]);
