@@ -14017,11 +14017,16 @@ impl Codegen {
             op,
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
         );
-        if !is_cmp && !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul) {
+        if !is_cmp
+            && !matches!(
+                op,
+                BinOp::Div | BinOp::Mod | BinOp::Mul | BinOp::Shl | BinOp::Shr
+            )
+        {
             // Add/Sub/And/Or/Xor (0x01/0x29/...): dst 在 r/m 字段 (需 REX.B),
             // src 在 reg 字段 (需 REX.R). 二者独立判断, 不可 else-if,
             // 否则双高位寄存器时 REX.B 丢失, dst 被截断为 dst&7.
-            // 注: Shl/Shr 分支内部自 emits REX, 此处额外前导 REX 会被覆盖 (无害).
+            // Note: Shl/Shr/Mul/Div/Mod emit their own REX prefixes internally.
             let mut rex = 0x48u8;
             if src >= 8 {
                 rex |= 0x04;
