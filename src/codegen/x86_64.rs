@@ -12412,6 +12412,37 @@ impl Codegen {
                     }
                     _ => self.store_stack(dst, off),
                 }
+                // 前缀 + sub-int: 存储后寄存器仍保留完整 64 位结果,
+                // 需要重新加载截断值以匹配内存中存储的值
+                if is_pre && ty_sz < 4 {
+                    let signed = Self::is_signed_int(&inner_ty);
+                    let rex_b = 0x41u8 | if dst >= 8 { 0x04 } else { 0 };
+                    match (ty_sz, signed) {
+                        (1, false) => {
+                            // movzbl: zero-extend byte
+                            self.emit(&[rex_b, 0x0F, 0xB6]);
+                        }
+                        (1, true) => {
+                            // movsbl: sign-extend byte
+                            self.emit(&[rex_b, 0x0F, 0xBE]);
+                        }
+                        (2, false) => {
+                            // movzwl: zero-extend word
+                            self.emit(&[rex_b, 0x0F, 0xB7]);
+                        }
+                        (2, true) => {
+                            // movswl: sign-extend word
+                            self.emit(&[rex_b, 0x0F, 0xBF]);
+                        }
+                        _ => {}
+                    }
+                    if off.abs() < 128 {
+                        self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                    } else {
+                        self.emit(&[0x85 | ((dst & 7) << 3)]);
+                        self.emit(&off.to_le_bytes());
+                    }
+                }
                 if !is_pre {
                     self.pop(dst);
                 } // 后缀: 恢复旧值到 dst
