@@ -10469,8 +10469,16 @@ impl Codegen {
             expr.ty(),
             Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
         ) {
-            // 浮点表达式结果已在 xmm0 (Float 字面量 / 浮点变量 /
-            // float/double 字段 MemberAccess 均直接加载到 xmm0)
+            // 浮点表达式结果已在 xmm0
+            // 但如果表达式类型与目标类型不匹配，需要转换
+            // 例如: double 表达式赋值给 float 变量，需要 cvtsd2ss
+            if matches!(elem_ty, Type::Float) && matches!(expr.ty(), Type::Double) {
+                // double -> float: cvtsd2ss xmm0, xmm0
+                self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
+            } else if matches!(elem_ty, Type::Double) && matches!(expr.ty(), Type::Float) {
+                // float -> double: cvtss2sd xmm0, xmm0
+                self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+            }
             return;
         }
         if matches!(elem_ty, Type::Float) {
