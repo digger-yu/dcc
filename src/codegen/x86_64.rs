@@ -10880,6 +10880,7 @@ impl Codegen {
                                 } else {
                                     self.store_xmm64_stack(0, store_off);
                                 }
+                                init_idx += 1;
                                 continue;
                             }
                         }
