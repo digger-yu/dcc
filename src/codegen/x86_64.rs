@@ -10045,6 +10045,46 @@ impl Codegen {
                 } else if matches!(e.as_ref(), Expr::CompoundLit { .. }) {
                     // &CompoundLit: 复合字面量的值已经是地址, 直接使用
                     self.gen_expr(e, dst);
+                } else if let Expr::Real { e: inner, .. } = e.as_ref() {
+                    // &(__real expr): 实部地址 = 复数变量地址 (实部在偏移 0)
+                    if let Expr::Ident { name, .. } = inner.as_ref() {
+                        if self.globals.contains_key(&name.name)
+                            && !self.is_local_name(&name.name)
+                        {
+                            self.emit_global_addr(dst, &name.name);
+                        } else {
+                            let off = self.var_offset(&name.name);
+                            self.emit_lea_r13(dst, off);
+                        }
+                    } else if !self.gen_lvalue_addr(inner, dst) {
+                        self.gen_expr(inner, dst);
+                    }
+                    // 实部在偏移 0, 无需加偏移
+                } else if let Expr::Imag { e: inner, .. } = e.as_ref() {
+                    // &(__imag expr): 虚部地址 = 复数变量地址 + inner_size
+                    let inner_ty = inner.ty();
+                    let inner_sz = match &inner_ty {
+                        Type::Complex(ref c) => c.base.size() as i32,
+                        _ => inner_ty.size() as i32,
+                    };
+                    if let Expr::Ident { name, .. } = inner.as_ref() {
+                        if self.globals.contains_key(&name.name)
+                            && !self.is_local_name(&name.name)
+                        {
+                            self.emit_global_addr(dst, &name.name);
+                        } else {
+                            let off = self.var_offset(&name.name);
+                            self.emit_lea_r13(dst, off);
+                        }
+                    } else if !self.gen_lvalue_addr(inner, dst) {
+                        self.gen_expr(inner, dst);
+                    }
+                    // 加上虚部偏移
+                    if inner_sz != 0 {
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                        self.emit(&inner_sz.to_le_bytes());
+                    }
                 }
             }
             Expr::Member {
