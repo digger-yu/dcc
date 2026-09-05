@@ -1327,6 +1327,10 @@ impl Builder {
             match item {
                 BlockItem::Stmt(s) => self.lower_stmt(s),
                 BlockItem::Decl(Decl::Var(v)) => {
+                    // extern 声明引用全局符号, 不创建 SSA 局部变量
+                    if v.is_extern {
+                        continue;
+                    }
                     // 检查初始化式是否包含 SSA 无法表示的模式 (复合字面量/初始化列表)
                     let has_complex_init = v.init.as_ref().is_some_and(|init| {
                         matches!(init, Expr::CompoundLit { .. } | Expr::InitList { .. })
@@ -1510,8 +1514,11 @@ fn collect_local_decls(
     for item in items {
         match item {
             BlockItem::Decl(Decl::Var(v)) => {
-                out.insert(v.name.name.clone());
-                quals.insert(v.name.name.clone(), v.quals);
+                // extern 声明引用全局符号, 不作为局部变量收集
+                if !v.is_extern {
+                    out.insert(v.name.name.clone());
+                    quals.insert(v.name.name.clone(), v.quals);
+                }
             }
             BlockItem::Stmt(s) => collect_local_decls_stmt(s, out, quals),
             _ => {}

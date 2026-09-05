@@ -16225,6 +16225,10 @@ impl Codegen {
         for item in items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
+                    // extern 声明引用全局符号, 不分配栈槽
+                    if v.is_extern && v.init.is_none() {
+                        continue;
+                    }
                     if v.is_static {
                         // 只有成功注册为全局的 static 局部变量才跳过栈分配
                         if registered_static.contains(&v.name.name) {

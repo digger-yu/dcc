@@ -7420,8 +7420,12 @@ impl<'a> Parser<'a> {
                 return (decl, None);
             }
             let name = &v.name.name;
-            // 检查名字是否在外层作用域中存在 (即被遮蔽)
-            if self.locals.exists_in_outer_scopes(name) {
+            // 检查名字是否在外层作用域或全局作用域中存在 (即被遮蔽)
+            // 非嵌套函数时 globals 未加载到 locals, 需额外检查 self.globals
+            // 以确保遮蔽全局变量的局部变量被正确重命名
+            if self.locals.exists_in_outer_scopes(name)
+                || self.globals.contains_key(name.as_str())
+            {
                 // 生成唯一名
                 let new_name = format!("{}__dcc_shadow_{}", name, self.shadow_counter);
                 self.shadow_counter += 1;
