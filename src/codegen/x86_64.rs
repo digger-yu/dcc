@@ -162,6 +162,7 @@ pub struct Codegen {
     nested_func_renames: HashMap<String, HashMap<String, String>>,
     nested_func_rename_counter: u32,
     current_func_name: String, // 当前正在编译的函数名
+    current_func_ret_ty: Type, // 当前函数的返回类型
     registered_static_locals: std::collections::HashSet<String>, // 本函数中成功注册为全局的 static 局部变量名
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
@@ -1401,6 +1402,7 @@ impl Codegen {
             nested_func_renames: HashMap::new(),
             nested_func_rename_counter: 0,
             current_func_name: String::new(),
+            current_func_ret_ty: Type::Int,
             registered_static_locals: std::collections::HashSet::new(),
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
@@ -5866,6 +5868,8 @@ impl Codegen {
         self.current_sret_offset = None;
         // 记录当前函数名 (用于嵌套函数重命名作用域)
         self.current_func_name = f.name.name.clone();
+        // 记录当前函数返回类型 (用于 return 语句截断)
+        self.current_func_ret_ty = f.ret_ty.clone();
         // 设置嵌套函数状态
         self.current_func_is_nested = f.is_nested;
         self.current_returns_nonnull = f.returns_nonnull;
@@ -7115,6 +7119,42 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // Truncate return value to the function's
+                            // declared return type width. For types smaller
+                            // than int, the BinOp result may have extra bits
+                            // in the register that must be cleared.
+                            let func_ret_ty = &self.current_func_ret_ty;
+                            let ret_bits = func_ret_ty.size() * 8;
+                            if func_ret_ty.is_int() && ret_bits < 64 {
+                                let is_signed = Self::is_signed_int(func_ret_ty);
+                                match ret_bits {
+                                    8 if is_signed => {
+                                        // movsx %al, %eax
+                                        self.emit(&[0x0F, 0xBE, 0xC0]);
+                                    }
+                                    8 => {
+                                        // movzx %al, %eax
+                                        self.emit(&[0x0F, 0xB6, 0xC0]);
+                                    }
+                                    16 if is_signed => {
+                                        // movsx %ax, %eax
+                                        self.emit(&[0x0F, 0xBF, 0xC0]);
+                                    }
+                                    16 => {
+                                        // movzx %ax, %eax
+                                        self.emit(&[0x0F, 0xB7, 0xC0]);
+                                    }
+                                    32 if is_signed => {
+                                        // movsxd %eax, %eax
+                                        self.emit(&[0x48, 0x63, 0xC0]);
+                                    }
+                                    32 => {
+                                        // mov %eax, %eax (zero-extend)
+                                        self.emit(&[0x89, 0xC0]);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     // __attribute__((returns_nonnull)): 返回前检查 rax 非空.
