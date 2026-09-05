@@ -1487,12 +1487,12 @@ impl Codegen {
     /// mini-asm 诊断: 附带源文件名与 asm 语句所在行号，方便定位内核等
     /// 大型 TU 中不被支持的内联汇编指令。
     /// current_asm_src_line 是预处理输出行号，经 line_map 映射回源文件。
-    /// 所有 mini-asm 不支持的指令/操作数模式均降级为警告 (W0311),
-    /// 避免编译期因不完整 mini-asm 而失败 (GCC torture compile 测试需要).
+    /// 所有 mini-asm 不支持的指令/操作数模式均为硬错误，避免静默
+    /// 发射错误机器码或 NOP fallback。
     fn asm_warn(&mut self, msg: &str) {
         let (file, line) = self.asm_src_pos();
         let span = Span::point(&file, line, 1);
-        let mut diag = Diagnostic::warn("W0311", msg, span);
+        let mut diag = Diagnostic::err("E0311", msg, span);
         diag.hint = Some("fix the mini-asm mnemonic or operand pattern".to_string());
         self.diagnostics.push(diag);
     }
@@ -6368,12 +6368,17 @@ impl Codegen {
                                         | Type::Array(_, ArraySize::Const(_))
                                         | Type::Atomic(_)
                                 ) && v.ty.size() > 8;
-                                if is_vec_init {
-                                    let dst_ty = v.ty.clone();
-                                    let dst_name = v.name.name.clone();
-                                    self.gen_aggregate_assign(&dst_name, &dst_ty, init);
-                                } else if is_agg {
-                                    // struct/array 初始化: 整体拷贝
+                                // CompoundLit returns an address in rax, not a value.
+                                // For struct/union types (any size), we must copy the
+                                // struct bytes from the compound-literal temp to the
+                                // variable, not store the pointer itself.
+                                let needs_compound_copy = matches!(init, Expr::CompoundLit { .. })
+                                    && matches!(
+                                        &v.ty,
+                                        Type::Struct(_, _, _) | Type::Union(_, _, _)
+                                    );
+                                if is_vec_init || is_agg || needs_compound_copy {
+                                    // struct/array/vector 初始化: 整体拷贝
                                     let dst_ty = v.ty.clone();
                                     let dst_name = v.name.name.clone();
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);

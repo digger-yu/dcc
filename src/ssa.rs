@@ -341,10 +341,14 @@ fn is_structured_item(item: &BlockItem) -> bool {
 
 fn is_structured_stmt(s: &Stmt) -> bool {
     match s {
-        // P0-4 Phase 2: goto/label 现在由 Builder 直接支持
-        Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => true,
-        Stmt::AsmGoto { .. } => false, // asm goto 仍然降级
-        Stmt::Switch { .. } => true, // Switch 由 lower_switches_in_func 降级为 if-chain
+        // Goto, labels, computed goto, asm-goto, and switch still use
+        // AST-level passes because SSA -> AST rebuild cannot preserve these
+        // control-flow forms reliably yet.
+        Stmt::Goto { .. }
+        | Stmt::GotoIndirect { .. }
+        | Stmt::Label { .. }
+        | Stmt::AsmGoto { .. }
+        | Stmt::Switch { .. } => false,
         Stmt::If { then_, else_, .. } => {
             is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
         }

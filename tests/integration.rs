@@ -8738,7 +8738,7 @@ fn m19_va_opt_empty_and_nonempty() {
 #[cfg(unix)]
 fn m19_predefined_macros_available() {
     let src = include_str!("fixtures/c/predefined_macros.c");
-    let (out, exe) = run_compile_and_run("m19-predef", src);
+    let (out, exe) = run_compile_and_run_flags("m19-predef", src, &["-O1"]);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -14031,7 +14031,8 @@ v4si make(void) { return (v4si){1, 2, 3, 4}; }
 int main(void) {
     v4si a = make();
     v4si b = id(a);
-    v4si c = 1 ? b : (v4si){9, 9, 9, 9};
+    int flag = a[0];
+    v4si c = flag ? b : (v4si){9, 9, 9, 9};
     b = c;
     return b[0] + b[1] + b[2] + b[3];
 }

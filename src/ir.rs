@@ -651,6 +651,22 @@ fn is_complex_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Complex(_))
 }
 
+fn is_float_vector_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Vector(inner, _) if matches!(inner.as_ref(), ValueType::Float { .. }))
+}
+
+fn is_supported_vector_binop(op: BinOp, operands: &[TypedExpr]) -> bool {
+    if !VECTOR_BINOPS.contains(&op) {
+        return false;
+    }
+    if operands.iter().any(|e| is_float_vector_ty(&e.ty))
+        && matches!(op, BinOp::Mod | BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr)
+    {
+        return false;
+    }
+    true
+}
+
 fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
@@ -756,6 +772,21 @@ fn is_supported_complex_cast(from: &ValueType, to: &ValueType) -> bool {
         )
 }
 
+fn is_va_list_struct(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Aggregate { name, .. } if name == "__dcc_sysv_va_list")
+}
+
+fn is_va_list_type(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Array(inner, Some(1)) => is_va_list_struct(inner),
+        ValueType::Pointer(inner) => {
+            is_va_list_struct(inner)
+                || matches!(inner.as_ref(), ValueType::Array(arr, Some(1)) if is_va_list_struct(arr))
+        }
+        _ => false,
+    }
+}
+
 fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
     match expr.kind {
         ExprKind::Binary(op) => {
@@ -769,7 +800,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     expr.span.clone(),
                 ));
             }
-            if vector && !VECTOR_BINOPS.contains(&op) {
+            if vector && !is_supported_vector_binop(op, &expr.children) {
                 diagnostics.push(Diagnostic::err(
                     "E1007",
                     format!("unsupported vector operation {:?}", op),
@@ -859,6 +890,8 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
         }
         ExprKind::Cast => {
             if let Some(src) = expr.children.first() {
+                let is_valid_vector_cast = is_supported_vector_cast(&src.ty, &expr.ty, &src.kind);
+                let is_valid_complex_cast = is_supported_complex_cast(&src.ty, &expr.ty);
                 if (is_float_ty(&src.ty) || is_float_ty(&expr.ty))
                     && !is_supported_float_cast(&src.ty, &expr.ty)
                 {
@@ -868,8 +901,8 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                         expr.span.clone(),
                     ));
                 }
-                if (is_vector_ty(&src.ty) || is_vector_ty(&expr.ty))
-                    && !is_supported_vector_cast(&src.ty, &expr.ty, &src.kind)
+                let cast_supported = is_valid_vector_cast || is_valid_complex_cast;
+                if (is_vector_ty(&src.ty) || is_vector_ty(&expr.ty)) && !cast_supported
                 {
                     diagnostics.push(Diagnostic::err(
                         "E1007",
@@ -877,8 +910,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                         expr.span.clone(),
                     ));
                 }
-                if (is_complex_ty(&src.ty) || is_complex_ty(&expr.ty))
-                    && !is_supported_complex_cast(&src.ty, &expr.ty)
+                if (is_complex_ty(&src.ty) || is_complex_ty(&expr.ty)) && !cast_supported
                 {
                     diagnostics.push(Diagnostic::err(
                         "E1008",
@@ -901,6 +933,15 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                         expr.span.clone(),
                     ));
                 }
+            }
+        }
+        ExprKind::VaArg { .. } => {
+            if !expr.children.first().is_some_and(|ap| is_va_list_type(&ap.ty)) {
+                diagnostics.push(Diagnostic::err(
+                    "E1005",
+                    "va_arg currently requires a va_list object",
+                    expr.span.clone(),
+                ));
             }
         }
         _ => {}
@@ -1328,7 +1369,7 @@ impl Lowering {
                     Expr::Member { field, .. } => field.name.clone(),
                     _ => String::new(),
                 };
-                (ExprKind::VaArg { ap: ap_name }, Vec::new())
+                (ExprKind::VaArg { ap: ap_name }, vec![self.lower_expr(ap)])
             }
             Expr::SizeofTy { ty: ref sty, .. } => {
                 literal = Some(ExprLiteral::Int(sty.size() as i128));
