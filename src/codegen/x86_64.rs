@@ -8367,22 +8367,50 @@ impl Codegen {
                         if field_is_aggregate {
                             // Aggregate member assignment: use rep movsb to copy full struct
                             let agg_sz = field_info.as_ref().map_or(0, |f| f.ty.size());
-                            // Check if RHS is a CompoundLit (gen_expr returns address in rax)
+                            // Determine how to get the source address (rsi).
+                            // For lvalue expressions (Member/Ident/Index/Deref),
+                            // gen_expr does NOT materialize the struct value in
+                            // rax:rdx (struct > 8B has no scalar rvalue). Instead
+                            // we must use gen_lvalue_addr to get the address.
+                            let rhs_is_lvalue = matches!(
+                                &**r,
+                                Expr::Member { .. }
+                                    | Expr::Index { .. }
+                                    | Expr::Deref { .. }
+                            );
+                            let rhs_is_ident = matches!(&**r, Expr::Ident { .. });
                             let rhs_is_compound = matches!(&**r, Expr::CompoundLit { .. });
                             self.push(0); // save target address
-                            self.gen_expr(r, 0); // rax = value (CompoundLit: address in rodata)
-                            self.pop(1); // rcx = target address
-                            if rhs_is_compound {
-                                // rax = source address (rodata pointer from CompoundLit)
+                            if rhs_is_lvalue {
+                                // Lvalue RHS: get source address directly
+                                self.gen_lvalue_addr(r, 0); // rax = source address
+                                self.pop(1); // rcx = target address
+                                self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
+                            } else if rhs_is_ident {
+                                // Ident RHS: struct variable address via LEA
+                                if let Expr::Ident { name, .. } = &**r {
+                                    if self.globals.contains_key(&name.name) {
+                                        self.emit_global_addr(0, &name.name); // rsi = global addr
+                                    } else {
+                                        let src_off = self.var_offset(&name.name);
+                                        self.emit_lea_r13(6, src_off); // rsi = local addr
+                                    }
+                                }
+                                self.pop(1); // rcx = target address
+                            } else if rhs_is_compound {
+                                self.gen_expr(r, 0); // rax = compound lit temp address
+                                self.pop(1); // rcx = target address
                                 self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
                             } else {
-                                // For non-CompoundLit RHS, store rax to temp and use as source
+                                // General RHS: evaluate, store rax:rdx to temp
+                                self.gen_expr(r, 0);
+                                self.pop(1); // rcx = target address
                                 let temp_off = self.var_offset("<agg_member_tmp>");
-                                self.store_stack(0, temp_off); // [r13+temp_off] = rax (first 8 bytes)
+                                self.store_stack(0, temp_off);
                                 if agg_sz > 8 {
-                                    self.store_stack(2, temp_off + 8); // rdx = next 8 bytes
+                                    self.store_stack(2, temp_off + 8);
                                 }
-                                self.emit_lea_r13(6, temp_off); // rsi = source address
+                                self.emit_lea_r13(6, temp_off); // rsi = source
                             }
                             self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx (dst)
                             self.emit(&[0xFC]); // cld
