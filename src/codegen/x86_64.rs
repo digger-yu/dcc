@@ -3600,6 +3600,81 @@ impl Codegen {
         }
     }
 
+    /// Evaluate an lvalue expression to (base_global_name, byte_offset).
+    /// Handles Ident, Index (with constant indices), Member, and Deref
+    /// chains. Returns None if the expression cannot be evaluated at
+    /// compile time (e.g. variable-length index).
+    fn eval_global_lvalue_offset(
+        e: &Expr,
+        globals: &std::collections::HashMap<String, GlobalVar>,
+    ) -> Option<(String, i64)> {
+        match e {
+            Expr::Ident { name, .. } => {
+                if globals.contains_key(&name.name) {
+                    Some((name.name.clone(), 0))
+                } else {
+                    None
+                }
+            }
+            Expr::Index { arr, idx, .. } => {
+                let (base, off) =
+                    Self::eval_global_lvalue_offset(arr, globals)?;
+                // Evaluate the index as a constant
+                let idx_val = const_eval::eval(idx).ok()?;
+                // Element size = sizeof the type that arr points to
+                // (i.e., the element type of the array)
+                let arr_ty = arr.ty();
+                let elem_sz = match &arr_ty {
+                    Type::Array(elem, _) => elem.size() as i128,
+                    Type::Ptr(elem) => elem.size() as i128,
+                    _ => arr_ty.size() as i128,
+                };
+                Some((base, off + (idx_val * elem_sz) as i64))
+            }
+            Expr::Member { expr: inner, field, .. } => {
+                let (base, off) =
+                    Self::eval_global_lvalue_offset(inner, globals)?;
+                // Compute field offset within the struct/union
+                let inner_ty = inner.ty();
+                // For arrow (->), dereference the pointer first
+                let struct_ty: &Type = match &inner_ty {
+                    Type::Ptr(ref t) => &t.base,
+                    other => other,
+                };
+                let field_off = match struct_ty {
+                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                        let mut cur = 0i64;
+                        let is_union = matches!(struct_ty, Type::Union(_, _, _));
+                        for f in fields.iter() {
+                            if is_union {
+                                if f.name == field.name {
+                                    cur = 0;
+                                    break;
+                                }
+                            } else {
+                                let f_align = f.ty.align() as i64;
+                                cur = (cur + f_align - 1) & !(f_align - 1);
+                                if f.name == field.name {
+                                    break;
+                                }
+                                cur += f.ty.size() as i64;
+                            }
+                        }
+                        cur
+                    }
+                    _ => return None,
+                };
+                Some((base, off + field_off))
+            }
+            Expr::Deref { e: inner, .. } => {
+                // &(*ptr) = ptr, but ptr must be a constant address
+                // This is rare in global init; skip for now
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn eval_global_init(&mut self, v: &VarDecl, sz: usize, use_rodata: bool) -> Option<Vec<u8>> {
         let init = v.init.as_ref()?;
         let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
@@ -3623,17 +3698,22 @@ impl Codegen {
                 } as u64;
                 self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata)
             }
-            Expr::AddrOf { e, .. } => match e.as_ref() {
-                Expr::Ident { name: ref_name, .. } => {
-                    if let Some(g) = self.globals.get(&ref_name.name) {
-                        let vaddr = self.entry + g.offset;
+            Expr::AddrOf { e, .. } => {
+                // Compute base global + byte offset for address expressions
+                // like &a[3][5], &s.field, &a[i].field, etc.
+                if let Some((base_name, byte_off)) =
+                    Self::eval_global_lvalue_offset(e, &self.globals)
+                {
+                    if let Some(g) = self.globals.get(&base_name) {
+                        let vaddr = self.entry + g.offset + byte_off as u64;
                         Some(vaddr.to_le_bytes().to_vec())
                     } else {
                         Some(vec![0u8; 8])
                     }
+                } else {
+                    None
                 }
-                _ => None,
-            },
+            }
             // 整数/浮点常量: 统一走 eval_full, 浮点目标转位模式
             _ => Self::global_init_bytes(
                 init,
@@ -3988,7 +4068,26 @@ impl Codegen {
                         }
                         Expr::AddrOf { e, .. } => {
                             // P1-6: .data 节中的符号引用
-                            if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
+                            // Handle &ident, &a[i], &a[i][j], &s.field, etc.
+                            // First try eval_global_lvalue_offset for complex expressions
+                            if let Some((base_name, byte_off)) =
+                                Self::eval_global_lvalue_offset(e, &self.globals)
+                            {
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                                self.pending_data64_rels.push((
+                                    ref_off,
+                                    base_name,
+                                    None,
+                                    rel_type,
+                                    byte_off,
+                                ));
+                                true
+                            } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
+                                // Fallback for function pointers and other symbols not in globals
                                 let ref_off = self.data_section.len() as u64;
                                 let width = if sz <= 4 { 4 } else { 8 };
                                 self.data_section
@@ -4002,34 +4101,6 @@ impl Codegen {
                                     0,
                                 ));
                                 true
-                            } else if let Expr::Index {
-                                arr,
-                                idx,
-                                ty: elem_ty,
-                                ..
-                            } = e.as_ref()
-                            {
-                                if let (Expr::Ident { name: ref_name, .. }, Ok(i)) =
-                                    (arr.as_ref(), const_eval::eval(idx))
-                                {
-                                    let ref_off = self.data_section.len() as u64;
-                                    let width = if sz <= 4 { 4 } else { 8 };
-                                    self.data_section
-                                        .resize(ref_off as usize + sz.max(width), 0);
-                                    let rel_type =
-                                        if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
-                                    let addend = (i as i64) * elem_ty.size().max(1) as i64;
-                                    self.pending_data64_rels.push((
-                                        ref_off,
-                                        ref_name.name.clone(),
-                                        None,
-                                        rel_type,
-                                        addend,
-                                    ));
-                                    true
-                                } else {
-                                    false
-                                }
                             } else {
                                 false
                             }
