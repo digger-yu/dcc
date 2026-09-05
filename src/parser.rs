@@ -10152,28 +10152,40 @@ impl<'a> Parser<'a> {
             }
             TokKind::FloatLit => {
                 let s = &self.cur.text;
-                // 虚数后缀 i/I/j/J 在类型后缀 F/L 之后 (1.0if / 1.0iF / 4.0i)
-                let s_clean = s.trim_end_matches(['f', 'F', 'l', 'L']);
-                let is_imag = s_clean.ends_with('i')
-                    || s_clean.ends_with('I')
-                    || s_clean.ends_with('j')
-                    || s_clean.ends_with('J');
-                let v_s = if is_imag {
-                    &s_clean[..s_clean.len() - 1]
+                let s: &str = s;
+                // C99 浮点虚数字面量: 后缀组合为 类型后缀(f/F/l/L) + 虚数后缀(i/I/j/J)
+                // 或 虚数后缀 + 类型后缀, 如 "2.0fi", "2.0if", "2.0i"
+                // 先检测虚数后缀 (i/I/j/J), 再检测类型后缀 (f/F/l/L)
+                let mut stripped = s;
+                let mut is_imag = false;
+                let mut imag_pos = None; // 'i' 在类型后缀之前还是之后
+                // 检查末尾是否有 i/I/j/J
+                if stripped.ends_with(['i', 'I', 'j', 'J']) {
+                    is_imag = true;
+                    imag_pos = Some("suffix");
+                    stripped = &stripped[..stripped.len() - 1];
+                }
+                // 提取类型后缀 (在去掉虚数后缀之后)
+                let ty = if stripped.ends_with('f') || stripped.ends_with('F') {
+                    stripped = &stripped[..stripped.len() - 1];
+                    Type::Float
+                } else if stripped.ends_with('l') || stripped.ends_with('L') {
+                    stripped = &stripped[..stripped.len() - 1];
+                    Type::LongDouble
                 } else {
-                    s_clean
+                    Type::Double
                 };
+                // 如果之前没找到虚数后缀, 再检查原始字符串开头是否有
+                // 类型后缀后跟虚数后缀的情况 (如 "2.0if")
+                if !is_imag && stripped.ends_with(['i', 'I', 'j', 'J']) {
+                    is_imag = true;
+                    stripped = &stripped[..stripped.len() - 1];
+                }
+                let v_s = stripped;
                 let v: f64 = if v_s.starts_with("0x") || v_s.starts_with("0X") {
                     parse_hex_float(v_s)
                 } else {
                     v_s.parse().unwrap_or(0.0)
-                };
-                let ty = if s.ends_with('f') || s.ends_with('F') {
-                    Type::Float
-                } else if s.ends_with('l') || s.ends_with('L') {
-                    Type::LongDouble
-                } else {
-                    Type::Double
                 };
                 self.advance();
                 if is_imag {
