@@ -1,0 +1,34 @@
+codegen/x86_64: fix aggregate assignment through pointer deref
+
+Root cause:
+The Deref assignment path (*ptr = val) in x86_64 codegen only
+handled scalar types. For aggregate types (struct/union/array),
+it emitted a single 8-byte "mov [rcx], rax" which truncated
+the value for structs > 8 bytes and caused misaligned access
+on packed structs.
+
+Additionally, struct field initialization with compound literal
+values (.field = (inner_t){val}) stored the address of the
+compound literal temp instead of copying the struct contents.
+The existing aggregate init path only handled Expr::Ident
+sources, falling through to emit_store for CompoundLit and
+lvalue sources.
+
+Fix:
+1. Add aggregate handling to the Deref assignment branch:
+   detect struct/union/array > 8 bytes, get source address
+   based on RHS kind (CompoundLit/Ident/lvalue/general),
+   get destination address from pointer, and use rep movsb
+   for byte-wise copy that is safe for packed/misaligned
+   structs.
+
+2. Extend struct field initialization to handle CompoundLit
+   and lvalue RHS in addition to Ident. For CompoundLit,
+   gen_expr returns the temp address in rax; use rep movsb
+   to copy to the destination field. For lvalue RHS (Member,
+   Index, Deref), use gen_lvalue_addr to get the source
+   address and rep movsb to copy.
+
+This fixes GCC torture execute tests: 20010518-2.c,
+20030224-2.c (packed struct through pointer and nested
+compound literal initialization).

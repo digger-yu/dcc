@@ -4747,6 +4747,19 @@ impl Codegen {
             }
         }
 
+        // &&label 地址引用: 转换为 PC32 重定位 (ET_REL)
+        // LEA reg, [RIP+disp32]: disp32 = label - (disp32_pos + 4)
+        // R_X86_64_PC32: disp32 = S + A - P, P = disp32_pos
+        // 需要 S = label, A = -4, 使 disp32 = label - disp32_pos - 4
+        for (disp32_pos, label_name) in self.label_addr_refs.drain(..) {
+            self.pending_code_rels.push(PendingCodeRel {
+                offset: disp32_pos,
+                symbol: label_name,
+                rel_type: R_X86_64_PC32,
+                addend: -4,
+            });
+        }
+
         // 隐式调用的外部函数 (sanitizer 桩 / trapv / 内建库函数) 在源码中
         // 未声明, 必须补 UND 符号, 否则链接器无法解析 call 重定位
         // (符号索引 0 → 目标落到地址 0, 运行时段错误)
@@ -4775,6 +4788,35 @@ impl Codegen {
                         visibility: STV_DEFAULT,
                     });
                     known_syms.insert(rel.symbol.clone());
+                }
+            }
+        }
+        // Also create local symbols for labels referenced from
+        // data section (&&label in static initializers)
+        for (_, var_name, _, _, _) in &self.pending_data64_rels {
+            if let Some(&pos) = self.labels.get(var_name) {
+                if !known_syms.contains(var_name) {
+                    let (section, value) = self
+                        .pushsection_code_ranges
+                        .iter()
+                        .find(|(start, size, _, _)| {
+                            pos >= *start && pos < *start + *size
+                        })
+                        .map(|(start, _size, sec_idx, sec_off)| {
+                            ((*sec_idx + 7) as u16,
+                             *sec_off + (pos - *start))
+                        })
+                        .unwrap_or((1u16, pos));
+                    local_syms.push(ElfSym {
+                        name: var_name.clone(),
+                        section,
+                        value,
+                        size: 0,
+                        bind: STB_LOCAL,
+                        ty: STT_NOTYPE,
+                        visibility: STV_DEFAULT,
+                    });
+                    known_syms.insert(var_name.clone());
                 }
             }
         }
@@ -11452,6 +11494,21 @@ impl Codegen {
                         bytes[..size.min(bytes.len())].to_vec()
                     }
                 }
+                const_eval::ConstValue::Addr { name, offset } => {
+                    // &&label or &global: emit data relocation
+                    let size = width.max(8);
+                    if let Some((off, sec)) = rel {
+                        let rel_type = if width <= 4 {
+                            R_X86_64_32
+                        } else {
+                            R_X86_64_64
+                        };
+                        self.pending_data64_rels.push(
+                            (off, name, sec, rel_type, offset as i64),
+                        );
+                    }
+                    vec![0u8; size]
+                }
                 _ => {
                     if let Ok(value) = const_eval::eval(e) {
                         let size = width.max(1);
@@ -11501,6 +11558,16 @@ impl Codegen {
                     }
                     _ => vec![0u8; width.max(e.ty().size())],
                 },
+                Expr::LabelAddr { label, .. } => {
+                    // &&label in data section: record for later patching
+                    if let Some((off, sec)) = rel {
+                        let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                        self.pending_data64_rels.push(
+                            (off, label.name.clone(), sec, rel_type, 0),
+                        );
+                    }
+                    vec![0u8; width.max(8)]
+                }
                 _ => vec![0u8; width.max(e.ty().size())],
             }
         }
@@ -16386,7 +16453,8 @@ impl Codegen {
                 }
                 Expr::InitList { inits, .. } => {
                     // struct/array 初始化: 使用 gen_global_init_list
-                    if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, None, false) {
+                    let base = self.data_section.len() as u64;
+                    if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, Some((base, None)), false) {
                         self.data_section.extend_from_slice(&init_data);
                         for _ in init_data.len()..sz {
                             self.data_section.push(0);
