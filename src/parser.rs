@@ -8565,7 +8565,17 @@ impl<'a> Parser<'a> {
                         Type::Ptr(_) if matches!(op, BinOp::Add | BinOp::Sub) => target_ty.clone(),
                         Type::Float | Type::Double | Type::LongDouble => target_ty.clone(),
                         Type::Vector(_, _) => target_ty.clone(),
-                        _ => int_t(),
+                        _ => {
+                            // C99 6.5.17: compound assignment computes
+                            // lhs op rhs then converts back to target type.
+                            // For types >= int width, use target type directly
+                            // to avoid spurious truncation/sign-extension.
+                            if target_ty.size() >= 4 {
+                                target_ty.clone()
+                            } else {
+                                int_t()
+                            }
+                        }
                     };
                     let expanded = Expr::Binop {
                         op,
