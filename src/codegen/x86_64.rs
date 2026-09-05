@@ -8222,6 +8222,61 @@ impl Codegen {
                 } else if let Expr::Deref { e: ptr_e, .. } = lv {
                     // *ptr = val
                     let seg_prefix = Self::ptr_seg_prefix(&ptr_e.ty());
+                    let is_deref_aggregate = matches!(
+                        assign_l_ty,
+                        Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _)
+                    ) && assign_l_ty.size() > 8;
+                    if is_deref_aggregate {
+                        // Aggregate *ptr assignment: use rep movsb
+                        // to correctly handle packed/misaligned structs.
+                        let agg_sz = assign_l_ty.size();
+                        // 1. Get source address into rsi
+                        let rhs_is_lvalue = matches!(
+                            &**r,
+                            Expr::Member { .. }
+                                | Expr::Index { .. }
+                                | Expr::Deref { .. }
+                        );
+                        let rhs_is_ident = matches!(&**r, Expr::Ident { .. });
+                        let rhs_is_compound = matches!(&**r, Expr::CompoundLit { .. });
+                        if rhs_is_compound {
+                            // CompoundLit: gen_expr builds on stack,
+                            // returns address in rax
+                            self.gen_expr(r, 0);
+                            self.mov(6, 0); // rsi = rax
+                        } else if rhs_is_ident {
+                            if let Expr::Ident { name, .. } = &**r {
+                                if self.globals.contains_key(&name.name) {
+                                    self.emit_global_addr(6, &name.name);
+                                } else {
+                                    let src_off = self.var_offset(&name.name);
+                                    self.emit_lea_r13(6, src_off);
+                                }
+                            }
+                        } else if rhs_is_lvalue {
+                            self.gen_lvalue_addr(r, 0); // rax = src addr
+                            self.mov(6, 0); // rsi = rax
+                        } else {
+                            // General: gen_expr, store to temp
+                            self.gen_expr(r, 0);
+                            let temp_off = self.var_offset("<agg_deref_tmp>");
+                            self.store_stack(0, temp_off);
+                            if agg_sz > 8 {
+                                self.store_stack(2, temp_off + 8);
+                            }
+                            self.emit_lea_r13(6, temp_off);
+                        }
+                        // 2. Get destination address (pointer value) into rdi
+                        self.gen_expr(ptr_e, 0); // rax = ptr value
+                        self.mov(7, 0); // rdi = rax
+                        // 3. rep movsb
+                        if let Some(seg) = seg_prefix {
+                            self.emit(&[seg]);
+                        }
+                        self.emit(&[0xFC]); // cld
+                        self.mov_imm(1, agg_sz as i128); // rcx = size
+                        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                    } else {
                     self.gen_expr(ptr_e, 0); // rax = address
                     self.push(0); // save addr
                     self.gen_expr(r, 0); // rax = val
@@ -8249,6 +8304,7 @@ impl Codegen {
                             4 => self.emit(&[0x89, 0x01]), // mov [rcx], eax
                             _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
                         }
+                    }
                     }
                 } else if let Expr::Member {
                     expr,
@@ -10860,7 +10916,6 @@ impl Codegen {
                         let val_ty = value.ty();
                         let val_is_agg = matches!(&val_ty, Type::Struct(_, _, _) | Type::Union(_, _, _));
                         if val_is_agg && sz > 0 {
-                            // 获取源地址 (value 必须是 Ident)
                             let mut src_addr_ok = false;
                             if let Expr::Ident { name: src_name, .. } = value {
                                 if let Some(src_off) = self.var_map.get(&src_name.name).map(|(o, _)| *o) {
@@ -10868,6 +10923,32 @@ impl Codegen {
                                     self.emit_lea_r13(7, store_off); // rdi = dest
                                     // rsi = 源地址
                                     self.emit_lea_r13(6, src_off); // rsi = src
+                                    self.mov_imm(1, sz as i128); // rcx = count
+                                    self.emit(&[0xFC]); // cld
+                                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                    src_addr_ok = true;
+                                }
+                            } else if matches!(value, Expr::CompoundLit { .. }) {
+                                // CompoundLit: gen_expr builds on stack,
+                                // rax = address of temp
+                                self.gen_expr(value, 0);
+                                // rdi = dest, rsi = rax (src)
+                                self.emit_lea_r13(7, store_off); // rdi = dest
+                                self.mov(6, 0); // rsi = rax
+                                self.mov_imm(1, sz as i128); // rcx = count
+                                self.emit(&[0xFC]); // cld
+                                self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                src_addr_ok = true;
+                            } else if matches!(
+                                value,
+                                Expr::Member { .. }
+                                    | Expr::Index { .. }
+                                    | Expr::Deref { .. }
+                            ) {
+                                // Lvalue: get address directly
+                                if self.gen_lvalue_addr(value, 0) {
+                                    self.emit_lea_r13(7, store_off); // rdi = dest
+                                    self.mov(6, 0); // rsi = rax
                                     self.mov_imm(1, sz as i128); // rcx = count
                                     self.emit(&[0xFC]); // cld
                                     self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
