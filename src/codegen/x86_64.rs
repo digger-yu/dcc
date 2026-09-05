@@ -7898,9 +7898,18 @@ impl Codegen {
                 };
                 let elem_size = if is_ptr_sub { l_inner.unwrap_or(1) } else { 1 };
                 // C11 6.3.1.8 通常算术转换: 确定运算的有符号性.
-                // 整数提升已在类型中完成 (char/short → int).
-                // 混合符号时: 无符号类型秩 >= 有符号类型秩 → 无符号;
-                //            有符号类型秩 > 无符号类型秩 → 有符号.
+                // C11 6.3.1.1: 整数提升 (char/short → int) 必须在
+                // 有符号性判定之前执行. 例如 signed char vs unsigned char
+                // 提升后均为 int (有符号), 比较应使用有符号指令.
+                let int_promote = |ty: &Type| -> Type {
+                    match ty {
+                        Type::Bool | Type::Char | Type::SChar | Type::UChar
+                        | Type::Short | Type::UShort => Type::Int,
+                        _ => ty.clone(),
+                    }
+                };
+                let lt_promo = int_promote(&l.ty());
+                let rt_promo = int_promote(&r.ty());
                 let type_rank = |ty: &Type| -> i32 {
                     match ty {
                         Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
@@ -7912,18 +7921,18 @@ impl Codegen {
                         _ => 0,
                     }
                 };
-                let ls = Self::is_signed_int(&l.ty());
-                let rs = Self::is_signed_int(&r.ty());
+                let ls = Self::is_signed_int(&lt_promo);
+                let rs = Self::is_signed_int(&rt_promo);
                 // C11 6.5.7: 移位运算的有符号性仅由左操作数决定,
                 // 右操作数仅为移位计数, 不参与符号判定.
                 let is_signed = if matches!(op, BinOp::Shl | BinOp::Shr) {
-                    ls
+                    Self::is_signed_int(&l.ty())
                 } else if ls == rs {
                     ls // 两操作数同符号
                 } else {
                     // 混合符号: 有符号类型秩严格大于无符号类型秩 → 有符号
-                    let lr = type_rank(&l.ty());
-                    let rr = type_rank(&r.ty());
+                    let lr = type_rank(&lt_promo);
+                    let rr = type_rank(&rt_promo);
                     if ls && lr > rr { true }
                     else if rs && rr > lr { true }
                     else { false }
