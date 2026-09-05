@@ -11570,6 +11570,49 @@ impl Codegen {
                     }
                 }
             }
+            Type::Complex(ref inner) => {
+                // 复数类型初始化: 分别处理实部和虚部
+                let inner_size = inner.size();
+                let total_size = inner_size * 2;
+                data.resize(total_size, 0);
+                let is_float_inner = matches!(inner.base, Type::Float | Type::Double | Type::LongDouble);
+                
+                // 收集实部和虚部的初始化表达式
+                let mut real_expr = None;
+                let mut imag_expr = None;
+                
+                for (i, item) in inits.iter().enumerate() {
+                    if let InitItem::Expr(e) = item {
+                        if i == 0 {
+                            real_expr = Some(e);
+                        } else if i == 1 {
+                            imag_expr = Some(e);
+                            break;
+                        }
+                    }
+                }
+                
+                // 处理实部
+                if let Some(real_e) = real_expr {
+                    let real_data = self.eval_const_expr(real_e, rel, inner_size, is_float_inner);
+                    for (j, &b) in real_data.iter().enumerate() {
+                        if j < inner_size {
+                            data[j] = b;
+                        }
+                    }
+                }
+                
+                // 处理虚部
+                if let Some(imag_e) = imag_expr {
+                    let imag_rel = rel.map(|(base, sec)| (base + inner_size as u64, sec));
+                    let imag_data = self.eval_const_expr(imag_e, imag_rel, inner_size, is_float_inner);
+                    for (j, &b) in imag_data.iter().enumerate() {
+                        if inner_size + j < total_size {
+                            data[inner_size + j] = b;
+                        }
+                    }
+                }
+            }
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
@@ -11603,6 +11646,37 @@ impl Codegen {
         // 此处 (char 数组元素等) 返回内容字节。
         if let Expr::String { data, .. } = e {
             return data.clone();
+        }
+        // 复数字面量: 必须特殊处理, 因为 eval_full 只返回虚部
+        if let Expr::ComplexLit { real, imag, ty, .. } = e {
+            let inner_size = width / 2;
+            let is_float_inner = matches!(
+                ty,
+                Type::Complex(ref inner)
+                    if matches!(inner.base, Type::Float)
+            );
+            let mut data = Vec::with_capacity(width);
+            // 实部
+            if is_float_inner {
+                let bytes = (*real as f32).to_bits().to_le_bytes();
+                data.extend_from_slice(&bytes[..inner_size.min(4)]);
+            } else {
+                let bytes = real.to_bits().to_le_bytes();
+                data.extend_from_slice(&bytes[..inner_size.min(8)]);
+            }
+            // 虚部
+            if is_float_inner {
+                let bytes = (*imag as f32).to_bits().to_le_bytes();
+                data.extend_from_slice(&bytes[..inner_size.min(4)]);
+            } else {
+                let bytes = imag.to_bits().to_le_bytes();
+                data.extend_from_slice(&bytes[..inner_size.min(8)]);
+            }
+            // 填充到 width
+            while data.len() < width {
+                data.push(0);
+            }
+            return data;
         }
         // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
         if let Ok(cv) = const_eval::eval_full(e) {
@@ -15610,12 +15684,31 @@ impl Codegen {
         let result_off = -self.frame_size + 8;
         match e {
             Expr::Ident { name, .. } => {
-                let off = self.var_offset(&name.name);
                 let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off);
-                self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off + inner_sz);
-                self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                if self.globals.contains_key(&name.name)
+                    && !self.is_local_name(&name.name)
+                {
+                    // 全局 complex 变量: 通过 RIP-relative 寻址加载
+                    self.emit_global_addr(0, &name.name); // rax = &global
+                    // 加载实部: movss/movsd xmm0, [rax]
+                    self.emit(&[pfx, 0x0F, 0x10, 0x00]);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                    // 加载虚部: movss/movsd xmm0, [rax+inner_sz]
+                    if inner_sz < 128 {
+                        self.emit(&[pfx, 0x0F, 0x10, 0x40, inner_sz as u8]);
+                    } else {
+                        self.emit(&[pfx, 0x0F, 0x10, 0x80]);
+                        self.emit(&inner_sz.to_le_bytes());
+                    }
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                } else {
+                    // 局部 complex 变量: 从 [r13+off] 加载
+                    let off = self.var_offset(&name.name);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off + inner_sz);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                }
             }
             Expr::Binop { .. } => {
                 self.gen_expr(e, 0);
