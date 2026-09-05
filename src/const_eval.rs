@@ -184,7 +184,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 UnOp::Plus => Ok(v),
             }
         }
-        Expr::Binop { op, l, r, .. } => {
+        Expr::Binop { op, l, r, ty: ref binop_ty, .. } => {
             // && / || 用整数语义, 不要求两边都是常量
             if matches!(op, BinOp::AndAnd) {
                 let lv = eval(l)?;
@@ -204,6 +204,28 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             }
             let lv = eval_full(l)?;
             let rv = eval_full(r)?;
+            // Helper: mask i128 to the bit width of the expression type.
+            // C shift/mul operations are defined modulo the type width,
+            // but we compute in i128 which may be wider.
+            let mask_to_ty = |v: i128| -> i128 {
+                if let Some(bits) = int_type_bits(binop_ty) {
+                    if bits < 128 {
+                        let mask = if bits == 64 {
+                            // Avoid overflow: (1i128 << 64) - 1 works,
+                            // but be explicit for clarity.
+                            u64::MAX as i128
+                        } else {
+                            (1i128 << bits) - 1
+                        };
+                        v & mask
+                    } else {
+                        v
+                    }
+                } else {
+                    v
+                }
+            };
+            let is_signed = !is_unsigned_int_ty(binop_ty);
             match op {
                 // 算术运算
                 BinOp::Add => add_values(lv, rv),
@@ -228,13 +250,41 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 }
                 BinOp::Shl => match (lv, rv) {
                     (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_shl(b as u32)))
+                        // Mask input to type width, shift, mask output.
+                        let masked_a = mask_to_ty(a);
+                        let result = masked_a.wrapping_shl(b as u32);
+                        Ok(ConstValue::Int(mask_to_ty(result)))
                     }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 BinOp::Shr => match (lv, rv) {
                     (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_shr(b as u32)))
+                        let shift = b as u32;
+                        if is_signed {
+                            // Arithmetic right shift: sign-extend from
+                            // type width, then shift.
+                            if let Some(bits) = int_type_bits(binop_ty) {
+                                if bits < 128 {
+                                    let sign_bit = 1i128 << (bits - 1);
+                                    let masked = a & ((1i128 << bits) - 1);
+                                    let extended = if masked & sign_bit != 0 {
+                                        // Sign-extend: set all bits above type width
+                                        masked | !((1i128 << bits) - 1)
+                                    } else {
+                                        masked
+                                    };
+                                    Ok(ConstValue::Int(extended >> shift))
+                                } else {
+                                    Ok(ConstValue::Int(a.wrapping_shr(shift)))
+                                }
+                            } else {
+                                Ok(ConstValue::Int(a.wrapping_shr(shift)))
+                            }
+                        } else {
+                            // Logical right shift: mask input, shift.
+                            let masked_a = mask_to_ty(a);
+                            Ok(ConstValue::Int(mask_to_ty(masked_a.wrapping_shr(shift))))
+                        }
                     }
                     _ => Err(ConstEvalError::NotConstant),
                 },
