@@ -6916,8 +6916,14 @@ impl Codegen {
                 }
             } else if matches!(effective_ty, Type::LongDouble) {
                 // A2: long double (SysV Memory 类) — 16 字节整体在栈上传递
-                // dcc 内部以 double 精度表示: 低 8 字节为值, 高 8 字节为零
-                self.gen_expr(arg, 0); // xmm0 = 值
+                // gen_expr 对 long double 产生 x87 值 (st(0)),
+                // 需先 fstpt 到 rsp 临时区, 再以 double 精度 movsd 到 xmm0。
+                self.gen_expr(arg, 0);
+                // st(0) → [rsp-16] (fstpt 存儲 10 字节 x87 80-bit)
+                // 使用 rsp 下方的红区或已分配栈空间
+                self.emit(&[0xDD, 0x5C, 0x24, 0xF0]); // fstpt -16(%rsp)
+                // movsd -16(%rsp), xmm0
+                self.emit(&[0xF2, 0x0F, 0x10, 0x44, 0x24, 0xF0]);
                 self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if chunk == 1 {
@@ -16546,17 +16552,22 @@ impl Codegen {
     }
 
     /// SysV va_arg long double: 始终从 overflow_arg_area 读取.
-    /// Long double 是 MEMORY 类 (80-bit x87), 用 fld tbyte 加载到 x87 栈.
+    /// dcc 内部以 double 精度表示 long double (调用方传 8 字节 double
+    /// + 8 字节零). 因此读 8 字节 double 后转为 x87 格式.
     fn gen_va_arg_long_double(&mut self, ap_name: &str, _dst: u8) {
         let ap_off = self.var_offset(ap_name);
         // rax = overflow_arg_area (va_list + 8)
         self.emit(&[0x49, 0x8B, 0x85]);
         self.emit(&(ap_off + 8).to_le_bytes());
-        // 保存指针到 rcx (fld 不 GP 寄存器)
+        // 保存指针到 rcx
         self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-        // fld tbyte [rcx]: 加载 80-bit 长浮点到 st(0)
-        // DB /5 mod=00 reg=101 rm=001 → DB 0x29
-        self.emit(&[0xDB, 0x29]);
+        // movsd [rcx], xmm0: 读 8 字节 double
+        self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
+        // 分配临时空间并转换为 x87 格式
+        self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
+        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd xmm0, [rsp]
+        self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp] (double→x87 st(0))
+        self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
         // 推进 overflow_arg_area 16 字节
         self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
         // mov [r13+ap_off+8], rcx (回写更新后的指针)
