@@ -10071,6 +10071,13 @@ impl<'a> Parser<'a> {
                                     | "__builtin_log" | "__builtin_logf" | "__builtin_logl"
                                     | "__builtin_exp" | "__builtin_expf" | "__builtin_expl"
                                     | "__builtin_sin" | "__builtin_sinf" | "__builtin_sinl"
+                                    | "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl"
+                                    | "__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl"
+                                    | "__builtin_finite" | "__builtin_finitef" | "__builtin_finitel"
+                                    | "__builtin_isfinite" | "__builtin_isfinitef" | "__builtin_isfinitel"
+                                    | "__builtin_fpclassify"
+                                    | "__builtin_inf" | "__builtin_inff" | "__builtin_infl"
+                                    | "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl"
                             )
                         {
                             self.warn_here(
