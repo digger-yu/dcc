@@ -1,34 +1,22 @@
-codegen/x86_64: fix aggregate assignment through pointer deref
+codegen/x86_64: fix static local InitList with &&label
 
 Root cause:
-The Deref assignment path (*ptr = val) in x86_64 codegen only
-handled scalar types. For aggregate types (struct/union/array),
-it emitted a single 8-byte "mov [rcx], rax" which truncated
-the value for structs > 8 bytes and caused misaligned access
-on packed structs.
+When registering static local variables with InitList initializers,
+register_one_static_local() called gen_global_init_list() with
+rel=None, preventing &&label expressions from generating data
+relocations in ET_REL mode.
 
-Additionally, struct field initialization with compound literal
-values (.field = (inner_t){val}) stored the address of the
-compound literal temp instead of copying the struct contents.
-The existing aggregate init path only handled Expr::Ident
-sources, falling through to emit_store for CompoundLit and
-lvalue sources.
+This caused static const void *l[] = {&&lab0, &&end} to write
+zeros to .data without .rela.data entries, making computed goto
+through label address arrays jump to address 0 (segfault).
 
 Fix:
-1. Add aggregate handling to the Deref assignment branch:
-   detect struct/union/array > 8 bytes, get source address
-   based on RHS kind (CompoundLit/Ident/lvalue/general),
-   get destination address from pointer, and use rep movsb
-   for byte-wise copy that is safe for packed/misaligned
-   structs.
+Pass Some((base, None)) to gen_global_init_list() where base is
+the current data_section offset, matching the pattern used for
+global variables. This allows eval_const_expr() to properly
+populate pending_data64_rels for &&label references.
 
-2. Extend struct field initialization to handle CompoundLit
-   and lvalue RHS in addition to Ident. For CompoundLit,
-   gen_expr returns the temp address in rax; use rep movsb
-   to copy to the destination field. For lvalue RHS (Member,
-   Index, Deref), use gen_lvalue_addr to get the source
-   address and rep movsb to copy.
-
-This fixes GCC torture execute tests: 20010518-2.c,
-20030224-2.c (packed struct through pointer and nested
-compound literal initialization).
+Impact:
+Fixes 14 computed goto tests including 920415-1.c, 920501-3.c,
+920721-4.c, 20040302-1.c, and other tests using static label
+address arrays.

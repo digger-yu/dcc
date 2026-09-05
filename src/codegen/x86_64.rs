@@ -9192,6 +9192,42 @@ impl Codegen {
                     return;
                 }
                 let src_ty = e.ty();
+                // 标量整数→向量 (同尺寸): 直接用 movq 将 GP 寄存器值移入 XMM
+                // 避免通过内存复制的复杂路径 (可能因 rep movsb 源地址错误而崩溃)
+                if let Type::Vector(_, _) = ty {
+                    if src_ty.size() == ty.size()
+                        && src_ty.size() <= 8
+                        && src_ty.is_int()
+                    {
+                        self.gen_expr(e, dst);
+                        if dst != 0 {
+                            self.mov(0, dst);
+                        }
+                        // movq xmm0, rax: 66 REX.W 0F 6E C0
+                        self.emit_movq_gp_to_xmm(0, 0);
+                        return;
+                    }
+                }
+                // 向量→标量整数 (同尺寸): 用 movq 将 XMM 低位移入 GP 寄存器
+                if let Type::Vector(_, _) = src_ty {
+                    if src_ty.size() == ty.size()
+                        && ty.size() <= 8
+                        && ty.is_int()
+                    {
+                        self.gen_expr(e, dst);
+                        // 向量结果约定在临时槽 0, 加载到 xmm0
+                        let toff = self.vector_temp_base(0, src_ty.size());
+                        // movq xmm0, [r13+toff]: 66 REX.W 0F 7E 45 off
+                        self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0x45]);
+                        self.emit(&[toff as u8]);
+                        // movq rax, xmm0: 66 REX.W 0F 7E C0
+                        self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+                        if dst != 0 {
+                            self.mov(0, dst);
+                        }
+                        return;
+                    }
+                }
                 if self.gen_same_size_bitcast(e, ty, dst) {
                     return;
                 }
