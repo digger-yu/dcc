@@ -8112,7 +8112,7 @@ impl Codegen {
                             | Type::Union(_, _, _)
                             | Type::Array(_, ArraySize::Const(_))
                             | Type::Atomic(_)
-                    ) && sz > 8;
+                    ) && (sz > 8 || matches!(r.as_ref(), Expr::CompoundLit { .. }));
                     if is_aggregate {
                         // struct/array 整体赋值: 逐块拷贝
                         self.gen_aggregate_assign(&name.name, l_ty, r);
@@ -16141,7 +16141,12 @@ impl Codegen {
     // 策略: 取源地址 + 取目标地址 + rep movsb
     fn gen_aggregate_assign(&mut self, dst_name: &str, dst_ty: &Type, r: &Expr) {
         let sz = dst_ty.size();
-        let dst_off = self.var_offset(dst_name);
+        let is_global_dst = self.globals.contains_key(dst_name) && !self.is_local_name(dst_name);
+        let dst_off = if is_global_dst {
+            0 // placeholder, not used for global dest
+        } else {
+            self.var_offset(dst_name)
+        };
         // 特殊处理: 源是函数调用 (走完整 SysV ABI: 参数分类/暂存/返回值)
         let mut call_sret_handled = false;
         if let Expr::Call {
@@ -16161,7 +16166,11 @@ impl Codegen {
                     let sret_off = self.alloc_sret_slot(call_ty.size());
                     self.emit_sysv_call(Some(&name.name), None, args, Some(sret_off));
                     self.emit_lea_r13(6, sret_off); // rsi = 源 (sret 槽)
-                    self.emit_lea_r13(7, dst_off); // rdi = 目标地址
+                    if is_global_dst {
+                        self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
+                    } else {
+                        self.emit_lea_r13(7, dst_off); // rdi = 目标地址
+                    }
                     call_sret_handled = true;
                 } else {
                     // 寄存器返回: 按 abi_classes 存储 (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
@@ -16258,7 +16267,11 @@ impl Codegen {
             }
         }
         // 2. 取目标地址到 rdi
-        self.emit_lea_r13(7, dst_off); // rdi = 目标地址
+        if is_global_dst {
+            self.emit_global_addr(7, dst_name); // rdi = 全局变量地址
+        } else {
+            self.emit_lea_r13(7, dst_off); // rdi = 目标地址
+        }
                                        // 3. rep movsq + rep movsb 拷贝
         let qwords = sz / 8;
         let remainder = sz % 8;
