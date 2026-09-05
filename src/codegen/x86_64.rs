@@ -10108,9 +10108,10 @@ impl Codegen {
                                         _ => self.emit(&[0x48, 0x89, 0x04, 0x24]), // default to 8 bytes
                                     }
                                 } else {
-                                    // TODO: handle >8 byte structs (rax + rdx)
-                                    // For now, store rax (first 8 bytes)
+                                    // SysV ABI: struct >8B && <=16B returned in rax:rdx
+                                    // Store both registers to spill area
                                     self.emit(&[0x48, 0x89, 0x04, 0x24]); // mov [rsp], rax
+                                    self.emit(&[0x48, 0x89, 0x54, 0x24, 0x08]); // mov [rsp+8], rdx
                                 }
                                 // dst = rsp (address of spilled struct)
                                 self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]);
