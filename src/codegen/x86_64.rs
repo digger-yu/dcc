@@ -13889,7 +13889,16 @@ impl Codegen {
 
     // 注册变量偏移 (数组按实际大小分配多个槽)
     fn register_var(&mut self, name: &str, ty: &Type) -> i32 {
-        if let Some(&(off, _)) = self.var_map.get(name) {
+        if let Some(entry) = self.var_map.get(name) {
+            // If the variable was previously registered via the lazy
+            // var_offset path (which defaults to Type::Int), update
+            // the type to the correct one. This is critical for
+            // struct/union types where the load size depends on the
+            // actual type, not the default Int.
+            let (off, ref existing_ty) = *entry;
+            if matches!(existing_ty, Type::Int) && !matches!(ty, Type::Int) {
+                self.var_map.insert(name.to_string(), (off, ty.clone()));
+            }
             return off;
         }
         // P1-5: register asm 变量不分配栈槽, 直接绑定到指定寄存器

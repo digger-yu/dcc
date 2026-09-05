@@ -183,6 +183,8 @@ pub struct Function {
     pub span: Span,
     /// 原始 AST 中声明的局部变量名 (用于 rebuild_block 避免重复声明)
     pub original_locals: HashSet<String>,
+    /// 原始局部变量的类型 (用于 rebuild_block 保留正确的类型信息)
+    pub local_types: HashMap<String, Type>,
     /// 原始局部变量的类型限定符 (volatile/const/restrict),
     /// 用于 SSA→AST 重建时保留 volatile 语义,防止优化器错误移除读写
     pub local_quals: HashMap<String, crate::ast::QualifierFlags>,
@@ -206,6 +208,7 @@ impl Function {
             is_noreturn: false,
             span,
             original_locals: HashSet::new(),
+            local_types: HashMap::new(),
             local_quals: HashMap::new(),
             param_quals: HashMap::new(),
         };
@@ -1513,6 +1516,7 @@ fn lower_lvalue(
 fn collect_local_decls(
     items: &[BlockItem],
     out: &mut HashSet<String>,
+    types: &mut HashMap<String, Type>,
     quals: &mut HashMap<String, crate::ast::QualifierFlags>,
 ) {
     for item in items {
@@ -1521,10 +1525,11 @@ fn collect_local_decls(
                 // extern 声明引用全局符号, 不作为局部变量收集
                 if !v.is_extern {
                     out.insert(v.name.name.clone());
+                    types.insert(v.name.name.clone(), v.ty.clone());
                     quals.insert(v.name.name.clone(), v.quals);
                 }
             }
-            BlockItem::Stmt(s) => collect_local_decls_stmt(s, out, quals),
+            BlockItem::Stmt(s) => collect_local_decls_stmt(s, out, types, quals),
             _ => {}
         }
     }
@@ -1533,26 +1538,27 @@ fn collect_local_decls(
 fn collect_local_decls_stmt(
     s: &Stmt,
     out: &mut HashSet<String>,
+    types: &mut HashMap<String, Type>,
     quals: &mut HashMap<String, crate::ast::QualifierFlags>,
 ) {
     match s {
-        Stmt::Block { b, .. } => collect_local_decls(&b.items, out, quals),
+        Stmt::Block { b, .. } => collect_local_decls(&b.items, out, types, quals),
         Stmt::If { then_, else_, .. } => {
-            collect_local_decls_stmt(then_, out, quals);
+            collect_local_decls_stmt(then_, out, types, quals);
             if let Some(e) = else_ {
-                collect_local_decls_stmt(e, out, quals);
+                collect_local_decls_stmt(e, out, types, quals);
             }
         }
         Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-            collect_local_decls_stmt(body, out, quals);
+            collect_local_decls_stmt(body, out, types, quals);
         }
         Stmt::Switch { cases, .. } => {
             for c in cases {
-                collect_local_decls(&c.body.items, out, quals);
+                collect_local_decls(&c.body.items, out, types, quals);
             }
         }
         Stmt::Label { stmt, .. } => {
-            collect_local_decls_stmt(stmt, out, quals);
+            collect_local_decls_stmt(stmt, out, types, quals);
         }
         _ => {}
     }
@@ -2041,8 +2047,8 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     func.is_cold = f.is_cold;
     func.is_hot = f.is_hot;
     func.is_noreturn = f.is_noreturn;
-    // Collect original local variable names and qualifiers for rebuild_block
-    collect_local_decls(&body.items, &mut func.original_locals, &mut func.local_quals);
+    // Collect original local variable names, types, and qualifiers for rebuild_block
+    collect_local_decls(&body.items, &mut func.original_locals, &mut func.local_types, &mut func.local_quals);
     let mut builder = Builder::new(func);
     for p in &f.params {
         if let Some(n) = &p.name {
@@ -2112,18 +2118,19 @@ pub fn rebuild_block(func: &Function) -> Block {
         if preserved_vars.contains(name) {
             continue;
         }
-        // 找到该变量的类型
-        let ty = func
-            .blocks
-            .values()
-            .flat_map(|bb| bb.insts.iter())
-            .find_map(|inst| {
-                inst.dest
-                    .as_ref()
-                    .filter(|d| &d.base == name)
-                    .map(|d| d.ty.clone())
-            })
-            .unwrap_or(Type::Int);
+        // Use the stored type from local_types if available, otherwise try to infer from instructions
+        let ty = func.local_types.get(name).cloned().unwrap_or_else(|| {
+            func.blocks
+                .values()
+                .flat_map(|bb| bb.insts.iter())
+                .find_map(|inst| {
+                    inst.dest
+                        .as_ref()
+                        .filter(|d| &d.base == name)
+                        .map(|d| d.ty.clone())
+                })
+                .unwrap_or(Type::Int)
+        });
         // 保留原始类型限定符 (volatile/const/restrict),
         // 防止 volatile 变量的读写被优化器错误移除
         let quals = func
