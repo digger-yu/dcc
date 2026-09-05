@@ -3522,10 +3522,10 @@ impl<'a> Parser<'a> {
             return self.parse_func_ptr_inner(ty, merged, storage);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
-        let pre_attrs = Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), self.parse_attributes());
+        let mut pre_attrs = Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), self.parse_attributes());
         self.skip_asm_label();
         // __asm__ 后的 __attribute__: 如 var __asm__("name") __attribute__((visibility("hidden")))
-        let pre_attrs = Self::merge_attrs(pre_attrs, self.parse_attributes());
+        pre_attrs = Self::merge_attrs(pre_attrs, self.parse_attributes());
         // 括号包函数名防宏展开: size_t (htab_size) (htab_t h)
         // 也处理括号化声明符: int *(p[25]) 等价于 int *p[25]
         let name = if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
@@ -3613,10 +3613,21 @@ impl<'a> Parser<'a> {
         // C23 [[attributes]]: 在变量/函数名后出现，静默跳过
         self.parse_std_attributes();
         // 变量名后的 __asm__ 和 __attribute__: 如 type name __asm__("label") __attribute__((visibility("hidden")))
-        self.skip_asm_label();
+        // register asm("rN"): 变量名后的 asm 标签属于寄存器绑定, 需要保存
+        // 到 register_name 而非当作普通 asm 标签丢弃。普通变量的 asm 标签
+        // 留给后续声明处理路径 (约 4074 行) 设置 asm_label。
+        let is_register_asm = storage.is_register
+            && matches!(self.cur.kind, TokKind::Ident)
+            && matches!(self.cur.text.as_str(), "__asm__" | "asm")
+            && self.peek.kind == TokKind::LParen;
+        if is_register_asm {
+            if let Some(asm_label) = self.skip_asm_label() {
+                pre_attrs.register_name = Some(asm_label);
+            }
+        }
         let trailing_attrs = self.parse_attributes();
         // 合并尾随属性到 pre_attrs (如 int b __attribute__((alias("a"))))
-        let pre_attrs = Self::merge_attrs(pre_attrs, trailing_attrs);
+        pre_attrs = Self::merge_attrs(pre_attrs, trailing_attrs);
         let sp = name.span.clone();
         let name_for_decl = name.clone();
         // 括号化声明符: 如果 paren_decl_ty 被设置, 覆盖 ty
@@ -4003,10 +4014,19 @@ impl<'a> Parser<'a> {
                 arr_ty = Type::Array(elem.clone(), ArraySize::Const(inits.len()));
             }
             // 从 String 推断字符数组大小: data[] = "string" → data[7]
+            // 宽字符串 L"..." 的 data 是原始字节 (4 bytes/wchar_t),
+            // 数组大小应为元素个数, 非字节数.
             if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::String { data, .. })) =
                 (&arr_ty, &init)
             {
-                arr_ty = Type::Array(elem.clone(), ArraySize::Const(data.len()));
+                let elem_sz = elem.size().max(1);
+                let num_elems = if elem_sz > 1 {
+                    // 宽字符数组: data.len() 是字节数, 除以元素大小得元素个数
+                    (data.len() + elem_sz - 1) / elem_sz
+                } else {
+                    data.len()
+                };
+                arr_ty = Type::Array(elem.clone(), ArraySize::Const(num_elems));
             }
             self.locals
                 .insert(name_for_decl.name.clone(), arr_ty.clone());
@@ -10959,6 +10979,23 @@ fn parse_wide_str(raw: &str, short_wchar: bool) -> Vec<u8> {
                     }
                     val
                 }
+                Some(c) if c >= '0' && c <= '7' => {
+                    // \NNN 八进制转义, 1-3 位
+                    let mut val = (c as u32) - ('0' as u32);
+                    for _ in 0..2 {
+                        if let Some(h) = it.clone().next() {
+                            if h >= '0' && h <= '7' {
+                                val = val * 8 + ((h as u32) - ('0' as u32));
+                                it.next();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    val
+                }
                 Some(c) => c as u32,
                 None => '\\' as u32,
             }
@@ -10984,12 +11021,8 @@ fn parse_wide_str(raw: &str, short_wchar: bool) -> Vec<u8> {
             d.extend_from_slice(&cp.to_le_bytes());
         }
     }
-    // null terminator: 2 bytes for short_wchar, 4 bytes otherwise
-    if short_wchar {
-        d.extend_from_slice(&0u16.to_le_bytes());
-    } else {
-        d.extend_from_slice(&0u32.to_le_bytes());
-    }
+    // parse_wide_str 不添加 NUL 终止符, 与 parse_str 保持一致.
+    // 调用方负责在拼接后的最终数据末尾补 NUL.
     d
 }
 
@@ -11333,33 +11366,32 @@ mod tests {
 
     #[test]
     fn wide_str_ascii() {
-        // L"a" -> 'a' 编码为 UTF-32LE 0x61 + 4 字节 null terminator
+        // L"a" -> 'a' 编码为 UTF-32LE 0x61 (不含 null, 由调用方添加)
         let bytes = parse_wide_str(r#"L"a""#, false);
-        assert_eq!(bytes, vec![0x61, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes, vec![0x61, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_escape() {
-        // L"\n" -> '\n' 编码为 0x0a + null terminator
+        // L"\n" -> '\n' 编码为 0x0a (不含 null)
         let bytes = parse_wide_str(r#"L"\n""#, false);
-        assert_eq!(bytes, vec![0x0a, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes, vec![0x0a, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_unicode() {
-        // L"\u{e9}" -> U+00E9 (UTF-32LE: e9 00 00 00) + null
+        // L"\u{e9}" -> U+00E9 (UTF-32LE: e9 00 00 00) (不含 null)
         let bytes = parse_wide_str(r#"L"\u{e9}""#, false);
-        assert_eq!(bytes, vec![0xe9, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes, vec![0xe9, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_multiple_chars() {
-        // L"abc" -> 3 字符, 各 4 字节, + null terminator
+        // L"abc" -> 3 字符, 各 4 字节 (不含 null)
         let bytes = parse_wide_str(r#"L"abc""#, false);
-        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes.len(), 12);
         assert_eq!(&bytes[0..4], &[0x61, 0, 0, 0]);
         assert_eq!(&bytes[4..8], &[0x62, 0, 0, 0]);
         assert_eq!(&bytes[8..12], &[0x63, 0, 0, 0]);
-        assert_eq!(&bytes[12..16], &[0, 0, 0, 0]);
     }
 }
