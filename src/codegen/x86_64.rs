@@ -12371,12 +12371,47 @@ impl Codegen {
                 }
             } else {
                 let off = self.var_offset(&name.name);
-                self.load_stack(dst, off);
+                let ty_sz = inner_ty.size().max(1);
+                // 按类型大小加载 (零扩展小类型到 64 位)
+                self.load_stack_sized(dst, off, ty_sz);
                 if !is_pre {
                     self.push(dst);
                 } // 后缀: 保存旧值
                 self.emit_inc_dec_reg(dst, is_inc, step);
-                self.store_stack(dst, off);
+                // 按类型大小写回栈
+                match ty_sz {
+                    1 => {
+                        let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex, 0x88]);
+                        if off.abs() < 128 {
+                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                        } else {
+                            self.emit(&[0x85 | ((dst & 7) << 3)]);
+                            self.emit(&off.to_le_bytes());
+                        }
+                    }
+                    2 => {
+                        let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[0x66, rex, 0x89]);
+                        if off.abs() < 128 {
+                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                        } else {
+                            self.emit(&[0x85 | ((dst & 7) << 3)]);
+                            self.emit(&off.to_le_bytes());
+                        }
+                    }
+                    4 => {
+                        let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex, 0x89]);
+                        if off.abs() < 128 {
+                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                        } else {
+                            self.emit(&[0x85 | ((dst & 7) << 3)]);
+                            self.emit(&off.to_le_bytes());
+                        }
+                    }
+                    _ => self.store_stack(dst, off),
+                }
                 if !is_pre {
                     self.pop(dst);
                 } // 后缀: 恢复旧值到 dst
