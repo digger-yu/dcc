@@ -15563,6 +15563,12 @@ impl Codegen {
                 {
                     self.gen_expr(r, 0);
                     self.mov(6, 0); // rsi = rax (sret 缓冲地址)
+                } else if matches!(r, Expr::CompoundLit { .. }) {
+                    // CompoundLit: gen_expr builds the struct on the stack
+                    // and returns the address in rax. Use rax directly as
+                    // the source address for the copy.
+                    self.gen_expr(r, 0);
+                    self.mov(6, 0); // rsi = rax (compound lit temp address)
                 } else {
                     // 通用路径: 求值表达式, 存到帧临时区, 然后拷贝
                     self.gen_expr(r, 0);
@@ -16481,14 +16487,12 @@ impl Codegen {
         dst: u8,
         sret_off: Option<i32>,
     ) {
-        // Unknown __builtin_* 降级为警告 (W0018), 回退代码已生成.
-        // 避免 torture compile 测试因未实现的 builtin 而失败.
-        let msg = format!(
-            "unsupported __builtin_ function '{}' (W0018)",
-            name
-        );
+        // Unknown __builtin_* are hard errors (E0018), not warnings.
+        // This prevents silent zero/ud2 fallback that could cause
+        // subtle runtime bugs in kernel code.
+        let msg = format!("unsupported __builtin_ function '{}'", name);
         let span = Span::point(&self.source_name, 0, 1);
-        let mut diag = Diagnostic::warn("W0018", msg, span);
+        let mut diag = Diagnostic::err("E0018", msg, span);
         diag.hint = Some(
             "implement this builtin in gen_builtin() \
              or add it to the known-builtin list"
