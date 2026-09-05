@@ -9199,6 +9199,10 @@ impl Codegen {
                 // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
                 if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e.as_ref()) {
                     self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
+                    // rax 指向临时槽, 供后续 aggregate_assign 或向量操作使用
+                    let vec_size = elem_ty.base.size() * n;
+                    let temp_off = self.vector_temp_base(0, vec_size);
+                    self.emit_lea_r13(0, temp_off);
                     return;
                 }
                 let src_ty = e.ty();
@@ -15182,6 +15186,8 @@ impl Codegen {
             // 实部载入 xmm0，供浮点转换
             let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
             self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+            // rax 指向结果区, 供 spill_complex_operand 的 rep movsb 使用
+            self.emit_lea_r13(0, result_off);
         } else {
             // 整数内型: 实部载入 rax (gen_complex_init 直接 store_stack)
             self.load_stack(0, result_off);
