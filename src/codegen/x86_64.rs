@@ -9997,16 +9997,21 @@ impl Codegen {
                 let code_pos = self.pos();
                 self.emit(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]); // lea rsi, [rip+off]
                 self.string_refs.push((code_pos, data.clone()));
-                // rdi = 目标地址 (dst)
-                if dst != 7 { // rdi = reg 7
-                    self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, (0xC7 | ((dst & 7) << 3))]); // mov rdi, dst
-                }
+                // rdi = 目标地址 (rsp, 保存在 rsi 中; dst 可能被后续 LEA 覆盖)
+                // 注意: 上面 LEA rsi,[rip+off] 会覆盖 rsi, 但 rdi 需要在
+                // LEA 之后设置, 所以这里从 rsp 的副本取目标地址.
+                // rsp 在 sub 后未变, 可以直接用 rsp; 但更安全的做法是
+                // 在 LEA 前保存 rsp 到 rdi, 然后 LEA 用另一个寄存器.
+                // 简化: 交换 LEA 和 mov rdi 的顺序, 或在 LEA 后用 mov rdi, rsp.
+                self.emit(&[0x48, 0x89, 0xE7]); // mov %rsp, %rdi (rdi = 目标地址)
                 // rcx = size (寄存器 1 = rcx; rep movsb 计数器必须是 rcx)
                 self.mov_imm(1, size as i64 as i128); // rcx = size
                 // cld 清方向标志 (DF 可能被 std 置位, 反向复制会写爆栈), 然后
                 // rep movsb: 复制 rcx 字节从 [rsi] 到 [rdi]
                 self.emit(&[0xFC]); // cld
                 self.emit(&[0xF3, 0xA4]); // rep movsb
+                // dst = rsp (compound lit address, for subsequent use)
+                self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]); // mov dst, rsp
             }
             Expr::VaArg { ap, ty: arg_ty, .. } => {
                 // 检查 ap 的类型：如果是指向 va_list 结构的指针（函数参数退化），使用指针版本
@@ -11066,7 +11071,17 @@ impl Codegen {
                         }
                         InitItem::Designated { designator, value } => {
                             match resolve_designator(ty, designator) {
-                                Some((o, s, ft)) => (o, s, value, Some(ft), None),
+                                Some((o, s, ft)) => {
+                                    // Look up bitfield info for designated field
+                                    let bf_info = if let Designator::Field(ref name) = designator {
+                                        if let Type::Struct(_, fs, _) | Type::Union(_, fs, _) = ty {
+                                            find_field(fs.as_ref(), &name.name).and_then(|(f, extra)| {
+                                                f.bit_width.map(|bw| (f.bit_offset + (extra as u32) * 8, bw))
+                                            })
+                                        } else { None }
+                                    } else { None };
+                                    (o, s, value, Some(ft), bf_info)
+                                }
                                 None => { init_idx += 1; continue; },
                             }
                         }

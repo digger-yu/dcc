@@ -8989,7 +8989,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 if self.cur.kind == TokKind::LParen && self.is_peek_type_start() {
                     self.advance();
-                    let ty = self.parse_type()?;
+                    let mut ty = self.parse_type()?;
                     if !self.expect(TokKind::RParen, "')'") {
                         return None;
                     }
@@ -9021,6 +9021,11 @@ impl<'a> Parser<'a> {
                         }
                         if !self.expect(TokKind::RBrace, "'}'") {
                             return None;
+                        }
+                        // Infer array size from initializer count
+                        if let Type::Array(elem, ArraySize::Const(0)) = &ty {
+                            let count = inits.len();
+                            ty = Type::Array(elem.clone(), ArraySize::Const(count));
                         }
                         let compound = Expr::CompoundLit {
                             ty,
@@ -9323,6 +9328,12 @@ impl<'a> Parser<'a> {
                     }
                     if !self.expect(TokKind::RBrace, "'}'") {
                         return None;
+                    }
+                    // Infer array size from initializer count for compound
+                    // literals: (int[]){1,2,3} → int[3]
+                    if let Type::Array(elem, ArraySize::Const(0)) = &ty {
+                        let count = inits.len();
+                        ty = Type::Array(elem.clone(), ArraySize::Const(count));
                     }
                     let compound = Expr::CompoundLit {
                         ty,
@@ -10413,7 +10424,7 @@ impl<'a> Parser<'a> {
                     // 尝试解析类型
                     let saved_pos = self.cur.clone();
                     let saved_peek = self.peek.clone();
-                    if let Some(ty) = self.parse_type() {
+                    if let Some(mut ty) = self.parse_type() {
                         if self.cur.kind == TokKind::RParen && self.peek.kind == TokKind::LBrace {
                             // 复合字面量: (type){...}
                             self.advance(); // 跳过 )
@@ -10456,6 +10467,11 @@ impl<'a> Parser<'a> {
                             }
                             if !self.expect(TokKind::RBrace, "'}'") {
                                 return None;
+                            }
+                            // Infer array size from initializer count
+                            if let Type::Array(elem, ArraySize::Const(0)) = &ty {
+                                let count = inits.len();
+                                ty = Type::Array(elem.clone(), ArraySize::Const(count));
                             }
                             return Some(Expr::CompoundLit {
                                 ty,
