@@ -4231,7 +4231,6 @@ impl Codegen {
                         Expr::AddrOf { e, .. } => {
                             // P1-6: .data 节中的符号引用
                             // Handle &ident, &a[i], &a[i][j], &s.field, etc.
-                            // First try eval_global_lvalue_offset for complex expressions
                             if let Some((base_name, byte_off)) =
                                 Self::eval_global_lvalue_offset(e, &self.globals)
                             {
@@ -4265,6 +4264,46 @@ impl Codegen {
                                 true
                             } else {
                                 false
+                            }
+                        }
+                        Expr::Cast { e, .. }
+                            if matches!(&**e, Expr::AddrOf { .. })
+                                || (matches!(&**e, Expr::Ident { .. })
+                                    && matches!(&v.ty, Type::Ptr(_))) =>
+                        {
+                            // 全局初始化中的类型转换: (float *)&val, (void *)func 等
+                            // 提取内部表达式并递归处理
+                            let inner_init = e.as_ref();
+                            match inner_init {
+                                Expr::AddrOf { e: ref ae, .. } => {
+                                    if let Some((base_name, byte_off)) =
+                                        Self::eval_global_lvalue_offset(ae, &self.globals)
+                                    {
+                                        let ref_off = self.data_section.len() as u64;
+                                        let width = if sz <= 4 { 4 } else { 8 };
+                                        self.data_section
+                                            .resize(ref_off as usize + sz.max(width), 0);
+                                        let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                                        self.pending_data64_rels.push((
+                                            ref_off, base_name, None, rel_type, byte_off,
+                                        ));
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                Expr::Ident { name: ref_name, .. } => {
+                                    let ref_off = self.data_section.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.data_section
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                                    self.pending_data64_rels.push((
+                                        ref_off, ref_name.name.clone(), None, rel_type, 0,
+                                    ));
+                                    true
+                                }
+                                _ => false,
                             }
                         }
                         // Array-to-pointer / function-to-pointer decay
