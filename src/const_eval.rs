@@ -226,6 +226,35 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 }
             };
             let is_signed = !is_unsigned_int_ty(binop_ty);
+            // Helper: convert i128 value to the binop type width.
+            // For unsigned: mask to type width (zero-extend).
+            // For signed: mask then sign-extend from type width.
+            let convert_to_binop_ty = |v: i128| -> i128 {
+                if let Some(bits) = int_type_bits(binop_ty) {
+                    if bits < 128 {
+                        let mask = if bits == 64 {
+                            u64::MAX as i128
+                        } else {
+                            (1i128 << bits) - 1
+                        };
+                        let truncated = v & mask;
+                        if is_signed {
+                            let sign_bit = 1i128 << (bits - 1);
+                            if (truncated & sign_bit) != 0 {
+                                truncated | !mask
+                            } else {
+                                truncated
+                            }
+                        } else {
+                            truncated
+                        }
+                    } else {
+                        v
+                    }
+                } else {
+                    v
+                }
+            };
             match op {
                 // 算术运算
                 BinOp::Add => add_values(lv, rv),
@@ -234,15 +263,27 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 BinOp::Div => div_values(lv, rv),
                 BinOp::Mod => mod_values(lv, rv),
                 BinOp::And => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a & b)),
+                    (ConstValue::Int(a), ConstValue::Int(b)) => {
+                        let a = convert_to_binop_ty(a);
+                        let b = convert_to_binop_ty(b);
+                        Ok(ConstValue::Int(mask_to_ty(a & b)))
+                    }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 BinOp::Or => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a | b)),
+                    (ConstValue::Int(a), ConstValue::Int(b)) => {
+                        let a = convert_to_binop_ty(a);
+                        let b = convert_to_binop_ty(b);
+                        Ok(ConstValue::Int(mask_to_ty(a | b)))
+                    }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 BinOp::Xor => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a ^ b)),
+                    (ConstValue::Int(a), ConstValue::Int(b)) => {
+                        let a = convert_to_binop_ty(a);
+                        let b = convert_to_binop_ty(b);
+                        Ok(ConstValue::Int(mask_to_ty(a ^ b)))
+                    }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv.as_int().unwrap_or(-1)) => {

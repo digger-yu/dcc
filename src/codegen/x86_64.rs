@@ -14111,6 +14111,19 @@ impl Codegen {
             op,
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
         );
+        // Determine operand size for Add/Sub/And/Or/Xor:
+        // - Unsigned 32-bit (uint): no REX.W, result auto zero-extends to 64-bit
+        //   This is correct for unsigned arithmetic (masking to 32 bits).
+        // - Signed 32-bit (int) or 64-bit: REX.W (64-bit operation)
+        //   Signed 32-bit results must be sign-extended, not zero-extended.
+        // This is critical for correct unsigned arithmetic: `0U ^ (short)-0x8000`
+        // must use 32-bit XOR to get 0xFFFF8000 (zero-extended), not 0xFFFFFFFFFFFF8000.
+        let op_size = lt.size().max(rt.size());
+        let is_unsigned = !is_signed;
+        let use_32bit = !is_cmp
+            && !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul | BinOp::Shl | BinOp::Shr)
+            && op_size <= 4
+            && is_unsigned;
         if !is_cmp
             && !matches!(
                 op,
@@ -14121,7 +14134,8 @@ impl Codegen {
             // src 在 reg 字段 (需 REX.R). 二者独立判断, 不可 else-if,
             // 否则双高位寄存器时 REX.B 丢失, dst 被截断为 dst&7.
             // Note: Shl/Shr/Mul/Div/Mod emit their own REX prefixes internally.
-            let mut rex = 0x48u8;
+            // REX.W=0 for 32-bit ops (auto zero-extend), REX.W=1 for 64-bit ops.
+            let mut rex = if use_32bit { 0x40u8 } else { 0x48u8 };
             if src >= 8 {
                 rex |= 0x04;
             }
