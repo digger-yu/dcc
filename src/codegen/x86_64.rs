@@ -8360,6 +8360,18 @@ impl Codegen {
                                 dst, &r_ty, l_ty,
                             );
                         }
+                        // Implicit int→float conversion when RHS is
+                        // integer but LHS is float (e.g. `ping = 0;`).
+                        // The integer result sits in eax; convert it to
+                        // xmm0 before gen_float_store.
+                        if matches!(
+                            l_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) && Self::is_integer_type(&r_ty) {
+                            self.emit_scalar_to_xmm0_if_needed(
+                                r, l_ty,
+                            );
+                        }
                         // 赋值表达式的值是左值转换后的值 (C11 6.5.16p3),
                         // 而非右值原值: `ul = us = -1` 中内层 us=-1 的结果须
                         // 先截断到 unsigned short (65535) 再传播给外层, 否则
@@ -10583,14 +10595,39 @@ impl Codegen {
                     } else {
                         // 普通字段: 直接加载
                         let size = f.ty.size();
-                        // float/double 字段: 在 GP 加载 (覆盖地址) 前先加载到 xmm0
+                        // float/double/long double 字段: 只加载到 xmm0
+                        // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
+                        // 后续 mixed-type 比较（如 float > int）会错误地把该
+                        // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
                         if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble) {
                             match size {
                                 4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
                                 8 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
                                 _ => {}
                             }
+                        } else {
+                            match size {
+                                1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
+                                2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
+                                4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
+                                8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
+                                _ => {}
+                            }
                         }
+                    }
+                } else {
+                    let size = ty.size();
+                    // float/double/long double 字段: 只加载到 xmm0
+                    // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
+                    // 后续 mixed-type 比较（如 float > int）会错误地把该
+                    // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                        match size {
+                            4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
+                            8 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
+                            _ => {}
+                        }
+                    } else {
                         match size {
                             1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
                             2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
@@ -10598,23 +10635,6 @@ impl Codegen {
                             8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
                             _ => {}
                         }
-                    }
-                } else {
-                    let size = ty.size();
-                    // float/double 字段: 在 GP 加载前先加载到 xmm0
-                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                        match size {
-                            4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                            8 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
-                            _ => {}
-                        }
-                    }
-                    match size {
-                        1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
-                        2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
-                        4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                        8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                        _ => {}
                     }
                 }
                 }
