@@ -557,6 +557,29 @@ impl<'a> Parser<'a> {
         }
         None
     }
+    /// 解析类型到最新的 struct/union 定义。
+    /// 用于 typedef 引用前向声明的 struct 时，获取已完成字段的版本。
+    fn resolve_type_latest(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Struct(name, fields, align) if fields.is_empty() => {
+                if let Some((f, _, a)) = self.struct_defs.get(name) {
+                    if !f.is_empty() {
+                        return Type::Struct(name.clone(), Arc::clone(f), *a);
+                    }
+                }
+                ty.clone()
+            }
+            Type::Union(name, fields, align) if fields.is_empty() => {
+                if let Some((f, _, a)) = self.struct_defs.get(name) {
+                    if !f.is_empty() {
+                        return Type::Union(name.clone(), Arc::clone(f), *a);
+                    }
+                }
+                ty.clone()
+            }
+            _ => ty.clone(),
+        }
+    }
     /// 登记 typedef；GCC 允许兼容或整型别名的重复 typedef（宿主头文件常见）
     fn register_typedef(&mut self, name: &Ident, ty: Type) -> bool {
         if let Some(existing) = self.typedefs.get(&name.name) {
@@ -1009,7 +1032,7 @@ impl<'a> Parser<'a> {
                     let name = self.cur.text.clone();
                     if let Some(ty) = self.typedefs.get(&name).cloned() {
                         self.advance();
-                        Some(ty)
+                        Some(self.resolve_type_latest(&ty))
                     } else {
                         None
                     }
@@ -6001,6 +6024,7 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident {
             if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() {
                 self.advance();
+                let ty = self.resolve_type_latest(&ty);
                 // typedef 名后的 __attribute__: 如 asmlinkage = __attribute__((aligned(4)))
                 // 解析并存入 decl_attrs 供后续声明使用
                 let td_attrs = self.parse_attributes();
