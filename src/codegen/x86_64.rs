@@ -19321,6 +19321,13 @@ impl Codegen {
                     return true;
                 }
                 let op_size = args[0].ty().size().max(args[1].ty().size()).max(4); // 至少 32 位
+                // 溢出检测基于结果类型 (第三个参数解引用后的类型)
+                let result_ty = match &args[2].ty() {
+                    Type::Ptr(p) => p.base.clone(),
+                    _ => args[2].ty(),
+                };
+                let result_size = result_ty.size().max(4);
+                let is_unsigned = !Self::is_signed_int(&result_ty);
                                                                                    // 1. 求值 ptr → r10
                 self.gen_expr(&args[2], 0);
                 self.emit(&[0x49, 0x89, 0xc2]); // mov r10, rax
@@ -19348,22 +19355,38 @@ impl Codegen {
                     _ => unreachable!(),
                 }
                 // rax = 64 位结果
-                // 6. 截断到操作数类型, 检测溢出
+                // 6. 截断到结果类型, 检测溢出
                 // 保存完整结果到 rcx
                 self.emit(&[0x48, 0x89, 0xc1]); // mov rcx, rax
-                match op_size {
+                match result_size {
                     4 => {
-                        // 32 位: 截断到 eax, 符号扩展到 rdx
-                        self.emit(&[0x89, 0xc0]); // mov eax, eax (截断到 32 位)
-                        self.emit(&[0x48, 0x63, 0xd0]); // movsxd rdx, eax (符号扩展)
+                        // 32 位: 截断到 eax
+                        self.emit(&[0x89, 0xc0]); // mov eax, eax (截断到 32 位，同时零扩展到 64 位)
+                        // mov eax, eax 已经零扩展到 rax，直接复制到 rdx
+                        self.emit(&[0x48, 0x89, 0xc2]); // mov rdx, rax
+                        if !is_unsigned {
+                            // 有符号: 需要符号扩展而不是零扩展
+                            // 重新截断并符号扩展
+                            self.emit(&[0x48, 0x63, 0xd0]); // movsxd rdx, eax
+                        }
                     }
                     2 => {
-                        // 16 位: movsx rdx, ax
-                        self.emit(&[0x48, 0x0f, 0xbf, 0xd0]); // movsx rdx, ax
+                        if is_unsigned {
+                            // 16 位无符号: movzx rdx, ax
+                            self.emit(&[0x48, 0x0f, 0xb7, 0xd0]); // movzx rdx, ax
+                        } else {
+                            // 16 位有符号: movsx rdx, ax
+                            self.emit(&[0x48, 0x0f, 0xbf, 0xd0]); // movsx rdx, ax
+                        }
                     }
                     1 => {
-                        // 8 位: movsx rdx, al
-                        self.emit(&[0x48, 0x0f, 0xbe, 0xd0]); // movsx rdx, al
+                        if is_unsigned {
+                            // 8 位无符号: movzx rdx, al
+                            self.emit(&[0x48, 0x0f, 0xb6, 0xd0]); // movzx rdx, al
+                        } else {
+                            // 8 位有符号: movsx rdx, al
+                            self.emit(&[0x48, 0x0f, 0xbe, 0xd0]); // movsx rdx, al
+                        }
                     }
                     _ => {
                         // 64 位: 无截断, 用 seto
@@ -19382,7 +19405,7 @@ impl Codegen {
                 self.emit(&[0x0f, 0x94, 0xc2]); // sete dl (相等=无溢出=1)
                 self.emit(&[0x80, 0xf2, 0x01]); // xor dl, 1 (反转: 溢出=1)
                                                 // 7. 存储截断结果到 *ptr
-                match op_size {
+                match result_size {
                     4 => {
                         self.emit(&[0x49, 0x89, 0x02]);
                     } // mov [r10], eax

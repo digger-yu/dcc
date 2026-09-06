@@ -2027,8 +2027,10 @@ impl<'a> Parser<'a> {
                 "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" |
                 "__builtin_printf" | "__builtin_fprintf" |
                 "__builtin_snprintf" | "__builtin_vsnprintf" |
+                "__builtin_sprintf" |
                 "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" |
-                "__builtin_mul_overflow_p" => {
+                "__builtin_mul_overflow_p" |
+                "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {
                     return int_t()
                 }
                 // 返回 size_t 的 builtin
@@ -10154,6 +10156,8 @@ impl<'a> Parser<'a> {
                                     | "__builtin_snprintf" | "__builtin_vsnprintf"
                                     | "__builtin_abs" | "__builtin_labs" | "__builtin_llabs"
                                     | "__builtin_mul_overflow_p"
+                                    | "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow"
+                                    | "__builtin_sprintf"
                                     | "__builtin_strlen"
                                     | "__builtin_return_address" | "__builtin_frame_address"
                                     | "__builtin_strcpy" | "__builtin_stpcpy"
