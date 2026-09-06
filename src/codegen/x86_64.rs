@@ -7355,18 +7355,17 @@ impl Codegen {
                             // float/double. The integer result is in rax;
                             // convert to xmm0.
                             let expr_ty = e.ty();
-                            if matches!(&ret_ty, Type::Float | Type::Double | Type::LongDouble)
+                            let func_ret_ty = self.current_func_ret_ty.clone();
+                            if matches!(&func_ret_ty, Type::Float | Type::Double | Type::LongDouble)
                                 && Self::is_integer_type(&expr_ty)
                             {
-                                self.emit_scalar_to_xmm0_if_needed(e, &ret_ty);
+                                self.emit_scalar_to_xmm0_if_needed(e, &func_ret_ty);
                             }
                             // Float/double return type mismatch:
                             // convert expression type to the declared
                             // return type.  E.g. `return float_var`
                             // in a function returning double needs
                             // cvtss2sd.
-                            let expr_ty = e.ty();
-                            let func_ret_ty = self.current_func_ret_ty.clone();
                             if matches!(&expr_ty, Type::Float)
                                 && matches!(&func_ret_ty,
                                     Type::Double | Type::LongDouble)
