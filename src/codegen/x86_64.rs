@@ -7313,14 +7313,33 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // Float/double return type mismatch:
+                            // convert expression type to the declared
+                            // return type.  E.g. `return float_var`
+                            // in a function returning double needs
+                            // cvtss2sd.
+                            let expr_ty = e.ty();
+                            let func_ret_ty = self.current_func_ret_ty.clone();
+                            if matches!(&expr_ty, Type::Float)
+                                && matches!(&func_ret_ty,
+                                    Type::Double | Type::LongDouble)
+                            {
+                                // cvtss2sd xmm0, xmm0
+                                self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+                            } else if matches!(&expr_ty,
+                                    Type::Double | Type::LongDouble)
+                                && matches!(&func_ret_ty, Type::Float)
+                            {
+                                // cvtsd2ss xmm0, xmm0
+                                self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
+                            }
                             // Truncate return value to the function's
                             // declared return type width. For types smaller
                             // than int, the BinOp result may have extra bits
                             // in the register that must be cleared.
-                            let func_ret_ty = &self.current_func_ret_ty;
                             let ret_bits = func_ret_ty.size() * 8;
                             if func_ret_ty.is_int() && ret_bits < 64 {
-                                let is_signed = Self::is_signed_int(func_ret_ty);
+                                let is_signed = Self::is_signed_int(&func_ret_ty);
                                 match ret_bits {
                                     8 if is_signed => {
                                         // movsbq %al, %rax (sign-extend to 64-bit)
