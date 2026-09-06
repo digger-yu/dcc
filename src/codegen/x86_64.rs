@@ -16409,6 +16409,13 @@ impl Codegen {
                     }
                     true
                 }
+                // *ptr: evaluate ptr to get address, use directly as source.
+                // This avoids the rax/rdx temp path which only handles 16 bytes.
+                Expr::Deref { e: inner, .. } => {
+                    self.gen_expr(inner, 0); // rax = ptr
+                    self.mov(6, 0); // rsi = rax (source address)
+                    true
+                }
                 _ => false,
             }
         };
