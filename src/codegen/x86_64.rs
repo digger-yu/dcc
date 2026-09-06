@@ -14563,14 +14563,25 @@ impl Codegen {
             BinOp::Div | BinOp::Mod => {
                 // 有符号: cqto (符号扩展 rax→rdx:rax) + idiv
                 // 无符号: xor rdx,rdx (清零 rdx) + div
+                // 32位无符号运算前需零扩展操作数到64位
+                let op_size = lt.size().max(rt.size());
+                let need_zero_ext = !is_signed && op_size <= 4;
                 if src == 2 {
                     self.emit(&[0x52]); // push rdx (save divisor)
                 }
                 if dst != 0 {
                     self.mov(0, dst); // rax = 被除数
                 }
+                // 零扩展被除数 (rax) 从32位到64位
+                if need_zero_ext {
+                    self.emit(&[0x89, 0xC0]); // mov eax, eax (zero-extends to rax)
+                }
                 if src == 2 {
                     self.emit(&[0x59]); // pop rcx (restore divisor)
+                    // 零扩展除数 (rcx) 从32位到64位
+                    if need_zero_ext {
+                        self.emit(&[0x89, 0xC9]); // mov ecx, ecx (zero-extends to rcx)
+                    }
                     if is_signed {
                         self.emit(&[0x48, 0x99]); // cqto
                         self.emit(&[0x48, 0xF7, 0xF9]); // idiv rcx
@@ -14579,6 +14590,12 @@ impl Codegen {
                         self.emit(&[0x48, 0xF7, 0xF1]); // div rcx
                     }
                 } else {
+                    // 零扩展除数从32位到64位
+                    if need_zero_ext {
+                        // mov src, src (zero-extends to 64-bit)
+                        let src_byte = (src & 7) as u8;
+                        self.emit(&[0x89, 0xC0 | (src_byte << 3) | src_byte]);
+                    }
                     if is_signed {
                         self.emit(&[0x48, 0x99]); // cqto
                         let mut rex = 0x48u8;

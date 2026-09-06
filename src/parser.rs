@@ -2072,7 +2072,39 @@ impl<'a> Parser<'a> {
                     fields.as_ref()
                 };
                 find_field(resolved, &field.name)
-                    .map(|(found, _)| found.ty.clone())
+                    .map(|(found, _)| {
+                        let ty = found.ty.clone();
+                        if let Some(bw) = found.bit_width {
+                            // C11 6.3.1.1: bit-field integer promotion.
+                            // If int can represent all values → int.
+                            // Else if unsigned int can → unsigned int.
+                            // Else → original type.
+                            let is_unsigned = matches!(
+                                ty,
+                                Type::UInt
+                                    | Type::ULong
+                                    | Type::ULongLong
+                                    | Type::UShort
+                                    | Type::UChar
+                                    | Type::Bool
+                            );
+                            if is_unsigned {
+                                if bw <= 31 {
+                                    Type::Int
+                                } else if bw <= 32 {
+                                    Type::UInt
+                                } else {
+                                    ty
+                                }
+                            } else if bw <= 32 {
+                                Type::Int
+                            } else {
+                                ty
+                            }
+                        } else {
+                            ty
+                        }
+                    })
                     .unwrap_or_else(int_t)
             }
             _ => int_t(),
