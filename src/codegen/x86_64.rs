@@ -8645,13 +8645,31 @@ impl Codegen {
                         }
                     }
                 }
-                // C 语义: 位域移位运算结果需掩码到位域宽度.
-                // GCC 将位域视为宽度受限的类型, 移位后高位截断.
-                // 例如 unsigned int b:40; x.b<<8 结果掩码到 40 位.
-                if matches!(*op, BinOp::Shl | BinOp::Shr) {
-                    if let Some(bf_width) = Self::expr_bitfield_width(l) {
-                        if bf_width < 64 {
-                            let mask: u64 = (1u64 << bf_width) - 1;
+                // GCC 位域算术语义: 当两个操作数都是位域时, 运算结果掩码到
+                // max(width_l, width_r) 位. 当一个操作数是位域而另一个是
+                // 整型常量时, 结果掩码到位域宽度.
+                // 例如 u33 * u33 → 掩码到 33 位, u40 - 8 → 掩码到 40 位.
+                {
+                    let bf_l = Self::expr_bitfield_width(l);
+                    let bf_r = if matches!(*op, BinOp::Shl | BinOp::Shr) {
+                        None // 移位: 仅看左操作数
+                    } else {
+                        Self::expr_bitfield_width(r)
+                    };
+                    let r_is_const = matches!(r.as_ref(), Expr::Int { .. });
+                    let l_is_const = matches!(l.as_ref(), Expr::Int { .. });
+                    // 两个操作数都是位域: 掩码到 max 宽度
+                    // 一个位域 + 一个常量: 掩码到位域宽度
+                    // 移位 + 左操作数位域: 掩码到位域宽度
+                    let effective_width: Option<u32> = match (bf_l, bf_r) {
+                        (Some(wl), Some(wr)) => Some(std::cmp::max(wl, wr)),
+                        (Some(w), None) if r_is_const || matches!(*op, BinOp::Shl | BinOp::Shr) => Some(w),
+                        (None, Some(w)) if l_is_const => Some(w),
+                        _ => None,
+                    };
+                    if let Some(bf_width) = effective_width {
+                        if bf_width < 64 && bf_width > 32 {
+                            let mask: u64 = if bf_width == 0 { 0 } else { (1u64 << bf_width) - 1 };
                             if mask <= 0x7FFFFFFF {
                                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                                 self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
@@ -13509,8 +13527,21 @@ impl Codegen {
         }
         if bw < 64 {
             let mask = (1u64 << bw) - 1;
-            self.emit(&[0x48, 0x25]);
-            self.emit(&(mask as u32).to_le_bytes());
+            if mask <= 0x7FFFFFFF {
+                // 掩码可符号扩展到32位: and eax, imm32
+                self.emit(&[0x48, 0x25]);
+                self.emit(&(mask as u32).to_le_bytes());
+            } else if mask <= 0xFFFFFFFF {
+                // 掩码 fits 32位零扩展: mov ecx, mask; and rax, rcx
+                self.emit(&[0x48, 0xB9]); // mov rcx, imm32 (zero-ext)
+                self.emit(&(mask as u32).to_le_bytes());
+                self.emit(&[0x48, 0x21, 0xC8]); // and rax, rcx
+            } else {
+                // 掩码 > 32位: movabs rcx, mask; and rax, rcx
+                self.emit(&[0x48, 0xB9]); // mov rcx, imm64
+                self.emit(&mask.to_le_bytes());
+                self.emit(&[0x48, 0x21, 0xC8]); // and rax, rcx
+            }
         }
         // rax = old bitfield value
         self.emit(&[0x49, 0x89, 0x45, old_slot as u8]); // save old
@@ -13519,8 +13550,18 @@ impl Codegen {
         self.emit_inc_dec_reg(0, is_inc, 1);
         if bw < 64 {
             let mask = (1u64 << bw) - 1;
-            self.emit(&[0x48, 0x25]);
-            self.emit(&(mask as u32).to_le_bytes());
+            if mask <= 0x7FFFFFFF {
+                self.emit(&[0x48, 0x25]);
+                self.emit(&(mask as u32).to_le_bytes());
+            } else if mask <= 0xFFFFFFFF {
+                self.emit(&[0x48, 0xB9]);
+                self.emit(&(mask as u32).to_le_bytes());
+                self.emit(&[0x48, 0x21, 0xC8]);
+            } else {
+                self.emit(&[0x48, 0xB9]);
+                self.emit(&mask.to_le_bytes());
+                self.emit(&[0x48, 0x21, 0xC8]);
+            }
         }
         // rax = new bitfield value
         self.emit(&[0x49, 0x89, 0x45, new_slot as u8]); // save new
