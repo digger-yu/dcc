@@ -7562,6 +7562,21 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // __int128 返回值: 若函数返回 __int128 但表达式非 __int128, rdx 未设置
+                            let func_ret_ty_for_128 = self.current_func_ret_ty.clone();
+                            if matches!(&func_ret_ty_for_128, Type::Int128 | Type::UInt128)
+                                && !matches!(e.ty(), Type::Int128 | Type::UInt128)
+                            {
+                                if matches!(func_ret_ty_for_128, Type::UInt128)
+                                    || matches!(e.ty(),
+                                        Type::Bool | Type::UChar | Type::UShort
+                                        | Type::UInt | Type::ULong | Type::ULongLong)
+                                {
+                                    self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+                                } else {
+                                    self.emit(&[0x48, 0x99]); // cqo
+                                }
+                            }
                             // Small struct (<=8B) returned as value in rax.
                             // CompoundLit/InitList gen_expr returns an ADDRESS
                             // in rax; we must load the VALUE from that address.
