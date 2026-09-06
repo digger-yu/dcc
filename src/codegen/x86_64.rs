@@ -10341,8 +10341,12 @@ impl Codegen {
                         // 掩码: and dst, (1 << bw) - 1
                         if bw < 64 {
                             let mask: u64 = if bw == 64 { u64::MAX } else { (1u64 << bw) - 1 };
-                            if mask <= 0xFFFFFFFF {
-                                // 32 位掩码可用 imm32 编码
+                            // imm32 在 REX.W 下会符号扩展到 64 位,
+                            // 所以 >0x7FFFFFFF 的掩码不能用 imm32 编码
+                            // (例如 bw=32 时 mask=0xFFFFFFFF 会被
+                            // 符号扩展为 0xFFFFFFFFFFFFFFFF, 变成 no-op).
+                            if mask <= 0x7FFFFFFF {
+                                // 32 位有符号 imm32 可安全编码
                                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                                 self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
                                 self.emit(&(mask as u32).to_le_bytes());
