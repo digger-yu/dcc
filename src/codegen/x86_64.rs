@@ -13124,7 +13124,7 @@ impl Codegen {
         if !self.target.sse || is_long_double {
             // 比较运算走特殊路径
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne) {
-                self.gen_float_cmp_x87(op, &l.ty(), l, r);
+                self.gen_float_cmp_x87(op, &float_ty, l, r);
                 return;
             }
             // 取模: 软件实现, 需要 SSE 指令, 在 no-sse 模式下通过调用 fmod/fmodf 实现
@@ -13300,7 +13300,7 @@ impl Codegen {
             BinOp::Div => (if is_float { 0xF3 } else { 0xF2 }, 0x5E), // divss/divsd
             // 比较运算
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
-                self.gen_float_cmp(op, &l.ty());
+                self.gen_float_cmp(op, &float_ty);
                 return;
             }
             _ => return, // 不支持的运算
