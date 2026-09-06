@@ -8872,6 +8872,59 @@ impl Codegen {
                             1 => self.emit(&[0x88, 0x0A]),       // mov [rdx], cl
                             _ => {}
                         }
+                        // 位域赋值表达式的结果 = 截断并符号扩展后的值 (C11 6.5.16p3)
+                        // 从内存重新加载容器，提取位域值并符号扩展
+                        {
+                            let f = field_info.as_ref().unwrap();
+                            let is_signed = Self::is_signed_int(&f.ty);
+                            // rdx = [r13 + addr_off] (地址)
+                            self.emit(&[0x49, 0x8B, 0x55, addr_off as u8]); // mov rdx, [r13+addr_off]
+                            // rdx = [rdx] (重新加载容器)
+                            match container_size {
+                                4 => self.emit(&[0x8B, 0x12]),       // mov edx, [rdx]
+                                8 => self.emit(&[0x48, 0x8B, 0x12]), // mov rdx, [rdx]
+                                2 => {
+                                    self.emit(&[0x66, 0x8B, 0x12]);
+                                    self.emit(&[0x48, 0x0F, 0xB7, 0xD2]);
+                                }
+                                1 => self.emit(&[0x0F, 0xB6, 0x12]),
+                                _ => {}
+                            }
+                            // shr rdx, bit_off
+                            if bit_off > 0 {
+                                self.emit(&[0x48, 0xC1, 0xEA, bit_off as u8]); // shr rdx, imm8
+                            }
+                            // mask to bw bits
+                            if bw < 64 {
+                                let mask: u64 = (1u64 << bw) - 1;
+                                if mask <= 0xFFFFFFFF {
+                                    self.emit(&[0x48, 0x81, 0xE2]); // and rdx, imm32
+                                    self.emit(&(mask as u32).to_le_bytes());
+                                } else {
+                                    self.emit(&[0x48, 0xBA]); // movabs rdx, mask
+                                    self.emit(&mask.to_le_bytes());
+                                    // re-load address for the and
+                                    self.emit(&[0x49, 0x8B, 0x45, addr_off as u8]); // mov rax, [r13+addr_off]
+                                    // Actually this path is complex; for bw<=63 mask fits in 32 bits
+                                    // since (1<<63)-1 > u32::MAX but bw<64 means bw<=63
+                                    // (1u64<<63)-1 = 0x7FFFFFFFFFFFFFFF which doesn't fit in u32
+                                    // Fall through to movabs path
+                                    self.emit(&[0x48, 0x21, 0xC2]); // and rdx, rax
+                                }
+                            }
+                            // sign-extend if signed bitfield
+                            if is_signed && bw < 64 {
+                                let shift = 64 - bw;
+                                // shl rdx, shift
+                                self.emit(&[0x48, 0xC1, 0xE2, shift as u8]); // shl rdx, imm8
+                                // sar rdx, shift
+                                self.emit(&[0x48, 0xC1, 0xFA, shift as u8]); // sar rdx, imm8
+                            }
+                            // move result to dst
+                            if dst != 2 {
+                                self.mov(dst, 2); // dst = rdx
+                            }
+                        }
                     } else {
                         // Check if field type is aggregate (struct/union/array)
                         let field_is_aggregate = field_info.as_ref().is_some_and(|f| {
@@ -9340,9 +9393,11 @@ impl Codegen {
                         self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                         // sete al: 零 → 1, 非零 → 0 (0F 94 C0)
                         self.emit(&[0x0F, 0x94, 0xC0]);
-                        // movzx dst, al (48 0F B6 C0)
-                        let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
-                        self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | (dst & 7)]);
+                        // movzx dst, al (REX 0F B6 modrm)
+                        // ModRM: mod=11, reg=dst, r/m=0(al) → 0xC0 | ((dst&7)<<3)
+                        // REX.R (0x04) when dst>=8 (reg field extension)
+                        let rex2 = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                        self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3)]);
                     }
                     UnOp::BitNot => {
                         let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
@@ -18095,7 +18150,7 @@ impl Codegen {
                 self.emit(&[0x57]); // push rdi
                 self.emit(&[0xfc]); // cld (清除方向标志)
                 self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
-                self.emit(&[0x5f]); // pop rax (返回值 = dst)
+                self.emit(&[0x58]); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -18114,7 +18169,7 @@ impl Codegen {
                 self.emit(&[0x57]); // push rdi
                 self.emit(&[0xfc]); // cld
                 self.emit(&[0xf3, 0xaa]); // rep stosb
-                self.emit(&[0x5f]); // pop rax (返回值 = dst)
+                self.emit(&[0x58]); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

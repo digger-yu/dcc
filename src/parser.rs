@@ -8687,12 +8687,34 @@ impl<'a> Parser<'a> {
                             }
                         }
                     };
-                    let expanded = Expr::Binop {
-                        op,
-                        l: read,
-                        r: Box::new(r),
-                        span: self.cur.span.clone(),
-                        ty: binop_ty,
+                    // For commutative operators on integer types, swap operands so
+                    // RHS is evaluated first. This matches GCC's behavior for compound
+                    // assignment: `x |= foo()` evaluates foo() before reading x, so
+                    // side effects in foo() are visible when x is read.
+                    // Exclude pointer/float/vector types: ptr+int has specific semantics,
+                    // float addition may have different rounding, vector ops need special handling.
+                    let is_integer = target_ty.is_int() && !matches!(target_ty, Type::Ptr(_) | Type::Array(_, _));
+                    let is_commutative = is_integer
+                        && matches!(
+                            op,
+                            BinOp::Add | BinOp::Mul | BinOp::Or | BinOp::And | BinOp::Xor
+                        );
+                    let expanded = if is_commutative {
+                        Expr::Binop {
+                            op,
+                            l: Box::new(r),
+                            r: read,
+                            span: self.cur.span.clone(),
+                            ty: binop_ty,
+                        }
+                    } else {
+                        Expr::Binop {
+                            op,
+                            l: read,
+                            r: Box::new(r),
+                            span: self.cur.span.clone(),
+                            ty: binop_ty,
+                        }
                     };
                     let assign_ty = target.ty();
                     lhs = Expr::Assign {
@@ -8738,7 +8760,8 @@ impl<'a> Parser<'a> {
                 } else if then_ty == else_ty {
                     then_ty
                 } else {
-                    int_t()
+                    // C11 6.5.15: ternary result type follows usual arithmetic conversions
+                    Self::usual_arith_type(&then_ty, &else_ty)
                 };
                 lhs = if let Expr::Int { v, .. } = &cond {
                     // Constant-fold ternary: 0 ? a : b → b, non-0 ? a : b → a
