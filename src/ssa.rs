@@ -36,7 +36,7 @@ impl SsaVar {
 pub enum Operand {
     Var(SsaVar),
     Int(i128),
-    Float(f64),
+    Float(f64, Type),
     /// 字符串字面量 (在 rodata 中以 FNV-1a label 表示)
     Str(Vec<u8>),
     /// 全局符号地址 (用符号名占位)
@@ -495,21 +495,21 @@ impl Builder {
                 }
                 Operand::Int(*v)
             }
-            Expr::Float { v, .. } => {
+            Expr::Float { v, ty, .. } => {
                 if let Some(t) = target {
                     self.emit(Inst {
                         dest: Some(t.clone()),
                         kind: InstKind::Bin {
                             op: BinOp::Add,
-                            l: Operand::Float(*v),
-                            r: Operand::Int(0),
+                            l: Operand::Float(*v, ty.clone()),
+                            r: Operand::Float(0.0, ty.clone()),
                         },
                         span: t.span.clone(),
                     });
                     self.define(t.clone());
                     return Operand::Var(t);
                 }
-                Operand::Float(*v)
+                Operand::Float(*v, ty.clone())
             }
             Expr::String { data, .. } => Operand::Str(data.clone()),
             Expr::Char { v, .. } => Operand::Int(*v),
@@ -2826,6 +2826,27 @@ fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
     }
 }
 
+/// 从两个操作数推导 BinOp 的结果类型
+fn infer_binop_type(l: &Expr, r: &Expr) -> Type {
+    let lt = l.ty();
+    let rt = r.ty();
+    if matches!(&lt, Type::Float | Type::Double | Type::LongDouble)
+        || matches!(&rt, Type::Float | Type::Double | Type::LongDouble)
+    {
+        if matches!(&lt, Type::LongDouble) || matches!(&rt, Type::LongDouble) {
+            Type::LongDouble
+        } else if matches!(&lt, Type::Double) || matches!(&rt, Type::Double) {
+            Type::Double
+        } else if matches!(&lt, Type::Float) || matches!(&rt, Type::Float) {
+            Type::Float
+        } else {
+            Type::Double
+        }
+    } else {
+        Type::Int
+    }
+}
+
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
 /// `inst_span` 是原始 SSA 指令的 span, 用于保留源码位置信息。
 fn inst_to_expr_resolved(
@@ -2836,13 +2857,18 @@ fn inst_to_expr_resolved(
     let sp = inst_span.clone();
     let fake_env: HashMap<String, SsaVar> = HashMap::new();
     match kind {
-        InstKind::Bin { op, l, r } => Expr::Binop {
-            op: *op,
-            l: Box::new(resolve_operand(l, &fake_env, subst)),
-            r: Box::new(resolve_operand(r, &fake_env, subst)),
-            span: sp.clone(),
-            ty: Type::Int,
-        },
+        InstKind::Bin { op, l, r } => {
+            let l_expr = resolve_operand(l, &fake_env, subst);
+            let r_expr = resolve_operand(r, &fake_env, subst);
+            let binop_ty = infer_binop_type(&l_expr, &r_expr);
+            Expr::Binop {
+                op: *op,
+                l: Box::new(l_expr),
+                r: Box::new(r_expr),
+                span: sp.clone(),
+                ty: binop_ty,
+            }
+        }
         InstKind::Un { op, e } => Expr::Unary {
             op: *op,
             e: Box::new(resolve_operand(e, &fake_env, subst)),
@@ -3162,10 +3188,10 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
             span: Span::point("ssa", 0, 0),
             ty: Type::Int,
         },
-        Operand::Float(v) => Expr::Float {
+        Operand::Float(v, ty) => Expr::Float {
             v: *v,
             span: Span::point("ssa", 0, 0),
-            ty: Type::Double,
+            ty: ty.clone(),
         },
         Operand::Str(d) => Expr::String {
             data: d.clone(),
@@ -3210,13 +3236,18 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
 fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
     let sp = Span::point("ssa", 0, 0);
     match kind {
-        InstKind::Bin { op, l, r } => Expr::Binop {
-            op: *op,
-            l: Box::new(operand_to_expr(l, env)),
-            r: Box::new(operand_to_expr(r, env)),
-            span: sp.clone(),
-            ty: Type::Int,
-        },
+        InstKind::Bin { op, l, r } => {
+            let l_expr = operand_to_expr(l, env);
+            let r_expr = operand_to_expr(r, env);
+            let binop_ty = infer_binop_type(&l_expr, &r_expr);
+            Expr::Binop {
+                op: *op,
+                l: Box::new(l_expr),
+                r: Box::new(r_expr),
+                span: sp.clone(),
+                ty: binop_ty,
+            }
+        }
         InstKind::Un { op, e } => Expr::Unary {
             op: *op,
             e: Box::new(operand_to_expr(e, env)),
