@@ -10092,6 +10092,25 @@ impl<'a> Parser<'a> {
                             );
                         }
                     }
+                    // GCC 兼容: 将标准库 llabs 调用重写为
+                    // __builtin_llabs, 以便 codegen 折叠.
+                    // 注意: abs/labs 不重写, 因为 builtin handler
+                    // 不处理参数截断 (int abs(int) 需要先截断到 32 位).
+                    let callee_expr = match callee_expr {
+                        Expr::Ident { ref name, span: ref sp, ty: ref ty }
+                            if name.name == "llabs" =>
+                        {
+                            Expr::Ident {
+                                name: crate::ast::Ident {
+                                    name: "__builtin_llabs".to_string(),
+                                    span: sp.clone(),
+                                },
+                                span: sp.clone(),
+                                ty: ty.clone(),
+                            }
+                        }
+                        other => other,
+                    };
                     e = Expr::Call {
                         callee: Box::new(callee_expr),
                         args,

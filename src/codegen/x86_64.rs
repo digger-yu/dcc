@@ -17643,8 +17643,9 @@ impl Codegen {
                 }
                 true
             }
-            // __builtin_abs: 绝对值
-            "__builtin_abs" => {
+            // __builtin_abs / __builtin_labs / __builtin_llabs:
+            // absolute value for int/long/long long.
+            "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
