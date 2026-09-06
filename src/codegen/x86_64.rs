@@ -6536,6 +6536,16 @@ impl Codegen {
                                     self.store_stack(2, off + 8); // high → [r13+off+8]
                                 } else {
                                     self.gen_expr(init, 0);
+                                    // Implicit float→int conversion
+                                    let init_ty = init.ty();
+                                    if matches!(
+                                        &init_ty,
+                                        Type::Float | Type::Double | Type::LongDouble
+                                    ) && Self::is_integer_type(&v.ty) {
+                                        self.emit_implicit_float_to_int(
+                                            0, &init_ty, &v.ty,
+                                        );
+                                    }
                                     self.mov_to_stack(0, &v.name.name);
                                 }
                             }
@@ -7689,6 +7699,16 @@ impl Codegen {
                                 self.gen_float_store(&v.name.name, &v.ty);
                             } else {
                                 self.gen_expr(init, 0);
+                                // Implicit float→int conversion
+                                let init_ty = init.ty();
+                                if matches!(
+                                    &init_ty,
+                                    Type::Float | Type::Double | Type::LongDouble
+                                ) && Self::is_integer_type(&v.ty) {
+                                    self.emit_implicit_float_to_int(
+                                        0, &init_ty, &v.ty,
+                                    );
+                                }
                                 self.mov_to_stack(0, &v.name.name);
                             }
                         }
@@ -8202,6 +8222,17 @@ impl Codegen {
                         self.gen_aggregate_assign(&name.name, l_ty, r);
                     } else {
                         self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
+                        // Implicit float→int conversion when RHS is
+                        // float but LHS is integer (e.g. `a = 0.0;`).
+                        let r_ty = r.ty();
+                        if matches!(
+                            &r_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) && Self::is_integer_type(l_ty) {
+                            self.emit_implicit_float_to_int(
+                                dst, &r_ty, l_ty,
+                            );
+                        }
                         // 赋值表达式的值是左值转换后的值 (C11 6.5.16p3),
                         // 而非右值原值: `ul = us = -1` 中内层 us=-1 的结果须
                         // 先截断到 unsigned short (65535) 再传播给外层, 否则
@@ -9355,6 +9386,18 @@ impl Codegen {
                                     self.gen_float_store(&v.name.name, &v.ty);
                                 } else {
                                     self.gen_expr(init, 0);
+                                    // Implicit float→int conversion when
+                                    // initializer is float but variable is
+                                    // integer (e.g. `int a = 0.0;`).
+                                    let init_ty = init.ty();
+                                    if matches!(
+                                        &init_ty,
+                                        Type::Float | Type::Double | Type::LongDouble
+                                    ) && Self::is_integer_type(&v.ty) {
+                                        self.emit_implicit_float_to_int(
+                                            0, &init_ty, &v.ty,
+                                        );
+                                    }
                                     self.mov_to_stack(0, &v.name.name);
                                 }
                             }
@@ -10852,6 +10895,55 @@ impl Codegen {
             self.emit(&[0xF3, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, eax
         } else {
             self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
+        }
+    }
+
+    /// Emit implicit float→integer conversion.
+    /// Precondition: float expression result is in xmm0.
+    /// Postcondition: integer result is in dst register.
+    fn emit_implicit_float_to_int(
+        &mut self,
+        dst: u8,
+        float_ty: &Type,
+        int_ty: &Type,
+    ) {
+        match float_ty {
+            Type::Float => {
+                // cvttss2si dst, xmm0 (F3 REX 0F 2C /r)
+                let wide = matches!(
+                    int_ty,
+                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                );
+                let rex = 0x40
+                    | (if wide { 0x08 } else { 0 })
+                    | (if dst >= 8 { 0x04 } else { 0 });
+                self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+            }
+            Type::Double => {
+                // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
+                let wide = matches!(
+                    int_ty,
+                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                );
+                let rex = 0x40
+                    | (if wide { 0x08 } else { 0 })
+                    | (if dst >= 8 { 0x04 } else { 0 });
+                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+            }
+            Type::LongDouble => {
+                // long double in st(0) (x87), convert to double in xmm0
+                self.emit_x87_to_xmm0();
+                // cvttsd2si dst, xmm0
+                let wide = matches!(
+                    int_ty,
+                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                );
+                let rex = 0x40
+                    | (if wide { 0x08 } else { 0 })
+                    | (if dst >= 8 { 0x04 } else { 0 });
+                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+            }
+            _ => {}
         }
     }
 
