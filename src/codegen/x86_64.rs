@@ -1629,6 +1629,156 @@ impl Codegen {
         )
     }
 
+    /// 结构相等性检查: 判断两个表达式是否具有相同的结构 (忽略 span 和 ty).
+    /// 用于检测 compound assignment 模式 (parser desugaring 产生的 target 和 read).
+    fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
+        match (a, b) {
+            (Expr::Ident { name: na, .. }, Expr::Ident { name: nb, .. }) => na.name == nb.name,
+            (Expr::Int { v: va, .. }, Expr::Int { v: vb, .. }) => va == vb,
+            (Expr::Deref { e: ea, .. }, Expr::Deref { e: eb, .. }) => {
+                Self::exprs_structurally_equal(ea, eb)
+            }
+            (Expr::Index { arr: aa, idx: ia, .. }, Expr::Index { arr: ab, idx: ib, .. }) => {
+                Self::exprs_structurally_equal(aa, ab) && Self::exprs_structurally_equal(ia, ib)
+            }
+            (Expr::Member { expr: ea, field: fa, is_arrow: aa, .. },
+             Expr::Member { expr: eb, field: fb, is_arrow: ab, .. }) => {
+                aa == ab && fa.name == fb.name && Self::exprs_structurally_equal(ea, eb)
+            }
+            (Expr::Unary { op: oa, e: ea, .. }, Expr::Unary { op: ob, e: eb, .. }) => {
+                oa == ob && Self::exprs_structurally_equal(ea, eb)
+            }
+            (Expr::PreInc { e: ea, .. }, Expr::PreInc { e: eb, .. }) |
+            (Expr::PreDec { e: ea, .. }, Expr::PreDec { e: eb, .. }) |
+            (Expr::PostInc { e: ea, .. }, Expr::PostInc { e: eb, .. }) |
+            (Expr::PostDec { e: ea, .. }, Expr::PostDec { e: eb, .. }) => {
+                Self::exprs_structurally_equal(ea, eb)
+            }
+            (Expr::Binop { op: oa, l: la, r: ra, .. },
+             Expr::Binop { op: ob, l: lb, r: rb, .. }) => {
+                oa == ob && Self::exprs_structurally_equal(la, lb) && Self::exprs_structurally_equal(ra, rb)
+            }
+            (Expr::Cast { e: ea, .. }, Expr::Cast { e: eb, .. }) => {
+                Self::exprs_structurally_equal(ea, eb)
+            }
+            (Expr::Comma { l: la, r: ra, .. }, Expr::Comma { l: lb, r: rb, .. }) => {
+                Self::exprs_structurally_equal(la, lb) && Self::exprs_structurally_equal(ra, rb)
+            }
+            (Expr::AddrOf { e: ea, .. }, Expr::AddrOf { e: eb, .. }) => {
+                Self::exprs_structurally_equal(ea, eb)
+            }
+            _ => false,
+        }
+    }
+
+    /// 检查表达式是否包含副作用 (递增/递减/赋值/函数调用).
+    fn expr_has_side_effects(e: &Expr) -> bool {
+        match e {
+            Expr::Unary { op, e: inner, .. } => {
+                matches!(op, UnOp::Neg) // PreDecr/PostDecr/PreIncr/PostIncr are separate variants
+                    || Self::expr_has_side_effects(inner)
+            }
+            Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
+                Self::expr_has_side_effects(l) || Self::expr_has_side_effects(r)
+            }
+            Expr::Assign { .. } => true,
+            Expr::Call { .. } => true,
+            Expr::PreInc { .. } | Expr::PreDec { .. } | Expr::PostInc { .. } | Expr::PostDec { .. } => true,
+            Expr::Deref { e, .. } | Expr::Cast { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+                Self::expr_has_side_effects(e)
+            }
+            Expr::Index { arr, idx, .. } => {
+                Self::expr_has_side_effects(arr) || Self::expr_has_side_effects(idx)
+            }
+            Expr::Member { expr, .. } => Self::expr_has_side_effects(expr),
+            Expr::Cond { cond, then_, else_, .. } => {
+                Self::expr_has_side_effects(cond)
+                    || Self::expr_has_side_effects(then_)
+                    || Self::expr_has_side_effects(else_)
+            }
+            _ => false,
+        }
+    }
+
+    /// Compound assignment 单次求值: 先计算 lvalue 地址并保存, 读取旧值, 计算 binop, 存回.
+    /// 避免 lvalue 中的副作用 (如 --ptr) 被求值两次.
+    fn gen_compound_assign_single_eval(
+        &mut self,
+        target: &Expr,
+        rhs: &Expr,
+        binop_op: BinOp,
+        dst: u8,
+        is_swapped: bool,
+    ) {
+        let lv_ty = target.ty();
+        let lv_sz = lv_ty.size();
+        // 1. 计算 lvalue 地址 → rax
+        let got_addr = self.gen_lvalue_addr(target, 0);
+        if !got_addr {
+            // 无法取地址, 退回普通路径 (直接走原有 Assign codegen)
+            // 注意: 这里不克隆表达式, 而是让调用方走原始路径.
+            // 由于我们已经匹配了 compound pattern, 但无法取地址, 
+            // 直接按普通赋值处理 (读取 target 值, 计算 binop, 存回).
+            self.gen_expr(target, 0); // 读取 target 当前值 → rax
+            self.push(0); // 保存旧值
+            self.gen_expr_decay(rhs, 0); // RHS → rax
+            self.pop(1); // rcx = 旧值 (pop to rcx, not rdx!)
+            // rax = rhs, rcx = old → binop(rax=old, rcx=rhs)
+            // 交换: rax=rcx(old), rcx=rax(rhs)
+            self.emit(&[0x48, 0x87, 0xc1]); // xchg rax, rcx → rax=old, rcx=rhs
+            let is_signed = Self::is_signed_int(&lv_ty);
+            self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
+            if dst != 0 { self.mov(dst, 0); }
+            return;
+        }
+        // rax = lvalue 地址
+        // 2. 保存地址到栈
+        self.push(0); // push rax (address)
+        // 3. 读取旧值
+        match lv_sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x00]),       // movzx eax, byte [rax]
+            2 => { self.emit(&[0x66, 0x8B, 0x00]); self.emit(&[0x48, 0x0F, 0xB7, 0xC0]); } // mov ax,[rax]; movzx eax,ax
+            4 => self.emit(&[0x8B, 0x00]),              // mov eax, [rax]
+            8 => self.emit(&[0x48, 0x8B, 0x00]),        // mov rax, [rax]
+            _ => self.emit(&[0x48, 0x8B, 0x00]),        // default: 8 bytes
+        }
+        // rax = old value
+        // 4. 保存旧值, 求值 RHS
+        self.push(0); // push rax (old value)
+        self.expr_depth += 1;
+        self.gen_expr_decay(rhs, dst); // RHS → dst (typically 0=rax)
+        self.expr_depth -= 1;
+        // rax = RHS value
+        // 5. pop 旧值到 rcx (register 1, NOT register 2/rdx!)
+        self.pop(1); // pop rcx (old value)
+        // rcx = old value, rax = RHS
+        // 6. 计算 binop: result = old_value op rhs
+        // 需要: rax = old, rcx = rhs for binop.
+        // 当前: rcx = old, rax = rhs.
+        // 交换: xchg rax, rcx → rax=old, rcx=rhs
+        self.emit(&[0x48, 0x87, 0xc1]); // xchg rax, rcx
+        // Now rax = old, rcx = rhs. Compute binop(rax, rcx).
+        let is_signed = Self::is_signed_int(&lv_ty);
+        self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
+        // rax = result
+        // 7. 截断到目标类型宽度 (32位以下)
+        if lv_sz == 4 && lv_ty.is_int() {
+            self.emit(&[0x89, 0xc0]); // mov eax, eax (truncate to 32 bits)
+        }
+        // 8. 恢复地址并存储
+        self.pop(1); // pop rcx (address)
+        match lv_sz {
+            1 => self.emit(&[0x88, 0x01]),              // mov [rcx], al
+            2 => self.emit(&[0x66, 0x89, 0x01]),        // mov [rcx], ax
+            4 => self.emit(&[0x89, 0x01]),              // mov [rcx], eax
+            _ => self.emit(&[0x48, 0x89, 0x01]),        // mov [rcx], rax
+        }
+        // 9. 结果到 dst
+        if dst != 0 {
+            self.mov(dst, 0);
+        }
+    }
+
     /// 将立即数按类型宽度截断/符号扩展到 i128.
     /// 有符号小类型 (<32位): 截断到位宽后符号扩展 (如 char 的 0xff → -1).
     /// 无符号小类型 (<64位): 截断到位宽后零扩展 (如 uint 的 -1 → 0xFFFFFFFF).
@@ -8372,6 +8522,30 @@ impl Codegen {
                 }
             }
             Expr::Assign { l, r, .. } => {
+                // 检测 compound assignment 模式: Assign { l: target, r: Binop { l: read, r: rhs } }
+                // 其中 target 和 read 结构相同 (由 parser desugaring 产生).
+                // 如果 lvalue 含副作用 (如 *--ptr += 1), 必须只求值一次.
+                // 策略: 先求值 lvalue 地址并保存, 然后从保存的地址读取, 计算 binop, 存回.
+                if let Expr::Binop { l: ref binop_l, op: binop_op, r: ref binop_r, .. } = **r {
+                    // 检测 compound pattern: target 和 binop 的某个操作数结构相同
+                    // 注意: parser 对可交换运算符会交换操作数 (RHS 在左, read 在右)
+                    let compound: Option<(&Expr, bool)> =
+                        if Self::exprs_structurally_equal(l, binop_l) {
+                            Some((binop_r.as_ref(), false))
+                        } else if Self::exprs_structurally_equal(l, binop_r) {
+                            Some((binop_l.as_ref(), true))
+                        } else {
+                            None
+                        };
+                    if let Some((compound_rhs, is_swapped)) = compound {
+                        // 仅当 lvalue 含副作用时使用单次求值路径,
+                        // 否则走原有路径 (原有路径对所有类型都正确).
+                        if Self::expr_has_side_effects(l) {
+                            self.gen_compound_assign_single_eval(l, compound_rhs, binop_op, dst, is_swapped);
+                            return;
+                        }
+                    }
+                }
                 // sanitizer 插桩可能把 LHS 包成 Comma(check, lvalue):
                 // 先执行 check 调用, 再对真实 lvalue 走 store 路径, 否则
                 // 形态匹配失败会导致 store 静默丢失 (KASAN 下 *p = v 空操作)
