@@ -33580,6 +33580,7 @@ mod tests {
                 quals: QualifierFlags::NONE,
                 ptr_quals: vec![],
                 field_align: None,
+                field_packed: false,
             }]),
             4, // align: Int = 4
         );

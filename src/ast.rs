@@ -1024,6 +1024,10 @@ pub struct Field {
     /// 字段级 __attribute__((aligned(N))) 显式指定的对齐值.
     /// None 表示使用类型的自然对齐.
     pub field_align: Option<usize>,
+    /// 字段级 __attribute__((packed)) 标记.
+    /// 对位域: 允许跨容器类型边界连续排列.
+    /// 对非位域: 对齐降为 1 字节.
+    pub field_packed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1113,7 +1117,22 @@ impl Type {
             Type::Imaginary(inner) => inner.size(),
             Type::Atomic(inner) => inner.size(),
             Type::Struct(_, fields, align) => {
-                let size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
+                // 计算结构体大小: 考虑所有字段 (包括零宽度位域的位置)
+                // 零宽度位域不贡献存储, 但其位置决定结构体最小大小
+                let size = fields.iter()
+                    .map(|f| {
+                        if f.bit_width == Some(0) {
+                            // 零宽度位域: 其偏移量决定结构体最小大小
+                            f.offset
+                        } else if let Some(bw) = f.bit_width {
+                            // 位域字段: 结束位置 = offset + ceil((bit_offset + bw) / 8)
+                            f.offset + ((f.bit_offset + bw + 7) / 8) as usize
+                        } else {
+                            f.offset + f.ty.size()
+                        }
+                    })
+                    .max()
+                    .unwrap_or(0);
                 let aligned = if *align > 1 {
                     (size + align - 1) & !(align - 1)
                 } else {
@@ -1254,12 +1273,24 @@ impl Type {
                     }
 
                     // 第一个位域或容器类型变化: 开始新存储单元
+                    // 但如果字段有 field_packed, 允许跨容器边界连续排列.
+                    // 同样, 如果新容器更小且当前容器能放下, 也继续当前排列 (GCC 行为).
                     if container_bits == 0 || container_ty_bits != container_bits {
-                        // 对齐到容器类型边界
-                        let align = eff(f);
-                        off = (off + align - 1) & !(align - 1);
-                        container_bits = container_ty_bits;
-                        bit_pos = 0;
+                        if f.field_packed && container_bits > 0 && bit_pos + field_bits <= container_ty_bits.max(container_bits) {
+                            // packed 位域: 继续当前排列, 不强制新存储单元
+                            if container_ty_bits > container_bits {
+                                container_bits = container_ty_bits;
+                            }
+                        } else if container_bits > 0 && container_ty_bits < container_bits && bit_pos + field_bits <= container_bits {
+                            // 更小类型的位域能放入当前容器的剩余空间: 继续当前排列
+                            // (GCC 行为: 位域可以共享存储单元, 即使类型不同)
+                        } else {
+                            // 对齐到容器类型边界
+                            let align = eff(f);
+                            off = (off + align - 1) & !(align - 1);
+                            container_bits = container_ty_bits;
+                            bit_pos = 0;
+                        }
                     }
 
                     // 当前单元放不下: 推进到下一单元
@@ -1306,48 +1337,35 @@ impl Type {
                 f.offset = 0;
             }
         } else {
-            let mut off = 0usize;
-            let mut bit_pos: u32 = 0; // 当前存储单元内已用位数
-            let mut container_bits: u32 = 0; // 当前存储单元总位数
+            // packed 模式: 位域连续排列, 不强制容器类型切换时对齐.
+            // 使用全局位位置 (global_bit_pos) 跟踪下一个可用位.
+            let mut global_bit_pos: u32 = 0;
             for f in fields.iter_mut() {
                 if let Some(bw) = f.bit_width {
-                    let container_ty_bits = (f.ty.size() * 8) as u32;
-                    // 零宽度位域: 对齐到下一个容器边界
                     if bw == 0 {
-                        if container_bits > 0 {
-                            off += (container_bits / 8) as usize;
+                        // 零宽度位域: 对齐到容器类型的自然对齐边界
+                        // (packed 模式下, 容器的对齐为 1, 但零宽度位域仍需要
+                        // 对齐到其类型的自然边界, 如 long long 对齐到 8 字节)
+                        let container_align = f.ty.align();
+                        let container_bits = (container_align * 8) as u32;
+                        let align_bits = container_bits;
+                        if global_bit_pos % align_bits != 0 {
+                            global_bit_pos = (global_bit_pos + align_bits - 1) & !(align_bits - 1);
                         }
-                        container_bits = 0;
-                        bit_pos = 0;
-                        f.offset = off;
+                        f.offset = (global_bit_pos / 8) as usize;
                         f.bit_offset = 0;
                         continue;
                     }
-                    // 容器类型变化或首个位域: 开始新存储单元
-                    if container_bits == 0 || container_ty_bits != container_bits {
-                        if container_bits > 0 {
-                            off += (container_bits / 8) as usize;
-                        }
-                        container_bits = container_ty_bits;
-                        bit_pos = 0;
-                    }
-                    // 当前单元放不下: 推进到下一单元
-                    if bit_pos + bw > container_bits {
-                        off += (container_bits / 8) as usize;
-                        bit_pos = 0;
-                    }
-                    f.offset = off;
-                    f.bit_offset = bit_pos;
-                    bit_pos += bw;
+                    f.offset = (global_bit_pos / 8) as usize;
+                    f.bit_offset = global_bit_pos % 8;
+                    global_bit_pos += bw;
                 } else {
-                    // 非位域字段: 刷新未用完的位域存储单元
-                    if container_bits > 0 {
-                        off += (container_bits / 8) as usize;
-                        container_bits = 0;
-                        bit_pos = 0;
+                    // 非位域字段: 对齐到下一个字节边界
+                    if global_bit_pos % 8 != 0 {
+                        global_bit_pos = (global_bit_pos + 7) & !7;
                     }
-                    f.offset = off;
-                    off += f.ty.size();
+                    f.offset = (global_bit_pos / 8) as usize;
+                    global_bit_pos += (f.ty.size() * 8) as u32;
                 }
             }
         }

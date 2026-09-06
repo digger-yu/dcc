@@ -739,10 +739,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// 跳过属性并提取 aligned 值（如果存在）。
-    /// 用于字段级 __attribute__((aligned(N))) 解析。
-    fn skip_attributes_extract_aligned(&mut self) -> Option<usize> {
+    /// 跳过属性并提取 aligned 值和 packed 标记。
+    /// 用于字段级 __attribute__((aligned(N))) 和 __attribute__((packed)) 解析。
+    fn skip_attributes_extract_aligned(&mut self) -> (Option<usize>, bool) {
         let mut aligned: Option<usize> = None;
+        let mut packed = false;
         while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
             self.advance(); // __attribute__
             if self.cur.kind == TokKind::LParen {
@@ -754,7 +755,7 @@ impl<'a> Parser<'a> {
             // 解析内部属性列表
             let mut depth = 2i32;
             while depth > 0 && self.cur.kind != TokKind::Eof {
-                // 在 depth==2 时检测 "aligned"
+                // 在 depth==2 时检测 "aligned" 和 "packed"
                 if depth == 2
                     && self.cur.kind == TokKind::Ident
                     && self.cur.text == "aligned"
@@ -789,6 +790,12 @@ impl<'a> Parser<'a> {
                         // __attribute__((aligned)) 无参数默认为 16
                         aligned = Some(16);
                     }
+                } else if depth == 2
+                    && self.cur.kind == TokKind::Ident
+                    && self.cur.text == "packed"
+                {
+                    packed = true;
+                    self.advance();
                 } else if self.cur.kind == TokKind::LParen {
                     depth += 1;
                     self.advance();
@@ -800,7 +807,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        aligned
+        (aligned, packed)
     }
 
     /// Parse a constant expression inside `__attribute__((aligned(...)))`.
@@ -5502,6 +5509,7 @@ impl<'a> Parser<'a> {
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
                                 field_align: None,
+                                field_packed: false,
                             },
                             Field {
                                 name: "fp_offset".into(),
@@ -5512,6 +5520,7 @@ impl<'a> Parser<'a> {
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
                                 field_align: None,
+                                field_packed: false,
                             },
                             Field {
                                 name: "overflow_arg_area".into(),
@@ -5522,6 +5531,7 @@ impl<'a> Parser<'a> {
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
                                 field_align: None,
+                                field_packed: false,
                             },
                             Field {
                                 name: "reg_save_area".into(),
@@ -5532,6 +5542,7 @@ impl<'a> Parser<'a> {
                                 quals: QualifierFlags::NONE,
                                 ptr_quals: vec![],
                                 field_align: None,
+                                field_packed: false,
                             },
                         ]),
                         8, // va_list align: max field = ptr (8)
@@ -5750,6 +5761,7 @@ impl<'a> Parser<'a> {
                             quals: QualifierFlags::NONE,
                             ptr_quals: vec![],
                             field_align: None,
+                                field_packed: false,
                         });
                     }
                 } else {
@@ -6761,7 +6773,7 @@ impl<'a> Parser<'a> {
             loop {
                 let (mut ty, nm) = self.parse_field_declarator(spec.clone());
                 // 字段级属性: 提取 aligned 值
-                let field_aligned = self.skip_attributes_extract_aligned();
+                let (mut field_aligned, mut field_packed) = self.skip_attributes_extract_aligned();
                 // C23 alignas(N) 在 parse_decl_specifiers 中已解析并
                 // 存入 self.decl_attrs.alignment. 将其合并到字段对齐值,
                 // 取 alignas 与 __attribute__((aligned)) 的较大值.
@@ -6829,12 +6841,14 @@ impl<'a> Parser<'a> {
                     }
                     arr_ty
                 };
-                // 数组/名字后的 __attribute__((aligned(...))) 等
-                // 合并之前提取的 aligned 值
-                let field_aligned = match self.skip_attributes_extract_aligned() {
+                // 数组/名字后的 __attribute__((aligned(...)/packed)) 等
+                // 合并之前提取的 aligned/packed 值
+                let (post_aligned, post_packed) = self.skip_attributes_extract_aligned();
+                let field_aligned = match post_aligned {
                     Some(a) => Some(a),
                     None => field_aligned,
                 };
+                let field_packed = field_packed || post_packed;
                 // C11 匿名 struct/union 成员: 无字段名时作为匿名成员,
                 // 贡献大小并展平字段到父结构。包括:
                 //   struct { ... };     — 匿名内联定义 (标签名为空)
@@ -6865,6 +6879,7 @@ impl<'a> Parser<'a> {
                         quals: self.spec_quals.iso_c(),
                         ptr_quals: vec![],
                         field_align: field_aligned,
+                        field_packed,
                     });
                 }
                 if self.cur.kind == TokKind::Comma {

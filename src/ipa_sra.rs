@@ -1101,6 +1101,7 @@ mod tests {
                 quals: QualifierFlags::NONE,
                 ptr_quals: vec![],
                 field_align: None,
+                field_packed: false,
             })
             .collect();
         let align = field_vec.iter().map(|f| f.ty.align()).max().unwrap_or(1);
