@@ -7335,6 +7335,21 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // Small struct (<=8B) returned as value in rax.
+                            // CompoundLit/InitList gen_expr returns an ADDRESS
+                            // in rax; we must load the VALUE from that address.
+                            if matches!(&ret_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                                && ret_sz <= 8
+                                && matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. })
+                            {
+                                match ret_sz {
+                                    1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]), // movzbq (%rax),%rax
+                                    2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]), // movzwq (%rax),%rax
+                                    4 => self.emit(&[0x8B, 0x00]),             // mov (%rax),%eax
+                                    8 => self.emit(&[0x48, 0x8B, 0x00]),       // mov (%rax),%rax
+                                    _ => {}
+                                }
+                            }
                             // Float/double return type mismatch:
                             // convert expression type to the declared
                             // return type.  E.g. `return float_var`
