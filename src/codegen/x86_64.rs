@@ -9774,6 +9774,13 @@ impl Codegen {
                                 let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
                                 self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                             }
+                            Type::Int => {
+                                // movsxd dst, dst (sign-extend 32→64)
+                                // 截断到 32 位后符号扩展, 供后续有符号运算
+                                // (如 idiv, cmp) 使用正确的 64 位值.
+                                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                                self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            }
                             _ => {}
                         }
                     }
