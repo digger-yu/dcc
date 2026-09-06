@@ -9535,6 +9535,26 @@ impl Codegen {
                             self.mov(dst, 0);
                         }
                     }
+                    // unsigned → signed same-size integer cast:
+                    // The value in dst is zero-extended (from loading
+                    // unsigned), but the signed consumer (e.g. idiv)
+                    // needs sign-extension.  Emit movsxd / movswx /
+                    // movsbw to re-interpret.
+                    (Type::UInt, Type::Int) => {
+                        // movsxd dst, dst (sign-extend 32→64)
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    }
+                    (Type::UShort, Type::Short) => {
+                        // movswl dst, dst (sign-extend 16→32, zero-extend to 64)
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    }
+                    (Type::UChar, Type::SChar | Type::Char) => {
+                        // movsbl dst, dst (sign-extend 8→32, zero to 64)
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    }
                     // int → float/double
                     // 源整数值由 gen_expr(e, dst) 求值到 dst 寄存器,
                     // 转换指令必须读取 dst (而非固定 rax), 否则嵌套在
