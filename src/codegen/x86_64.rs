@@ -12712,6 +12712,44 @@ impl Codegen {
             lv,
             Expr::Deref { .. } | Expr::Index { .. } | Expr::Member { .. }
         ) {
+            // Check for bitfield member first
+            let bf_info = if let Expr::Member {
+                expr, field, is_arrow, ..
+            } = lv
+            {
+                let expr_ty = expr.ty();
+                let target_ty = if *is_arrow {
+                    if let Type::Ptr(ref p) = expr_ty {
+                        (*p).base.clone()
+                    } else {
+                        expr_ty
+                    }
+                } else {
+                    expr_ty
+                };
+                match &target_ty {
+                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                        find_field(fields, &field.name)
+                            .and_then(|(f, extra)| {
+                                f.bit_width.map(|bw| {
+                                    (bw, f.bit_offset, f.offset + extra,
+                                     f.ty.size())
+                                })
+                            })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some((bw, bit_off, field_off, container_size)) = bf_info {
+                // Bitfield inc/dec: read-modify-write on container
+                self.gen_bitfield_inc_dec(
+                    lv, bw, bit_off, field_off, container_size,
+                    dst, is_pre, is_inc,
+                );
+                return;
+            }
             // 内存 lvalue: (*p)++ / a[i]-- / s->f++
             let mem_sz = inner_ty.size().max(1);
             // __seg_gs/__seg_fs 指针解引用的 inc/dec: 需要段前缀
@@ -12759,7 +12797,126 @@ impl Codegen {
         }
     }
 
-    /// `add/sub dst, imm32` (0x81 /0 add, 0x81 /5 sub)。
+    /// Bitfield inc/dec: read-modify-write on the container word.
+    fn gen_bitfield_inc_dec(
+        &mut self,
+        lv: &Expr,
+        bw: u32,
+        bit_off: u32,
+        field_off: usize,
+        container_size: usize,
+        dst: u8,
+        is_pre: bool,
+        is_inc: bool,
+    ) {
+        // Use bf_rmw_depth for frame temp slots (same as bitfield write)
+        let depth = self.bf_rmw_depth as i32;
+        let addr_slot = (-8 - depth * 24) as i8;
+        let old_slot = (-16 - depth * 24) as i8;
+        let new_slot = (-24 - depth * 24) as i8;
+        self.bf_rmw_depth += 1;
+
+        // 1. Get container address, save to frame slot
+        if let Expr::Member { expr, is_arrow, .. } = lv {
+            if *is_arrow {
+                self.gen_expr(expr, 0);
+            } else {
+                self.gen_lvalue_addr(expr, 0);
+            }
+        }
+        if field_off != 0 {
+            self.emit(&[0x48, 0x05]);
+            self.emit(&(field_off as i32).to_le_bytes());
+        }
+        // rax = container address
+        self.emit(&[0x49, 0x89, 0x45, addr_slot as u8]); // [r13+addr_slot] = addr
+
+        // 2. Load container, extract bitfield value
+        match container_size {
+            4 => self.emit(&[0x8B, 0x00]),
+            8 => self.emit(&[0x48, 0x8B, 0x00]),
+            2 => {
+                self.emit(&[0x66, 0x8B, 0x00]);
+                self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
+            }
+            1 => self.emit(&[0x48, 0x0F, 0xB6, 0xC0]),
+            _ => {}
+        }
+        if bit_off > 0 {
+            self.emit(&[0x48, 0xC1, 0xE8, bit_off as u8]);
+        }
+        if bw < 64 {
+            let mask = (1u64 << bw) - 1;
+            self.emit(&[0x48, 0x25]);
+            self.emit(&(mask as u32).to_le_bytes());
+        }
+        // rax = old bitfield value
+        self.emit(&[0x49, 0x89, 0x45, old_slot as u8]); // save old
+
+        // 3. Compute new value
+        self.emit_inc_dec_reg(0, is_inc, 1);
+        if bw < 64 {
+            let mask = (1u64 << bw) - 1;
+            self.emit(&[0x48, 0x25]);
+            self.emit(&(mask as u32).to_le_bytes());
+        }
+        // rax = new bitfield value
+        self.emit(&[0x49, 0x89, 0x45, new_slot as u8]); // save new
+
+        // 4. Write back: RMW on container
+        // Reload address into rcx
+        self.emit(&[0x49, 0x8B, 0x4D, addr_slot as u8]); // rcx = addr
+        // Load container into rcx
+        match container_size {
+            4 => self.emit(&[0x8B, 0x09]),
+            8 => self.emit(&[0x48, 0x8B, 0x09]),
+            2 => {
+                self.emit(&[0x66, 0x8B, 0x09]);
+                self.emit(&[0x48, 0x0F, 0xB7, 0xC9]);
+            }
+            1 => self.emit(&[0x48, 0x0F, 0xB6, 0xC9]),
+            _ => {}
+        }
+        // Clear target bits
+        let bf_mask = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
+        let inv_mask = !(bf_mask << bit_off);
+        if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
+            self.emit(&[0x48, 0x81, 0xE1]);
+            self.emit(&(inv_mask as u32).to_le_bytes());
+        } else {
+            self.emit(&[0x49, 0xB8]);
+            self.emit(&inv_mask.to_le_bytes());
+            self.emit(&[0x4C, 0x21, 0xC1]);
+        }
+        // Load new value into rdx, shift, OR
+        self.emit(&[0x49, 0x8B, 0x55, new_slot as u8]); // rdx = new val
+        if bit_off > 0 {
+            self.emit(&[0x48, 0xC1, 0xE2, bit_off as u8]);
+        }
+        self.emit(&[0x48, 0x09, 0xD1]); // or rcx, rdx
+        // Store container back
+        self.emit(&[0x49, 0x8B, 0x45, addr_slot as u8]); // rax = addr
+        match container_size {
+            4 => self.emit(&[0x89, 0x08]),
+            8 => self.emit(&[0x48, 0x89, 0x08]),
+            2 => self.emit(&[0x66, 0x89, 0x08]),
+            1 => self.emit(&[0x88, 0x08]),
+            _ => {}
+        }
+
+        // 5. Set return value
+        if is_pre {
+            // Return new value
+            self.emit(&[0x49, 0x8B, 0x45, new_slot as u8]); // rax = new
+            if dst != 0 { self.mov(dst, 0); }
+        } else {
+            // Return old value
+            self.emit(&[0x49, 0x8B, 0x45, old_slot as u8]); // rax = old
+            if dst != 0 { self.mov(dst, 0); }
+        }
+        self.bf_rmw_depth -= 1;
+    }
+
     fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
         // ModRM: mod=11, reg=opcode extension (/0=add, /5=sub), r/m=dst register
         let modrm = if is_inc {
