@@ -15550,28 +15550,35 @@ impl Codegen {
             ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
             self.emit(&ins);
         } else {
-            // 按 elem_size 选操作数尺寸: 1/2=movzx 零扩展, 4=32-bit mov,
-            // 8=REX.W mov. 16-bit 不能裸 mov (高 48 位寄存器残留垃圾值)
+            // 按 elem_size 和符号性选加载指令:
+            // signed: movsbq/movswq/movsxd (符号扩展)
+            // unsigned: movzbq/movzwq/mov (零扩展)
+            let is_signed = Self::is_signed_int(elem_ty);
             let mut rex = 0x48u8 | 0x01; // REX.W + REX.B (SIB base=r11)
             if dst_gp >= 8 {
-                rex |= 0x04;
+                rex |= 0x04; // REX.R
             }
             if idx_reg >= 8 {
-                rex |= 0x02;
+                rex |= 0x02; // REX.X
             }
-            let use_movzx = elem_size <= 2;
-            // 非 8 字节路径需要去掉 REX.W (否则变成 64-bit load)
-            if elem_size != 8 {
-                rex &= !0x08;
-            }
-            if use_movzx {
-                if elem_size == 1 {
-                    self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]);
-                } else {
-                    self.emit(&[rex, 0x0F, 0xB7, modrm | ((dst_gp & 7) << 3), sib]);
+            if is_signed {
+                // 符号扩展加载: 保留 REX.W
+                match elem_size {
+                    1 => self.emit(&[rex, 0x0F, 0xBE, modrm | ((dst_gp & 7) << 3), sib]), // movsbq
+                    2 => self.emit(&[rex, 0x0F, 0xBF, modrm | ((dst_gp & 7) << 3), sib]), // movswq
+                    4 => self.emit(&[rex, 0x63, modrm | ((dst_gp & 7) << 3), sib]),       // movsxd
+                    _ => self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]),       // mov 64-bit
                 }
             } else {
-                self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
+                // 零扩展加载: 去掉 REX.W
+                if elem_size != 8 {
+                    rex &= !0x08;
+                }
+                match elem_size {
+                    1 => self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]), // movzbq
+                    2 => self.emit(&[rex, 0x0F, 0xB7, modrm | ((dst_gp & 7) << 3), sib]), // movzwq
+                    _ => self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]),       // mov 32/64
+                }
             }
         }
     }
