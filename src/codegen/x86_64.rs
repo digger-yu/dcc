@@ -9210,14 +9210,32 @@ impl Codegen {
                     UnOp::BitNot => {
                         let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                         self.emit(&[rex, 0xf7, 0xd0 | (dst & 7)]);
-                        // 无符号小类型需要零扩展: not 翻转全部 64 位,
-                        // 但无符号类型的上半位应为 0.
+                        // not flips all 64 bits. The result must be
+                        // truncated to the expression type width, then
+                        // re-extended. For types < int, C integer
+                        // promotion means the NOT result is at least
+                        // 32 bits wide.
                         let result_ty = e.ty();
-                        if !Self::is_signed_int(&result_ty)
-                            && !matches!(result_ty, Type::Char)
-                            && result_ty.size() < 8
-                        {
-                            self.emit_zero_extend(dst, &result_ty);
+                        let result_sz = result_ty.size();
+                        let effective_sz = result_sz.max(4); // int promotion
+                        if effective_sz <= 4 {
+                            // Result fits in 32 bits: truncate to 32
+                            // bits then zero/sign-extend to 64.
+                            let is_signed = Self::is_signed_int(&result_ty)
+                                || matches!(result_ty, Type::Char);
+                            if is_signed {
+                                // movsxd dst, dst (sign-extend 32→64)
+                                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                                self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            } else {
+                                // mov dst32, dst32 (zero-extend 32→64)
+                                let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+                                self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            }
+                        } else if result_sz < 8 {
+                            // 8-byte types: no fixup needed (not already
+                            // produces correct 64-bit result)
+                            unreachable!()
                         }
                     }
                     UnOp::Plus => {}
