@@ -6983,22 +6983,62 @@ impl Codegen {
                             }
                         }
                     }
-                } else {
+                } else if let Expr::Ident { name, .. } = arg {
+                    // Ident aggregate: load data from variable slots
                     for (chunk, loc) in arg_locs.iter().enumerate() {
-                        if let Expr::Ident { name, .. } = arg {
-                            if self.is_global_not_local(&name.name) {
-                                self.emit_global_addr(11, &name.name);
-                                self.emit(&[0x49, 0x8B, 0x83]);
-                                self.emit(&((chunk * 8) as i32).to_le_bytes());
-                            } else {
-                                let var_off = self.var_offset(&name.name) + (chunk * 8) as i32;
-                                self.load_stack(0, var_off);
-                            }
+                        if self.is_global_not_local(&name.name) {
+                            self.emit_global_addr(11, &name.name);
+                            self.emit(&[0x49, 0x8B, 0x83]);
+                            self.emit(&((chunk * 8) as i32).to_le_bytes());
                         } else {
-                            self.gen_expr(arg, 0);
-                            if chunk == 1 {
-                                self.mov(0, 2);
+                            let var_off = self.var_offset(&name.name) + (chunk * 8) as i32;
+                            self.load_stack(0, var_off);
+                        }
+                        match *loc {
+                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            _ => {
+                                self.store_rsp_qword(0, stage);
+                                staged.push((*loc, stage));
+                                stage += 8;
                             }
+                        }
+                    }
+                } else if matches!(arg, Expr::CompoundLit { .. }) {
+                    // CompoundLit: gen_expr builds data on stack and returns
+                    // the ADDRESS in rax.  We must LOAD data from [addr +
+                    // chunk*8], not pass the address itself.
+                    self.gen_expr(arg, 0); // rax = address
+                    self.mov(1, 0); // rcx = address (safe: no calls
+                                    // between chunk loads)
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        // mov rax, [rcx + chunk*8]
+                        let disp = (chunk * 8) as i32;
+                        if disp == 0 {
+                            self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+                        } else if disp < 128 {
+                            self.emit(&[0x48, 0x8B, 0x41]); // mov rax, [rcx+disp8]
+                            self.emit(&[disp as u8]);
+                        } else {
+                            self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
+                            self.emit(&disp.to_le_bytes());
+                        }
+                        match *loc {
+                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            _ => {
+                                self.store_rsp_qword(0, stage);
+                                staged.push((*loc, stage));
+                                stage += 8;
+                            }
+                        }
+                    }
+                } else {
+                    // Other rvalue aggregate (e.g. function returning
+                    // struct in rax:rdx): gen_expr leaves value in
+                    // rax (and rdx for >8 bytes).
+                    self.gen_expr(arg, 0);
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        if chunk == 1 {
+                            self.mov(0, 2); // rdx = rax
                         }
                         match *loc {
                             ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
