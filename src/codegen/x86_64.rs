@@ -20113,9 +20113,11 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
+                // 栈对齐: sub $8, %rsp 然后 add $8, %rsp
+                self.emit(&[0x48, 0x83, 0xec, 0x08]); // sub $8, %rsp
+                self.emit(&[0xb0, 0x00]); // mov $0, %al (no vector args for variadic)
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
+                self.emit(&[0x48, 0x83, 0xc4, 0x08]); // add $8, %rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
