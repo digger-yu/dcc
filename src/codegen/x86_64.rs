@@ -4113,6 +4113,28 @@ impl Codegen {
                                 false
                             }
                         }
+                        // Array-to-pointer / function-to-pointer decay
+                        // in global initializer: `T *p = arr;` or `T *p = func;`
+                        Expr::Ident { name, ty: id_ty, .. }
+                            if matches!(v.ty, Type::Ptr(_))
+                                && (matches!(id_ty, Type::Array(_, _))
+                                    || matches!(id_ty, Type::Func(_, _))) =>
+                        {
+                            let ref_off = self.data_section.len() as u64;
+                            let width = if sz <= 4 { 4 } else { 8 };
+                            self.data_section
+                                .resize(ref_off as usize + sz.max(width), 0);
+                            let rel_type =
+                                if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                            self.pending_data64_rels.push((
+                                ref_off,
+                                name.name.clone(),
+                                None,
+                                rel_type,
+                                0,
+                            ));
+                            true
+                        }
                         _ => {
                             // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                             let is_float =
