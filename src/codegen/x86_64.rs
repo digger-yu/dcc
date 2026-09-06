@@ -12474,7 +12474,12 @@ impl Codegen {
         // 指针类型由调用方在 Ptr 上下文特判 (emit_string_ptr_slot);
         // 此处 (char 数组元素等) 返回内容字节。
         if let Expr::String { data, .. } = e {
-            return data.clone();
+            // 截断到 width (如 char[3] = "1234" 只取前 3 字节 "123")
+            let mut d = data.clone();
+            if width > 0 && d.len() > width {
+                d.truncate(width);
+            }
+            return d;
         }
         // 复数字面量: 必须特殊处理, 因为 eval_full 只返回虚部
         if let Expr::ComplexLit { real, imag, ty, .. } = e {
