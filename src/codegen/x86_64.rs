@@ -8080,7 +8080,10 @@ impl Codegen {
                     return;
                 }
                 // 浮点运算: 使用 SSE 指令；FP_CONTRACT ON 时允许 a*b+c 收缩.
-                if matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                // Check BOTH operands: `int - float` must go through float path.
+                if matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble)
+                    || matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble)
+                {
                     if self.fp_contract && self.try_gen_fp_contract(*op, l, r, dst) {
                         return;
                     }
@@ -13108,8 +13111,15 @@ impl Codegen {
     // -mno-sse 模式: 使用 x87 FPU 指令, 结果在 st(0)
     // 左操作数保存到帧临时槽 (避免嵌套 binop 时 xmm 寄存器冲突)
     fn gen_float_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
-        let is_float = matches!(l.ty(), Type::Float);
-        let is_long_double = matches!(l.ty(), Type::LongDouble);
+        // Determine the target float type from whichever operand is float.
+        // This is needed for mixed int/float expressions like `a - step`.
+        let float_ty = if matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble) {
+            l.ty()
+        } else {
+            r.ty()
+        };
+        let is_float = matches!(float_ty, Type::Float);
+        let is_long_double = matches!(float_ty, Type::LongDouble);
         // long double 始终走 x87 路径 (80-bit 扩展精度), 即使 SSE 模式
         if !self.target.sse || is_long_double {
             // 比较运算走特殊路径
@@ -13192,6 +13202,7 @@ impl Codegen {
             // 直接走通用路径, 这样节省重复 emit
             let save_bytes = (self.expr_depth as i32 + 1) * 8;
             self.gen_expr(l, 0);
+            self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
             self.emit(&[0x48, 0x83, 0xEC, save_bytes as u8]);
             if is_float {
                 self.emit(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
@@ -13201,7 +13212,7 @@ impl Codegen {
             self.expr_depth += 1;
             self.gen_expr(r, 0);
             self.expr_depth -= 1;
-            self.emit_scalar_to_xmm0_if_needed(r, &l.ty());
+            self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
             self.emit(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0 (r→xmm1)
             if is_float {
                 self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
@@ -13255,6 +13266,9 @@ impl Codegen {
         let save_bytes = (self.expr_depth as i32 + 1) * 8;
         // 计算左操作数到 xmm0
         self.gen_expr(l, 0);
+        // If LHS is integer, the result sits in eax; convert to
+        // xmm0 before saving (e.g. `1.0 - x` where x is int).
+        self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
         // 保存 xmm0: sub rsp, save_bytes; movsd [rsp], xmm0
         self.emit(&[0x48, 0x83, 0xEC, save_bytes as u8]); // sub rsp, save_bytes
         if is_float {
@@ -13267,7 +13281,7 @@ impl Codegen {
         self.gen_expr(r, 0);
         self.expr_depth -= 1;
         // 整数右操作数 (如 x * 2): 转换到 xmm0, 否则 xmm1 会残留左操作数
-        self.emit_scalar_to_xmm0_if_needed(r, &l.ty());
+        self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
         // xmm1 = 右操作数, 恢复左操作数到 xmm0
         self.emit(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0 (右→xmm1)
         if is_float {
