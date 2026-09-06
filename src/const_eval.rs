@@ -364,6 +364,40 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 }
                 return Ok(ConstValue::Int(i));
             }
+            // Float → integer cast: convert with saturation (match x86 behavior
+            // for out-of-range values: clamp to INT_MAX/INT_MIN).
+            if let ConstValue::Float(f) = v {
+                if let Some(bits) = int_type_bits(ty) {
+                    let is_signed = !is_unsigned_int_ty(ty);
+                    let clamped = if is_signed {
+                        let max_val = ((1u128 << (bits - 1)) - 1) as f64;
+                        let min_val = -((1i128 << (bits - 1)) as f64);
+                        if f.is_nan() {
+                            0i128
+                        } else if f >= max_val {
+                            max_val as i128
+                        } else if f <= min_val {
+                            min_val as i128
+                        } else {
+                            f as i128
+                        }
+                    } else {
+                        let max_val = if bits >= 128 {
+                            u128::MAX as f64
+                        } else {
+                            ((1u128 << bits) - 1) as f64
+                        };
+                        if f.is_nan() || f < 0.0 {
+                            0i128
+                        } else if f >= max_val {
+                            max_val as i128
+                        } else {
+                            f as i128
+                        }
+                    };
+                    return Ok(ConstValue::Int(clamped));
+                }
+            }
             // 浮点 / 指针等: 简化处理, 让 codegen 处理位宽
             Ok(v)
         }
