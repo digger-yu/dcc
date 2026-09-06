@@ -7937,7 +7937,15 @@ impl Codegen {
                 self.break_targets.push((l_break.clone(), true));
                 // 计算switch表达式到rax
                 self.gen_expr(expr, 0);
-                self.push(0); // 保存switch值
+                let switch_is_int128 = matches!(expr.ty(), Type::Int128 | Type::UInt128);
+                if switch_is_int128 {
+                    // __int128: gen_expr 已正确加载 rax(low) + rdx(high)
+                    // 保存低和高 64 位
+                    self.push(2); // push rdx (high)
+                    self.push(0); // push rax (low)
+                } else {
+                    self.push(0); // 保存switch值
+                }
                 // 判断 switch 表达式是否有符号类型 (决定范围比较使用
                 // 有符号 jl/jg 还是无符号 jb/ja 跳转指令).
                 let switch_is_signed = match expr.ty() {
@@ -7982,11 +7990,50 @@ impl Codegen {
                             self.label(&l_next);
                         } else {
                             // case N: 比较 rcx == N, 相等跳 case 体
-                            self.gen_expr(val, 2);
-                            // gen_expr 可能覆写 rcx, 比较前重新加载
-                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
-                            self.emit(&[0x48, 0x39, 0xD1]);
-                            self.jmp_rel32(&l_case, JumpKind::Je);
+                            if switch_is_int128 {
+                                // __int128 case 比较: 纯寄存器方式, 不push/pop
+                                // [rsp] = switch low, [rsp+8] = switch high
+                                let case_low: i64 = if let Ok(cv) = const_eval::eval(val) {
+                                    cv as i64
+                                } else {
+                                    0
+                                };
+                                let case_high: i64 = if let Ok(cv) = const_eval::eval(val) {
+                                    (cv >> 64) as i64
+                                } else {
+                                    0
+                                };
+                                // 比较低 64 位: switch_low vs case_low
+                                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp] (switch low)
+                                if case_low == 0 {
+                                    self.emit(&[0x48, 0x85, 0xC0]); // test rax, rax
+                                } else {
+                                    // mov rdx, case_low; cmp rax, rdx
+                                    self.emit(&[0x48, 0xBA]); // mov rdx, imm64
+                                    self.emit(&case_low.to_le_bytes());
+                                    self.emit(&[0x48, 0x39, 0xD0]); // cmp rax, rdx
+                                }
+                                let l_nomatch = self.fresh_label();
+                                self.jmp_rel32(&l_nomatch, JumpKind::Jne);
+                                // 低 64 位匹配, 检查高 64 位
+                                self.emit(&[0x4C, 0x8B, 0x4C, 0x24, 0x08]); // mov r9, [rsp+8] (switch high)
+                                if case_high == 0 {
+                                    self.emit(&[0x4D, 0x85, 0xC9]); // test r9, r9
+                                } else {
+                                    // mov r8, case_high; cmp r9, r8
+                                    self.emit(&[0x49, 0xB8]); // mov r8, imm64
+                                    self.emit(&case_high.to_le_bytes());
+                                    self.emit(&[0x4C, 0x39, 0xC1]); // cmp r9, r8
+                                }
+                                self.jmp_rel32(&l_case, JumpKind::Je);
+                                self.label(&l_nomatch);
+                            } else {
+                                self.gen_expr(val, 2);
+                                // gen_expr 可能覆写 rcx, 比较前重新加载
+                                self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
+                                self.emit(&[0x48, 0x39, 0xD1]);
+                                self.jmp_rel32(&l_case, JumpKind::Je);
+                            }
                         }
                         case_bodies.push((case, l_case));
                     } else {
@@ -8017,7 +8064,11 @@ impl Codegen {
                 }
                 // break 出口: 弹出 switch 值后跳到 l_end
                 self.label(&l_break);
-                self.emit(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8 (清理switch值)
+                if switch_is_int128 {
+                    self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16 (清理switch值: low+high)
+                } else {
+                    self.emit(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8 (清理switch值)
+                }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_end);
                 self.break_targets.pop();
