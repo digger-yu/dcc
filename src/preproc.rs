@@ -992,6 +992,20 @@ pub fn preprocess(
     pp.define_builtin("__UINT16_TYPE__", "short unsigned int");
     pp.define_builtin("__INT8_TYPE__", "signed char");
     pp.define_builtin("__UINT8_TYPE__", "unsigned char");
+    // LEAST 类型宏 (GCC 兼容): x86_64 上 LEAST 与精确宽度相同
+    pp.define_builtin("__INT_LEAST8_TYPE__", "signed char");
+    pp.define_builtin("__UINT_LEAST8_TYPE__", "unsigned char");
+    pp.define_builtin("__INT_LEAST16_TYPE__", "short int");
+    pp.define_builtin("__UINT_LEAST16_TYPE__", "short unsigned int");
+    pp.define_builtin("__INT_LEAST32_TYPE__", "int");
+    pp.define_builtin("__UINT_LEAST32_TYPE__", "unsigned int");
+    if is_lp64 {
+        pp.define_builtin("__INT_LEAST64_TYPE__", "long int");
+        pp.define_builtin("__UINT_LEAST64_TYPE__", "long unsigned int");
+    } else {
+        pp.define_builtin("__INT_LEAST64_TYPE__", "long long int");
+        pp.define_builtin("__UINT_LEAST64_TYPE__", "long long unsigned int");
+    }
     // ===== 整型极限值宏 (GCC 兼容, x86_64 LP64) =====
     // 固定宽度有符号最大值
     pp.define_builtin("__INT8_MAX__", "127");
