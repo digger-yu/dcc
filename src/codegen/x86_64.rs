@@ -16412,26 +16412,52 @@ impl Codegen {
                     }
                     call_sret_handled = true;
                 } else {
-                    // 寄存器返回: 按 abi_classes 存储 (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
+                    // 寄存器返回: 按 abi_classes 存储
+                    // (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
                     self.emit_sysv_call(Some(&name.name), None, args, None);
-                    let ret_classes = Self::abi_classes(call_ty);
-                    for (c, cls) in ret_classes.iter().enumerate() {
-                        let off = dst_off + (c as i32) * 8;
-                        match cls {
-                            AbiClass::Integer => {
-                                let reg = if c == 0 { 0u8 } else { 2u8 };
-                                self.store_stack(reg, off);
+                    if is_global_dst {
+                        // Global destination: dst_off=0 is invalid for
+                        // store_stack (would corrupt return address).
+                        // Store to sret temp, then rep movsb to global.
+                        let temp_off = self.alloc_sret_slot(call_ty.size());
+                        let ret_classes = Self::abi_classes(call_ty);
+                        for (c, cls) in ret_classes.iter().enumerate() {
+                            let off = temp_off + (c as i32) * 8;
+                            match cls {
+                                AbiClass::Integer => {
+                                    let reg = if c == 0 { 0u8 } else { 2u8 };
+                                    self.store_stack(reg, off);
+                                }
+                                AbiClass::Sse | AbiClass::SseUp => {
+                                    self.store_xmm64_stack(c as u8, off);
+                                }
+                                _ => unreachable!(),
                             }
-                            AbiClass::Sse | AbiClass::SseUp => {
-                                self.store_xmm64_stack(c as u8, off);
-                            }
-                            AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
-                                unreachable!()
-                            }
-                            AbiClass::NoClass => unreachable!(),
                         }
+                        self.emit_lea_r13(6, temp_off); // rsi = src
+                        self.emit_global_addr(7, dst_name); // rdi = dst
+                        // rep movsb handled below
+                        call_sret_handled = true;
+                    } else {
+                        let ret_classes = Self::abi_classes(call_ty);
+                        for (c, cls) in ret_classes.iter().enumerate() {
+                            let off = dst_off + (c as i32) * 8;
+                            match cls {
+                                AbiClass::Integer => {
+                                    let reg = if c == 0 { 0u8 } else { 2u8 };
+                                    self.store_stack(reg, off);
+                                }
+                                AbiClass::Sse | AbiClass::SseUp => {
+                                    self.store_xmm64_stack(c as u8, off);
+                                }
+                                AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
+                                    unreachable!()
+                                }
+                                AbiClass::NoClass => unreachable!(),
+                            }
+                        }
+                        return;
                     }
-                    return;
                 }
             }
         }
