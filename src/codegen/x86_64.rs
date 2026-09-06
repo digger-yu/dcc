@@ -14396,9 +14396,10 @@ impl Codegen {
     /// 全局变量 RIP-relative 浮点存储: [global_var] = xmm0
     /// 编码: F2/F3 0F 11 05 disp32 (movsd/movss). long double 额外把高 8 字节清零.
     fn emit_global_float_store(&mut self, name: &str, ty: &Type) {
+        let resolved = self.resolve_global_key(name).to_string();
         let (_, is_tls, _off) = self
             .globals
-            .get(name)
+            .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset))
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
@@ -14407,9 +14408,9 @@ impl Codegen {
         let pos = self.pos() + 4;
         self.emit(&[pfx, 0x0F, 0x11, 0x05, 0, 0, 0, 0]);
         if tls_exec {
-            self.pending_tls_rels.push((pos, name.to_string()));
+            self.pending_tls_rels.push((pos, resolved.clone()));
         } else {
-            self.pending_data_rels.push((pos, name.to_string()));
+            self.pending_data_rels.push((pos, resolved.clone()));
         }
         if matches!(ty, Type::LongDouble) {
             // 高 8 字节写零: rax = &g; mov qword [rax+8], 0
@@ -14421,9 +14422,10 @@ impl Codegen {
     /// 全局变量 RIP-relative 存储: [global_var] = reg
     /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_store(&mut self, reg: u8, name: &str) {
+        let resolved = self.resolve_global_key(name).to_string();
         let (sz, is_tls, _off) = self
             .globals
-            .get(name)
+            .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset))
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
@@ -14437,27 +14439,27 @@ impl Codegen {
                     self.emit(&[0x88, modrm, 0, 0, 0, 0]);
                 }
                 if tls_exec {
-                    self.pending_tls_rels.push((pos, name.to_string()));
+                    self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
-                    self.pending_data_rels.push((pos, name.to_string()));
+                    self.pending_data_rels.push((pos, resolved.clone()));
                 }
             }
             2 => {
                 let pos = self.pos() + 3;
                 self.emit(&[0x66, 0x89, modrm, 0, 0, 0, 0]);
                 if tls_exec {
-                    self.pending_tls_rels.push((pos, name.to_string()));
+                    self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
-                    self.pending_data_rels.push((pos, name.to_string()));
+                    self.pending_data_rels.push((pos, resolved.clone()));
                 }
             }
             4 => {
                 let pos = self.pos() + 2;
                 self.emit(&[0x89, modrm, 0, 0, 0, 0]);
                 if tls_exec {
-                    self.pending_tls_rels.push((pos, name.to_string()));
+                    self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
-                    self.pending_data_rels.push((pos, name.to_string()));
+                    self.pending_data_rels.push((pos, resolved.clone()));
                 }
             }
             _ => {
@@ -14465,9 +14467,9 @@ impl Codegen {
                 let rex = if reg >= 8 { 0x4C } else { 0x48 };
                 self.emit(&[rex, 0x89, modrm, 0, 0, 0, 0]);
                 if tls_exec {
-                    self.pending_tls_rels.push((pos, name.to_string()));
+                    self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
-                    self.pending_data_rels.push((pos, name.to_string()));
+                    self.pending_data_rels.push((pos, resolved.clone()));
                 }
             }
         }
@@ -15239,13 +15241,15 @@ impl Codegen {
         }
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
+        // Resolve static local mangled name for relocation
+        let resolved = self.resolve_global_key(name).to_string();
         // TLS 全局变量: ET_EXEC 走 pending_tls_rels 由 resolve() 修补,
         // ET_REL 走 pending_data_rels + R_X86_64_PC32 (与整数路径一致)
-        let is_tls = self.globals.get(name).map(|g| g.is_tls).unwrap_or(false);
+        let is_tls = self.globals.get(&resolved).map(|g| g.is_tls).unwrap_or(false);
         if is_tls && !self.relocatable {
-            self.pending_tls_rels.push((disp_pos, name.to_string()));
+            self.pending_tls_rels.push((disp_pos, resolved.clone()));
         } else {
-            self.pending_data_rels.push((disp_pos, name.to_string()));
+            self.pending_data_rels.push((disp_pos, resolved));
         }
     }
 
@@ -15284,6 +15288,7 @@ impl Codegen {
 
     /// 全局浮点变量 RIP-relative 存储: xmm → [global]
     fn emit_global_float_store_from_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
+        let resolved = self.resolve_global_key(name).to_string();
         let is_float = matches!(ty, Type::Float);
         let mut rex = 0u8;
         if xmm >= 8 {
@@ -15301,7 +15306,7 @@ impl Codegen {
         }
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
-        self.pending_data_rels.push((disp_pos, name.to_string()));
+        self.pending_data_rels.push((disp_pos, resolved));
     }
 
     /// xmm 寄存器间拷贝 (movaps)
