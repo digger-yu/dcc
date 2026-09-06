@@ -1700,6 +1700,28 @@ impl Codegen {
         }
     }
 
+    /// 如果表达式是位域成员访问, 返回位域宽度; 否则返回 None.
+    /// 用于移位运算后掩码结果到正确的位域宽度.
+    fn expr_bitfield_width(e: &Expr) -> Option<u32> {
+        if let Expr::Member { expr: inner, field, .. } = e {
+            let inner_ty = inner.ty();
+            // 指针解引用: 取所指类型
+            let struct_ty: &Type = match &inner_ty {
+                Type::Ptr(p) => &p.base,
+                other => other,
+            };
+            match struct_ty {
+                Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                    find_field(fields, &field.name)
+                        .and_then(|(f, _)| f.bit_width)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
     /// Compound assignment 单次求值: 先计算 lvalue 地址并保存, 读取旧值, 计算 binop, 存回.
     /// 避免 lvalue 中的副作用 (如 --ptr) 被求值两次.
     fn gen_compound_assign_single_eval(
@@ -8569,6 +8591,29 @@ impl Codegen {
                                 self.emit(&[0x45]);
                             }
                             self.emit(&[0x8B, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        }
+                    }
+                }
+                // C 语义: 位域移位运算结果需掩码到位域宽度.
+                // GCC 将位域视为宽度受限的类型, 移位后高位截断.
+                // 例如 unsigned int b:40; x.b<<8 结果掩码到 40 位.
+                if matches!(*op, BinOp::Shl | BinOp::Shr) {
+                    if let Some(bf_width) = Self::expr_bitfield_width(l) {
+                        if bf_width < 64 {
+                            let mask: u64 = (1u64 << bf_width) - 1;
+                            if mask <= 0x7FFFFFFF {
+                                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                                self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
+                                self.emit(&(mask as u32).to_le_bytes());
+                            } else {
+                                let tmp = if dst != 1 { 1u8 } else { 2u8 };
+                                let rex_tmp = 0x48 | if tmp >= 8 { 0x44 } else { 0 };
+                                self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
+                                self.emit(&mask.to_le_bytes());
+                                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 }
+                                    | if tmp >= 8 { 0x04 } else { 0 };
+                                self.emit(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
+                            }
                         }
                     }
                 }
