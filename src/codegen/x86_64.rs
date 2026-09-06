@@ -7347,6 +7347,11 @@ impl Codegen {
                 }
             } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, 0);
+                // 隐式整数→浮点转换: 实参是整数但形参是浮点类型
+                let arg_ty = arg.ty();
+                if Self::is_integer_type(&arg_ty) {
+                    self.emit_scalar_to_xmm0_if_needed(arg, &effective_ty);
+                }
                 // C 语义: 可变参数函数的 float 参数默认提升为 double
                 // printf("%f", 1.0f) 实际传递的是 double 1.0
                 let is_variadic = direct
@@ -11609,10 +11614,24 @@ impl Codegen {
             }
             return;
         }
+        // 整数→浮点转换: 根据整数类型宽度选择 32 位或 64 位转换
+        let expr_ty = expr.ty();
+        let is_64bit = matches!(expr_ty,
+            Type::Long | Type::ULong | Type::LongLong | Type::ULongLong);
         if matches!(elem_ty, Type::Float) {
-            self.emit(&[0xF3, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, eax
+            if is_64bit {
+                // cvtsi2ssq xmm0, rax (REX.W + F3 0F 2A C0)
+                self.emit(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0]);
+            } else {
+                self.emit(&[0xF3, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, eax
+            }
         } else {
-            self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
+            if is_64bit {
+                // cvtsi2sdq xmm0, rax (REX.W + F2 0F 2A C0)
+                self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
+            }
         }
     }
 
