@@ -7229,14 +7229,31 @@ impl Codegen {
                     // struct in rax:rdx): gen_expr leaves value in
                     // rax (and rdx for >8 bytes).
                     self.gen_expr(arg, 0);
-                    for (chunk, loc) in arg_locs.iter().enumerate() {
-                        if chunk == 1 {
-                            self.mov(0, 2); // rdx = rax
+                    // __int128 参数: 若 RHS 非 __int128, rdx 未设置, 需扩展
+                    if matches!(effective_ty, Type::Int128 | Type::UInt128)
+                        && !matches!(arg.ty(), Type::Int128 | Type::UInt128)
+                    {
+                        if matches!(effective_ty, Type::UInt128)
+                            || matches!(arg.ty(),
+                                Type::Bool | Type::UChar | Type::UShort
+                                | Type::UInt | Type::ULong | Type::ULongLong)
+                        {
+                            self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+                        } else {
+                            self.emit(&[0x48, 0x99]); // cqo
                         }
+                    }
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        let store_reg = if matches!(effective_ty, Type::Int128 | Type::UInt128) {
+                            if chunk == 0 { 0u8 } else { 2u8 } // rax for low, rdx for high
+                        } else {
+                            if chunk == 1 { self.mov(0, 2); } // rdx = rax (non-int128 aggregate)
+                            0u8 // always store rax
+                        };
                         match *loc {
-                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            ArgLoc::Stack(off) => self.store_rsp_qword(store_reg, off),
                             _ => {
-                                self.store_rsp_qword(0, stage);
+                                self.store_rsp_qword(store_reg, stage);
                                 staged.push((*loc, stage));
                                 stage += 8;
                             }
@@ -8650,6 +8667,19 @@ impl Codegen {
                             }
                         }
                         if matches!(l_ty, Type::Int128 | Type::UInt128) {
+                            // RHS 非 __int128 时, rdx 未设置, 需零扩展/符号扩展
+                            let r_ty_for_128 = r.ty();
+                            if !matches!(r_ty_for_128, Type::Int128 | Type::UInt128) {
+                                if matches!(l_ty, Type::UInt128)
+                                    || matches!(r_ty_for_128,
+                                        Type::Bool | Type::UChar | Type::UShort
+                                        | Type::UInt | Type::ULong | Type::ULongLong)
+                                {
+                                    self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+                                } else {
+                                    self.emit(&[0x48, 0x99]); // cqo (sign-extend rax→rdx:rax)
+                                }
+                            }
                             if self.is_global_not_local(&name.name)
                         {
                                 self.gen_int128_store(&name.name);
