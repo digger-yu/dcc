@@ -7043,7 +7043,19 @@ impl Codegen {
             let param_ty = direct
                 .and_then(|name| self.func_param_types.get(name))
                 .and_then(|ps| ps.get(arg_idx))
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    // 间接调用: 从函数指针类型提取参数类型
+                    if let Some(callee_expr) = callee {
+                        let callee_ty = callee_expr.ty();
+                        if let Type::Ptr(ref p) = callee_ty {
+                            if let Type::Func(_, ref params) = p.base {
+                                return params.get(arg_idx).map(|q| q.base.clone());
+                            }
+                        }
+                    }
+                    None
+                });
             // C 语义: 数组实参传参时衰减为指向首元素的指针
             // (int a[8]; f(a) 即 f(&a[0])). 若按数组类型分类, 聚合
             // 路径会把整个数组按值拷贝到参数暂存区, 导致
@@ -7125,7 +7137,19 @@ impl Codegen {
             let param_ty = direct
                 .and_then(|name| self.func_param_types.get(name))
                 .and_then(|ps| ps.get(arg_idx))
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    // 间接调用: 从函数指针类型提取参数类型
+                    if let Some(callee_expr) = callee {
+                        let callee_ty = callee_expr.ty();
+                        if let Type::Ptr(ref p) = callee_ty {
+                            if let Type::Func(_, ref params) = p.base {
+                                return params.get(arg_idx).map(|q| q.base.clone());
+                            }
+                        }
+                    }
+                    None
+                });
             // 与上方分类循环一致: 数组实参衰减为指针
             let effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
                 Type::Array(elem, _) => Type::Ptr(elem),
