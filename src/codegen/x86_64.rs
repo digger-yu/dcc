@@ -12516,9 +12516,11 @@ impl Codegen {
                         }
                     }
                     for (j, &b) in field_data.iter().enumerate() {
-                        if off + j < data.len() {
-                            data[off + j] = b;
+                        // 柔性数组字段: 扩展 data 缓冲区以容纳数据
+                        if off + j >= data.len() {
+                            data.resize(off + j + 1, 0);
                         }
+                        data[off + j] = b;
                     }
                 }
             }
