@@ -3706,8 +3706,26 @@ impl<'a> Parser<'a> {
                 // 解析 K&R 参数类型声明
                 let mut kr_params = params;
                 while self.is_type_start() && self.cur.kind != TokKind::LBrace {
-                    let base_ty = self.parse_type()?;
-                    // 第一个声明符: 类型已含指针/数组后缀
+                    let parsed_ty = self.parse_type()?;
+                    // parse_type() 会消费指针后缀 (如 `int *` → Ptr(Int)).
+                    // 但在 K&R 声明 `int *out, lo, hi;` 中, `*` 只属于 `out`,
+                    // 不属于 `lo` 或 `hi`. 因此需要分离基础类型和指针层数.
+                    let (true_base_ty, ptr_levels) = {
+                        let mut ty = parsed_ty;
+                        let mut levels: i32 = 0;
+                        loop {
+                            match ty {
+                                Type::Ptr(inner) => {
+                                    ty = inner.base.clone();
+                                    levels += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        (ty, levels)
+                    };
+                    let base_ty = true_base_ty.clone();
+                    // 第一个声明符: 类型含指针/数组后缀
                     if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                         // 函数指针声明符: type (*name)(params) / type (**name)()
                         self.advance(); // (
@@ -3753,8 +3771,12 @@ impl<'a> Parser<'a> {
                     } else if self.cur.kind == TokKind::Ident {
                         let name = self.cur.text.clone();
                         self.advance();
-                        // 解析数组后缀 (如 char *argv[])
-                        let mut decl_ty = base_ty.clone();
+                        // 第一个声明符获得 parse_type() 消费的指针层 + 可能的数组后缀
+                        let mut decl_ty = true_base_ty.clone();
+                        // 重新应用 parse_type() 消费的指针
+                        for _ in 0..ptr_levels {
+                            decl_ty = Type::Ptr(Box::new(decl_ty.clone().into()));
+                        }
                         if self.cur.kind == TokKind::LBracket {
                             decl_ty = self.parse_array_suffix(decl_ty);
                         }
