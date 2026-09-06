@@ -7333,6 +7333,61 @@ impl Codegen {
                                 // cvtsd2ss xmm0, xmm0
                                 self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
                             }
+                            // Float/double -> integer return:
+                            // convert xmm0 to integer in rax.
+                            if matches!(&expr_ty,
+                                    Type::Float | Type::Double
+                                    | Type::LongDouble)
+                                && func_ret_ty.is_int()
+                            {
+                                match &expr_ty {
+                                    Type::Float => {
+                                        // cvttss2si rax, xmm0
+                                        let wide = matches!(
+                                            &func_ret_ty,
+                                            Type::Long
+                                            | Type::LongLong);
+                                        let rex = 0x48
+                                            | if wide { 0x08 }
+                                              else { 0 };
+                                        self.emit(&[
+                                            0xF3, rex, 0x0F,
+                                            0x2C, 0xC0,
+                                        ]);
+                                    }
+                                    Type::Double => {
+                                        // cvttsd2si rax, xmm0
+                                        let wide = matches!(
+                                            &func_ret_ty,
+                                            Type::Long
+                                            | Type::LongLong);
+                                        let rex = 0x48
+                                            | if wide { 0x08 }
+                                              else { 0 };
+                                        self.emit(&[
+                                            0xF2, rex, 0x0F,
+                                            0x2C, 0xC0,
+                                        ]);
+                                    }
+                                    Type::LongDouble => {
+                                        // long double in st(0)
+                                        // -> xmm0 first
+                                        self.emit_x87_to_xmm0();
+                                        let wide = matches!(
+                                            &func_ret_ty,
+                                            Type::Long
+                                            | Type::LongLong);
+                                        let rex = 0x48
+                                            | if wide { 0x08 }
+                                              else { 0 };
+                                        self.emit(&[
+                                            0xF2, rex, 0x0F,
+                                            0x2C, 0xC0,
+                                        ]);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             // Truncate return value to the function's
                             // declared return type width. For types smaller
                             // than int, the BinOp result may have extra bits
