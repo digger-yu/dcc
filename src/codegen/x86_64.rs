@@ -19389,9 +19389,14 @@ impl Codegen {
                         }
                     }
                     _ => {
-                        // 64 位: 无截断, 用 seto
-                        self.emit(&[0x0f, 0x90, 0xc2]); // seto dl
-                        self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                        // 64 位: 无截断
+                        // 无符号用 setc (CF=进位), 有符号用 seto (OF=溢出)
+                        self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax (先存储结果)
+                        if is_unsigned {
+                            self.emit(&[0x0f, 0x92, 0xc2]); // setc dl (unsigned: carry)
+                        } else {
+                            self.emit(&[0x0f, 0x90, 0xc2]); // seto dl (signed: overflow)
+                        }
                         self.emit(&[0x0f, 0xb6, 0xc2]); // movzx eax, dl
                         if dst != 0 {
                             self.mov(dst, 0);
