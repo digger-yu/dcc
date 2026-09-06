@@ -10201,16 +10201,26 @@ impl Codegen {
                 {
                     // &arr[i]: 基址 + i * elem_size
                     let es = elem_ty.size() as i32;
-                    if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                    if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                         if self.is_global_not_local(&arr_name.name)
                         {
-                            self.emit_global_addr(0, &arr_name.name);
+                            // 全局数组 → 取地址; 全局指针 → 加载值
+                            if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                                self.emit_global_addr(0, &arr_name.name);
+                            } else {
+                                self.emit_global_load(0, &arr_name.name);
+                            }
                         } else if self.vla_offsets.contains_key(&arr_name.name) {
                             let off = self.var_offset(&arr_name.name);
                             self.load_stack(0, off);
-                        } else {
+                        } else if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                            // 局部数组: LEA 取地址
                             let off = self.var_offset(&arr_name.name);
                             self.emit_lea_r13(0, off);
+                        } else {
+                            // 局部指针: 加载指针值
+                            let off = self.var_offset(&arr_name.name);
+                            self.load_stack(0, off);
                         }
                     } else {
                         // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])
