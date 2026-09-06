@@ -7350,6 +7350,16 @@ impl Codegen {
                                     _ => {}
                                 }
                             }
+                            // Integer → float return conversion:
+                            // `return int_expr` in a function returning
+                            // float/double. The integer result is in rax;
+                            // convert to xmm0.
+                            let expr_ty = e.ty();
+                            if matches!(&ret_ty, Type::Float | Type::Double | Type::LongDouble)
+                                && Self::is_integer_type(&expr_ty)
+                            {
+                                self.emit_scalar_to_xmm0_if_needed(e, &ret_ty);
+                            }
                             // Float/double return type mismatch:
                             // convert expression type to the declared
                             // return type.  E.g. `return float_var`
