@@ -10289,13 +10289,52 @@ impl<'a> Parser<'a> {
                 });
                 let has_unsigned = suffix.chars().any(|c| c == 'u' || c == 'U');
                 let long_count = suffix.chars().filter(|c| *c == 'l' || *c == 'L').count();
-                let ty = match (has_unsigned, long_count) {
-                    (true, 2..) => Type::ULongLong,
-                    (true, 1) => Type::ULong,
-                    (true, 0) => Type::UInt,
-                    (false, 2..) => Type::LongLong,
-                    (false, 1) => Type::Long,
-                    (false, 0) => Type::Int,
+                // C 标准 §6.4.4.1: 无后缀整数常量的类型:
+                //   十进制: int → long → long long (仅 signed)
+                //   十六进制/八进制: int → unsigned int → long → unsigned long
+                //                                  → long long → unsigned long long
+                // 值 v 是 i128, 非负. 判断其是否适合某类型.
+                let is_hex_or_oct = s.starts_with("0x") || s.starts_with("0X")
+                    || s.starts_with("0b") || s.starts_with("0B")
+                    || (s.starts_with('0') && s.len() > 1
+                        && s[1..].chars().all(|c| c.is_ascii_digit()));
+                let ty = if has_unsigned {
+                    match long_count {
+                        2.. => Type::ULongLong,
+                        1 => Type::ULong,
+                        _ => Type::UInt,
+                    }
+                } else if long_count > 0 {
+                    match long_count {
+                        2.. => Type::LongLong,
+                        _ => Type::Long,
+                    }
+                } else {
+                    // 无后缀: 按值大小选择第一个能容纳的类型
+                    let fits_u32 = v >= 0 && v <= 0xFFFFFFFF;
+                    let fits_i32 = v >= 0 && v <= 0x7FFFFFFF;
+                    let fits_i64 = v >= 0 && v <= i64::MAX as i128;
+                    if is_hex_or_oct {
+                        // hex/oct: int → unsigned int → long → unsigned long → ...
+                        if fits_i32 {
+                            Type::Int
+                        } else if fits_u32 {
+                            Type::UInt
+                        } else if fits_i64 {
+                            Type::Long
+                        } else {
+                            Type::ULong
+                        }
+                    } else {
+                        // decimal: int → long → long long
+                        if fits_i32 {
+                            Type::Int
+                        } else if fits_i64 {
+                            Type::Long
+                        } else {
+                            Type::LongLong
+                        }
+                    }
                 };
                 // C99 虚数后缀: 3i / 3j → _Complex int 虚数字面量 (实部 0)
                 let is_imag = suffix

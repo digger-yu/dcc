@@ -11642,15 +11642,27 @@ impl Codegen {
         let expr_ty = expr.ty();
         let is_64bit = matches!(expr_ty,
             Type::Long | Type::ULong | Type::LongLong | Type::ULongLong);
+        // 无符号 <=32 位类型: 值在寄存器中已零扩展到 64 位,
+        // 但 cvtsi2ss/sd 32 位形式会将有符号 32 位解释转换,
+        // 对 >INT32_MAX 的值 (如 0x80000081) 产生错误负数结果.
+        // 修复: 先零扩展到 64 位 (mov eax,eax), 再用 REX.W 64 位转换.
+        let is_unsigned_small = matches!(expr_ty,
+            Type::Bool | Type::UChar | Type::UShort | Type::UInt);
+        if is_unsigned_small {
+            // 零扩展: mov dst32, dst32 (32 位写自动清零高 32 位)
+            let dst = 0; // 整数结果约定在 rax
+            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        }
         if matches!(elem_ty, Type::Float) {
-            if is_64bit {
+            if is_64bit || is_unsigned_small {
                 // cvtsi2ssq xmm0, rax (REX.W + F3 0F 2A C0)
                 self.emit(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0]);
             } else {
                 self.emit(&[0xF3, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, eax
             }
         } else {
-            if is_64bit {
+            if is_64bit || is_unsigned_small {
                 // cvtsi2sdq xmm0, rax (REX.W + F2 0F 2A C0)
                 self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
             } else {
