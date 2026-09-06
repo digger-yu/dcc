@@ -166,10 +166,28 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             let v = eval_full(e)?;
             match op {
                 UnOp::Neg => match v {
-                    ConstValue::Int(i) => i
-                        .checked_neg()
-                        .map(ConstValue::Int)
-                        .ok_or(ConstEvalError::Overflow),
+                    ConstValue::Int(i) => {
+                        // 无符号类型: wrapping neg (如 -1U → 0xFFFFFFFF)
+                        let is_unsigned = matches!(&e.ty(),
+                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        if is_unsigned {
+                            if let Some(bits) = int_type_bits(&e.ty()) {
+                                if bits < 128 {
+                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    Ok(ConstValue::Int((!i + 1) & mask))
+                                } else {
+                                    Ok(ConstValue::Int(i.wrapping_neg()))
+                                }
+                            } else {
+                                Ok(ConstValue::Int(i.wrapping_neg()))
+                            }
+                        } else {
+                            i.checked_neg()
+                                .map(ConstValue::Int)
+                                .ok_or(ConstEvalError::Overflow)
+                        }
+                    }
                     ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
                     _ => Err(ConstEvalError::NotConstant),
                 },
@@ -178,7 +196,28 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::BitNot => match v {
-                    ConstValue::Int(i) => Ok(ConstValue::Int(!i)),
+                    ConstValue::Int(i) => {
+                        // 无符号类型: 掩码到类型宽度 (如 ~0U → 0xFFFFFFFF)
+                        // 有符号类型: 直接 !i (保留符号扩展, 如 ~0 → -1)
+                        let is_unsigned = matches!(&e.ty(),
+                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let result = if is_unsigned {
+                            if let Some(bits) = int_type_bits(&e.ty()) {
+                                if bits < 128 {
+                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    !i & mask
+                                } else {
+                                    !i
+                                }
+                            } else {
+                                !i
+                            }
+                        } else {
+                            !i
+                        };
+                        Ok(ConstValue::Int(result))
+                    }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Plus => Ok(v),
@@ -700,7 +739,25 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
             let v = eval_with_env(e, env)?;
             match op {
                 UnOp::Neg => match v {
-                    ConstValue::Int(i) => i.checked_neg().map(ConstValue::Int).ok_or(ConstEvalError::Overflow),
+                    ConstValue::Int(i) => {
+                        let is_unsigned = matches!(&e.ty(),
+                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        if is_unsigned {
+                            if let Some(bits) = int_type_bits(&e.ty()) {
+                                if bits < 128 {
+                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    Ok(ConstValue::Int((!i + 1) & mask))
+                                } else {
+                                    Ok(ConstValue::Int(i.wrapping_neg()))
+                                }
+                            } else {
+                                Ok(ConstValue::Int(i.wrapping_neg()))
+                            }
+                        } else {
+                            i.checked_neg().map(ConstValue::Int).ok_or(ConstEvalError::Overflow)
+                        }
+                    }
                     ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
                     _ => Err(ConstEvalError::NotConstant),
                 },
@@ -709,7 +766,26 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::BitNot => match v {
-                    ConstValue::Int(i) => Ok(ConstValue::Int(!i)),
+                    ConstValue::Int(i) => {
+                        let is_unsigned = matches!(&e.ty(),
+                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let result = if is_unsigned {
+                            if let Some(bits) = int_type_bits(&e.ty()) {
+                                if bits < 128 {
+                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    !i & mask
+                                } else {
+                                    !i
+                                }
+                            } else {
+                                !i
+                            }
+                        } else {
+                            !i
+                        };
+                        Ok(ConstValue::Int(result))
+                    }
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Plus => Ok(v),

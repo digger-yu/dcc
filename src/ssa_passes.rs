@@ -1761,7 +1761,29 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                         let lv = operand_int(l, &consts);
                         let rv = operand_int(r, &consts);
                         match (lv, rv) {
-                            (Some(a), Some(b)) => eval_binop(*op, a, b),
+                            (Some(a), Some(b)) => {
+                                // Mask operands to dest type width before
+                                // evaluating, so that e.g. unsigned div sees
+                                // the correct positive value rather than a
+                                // sign-extended i128 negative.
+                                if let Some(d) = &inst.dest {
+                                    let bits = type_bits(&d.ty);
+                                    if let Some(bits) = bits {
+                                        if bits < 128 {
+                                            let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                            let a = a & mask;
+                                            let b = b & mask;
+                                            eval_binop(*op, a, b)
+                                        } else {
+                                            eval_binop(*op, a, b)
+                                        }
+                                    } else {
+                                        eval_binop(*op, a, b)
+                                    }
+                                } else {
+                                    eval_binop(*op, a, b)
+                                }
+                            }
                             _ => None,
                         }
                     }
@@ -1773,6 +1795,10 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                 };
                 if let Some(d) = &inst.dest {
                     if let Some(cv) = v {
+                        // Mask constant to destination type width to avoid
+                        // i128 sign-extension issues (e.g. ~0U must be
+                        // 0xFFFFFFFF, not -1 in i128).
+                        let cv = mask_to_type(cv, &d.ty);
                         if consts.get(&d.name()) != Some(&cv) {
                             consts.insert(d.name(), cv);
                             changed = true;
@@ -1942,6 +1968,50 @@ fn replace_op(o: &mut Operand, consts: &HashMap<String, i128>) {
         if let Some(c) = consts.get(&v.name()) {
             *o = Operand::Int(*c);
         }
+    }
+}
+
+/// Return the bit width of an integer type, or None for non-integer types.
+fn type_bits(ty: &Type) -> Option<usize> {
+    Some(match ty {
+        Type::Bool | Type::Char | Type::SChar | Type::UChar => 8,
+        Type::Short | Type::UShort => 16,
+        Type::Int | Type::UInt => 32,
+        Type::Long | Type::ULong => 64,
+        Type::LongLong | Type::ULongLong => 64,
+        Type::Int128 | Type::UInt128 => 128,
+        _ => return None,
+    })
+}
+
+/// Mask i128 value to the bit width of the given integer type.
+/// For unsigned types: zero-extend (mask upper bits).
+/// For signed types: mask then sign-extend from type width.
+fn mask_to_type(v: i128, ty: &Type) -> i128 {
+    let bits = match type_bits(ty) {
+        Some(b) if b < 128 => b,
+        _ => return v,
+    };
+    let mask = if bits == 64 {
+        u64::MAX as i128
+    } else {
+        (1i128 << bits) - 1
+    };
+    let truncated = v & mask;
+    let is_signed = matches!(
+        ty,
+        Type::Char | Type::SChar | Type::Short | Type::Int
+            | Type::Long | Type::LongLong | Type::Int128
+    );
+    if is_signed {
+        let sign_bit = 1i128 << (bits - 1);
+        if (truncated & sign_bit) != 0 {
+            truncated | !mask
+        } else {
+            truncated
+        }
+    } else {
+        truncated
     }
 }
 

@@ -681,9 +681,16 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
         Expr::Binop { op, l, r, span, ty } => {
             let l = Box::new(fold_expr(*l, fenv_access));
             let r = Box::new(fold_expr(*r, fenv_access));
-            if let (Expr::Int { v: lv, .. }, Expr::Int { v: rv, .. }) = (l.as_ref(), r.as_ref()) {
-                if let Some(v) = eval_binop(op, *lv, *rv) {
-                    return Expr::Int { v, span, ty };
+            // 整数常量折叠: 优先使用 const_eval (类型感知, 正确处理
+            // 无符号类型宽度和溢出语义).
+            if let (Expr::Int { .. }, Expr::Int { .. }) = (l.as_ref(), r.as_ref()) {
+                let binop_expr = Expr::Binop {
+                    op, l: l.clone(), r: r.clone(), span: span.clone(), ty: ty.clone(),
+                };
+                if let Ok(v) = const_eval::eval_full(&binop_expr) {
+                    if let Some(iv) = v.as_int() {
+                        return Expr::Int { v: iv, span, ty };
+                    }
                 }
             }
             // FENV_ACCESS ON: 不折叠浮点常量运算 (舍入模式可能被 fesetround
@@ -701,9 +708,16 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
         }
         Expr::Unary { op, e, span, ty } => {
             let e = Box::new(fold_expr(*e, fenv_access));
-            if let Expr::Int { v, .. } = e.as_ref() {
-                if let Some(v) = eval_unary(op, *v) {
-                    return Expr::Int { v, span, ty };
+            // 整数一元运算折叠: 使用 const_eval (类型感知, 正确处理
+            // BitNot 的类型宽度掩码).
+            if let Expr::Int { .. } = e.as_ref() {
+                let unary_expr = Expr::Unary {
+                    op, e: e.clone(), span: span.clone(), ty: ty.clone(),
+                };
+                if let Ok(v) = const_eval::eval_full(&unary_expr) {
+                    if let Some(iv) = v.as_int() {
+                        return Expr::Int { v: iv, span, ty };
+                    }
                 }
             }
             Expr::Unary { op, e, span, ty }

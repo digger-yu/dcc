@@ -1335,6 +1335,10 @@ struct FuncEmitChunk {
     extra_sections: Vec<elf::ElfSection>,
     custom_sec_indices: HashMap<String, usize>,
     disasm_calls: HashMap<u64, String>,
+    /// rodata 增量: chunk 编译期间新增的 rodata 数据
+    new_rodata: Vec<u8>,
+    /// chunk 开始时的 rodata 大小 (用于计算增量)
+    rodata_base: u64,
 }
 
 impl Codegen {
@@ -5737,8 +5741,10 @@ impl Codegen {
     }
 
     fn emit_func_chunk(ctx: ParallelEmitCtx, f: FuncDecl, prog: &Program) -> FuncEmitChunk {
+        let rodata_base = ctx.rodata.len() as u64;
         let mut cg = Self::codegen_from_parallel(ctx);
         cg.compile_func(&f, prog);
+        let new_rodata = cg.rodata[rodata_base as usize..].to_vec();
         let size = cg
             .func_sizes
             .get(&f.name.name)
@@ -5766,6 +5772,8 @@ impl Codegen {
             extra_sections: cg.extra_sections,
             custom_sec_indices: cg.custom_sec_indices,
             disasm_calls: cg.disasm_calls,
+            new_rodata,
+            rodata_base,
         }
     }
 
@@ -5784,11 +5792,24 @@ impl Codegen {
         for (pos, data) in chunk.string_refs {
             self.string_refs.push((base + pos, data));
         }
+        // Append chunk's new rodata and adjust float ref offsets
+        let rodata_delta = self.rodata.len() as u64 - chunk.rodata_base;
+        self.rodata.extend_from_slice(&chunk.new_rodata);
         for (pos, off) in chunk.float_refs {
-            self.float_refs.push((base + pos, off));
+            let new_off = if off >= chunk.rodata_base {
+                off + rodata_delta
+            } else {
+                off
+            };
+            self.float_refs.push((base + pos, new_off));
         }
         for (pos, off) in chunk.x87_float_refs {
-            self.x87_float_refs.push((base + pos, off));
+            let new_off = if off >= chunk.rodata_base {
+                off + rodata_delta
+            } else {
+                off
+            };
+            self.x87_float_refs.push((base + pos, new_off));
         }
         for mut p in chunk.pending {
             p.at += base;
@@ -9697,6 +9718,17 @@ impl Codegen {
                         // movsxd dst, dst (sign-extend 32→64)
                         let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                         self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    }
+                    // signed → unsigned same-size: 截断到类型宽度并零扩展
+                    // 如 (unsigned int)(signed_expr) 需要确保高位为 0
+                    (Type::Int, Type::UInt) | (Type::Long, Type::ULong) | (Type::LongLong, Type::ULongLong) => {
+                        // mov dst32, dst32 (零扩展 32→64) 或 mov dst64, dst64
+                        let sz = ty.size();
+                        if sz <= 4 {
+                            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        }
+                        // 64-bit: 无需处理 (已经是 64 位)
                     }
                     (Type::UShort, Type::Short) => {
                         // movswl dst, dst (sign-extend 16→32, zero-extend to 64)
@@ -19106,9 +19138,27 @@ impl Codegen {
                     (1, 4) => self.emit(&[0x29, 0xC1]),       // sub ecx, eax
                     (1, _) => self.emit(&[0x48, 0x29, 0xC1]), // sub rcx, rax
                     (2, 1) => self.emit(&[0xF6, if unsigned { 0xE1 } else { 0xE9 }]), // mul/imul cl
-                    (2, 2) => self.emit(&[0x66, 0x0F, 0xAF, 0xC8]),
-                    (2, 4) => self.emit(&[0x0F, 0xAF, 0xC8]),
-                    (2, _) => self.emit(&[0x48, 0x0F, 0xAF, 0xC8]),
+                    (2, 2) => {
+                        if unsigned {
+                            self.emit(&[0x66, 0xF7, 0xE1]); // mul cx (dx:ax = ax*cx)
+                        } else {
+                            self.emit(&[0x66, 0x0F, 0xAF, 0xC8]); // imul cx, ax
+                        }
+                    }
+                    (2, 4) => {
+                        if unsigned {
+                            self.emit(&[0xF7, 0xE1]); // mul ecx (edx:eax = eax*ecx)
+                        } else {
+                            self.emit(&[0x0F, 0xAF, 0xC8]); // imul ecx, eax
+                        }
+                    }
+                    (2, _) => {
+                        if unsigned {
+                            self.emit(&[0x48, 0xF7, 0xE1]); // mul rcx (rdx:rax = rax*rcx)
+                        } else {
+                            self.emit(&[0x48, 0x0F, 0xAF, 0xC8]); // imul rcx, rax
+                        }
+                    }
                     _ => unreachable!(),
                 }
                 let cc = if unsigned { 0x92 } else { 0x90 }; // setb / seto
