@@ -10687,9 +10687,18 @@ impl Codegen {
                                 _ => {}
                             }
                         } else {
+                            let is_signed = !matches!(&f.ty,
+                                Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                                | Type::ULong | Type::ULongLong | Type::UInt128);
                             match size {
-                                1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
-                                2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
+                                1 => {
+                                    let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
+                                    self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
+                                }
+                                2 => {
+                                    let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
+                                    self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
+                                }
                                 4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
                                 8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
                                 _ => {}
@@ -10709,9 +10718,18 @@ impl Codegen {
                             _ => {}
                         }
                     } else {
+                        let is_signed = !matches!(ty,
+                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                            | Type::ULong | Type::ULongLong | Type::UInt128);
                         match size {
-                            1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
-                            2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
+                            1 => {
+                                let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
+                                self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
+                            }
+                            2 => {
+                                let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
+                                self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
+                            }
                             4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
                             8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
                             _ => {}
