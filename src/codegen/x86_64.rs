@@ -10256,7 +10256,7 @@ impl Codegen {
                     // float/double → int
                     // 浮点值按约定在 xmm0, 转换结果必须写入 dst 寄存器,
                     // 否则嵌套在 Binop 右操作数 (dst=rcx) 时结果被覆盖.
-                    (Type::Float, Type::Int | Type::Long | Type::Char | Type::Short) => {
+                    (Type::Float, Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short) => {
                         // cvttss2si dst, xmm0 (F3 0F 2C /r)
                         let wide = matches!(ty, Type::Long | Type::LongLong);
                         let rex = 0x40
@@ -10267,7 +10267,7 @@ impl Codegen {
                     }
                     (
                         Type::Double,
-                        Type::Int | Type::Long | Type::Char | Type::Short,
+                        Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
                     ) => {
                         // cvttsd2si dst, xmm0 (F2 0F 2C /r)
                         let wide = matches!(ty, Type::Long | Type::LongLong);
