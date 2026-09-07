@@ -3754,16 +3754,19 @@ impl Codegen {
                     if sz == 4 {
                         Some((f as f32).to_bits().to_le_bytes().to_vec())
                     } else if sz == 16 {
-                        // long double: x87 80-bit 扩展精度 + 6 字节填充
-                        let mut b = f64_to_x87_80(f);
-                        b.extend_from_slice(&[0u8; 6]);
+                        // long double: dcc 内部为 double (xmm0-double 约定),
+                        // 16 字节槽 = 低 8 字节 double 位模式 + 高 8 字节零.
+                        // 运行时读取 (movsd) 依赖此布局。
+                        let mut b = f.to_bits().to_le_bytes().to_vec();
+                        b.extend_from_slice(&[0u8; 8]);
                         Some(b)
                     } else if sz == 32 {
                         // _Complex long double 实数初始化: 实部 + 零虚部
-                        let mut b = f64_to_x87_80(f);
-                        b.extend_from_slice(&[0u8; 6]);
-                        b.extend_from_slice(&f64_to_x87_80(0.0));
-                        b.extend_from_slice(&[0u8; 6]);
+                        // (与标量同一 xmm0-double 约定, 每分量 16 字节)
+                        let mut b = f.to_bits().to_le_bytes().to_vec();
+                        b.extend_from_slice(&[0u8; 8]);
+                        b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
+                        b.extend_from_slice(&[0u8; 8]);
                         Some(b)
                     } else {
                         Some(f.to_bits().to_le_bytes().to_vec())
@@ -3773,14 +3776,16 @@ impl Codegen {
                     if sz == 4 {
                         Some((v as f32).to_bits().to_le_bytes().to_vec())
                     } else if sz == 16 {
-                        let mut b = f64_to_x87_80(v as f64);
-                        b.extend_from_slice(&[0u8; 6]);
+                        // long double: xmm0-double 约定 (同上)
+                        let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
+                        b.extend_from_slice(&[0u8; 8]);
                         Some(b)
                     } else if sz == 32 {
-                        let mut b = f64_to_x87_80(v as f64);
-                        b.extend_from_slice(&[0u8; 6]);
-                        b.extend_from_slice(&f64_to_x87_80(0.0));
-                        b.extend_from_slice(&[0u8; 6]);
+                        // _Complex long double 实数初始化: 实部 + 零虚部
+                        let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
+                        b.extend_from_slice(&[0u8; 8]);
+                        b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
+                        b.extend_from_slice(&[0u8; 8]);
                         Some(b)
                     } else {
                         Some((v as f64).to_bits().to_le_bytes().to_vec())
@@ -7371,15 +7376,11 @@ impl Codegen {
                     }
                 }
             } else if matches!(effective_ty, Type::LongDouble) {
-                // A2: long double (SysV Memory 类) — 16 字节整体在栈上传递
-                // gen_expr 对 long double 产生 x87 值 (st(0)),
-                // 需先 fstpt 到 rsp 临时区, 再以 double 精度 movsd 到 xmm0。
+                // A2: long double (SysV Memory 类) — 16 字节整体在栈上传递.
+                // dcc 内部以 double 表示 long double: gen_expr 产生 xmm0
+                // (低 8 字节 double 位模式), 槽布局 = [double, 0].
+                // 被调方以 movsd 语义读取 (gen_float_load 同一约定).
                 self.gen_expr(arg, 0);
-                // st(0) → [rsp-16] (fstpt 存儲 10 字节 x87 80-bit)
-                // 使用 rsp 下方的红区或已分配栈空间
-                self.emit(&[0xDD, 0x5C, 0x24, 0xF0]); // fstpt -16(%rsp)
-                // movsd -16(%rsp), xmm0
-                self.emit(&[0xF2, 0x0F, 0x10, 0x44, 0x24, 0xF0]);
                 self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if chunk == 1 {
@@ -7554,8 +7555,14 @@ impl Codegen {
                         t => t,
                     };
                     let ret_sz = ret_ty.size();
-                    // A1: 内存返回 (sret) — 聚合/长双精度整体写入 rdi 指向的缓冲区
-                    if Self::needs_memory_return(&ret_ty) && self.current_sret_offset.is_some() {
+                    // A1: 内存返回 (sret) — 聚合/长双精度整体写入 rdi 指向的缓冲区.
+                    // 函数声明返回 long double 时, 即使表达式类型是 int/double
+                    // (隐式转换), 也必须走 sret 写回 (调用方从 sret 槽读值).
+                    let func_ret_is_ld =
+                        matches!(self.current_func_ret_ty, Type::LongDouble);
+                    if (Self::needs_memory_return(&ret_ty) || func_ret_is_ld)
+                        && self.current_sret_offset.is_some()
+                    {
                         self.gen_sret_return(e, &ret_ty);
                     } else {
                         let is_agg_ret = matches!(
@@ -7743,9 +7750,7 @@ impl Codegen {
                                         ]);
                                     }
                                     Type::LongDouble => {
-                                        // long double in st(0)
-                                        // -> xmm0 first
-                                        self.emit_x87_to_xmm0();
+                                        // long double 内部为 double, 已在 xmm0
                                         let rex = 0x48
                                             | if wide { 0x08 }
                                               else { 0 };
@@ -10279,10 +10284,9 @@ impl Codegen {
                     }
                     (
                         Type::LongDouble,
-                        Type::Int | Type::Long | Type::Char | Type::Short,
+                        Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
                     ) => {
-                        // long double 在 st(0) (x87), 先转为 double 到 xmm0
-                        self.emit_x87_to_xmm0();
+                        // long double 内部为 double, 值已在 xmm0
                         // cvttsd2si dst, xmm0
                         let wide = matches!(ty, Type::Long | Type::LongLong);
                         let rex = 0x40
@@ -10391,8 +10395,7 @@ impl Codegen {
                         self.emit_truncate_to_unsigned(dst, ty);
                     }
                     (Type::LongDouble, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                        // long double 在 st(0), 先转 xmm0
-                        self.emit_x87_to_xmm0();
+                        // long double 内部为 double, 值已在 xmm0
                         let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
                         let zero_reg = if dst == 0 { 2 } else { 0 };
@@ -10413,8 +10416,7 @@ impl Codegen {
                         self.emit_float_to_ulong(dst, true);
                     }
                     (Type::LongDouble, Type::ULong | Type::ULongLong) => {
-                        // long double 在 st(0), 先转 xmm0
-                        self.emit_x87_to_xmm0();
+                        // long double 内部为 double, 值已在 xmm0
                         self.emit_float_to_ulong(dst, true);
                     }
                     // 整数窄化转换: 源类型宽度 > 目标类型宽度时需要截断
@@ -11176,7 +11178,12 @@ impl Codegen {
                         if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble) {
                             match size {
                                 4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                                8 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
+                                // double/long double: movsd 加载低 8 字节.
+                                // long double 内部为 double (16 字节槽高 8 字节
+                                // 为零), movsd 读低 8 字节即值 (xmm0-double 约定).
+                                8 | 16 => {
+                                    self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)])
+                                } // movsd xmm0, [dst]
                                 _ => {}
                             }
                         } else {
@@ -11207,7 +11214,10 @@ impl Codegen {
                     if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                         match size {
                             4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                            8 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
+                            // double/long double: movsd 读低 8 字节 (xmm0-double)
+                            8 | 16 => {
+                                self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)])
+                            } // movsd xmm0, [dst]
                             _ => {}
                         }
                     } else {
@@ -11737,8 +11747,7 @@ impl Codegen {
                 self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
             }
             Type::LongDouble => {
-                // long double in st(0) (x87), convert to double in xmm0
-                self.emit_x87_to_xmm0();
+                // long double 内部为 double, 已在 xmm0
                 // cvttsd2si dst, xmm0
                 let rex = 0x40
                     | (if wide { 0x08 } else { 0 })
@@ -13821,8 +13830,8 @@ impl Codegen {
         };
         let is_float = matches!(float_ty, Type::Float);
         let is_long_double = matches!(float_ty, Type::LongDouble);
-        // long double 始终走 x87 路径 (80-bit 扩展精度), 即使 SSE 模式
-        if !self.target.sse || is_long_double {
+        // -mno-sse 目标走 x87; SSE 模式下 long double 按 double 运算 (xmm0)
+        if !self.target.sse {
             // 比较运算走特殊路径
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne) {
                 self.gen_float_cmp_x87(op, &float_ty, l, r);
@@ -15804,8 +15813,9 @@ impl Codegen {
         } else {
             ty
         };
-        // -mno-sse 模式或 long double: 使用 x87 fstp 存储 st(0) 到内存
-        if !self.target.sse || matches!(effective_ty, Type::LongDouble) {
+        // -mno-sse 模式: 使用 x87 fstp 存储 st(0) 到内存.
+        // SSE 模式下 long double 内部为 double, 走下方 movq 路径.
+        if !self.target.sse {
             self.emit_x87_fstp_mem_typed(off, effective_ty);
             return;
         }
@@ -15824,8 +15834,13 @@ impl Codegen {
             // 高 8 字节存零: mov qword [r13+off-8], 0
             // 注意: off 为负数, off-8 更远离 r13 (在变量自身空间内)
             let off2 = off - 8;
-            self.emit(&[0x49, 0xC7, 0x45]);
+            // REX.W C7 /0: mov qword [r13+off2], 0
+            // ModRM 在此处分支选择: disp8 版 (0x45) 与 disp32 版 (0x85)
+            // 互斥, 不可先无条件 emit 0x45 再补 0x85 (否则双重 ModRM
+            // 导致指令流错位, 后续字节被当指令执行 → SIGSEGV)
+            self.emit(&[0x49, 0xC7]);
             if off2.abs() < 128 {
+                self.emit(&[0x45]);
                 self.emit(&[off2 as i8 as u8]);
             } else {
                 self.emit(&[0x85]);
@@ -15854,8 +15869,8 @@ impl Codegen {
     }
     // 浮点变量加载: 栈 → xmm0 (使用 XMM 指令) 或 栈 → st(0) (x87)
     fn gen_float_load(&mut self, name: &str, ty: &Type) {
-        // long double 始终走 x87 路径 (80-bit 扩展精度)
-        if !self.target.sse || matches!(ty, Type::LongDouble) {
+        // -mno-sse 目标走 x87; SSE 模式下 long double 内部为 double (xmm0)
+        if !self.target.sse {
             let off = self.var_offset(name);
             self.emit_x87_fld_mem(off, ty);
             return;
@@ -15865,8 +15880,8 @@ impl Codegen {
 
     /// 浮点立即数 → xmm0 (SSE) 或 st(0) (x87): 存入 .rodata 池, RIP-relative 加载
     fn gen_float_imm_load(&mut self, v: f64, ty: &Type) {
-        // long double 始终走 x87 路径
-        if !self.target.sse || matches!(ty, Type::LongDouble) {
+        // -mno-sse 目标走 x87; SSE 模式下 long double 内部为 double (xmm0)
+        if !self.target.sse {
             self.emit_x87_float_imm(v, ty);
             return;
         }
@@ -16459,8 +16474,13 @@ impl Codegen {
                 self.emit(&off.to_le_bytes());
             }
             let off2 = off - 8;
-            self.emit(&[0x49, 0xC7, 0x45]);
+            // REX.W C7 /0: mov qword [r13+off2], 0
+            // ModRM 在此处分支选择: disp8 版 (0x45) 与 disp32 版 (0x85)
+            // 互斥, 不可先无条件 emit 0x45 再补 0x85 (否则双重 ModRM
+            // 导致指令流错位, 后续字节被当指令执行 → SIGSEGV)
+            self.emit(&[0x49, 0xC7]);
             if off2.abs() < 128 {
+                self.emit(&[0x45]);
                 self.emit(&[off2 as i8 as u8]);
             } else {
                 self.emit(&[0x85]);
@@ -17634,13 +17654,32 @@ impl Codegen {
         let sret_off = self
             .current_sret_offset
             .expect("sret return without saved sret pointer");
-        // 浮点标量返回 (long double 为 Memory 类): 结果在 xmm0, 直接存缓冲区
-        if matches!(ret_ty, Type::Float | Type::Double | Type::LongDouble) {
-            self.gen_expr(e, 0); // xmm0 = 返回值
+        // 浮点标量返回 (long double 为 Memory 类): 结果写入 sret 缓冲区.
+        // long double 内部以 double 表示: 槽布局 = [double 位模式, 0].
+        // 写回格式按声明返回类型判定, 表达式类型可能不同 (隐式转换).
+        let declared_ret = self.current_func_ret_ty.clone();
+        if matches!(
+            declared_ret,
+            Type::Float | Type::Double | Type::LongDouble
+        ) {
+            let expr_ty = e.ty();
+            if Self::is_integer_type(&expr_ty) {
+                // 整数表达式 → rax → xmm0 (cvtsi2sd)
+                self.gen_expr(e, 0);
+                self.emit_scalar_to_xmm0_if_needed(e, &declared_ret);
+            } else {
+                // 浮点表达式 → xmm0; float 需提升到 double
+                self.gen_expr(e, 0);
+                if matches!(expr_ty, Type::Float)
+                    && !matches!(declared_ret, Type::Float)
+                {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd
+                }
+            }
             self.load_stack(7, sret_off); // rdi = sret 指针
-            if matches!(ret_ty, Type::Float) {
+            if matches!(declared_ret, Type::Float) {
                 self.emit(&[0xF3, 0x0F, 0x11, 0x07]); // movss [rdi], xmm0
-            } else if matches!(ret_ty, Type::LongDouble) {
+            } else if matches!(declared_ret, Type::LongDouble) {
                 // long double: 低 8 字节 double + 高 8 字节零
                 self.emit(&[0x66, 0x0F, 0xD6, 0x07]); // movq [rdi], xmm0
                 self.emit(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0]); // mov qword [rdi+8], 0
