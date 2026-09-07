@@ -71,6 +71,14 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         Expr::Int { v, .. } => Ok(ConstValue::Int(*v)),
         Expr::Char { v, .. } => Ok(ConstValue::Int(*v)),
         Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
+        // 数组名在常量表达式中退化为首元素地址 (C11 6.3.2.1p3):
+        // (arr)->field / arr + 1 等地址常量链的基址
+        Expr::Ident { name, ty, .. } if matches!(ty, Type::Array(_, _)) => {
+            Ok(ConstValue::Addr {
+                name: name.name.clone(),
+                offset: 0,
+            })
+        }
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
             // 调用方需要确保同源字符串复用同一 label
@@ -91,9 +99,13 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     _ => return Err(ConstEvalError::NotConstant),
                 };
                 let off = eval(idx)?; // 索引必须是编译期整数
+                // addend 按元素大小缩放 (与 codegen 的 R_X86_64_64
+                // addend 计算一致, 否则 &arr[2] 指向 arr[0] 偏移 2 字节)
+                let scale =
+                    pointee_byte_scale(&arr.ty()).ok_or(ConstEvalError::NotConstant)?;
                 Ok(ConstValue::Addr {
                     name: arr_name,
-                    offset: off,
+                    offset: off * scale,
                 })
             }
             // &global_struct.member: 地址常量表达式 (C 标准 6.6.9)
@@ -110,6 +122,9 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     let pointee_ty = expr.ty();
                     let struct_ty = match &pointee_ty {
                         Type::Ptr(inner) => inner.base.clone(),
+                        // 数组名 -> 成员: 先按 C11 6.3.2.1 退化为指针
+                        // (如 (Upgrade_items)->uaattrid)
+                        Type::Array(elem, _) => elem.base.clone(),
                         _ => return Err(ConstEvalError::NotConstant),
                     };
                     let field_offset = match &struct_ty {
@@ -240,6 +255,43 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 } else {
                     Ok(ConstValue::Int((eval(r)? != 0) as i128))
                 };
+            }
+            // 指针算术: ptr ± int / int + ptr (数组名已退化为地址常量)。
+            // Addr.offset 以字节计, 整数侧须按 pointee 大小缩放
+            // (C11 6.5.6p8), 如 (items + 1)->field 的地址常量折叠。
+            if matches!(op, BinOp::Add | BinOp::Sub) {
+                let l_ptr = matches!(l.ty(), Type::Ptr(_) | Type::Array(_, _));
+                let r_ptr = matches!(r.ty(), Type::Ptr(_) | Type::Array(_, _));
+                if l_ptr && !r_ptr {
+                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(l) {
+                        let n = eval_full(r)?
+                            .as_int()
+                            .ok_or(ConstEvalError::NotConstant)?;
+                        let scale = pointee_byte_scale(&l.ty())
+                            .ok_or(ConstEvalError::NotConstant)?;
+                        let delta = n * scale;
+                        return Ok(ConstValue::Addr {
+                            name,
+                            offset: if matches!(op, BinOp::Add) {
+                                offset + delta
+                            } else {
+                                offset - delta
+                            },
+                        });
+                    }
+                } else if r_ptr && !l_ptr {
+                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(r) {
+                        let n = eval_full(l)?
+                            .as_int()
+                            .ok_or(ConstEvalError::NotConstant)?;
+                        let scale = pointee_byte_scale(&r.ty())
+                            .ok_or(ConstEvalError::NotConstant)?;
+                        return Ok(ConstValue::Addr {
+                            name,
+                            offset: offset + n * scale,
+                        });
+                    }
+                }
             }
             let lv = eval_full(l)?;
             let rv = eval_full(r)?;
@@ -821,6 +873,16 @@ fn is_unsigned_int_ty(ty: &Type) -> bool {
             | Type::ULongLong
             | Type::UInt128
     )
+}
+
+/// 指针算术的字节缩放: ptr±n 中 n 乘 pointee 大小。
+/// 数组类型取元素大小, 指针取 pointee 大小, 其余为 None。
+fn pointee_byte_scale(ty: &Type) -> Option<i128> {
+    match ty {
+        Type::Ptr(inner) => Some(inner.base.size().max(1) as i128),
+        Type::Array(elem, _) => Some(elem.base.size().max(1) as i128),
+        _ => None,
+    }
 }
 
 fn add_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {

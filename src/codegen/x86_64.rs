@@ -3875,8 +3875,27 @@ impl Codegen {
         }
     }
 
+    /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等
+    /// 统一走 const_eval 的 ConstValue::Addr (符号 + 字节偏移)。
+    fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
+        match const_eval::eval_full(init) {
+            Ok(const_eval::ConstValue::Addr { name, offset }) => {
+                Some((name, offset as i64))
+            }
+            _ => None,
+        }
+    }
+
     fn eval_global_init(&mut self, v: &VarDecl, sz: usize, use_rodata: bool) -> Option<Vec<u8>> {
         let init = v.init.as_ref()?;
+        // 静态地址常量统一拦截 (含 cast 包裹与指针算术基址):
+        // globals 中的符号按 data 偏移直算虚地址。
+        if let Some((name, addend)) = Self::static_addr_parts(init) {
+            if let Some(g) = self.globals.get(&name) {
+                let vaddr = self.entry + g.offset + addend as u64;
+                return Some(vaddr.to_le_bytes().to_vec());
+            }
+        }
         let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
         match init {
             Expr::String { data, .. } => {
@@ -4227,7 +4246,29 @@ impl Codegen {
                     self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
                     self.bss_size
                 };
-                let has_init = if let Some(init) = &v.init {
+                // 静态地址常量优先: &x / (T*)&x / &((arr+i)->f) / arr + n
+                // 统一由 const_eval 折叠为 (符号, 字节偏移) 重定位,
+                // 覆盖旧 AddrOf/Cast 分支无法表达的形式
+                let static_addr_handled = if let Some(init) = &v.init {
+                    if let Some((base_name, byte_off)) = Self::static_addr_parts(init) {
+                        let ref_off = self.data_section.len() as u64;
+                        let width = if sz <= 4 { 4 } else { 8 };
+                        self.data_section
+                            .resize(ref_off as usize + sz.max(width), 0);
+                        let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                        self.pending_data64_rels.push((
+                            ref_off, base_name, None, rel_type, byte_off,
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let has_init = if static_addr_handled {
+                    true
+                } else if let Some(init) = &v.init {
                     match init {
                         Expr::String { data, .. } => {
                             // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
