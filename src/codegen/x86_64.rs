@@ -11373,6 +11373,21 @@ impl Codegen {
                 self.emit_lea_r13(dst, base_offset);
             }
             Expr::VaArg { ap, ty: arg_ty, .. } => {
+                // 聚合 va_arg: 物化到临时槽, rax = 槽地址 (与 sret Call
+                // 约定一致), 供调用方 gen_aggregate_assign 以 rax 为源拷贝
+                if matches!(arg_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                    && arg_ty.size() > 8
+                {
+                    let slot = self.alloc_sret_slot(arg_ty.size());
+                    if let Expr::Ident { name, .. } = ap.as_ref() {
+                        self.emit_lea_r13(7, slot); // rdi = 临时槽
+                        self.gen_va_arg_struct(&name.name, arg_ty);
+                    } else {
+                        self.mov_imm(7, 0);
+                    }
+                    self.emit_lea_r13(0, slot); // rax = 槽地址
+                    return;
+                }
                 // 检查 ap 的类型：如果是指向 va_list 结构的指针（函数参数退化），使用指针版本
                 let ap_is_ptr = matches!(ap.ty(), Type::Ptr(_));
                 if let Expr::Ident { name, .. } = ap.as_ref() {
@@ -17727,6 +17742,20 @@ impl Codegen {
                 }
             }
         }
+        // SysV va_arg 聚合读取: 按 abi 分类从寄存器保存区/溢出区读出,
+        // 直接写入目标变量缓冲 (rdi)。通用 rax/rdx 物化路径只覆盖 16 字节,
+        // >16B 聚合会截断/污染, 必须绕开。
+        if let Expr::VaArg { ap, ty: arg_ty, .. } = r {
+            if let Expr::Ident { name, .. } = ap.as_ref() {
+                if is_global_dst {
+                    self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
+                } else {
+                    self.emit_lea_r13(7, dst_off); // rdi = 目标地址
+                }
+                self.gen_va_arg_struct(&name.name, arg_ty);
+                return;
+            }
+        }
         // 1. 获取源地址到 rsi
         let got_src = if call_sret_handled {
             true
@@ -18195,6 +18224,125 @@ impl Codegen {
         self.emit(&[0x49, 0x89, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
         // 结果在 st(0) (x87 栈顶), 与 long double 常规约定一致
+    }
+
+    /// SysV va_arg 聚合读取: 按 abi 分类从寄存器保存区或溢出区读取
+    /// struct/union, 直接写入 rdi 指向的目标缓冲。
+    /// (ABI §3.5.7 va_arg 伪码: gp/fp 偏移预算不足时整体走
+    /// overflow_arg_area, 否则逐 eightbyte 从 reg_save_area 取。)
+    fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &Type) {
+        let ap_off = self.var_offset(ap_name);
+        let sz = arg_ty.size();
+        let align = (arg_ty.align() as i32).max(8);
+        let step = ((sz + 7) & !7) as i32;
+        let classes = Self::abi_classes(arg_ty);
+        let has_memory = classes.iter().any(|c| {
+            matches!(
+                c,
+                AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87
+            )
+        });
+        let n_gp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Integer))
+            .count() as i32;
+        let n_fp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+            .count() as i32;
+
+        // 加载 va_list 字段: rax=gp_offset, rdx=fp_offset,
+        // rcx=reg_save_area, r8=overflow_arg_area
+        self.emit(&[0x41, 0x8B, 0x85]);
+        self.emit(&ap_off.to_le_bytes());
+        self.emit(&[0x41, 0x8B, 0x95]);
+        self.emit(&(ap_off + 4).to_le_bytes());
+        self.emit(&[0x49, 0x8B, 0x8D]);
+        self.emit(&(ap_off + 16).to_le_bytes());
+        self.emit(&[0x4D, 0x8B, 0x85]);
+        self.emit(&(ap_off + 8).to_le_bytes());
+
+        let overflow = self.fresh_label();
+        let regs = self.fresh_label();
+        let done = self.fresh_label();
+        if has_memory {
+            self.jmp_rel32(&overflow, JumpKind::Jmp);
+        } else {
+            // gp_offset > 48 - 8*ngp 或 fp_offset > 176 - 16*nfp → 溢出区
+            self.emit(&[0x3D]); // cmp eax, imm32
+            self.emit(&(48 - 8 * n_gp).to_le_bytes());
+            self.jmp_rel32(&overflow, JumpKind::Jg);
+            if n_fp > 0 {
+                self.emit(&[0x81, 0xFA]); // cmp edx, imm32
+                self.emit(&(176 - 16 * n_fp).to_le_bytes());
+                self.jmp_rel32(&overflow, JumpKind::Jg);
+            }
+            self.jmp_rel32(&regs, JumpKind::Jmp);
+        }
+
+        // ---- 溢出区路径: 对齐 → rep movsb 复制 → 推进 ----
+        self.label(&overflow);
+        if align > 8 {
+            // r8 = (r8 + align-1) & ~(align-1)
+            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
+            self.emit(&(align - 1).to_le_bytes());
+            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
+            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
+            self.emit(&(!(align - 1)).to_le_bytes());
+        }
+        self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
+        self.emit(&[0xFC]); // cld
+        self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
+        self.emit(&(sz as u32).to_le_bytes());
+        self.emit(&[0xF3, 0xA4]); // rep movsb
+        self.emit(&[0x49, 0x81, 0xC0]); // add r8, step
+        self.emit(&step.to_le_bytes());
+        self.emit(&[0x4D, 0x89, 0x85]); // mov [r13+disp32], r8
+        self.emit(&(ap_off + 8).to_le_bytes());
+        self.jmp_rel32(&done, JumpKind::Jmp);
+
+        // ---- 寄存器保存区路径: 逐 eightbyte 搬运, 每次读取后推进基址 ----
+        self.label(&regs);
+        for (c, cls) in classes.iter().enumerate() {
+            let off8 = (c as i32) * 8;
+            match cls {
+                AbiClass::Integer => {
+                    // mov r9, [rcx+rax] → 存 [rdi+8c] → gp_offset += 8
+                    self.emit(&[0x4C, 0x8B, 0x0C, 0x01]); // mov r9, [rcx+rax*1]
+                    if off8 == 0 {
+                        self.emit(&[0x4C, 0x89, 0x0F]); // mov [rdi], r9
+                    } else if off8 < 128 {
+                        self.emit(&[0x4C, 0x89, 0x4F]); // mov [rdi+disp8], r9
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x4C, 0x89, 0x8F]); // mov [rdi+disp32], r9
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC0, 0x08]); // add rax, 8
+                }
+                AbiClass::Sse | AbiClass::SseUp => {
+                    // movsd xmm0, [rcx+rdx] → movq [rdi+8c] → fp_offset += 16
+                    self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x11]); // movsd xmm0, [rcx+rdx*1]
+                    if off8 == 0 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x07]); // movq [rdi], xmm0
+                    } else if off8 < 128 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x47]); // movq [rdi+disp8], xmm0
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x87]); // movq [rdi+disp32], xmm0
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC2, 0x10]); // add rdx, 16
+                }
+                _ => {}
+            }
+        }
+        // 回写推进后的偏移 (rax/rdx 已累加到最终值)
+        self.emit(&[0x41, 0x89, 0x85]); // mov [r13+ap_off], eax
+        self.emit(&ap_off.to_le_bytes());
+        self.emit(&[0x41, 0x89, 0x95]); // mov [r13+ap_off+4], edx
+        self.emit(&(ap_off + 4).to_le_bytes());
+        self.label(&done);
     }
 
     /// SysV va_arg (指针版本): rcx = va_list 指针，按 gp_offset/fp_offset 读取参数。
