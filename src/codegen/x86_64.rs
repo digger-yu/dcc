@@ -7565,15 +7565,21 @@ impl Codegen {
                     {
                         self.gen_sret_return(e, &ret_ty);
                     } else {
-                        let is_agg_ret = matches!(
-                            &ret_ty,
-                            Type::Struct(_, _, _)
-                                | Type::Union(_, _, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Complex(_)
-                                | Type::Atomic(_)
-                                | Type::Vector(_, _)
-                        ) && ret_sz > 8;
+                        // _Complex float (8B) 同样走 SSE 寄存器返回
+                        // (xmm0=实部, xmm1=虚部), 不适用 >8B 门槛;
+                        // 否则落入 gen_expr 整数路径, xmm0/xmm1 为垃圾
+                        let is_agg_ret = if matches!(&ret_ty, Type::Complex(_)) {
+                            true
+                        } else {
+                            matches!(
+                                &ret_ty,
+                                Type::Struct(_, _, _)
+                                    | Type::Union(_, _, _)
+                                    | Type::Array(_, ArraySize::Const(_))
+                                    | Type::Atomic(_)
+                                    | Type::Vector(_, _)
+                            ) && ret_sz > 8
+                        };
                         if is_agg_ret {
                             if let Type::Complex(inner) = &ret_ty {
                                 if matches!(&inner.base, Type::Float | Type::Double) {
@@ -9023,8 +9029,20 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
-                                     // 浮点元素: 值在 xmm0, 用 movss/movsd 存储
-                        if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        // _Complex 浮点元素: 逐分量写 (实部 [rcx], 虚部
+                        // [rcx+isz])。若落入下方整数 store, gen_expr 遗留
+                        // 在 rax 的值 (如 conj 的 flip 掩码) 会覆盖实部。
+                        if matches!(elem_ty, Type::Complex(ref c)
+                            if matches!(&c.base,
+                                Type::Float | Type::Double | Type::LongDouble))
+                        {
+                            if let Type::Complex(ref cinner) = elem_ty {
+                                self.store_complex_at_rcx(r, &cinner.base);
+                            }
+                        } else if matches!(
+                            elem_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) {
                             self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
                             if matches!(elem_ty, Type::Float) {
                                 self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
@@ -9060,7 +9078,19 @@ impl Codegen {
                         self.push(0);
                         self.gen_expr(r, 0);
                         self.pop(1);
-                        if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        // _Complex 浮点元素: 逐分量写 (同上, 防止整数
+                        // store 把 rax 残值写进实部)
+                        if matches!(elem_ty, Type::Complex(ref c)
+                            if matches!(&c.base,
+                                Type::Float | Type::Double | Type::LongDouble))
+                        {
+                            if let Type::Complex(ref cinner) = elem_ty {
+                                self.store_complex_at_rcx(r, &cinner.base);
+                            }
+                        } else if matches!(
+                            elem_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) {
                             self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
                             if matches!(elem_ty, Type::Float) {
                                 self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
@@ -9143,7 +9173,16 @@ impl Codegen {
                         self.emit(&[seg]);
                     }
                                  // 浮点指向: 值在 xmm0, 用 movsd/movss 存储
-                    if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble) {
+                    // _Complex 指向: 逐分量写 (实部 [rcx], 虚部 [rcx+isz]),
+                    // 防止整数 store 把 rax 残值写进实部
+                    if matches!(assign_l_ty, Type::Complex(ref c)
+                        if matches!(&c.base,
+                            Type::Float | Type::Double | Type::LongDouble))
+                    {
+                        if let Type::Complex(ref cinner) = assign_l_ty {
+                            self.store_complex_at_rcx(r, &cinner.base);
+                        }
+                    } else if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
                         if matches!(assign_l_ty, Type::Float) {
                             self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
@@ -9530,6 +9569,41 @@ impl Codegen {
                             | Type::Union(_, _, _)
                             | Type::Array(_, _)
                     ) && assign_sz > 8;
+                    // _Complex 浮点赋值到 Index/Deref/Cast lvalue: 取目标
+                    // 地址后逐分量写入 (实部 + 虚部)。RHS 的虚部按 complex
+                    // rvalue 约定定位 (gen_builtin 内联物化/binop 在临时槽,
+                    // SysV SSE 返回在 xmm1, 标量为 0) — 交由
+                    // gen_complex_imag_into_xmm0 统一判定。
+                    if matches!(assign_l_ty, Type::Complex(_)) && !is_aggregate {
+                        if let Type::Complex(ref inner) = assign_l_ty {
+                            if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble)
+                            {
+                                if self.gen_lvalue_addr(lv, 0) {
+                                    self.push(0); // 保存目标地址 (gen_expr 破坏 rax)
+                                    self.gen_expr(r, 0); // xmm0 = 实部
+                                    self.pop(1); // rcx = 目标地址
+                                    self.emit_scalar_to_xmm0_if_needed(r, &inner.base);
+                                    let pfx = if matches!(inner.base, Type::Float) {
+                                        0xF3u8
+                                    } else {
+                                        0xF2u8
+                                    };
+                                    let inner_sz = inner.size() as i32;
+                                    // 实部 → [rcx]
+                                    self.emit(&[pfx, 0x0F, 0x11, 0x01]);
+                                    // 虚部 → xmm0 → [rcx+inner_sz]
+                                    self.gen_complex_imag_into_xmm0(r, &inner.base);
+                                    self.emit(&[pfx, 0x0F, 0x11, 0x41]);
+                                    self.emit(&[inner_sz as u8]);
+                                    return;
+                                } else {
+                                    // 无法取地址: 仅求值 RHS
+                                    self.gen_expr(r, 0);
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     if is_aggregate {
                         // 聚合类型 (>8B): 取地址 + rep movsb 拷贝
                         if self.gen_lvalue_addr(lv, 0) {
@@ -16543,36 +16617,89 @@ impl Codegen {
             return;
         }
         if self.gen_lvalue_addr(e, 0) {
-            self.emit_xmm_rax_disp(pfx, 0, 0);
-            if inner_sz == 4 {
-                return;
-            }
-            self.emit_xmm_rax_disp(pfx, 1, inner_sz);
+            self.emit_xmm_rax_disp(pfx, 0, 0); // xmm0 = 实部
+            // SysV: _Complex float 虚部也在独立寄存器 xmm1 (各 4 字节),
+            // 与 _Complex double 相同, 不因 inner_sz==4 省略
+            self.emit_xmm_rax_disp(pfx, 1, inner_sz); // xmm1 = 虚部
             return;
         }
         self.gen_expr(e, 0);
         let result_off = -self.frame_size + 8;
         self.emit_xmm_r13_disp(pfx, 0x10, 0, result_off);
-        if inner_sz != 4 {
-            self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
+        self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
+    }
+
+    /// 浮点实部分量精度转换 (xmm0 就地): float↔double。
+    /// LongDouble 在 SSE 路径与 double 位模式相同, 无需转换。
+    fn emit_float_convert(&mut self, from: &Type, to: &Type) {
+        if matches!(from, Type::Float) && !matches!(to, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
+        } else if !matches!(from, Type::Float) && matches!(to, Type::Float) {
+            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]); // cvtsd2ss xmm0, xmm0
         }
     }
 
     /// 求值 r 之后 (实部已在 xmm0), 把 _Complex 的虚部分量载入 xmm0。
-    /// - r 为 _Complex rvalue: 物化在 [r13+result_off+inner_sz] (binop/取负/字面量);
-    ///   Call 的 SSE 返回值虚部在 xmm1
+    /// - r 为 _Complex rvalue: 物化在 [r13+result_off+src_isz]
+    ///   (binop/取负/字面量, 偏移与位模式按 r 自身内型); Call 的 SSE
+    ///   返回值虚部在 xmm1 — 源内型与目标 inner 不同时做精度转换
+    ///   (如 _Complex float 返回值赋给 _Complex double)
     /// - r 为标量: 虚部 = 0
     fn gen_complex_imag_into_xmm0(&mut self, r: &Expr, inner: &Type) {
         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-        if matches!(r, Expr::Call { .. }) {
+        let r_inner = match r.ty() {
+            Type::Complex(ref c) | Type::Imaginary(ref c) => Some(c.base.clone()),
+            _ => None,
+        };
+        // __builtin_conj 系列: gen_builtin 内联物化 (不走 SysV 调用),
+        // 虚部与 binop 一样在临时槽, 不在 xmm1
+        let is_conj_call = matches!(r, Expr::Call { callee, .. }
+            if matches!(callee.as_ref(), Expr::Ident { name, .. }
+                if matches!(name.name.as_str(),
+                    "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl")));
+        if matches!(r, Expr::Call { .. }) && !is_conj_call {
             self.emit(&[pfx, 0x0F, 0x10, 0xC1]); // movss/movsd xmm0, xmm1
+            if let Some(ref ri) = r_inner {
+                self.emit_float_convert(ri, inner);
+            }
         } else if matches!(r.ty(), Type::Complex(_)) {
-            let inner_sz = inner.size() as i32;
+            // 物化槽偏移与位模式按源内型 (而非目标 inner)
+            let ri = r_inner.unwrap_or_else(|| inner.clone());
+            let rpfx = if matches!(ri, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+            let r_isz = ri.size() as i32;
             let result_off = -self.frame_size + 8;
-            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off + inner_sz);
+            self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off + r_isz);
+            self.emit_float_convert(&ri, inner);
         } else {
             self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0 (标量: 虚部 0)
         }
+    }
+
+    /// _Complex 赋值 store: 目标地址在 rcx, RHS 已由 gen_expr 求值
+    /// (实部在 xmm0)。逐分量写: 实部 [rcx], 虚部 [rcx+isz]。
+    /// LongDouble 内型 (xmm0-double 约定, 每分量 16B 槽) 额外清零
+    /// 两槽的高 8 字节, 避免陈旧字节污染后续读取。
+    fn store_complex_at_rcx(&mut self, r: &Expr, inner: &Type) {
+        self.emit_scalar_to_xmm0_if_needed(r, inner);
+        // 源为不同内型 complex/imaginary 时实部需精度转换
+        // (标量源的转换已由 emit_scalar_to_xmm0_if_needed 处理)
+        if let Type::Complex(ref c) | Type::Imaginary(ref c) = r.ty() {
+            self.emit_float_convert(&c.base, inner);
+        }
+        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+        let isz = inner.size() as i32;
+        if matches!(inner, Type::LongDouble) {
+            // 高 8 字节清零: 实部槽 [rcx+8], 虚部槽 [rcx+8+isz]
+            self.emit(&[0x48, 0xC7, 0x41, 0x08]); // mov qword [rcx+8], imm32
+            self.emit(&[0x00, 0x00, 0x00, 0x00]);
+            self.emit(&[0x48, 0xC7, 0x41]);
+            self.emit(&[(0x08 + isz) as u8]);
+            self.emit(&[0x00, 0x00, 0x00, 0x00]);
+        }
+        self.emit(&[pfx, 0x0F, 0x11, 0x01]); // movss/movsd [rcx], xmm0 (实部)
+        self.gen_complex_imag_into_xmm0(r, inner);
+        self.emit(&[pfx, 0x0F, 0x11, 0x41]); // movss/movsd [rcx+disp8], xmm0
+        self.emit(&[isz as u8]);
     }
 
     // Complex 变量标量初始化: 存实部、虚部清零
@@ -17484,10 +17611,21 @@ impl Codegen {
         {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
-                    self.gen_unknown_builtin_fallback(&name.name, call_ty, 0, Some(dst_off));
-                    return;
-                }
-                if Self::needs_memory_return(call_ty) {
+                    // 复数 builtin (conj 系列) 放行到下方 _Complex rvalue
+                    // 分量路径: gen_expr 内部走 gen_builtin 成功物化
+                    // (xmm0=实部, 虚部在临时槽), 再逐分量写入目标。
+                    // 其余未在 gen_builtin 注册的 builtin 仍走 fallback。
+                    let is_complex_builtin = matches!(
+                        name.name.as_str(),
+                        "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl"
+                    );
+                    if !is_complex_builtin {
+                        self.gen_unknown_builtin_fallback(&name.name, call_ty, 0, Some(dst_off));
+                        return;
+                    }
+                    // complex builtin: 跳过下方 SysV 调用段 (gen_builtin
+                    // 已在 gen_expr 内完成物化), 落到 _Complex 分量路径
+                } else if Self::needs_memory_return(call_ty) {
                     // sret 返回: 分配隐藏指针槽, 调用后从槽拷贝到目标变量
                     let sret_off = self.alloc_sret_slot(call_ty.size());
                     self.emit_sysv_call(Some(&name.name), None, args, Some(sret_off));
@@ -17586,16 +17724,26 @@ impl Codegen {
                         &inner.base,
                         Type::Float | Type::Double | Type::LongDouble
                     ) {
-                        self.gen_expr(r, 0);
-                        self.gen_float_store_at(dst_off, &inner.base);
-                        self.gen_complex_imag_into_xmm0(r, &inner.base);
-                        let inner_sz = inner.size() as i32;
-                        let imag_base = if matches!(&inner.base, Type::LongDouble) {
-                            dst_off - 8 - inner_sz
+                        if is_global_dst {
+                            // 全局目标: 分量路径的 gen_float_store_at 是
+                            // r13 栈槽相对, 对全局变量会写到栈顶附近。
+                            // 先求值再取全局地址, 用 store_complex_at_rcx
+                            // 按全局连续布局 (实部 [0], 虚部 [isz]) 写入。
+                            self.gen_expr(r, 0);
+                            self.emit_global_addr(1, dst_name); // rcx = dst
+                            self.store_complex_at_rcx(r, &inner.base);
                         } else {
-                            dst_off + inner_sz
-                        };
-                        self.gen_float_store_at(imag_base, &inner.base);
+                            self.gen_expr(r, 0);
+                            self.gen_float_store_at(dst_off, &inner.base);
+                            self.gen_complex_imag_into_xmm0(r, &inner.base);
+                            let inner_sz = inner.size() as i32;
+                            let imag_base = if matches!(&inner.base, Type::LongDouble) {
+                                dst_off - 8 - inner_sz
+                            } else {
+                                dst_off + inner_sz
+                            };
+                            self.gen_float_store_at(imag_base, &inner.base);
+                        }
                         return;
                     }
                 }
@@ -18970,6 +19118,60 @@ impl Codegen {
                 self.emit(&[0x5c]); // pop_rsp
                 if dst != 0 {
                     self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_conj/conjf/conjl: 复数共轭 (实部不变, 虚部翻转符号位).
+            // 参数为 lvalue 时直接对内存分量寻址; rvalue 时按 complex rvalue
+            // 约定 (xmm0=实部, 调用返回时虚部在 xmm1) 物化到临时槽再处理.
+            "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" => {
+                if let Some(arg) = args.first() {
+                    let inner = match &arg.ty() {
+                        Type::Complex(i) => i.base.clone(),
+                        _ => Type::Double,
+                    };
+                    let inner_sz = inner.size() as i32;
+                    let result_off = -self.frame_size + 8;
+                    let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    if self.gen_lvalue_addr(arg, 0) {
+                        self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                        let imag_off = if matches!(inner, Type::LongDouble) {
+                            -8 - inner_sz
+                        } else {
+                            inner_sz
+                        };
+                        // 实部: [rcx] → xmm0 → [result_off] (不变)
+                        self.emit(&[pfx, 0x0F, 0x10, 0x01]);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
+                        self.emit(&[pfx, 0x0F, 0x10, 0x81]);
+                        self.emit(&imag_off.to_le_bytes());
+                        self.flip_sign_xmm(0, &inner);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                    } else {
+                        self.gen_expr(arg, 0);
+                        if matches!(arg, Expr::Call { .. }) {
+                            // SSE 返回: 虚部在 xmm1, 物化到临时区
+                            self.emit(&[pfx, 0x41, 0x0F, 0x11]);
+                            if (result_off + inner_sz).abs() < 128 {
+                                self.emit(&[0x4D, (result_off + inner_sz) as u8]);
+                            } else {
+                                self.emit(&[0x8D]);
+                                self.emit(&(result_off + inner_sz).to_le_bytes());
+                            }
+                        }
+                        // 实部: xmm0 → [result_off] (不变)
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        // 虚部: 加载并翻转
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off + inner_sz);
+                        self.flip_sign_xmm(0, &inner);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                    }
+                    // 重载实部到 xmm0 (complex rvalue 约定: xmm0=实部)
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                 }
                 true
             }

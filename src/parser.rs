@@ -2000,10 +2000,12 @@ impl<'a> Parser<'a> {
                 "__builtin_sin" | "__builtin_sinf" => return Type::Double,
                 // 复数函数
                 "__builtin_cpow" | "__builtin_cpowf" | "__builtin_cpowl" |
-                "__builtin_cexpi" | "__builtin_cexpif" | "__builtin_cexpil" => {
+                "__builtin_cexpi" | "__builtin_cexpif" | "__builtin_cexpil" |
+                // __builtin_conj/conjf/conjl: 复数共轭, 返回同精度复数
+                "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" => {
                     return Type::Complex(Box::new(
-                        if name.name.contains('l') { Type::LongDouble.into() }
-                        else if name.name.contains('f') { Type::Float.into() }
+                        if name.name.ends_with('l') { Type::LongDouble.into() }
+                        else if name.name.ends_with('f') { Type::Float.into() }
                         else { Type::Double.into() }
                     ))
                 }
@@ -10136,6 +10138,9 @@ impl<'a> Parser<'a> {
                                     | "__builtin_cpow"
                                     | "__builtin_cpowf"
                                     | "__builtin_cpowl"
+                                    | "__builtin_conj"
+                                    | "__builtin_conjf"
+                                    | "__builtin_conjl"
                                     | "__builtin_cexpi"
                                     | "__builtin_cexpif"
                                     | "__builtin_cexpil"
