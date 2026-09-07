@@ -7380,6 +7380,34 @@ impl Codegen {
                             }
                         }
                     }
+                } else if matches!(arg, Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. })
+                    && self.gen_lvalue_addr(arg, 1)
+                {
+                    // Lvalue 聚合实参 (a[2] / s.f / *p): gen_expr 会加载
+                    // 元素值 (pr44575: 全局数组元素被当 4 字节标量读),
+                    // 须取 lvalue 地址后按 8 字节块装载 (与 CompoundLit
+                    // 一致)。gen_lvalue_addr 失败则落入下方 rvalue 路径。
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        // mov rax, [rcx + chunk*8]
+                        let disp = (chunk * 8) as i32;
+                        if disp == 0 {
+                            self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+                        } else if disp < 128 {
+                            self.emit(&[0x48, 0x8B, 0x41]); // mov rax, [rcx+disp8]
+                            self.emit(&[disp as u8]);
+                        } else {
+                            self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
+                            self.emit(&disp.to_le_bytes());
+                        }
+                        match *loc {
+                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            _ => {
+                                self.store_rsp_qword(0, stage);
+                                staged.push((*loc, stage, false));
+                                stage += 8;
+                            }
+                        }
+                    }
                 } else {
                     // Other rvalue aggregate (e.g. function returning
                     // struct in rax:rdx): gen_expr leaves value in
@@ -7422,6 +7450,23 @@ impl Codegen {
                 // (低 8 字节 double 位模式), 槽布局 = [double, 0].
                 // 被调方以 movsd 语义读取 (gen_float_load 同一约定).
                 self.gen_expr(arg, 0);
+                // 隐式转换到形参 long double (dcc 内部 double 语义):
+                // 整数实参 → cvtsi2sd; float 实参 → cvtss2sd。
+                // 缺失时整数位模式会被当作 double 位模式 (callconv.c
+                // bug: baz(d+1.0) 得 7 而非 18)。
+                let ld_arg_ty = arg.ty();
+                if Self::is_integer_type(&ld_arg_ty) {
+                    if matches!(
+                        ld_arg_ty,
+                        Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                    ) {
+                        self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, rax
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
+                    }
+                } else if matches!(ld_arg_ty, Type::Float) {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
+                }
                 self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if chunk == 1 {
@@ -7457,11 +7502,15 @@ impl Codegen {
                     .and_then(|name| self.variadic_funcs.get(name))
                     .copied()
                     .unwrap_or(false);
-                if is_variadic && matches!(effective_ty, Type::Float) {
+                let promoted = is_variadic && matches!(effective_ty, Type::Float);
+                if promoted {
                     // cvtss2sd xmm0, xmm0: float → double
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
                 }
-                let is_float = matches!(effective_ty, Type::Float);
+                // 提升后的 float 按 double 语义 8 字节搬运 (movsd):
+                // movss 只写/读低 4 字节, double 高 4 字节成为垃圾,
+                // printf 按错误位模式解析 (sse.c: 打印 0.0 而非 1.5)。
+                let is_float = matches!(effective_ty, Type::Float) && !promoted;
                 let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                 match arg_locs[0] {
                     ArgLoc::Stack(off) => self.emit_xmm_store_rsp(pfx, 0, off),
@@ -7504,6 +7553,16 @@ impl Codegen {
                 }
             } else {
                 self.gen_expr_decay(arg, 0);
+                // 隐式浮点→整数转换: 实参是浮点表达式但形参是整数类型
+                // (bar(d + 4.0): 求值结果在 xmm0, 分类按形参 Integer 走
+                //  GP — 须 cvttsd2si 转回 GP, 否则传入 rax 中的陈旧残留
+                //  值, callconv.c bug: bar(d) 得 12 而非 17)
+                let sc_arg_ty = arg.ty();
+                if matches!(sc_arg_ty, Type::Float | Type::Double | Type::LongDouble)
+                    && Self::is_integer_type(&effective_ty)
+                {
+                    self.emit_implicit_float_to_int(0, &sc_arg_ty, &effective_ty);
+                }
                 // 零大小类型 (如空结构体) 无 ABI 槽位, 只求值不传参
                 if arg_locs.is_empty() {
                     continue;
@@ -7580,6 +7639,12 @@ impl Codegen {
                 }
                 return;
             }
+        }
+        // C11 6.3.2.1p3: 复合数组表达式 (*p / s.arr / p[i]) 的值上下文
+        // 衰减为首元素地址. gen_expr 对部分形态按数组大小加载内容,
+        // 故非 Ident 数组 lvalue 先取地址.
+        if matches!(e.ty(), Type::Array(_, _)) && self.gen_lvalue_addr(e, dst) {
+            return;
         }
         self.gen_expr(e, dst);
     }
@@ -8047,19 +8112,24 @@ impl Codegen {
                 let l_default = self.fresh_label();
                 let l_break = self.fresh_label();
                 let mut has_default = false;
-                // break 目标栈: switch 压入 (l_break, true), 该标签处
-                // 统一弹出 switch 值后再跳 l_end, 保证 break 路径栈平衡
-                self.break_targets.push((l_break.clone(), true));
+                // break 目标栈: switch 压入 (l_break, false)。switch 值
+                // 保存在帧内槽, break 跳转无需额外清理。
+                self.break_targets.push((l_break.clone(), false));
                 // 计算switch表达式到rax
                 self.gen_expr(expr, 0);
                 let switch_is_int128 = matches!(expr.ty(), Type::Int128 | Type::UInt128);
+                // switch 值保存到 r13 帧内槽而非 push 栈槽: case 体中
+                // 可能含函数调用, push 跨越调用会使 rsp 错位 8, 违反
+                // 16 字节栈对齐 ABI (pr44575: case 体中 call printf
+                // 时 libc 内 movaps 对齐崩溃)。
+                let sw_slot = self.alloc_sret_slot(16); // int128 需低/高 16 字节
+                let sw_lo_slot = self.alloc_sret_slot(8); // 范围比较 low 暂存
                 if switch_is_int128 {
                     // __int128: gen_expr 已正确加载 rax(low) + rdx(high)
-                    // 保存低和高 64 位
-                    self.push(2); // push rdx (high)
-                    self.push(0); // push rax (low)
+                    self.store_stack(0, sw_slot); // low
+                    self.store_stack(2, sw_slot + 8); // high
                 } else {
-                    self.push(0); // 保存switch值
+                    self.store_stack(0, sw_slot); // 保存switch值
                 }
                 // 判断 switch 表达式是否有符号类型 (决定范围比较使用
                 // 有符号 jl/jg 还是无符号 jb/ja 跳转指令).
@@ -8077,12 +8147,12 @@ impl Codegen {
                             // 将 rdx 用作临时寄存器导致 low 值被覆盖.
                             let l_next = self.fresh_label();
                             self.gen_expr(val, 2); // rdx = low
-                            self.emit(&[0x48, 0x89, 0x54, 0x24, 0xF8]); // mov [rsp-8], rdx
+                            self.store_stack(2, sw_lo_slot);
                             self.gen_expr(hi, 8); // r8 = high
                             // Bug fix: gen_expr 可能将 rcx 用作临时寄存器,
-                            // 每次比较前从栈上重新加载 switch 值到 rcx.
-                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
-                            self.emit(&[0x48, 0x8B, 0x54, 0x24, 0xF8]); // mov rdx, [rsp-8]
+                            // 每次比较前从帧内槽重新加载 switch 值到 rcx.
+                            self.load_stack(1, sw_slot); // rcx = switch 值
+                            self.load_stack(2, sw_lo_slot); // rdx = low
                             self.emit(&[0x48, 0x39, 0xD1]); // cmp rcx, rdx
                             // 有符号用 jl (skip if < low), 无符号用 jb
                             let jk_lo = if switch_is_signed {
@@ -8092,7 +8162,7 @@ impl Codegen {
                             };
                             self.jmp_rel32(&l_next, jk_lo);
                             // 重新加载 switch 值 (gen_expr(hi) 可能覆写 rcx)
-                            self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
+                            self.load_stack(1, sw_slot); // rcx = switch 值
                             self.emit(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
                             // 有符号用 jg (skip if > high), 无符号用 ja
                             let jk_hi = if switch_is_signed {
@@ -8106,8 +8176,8 @@ impl Codegen {
                         } else {
                             // case N: 比较 rcx == N, 相等跳 case 体
                             if switch_is_int128 {
-                                // __int128 case 比较: 纯寄存器方式, 不push/pop
-                                // [rsp] = switch low, [rsp+8] = switch high
+                                // __int128 case 比较: 纯寄存器方式
+                                // [sw_slot] = switch low, [sw_slot+8] = switch high
                                 let case_low: i64 = if let Ok(cv) = const_eval::eval(val) {
                                     cv as i64
                                 } else {
@@ -8119,7 +8189,7 @@ impl Codegen {
                                     0
                                 };
                                 // 比较低 64 位: switch_low vs case_low
-                                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp] (switch low)
+                                self.load_stack(0, sw_slot); // rax = switch low
                                 if case_low == 0 {
                                     self.emit(&[0x48, 0x85, 0xC0]); // test rax, rax
                                 } else {
@@ -8131,7 +8201,7 @@ impl Codegen {
                                 let l_nomatch = self.fresh_label();
                                 self.jmp_rel32(&l_nomatch, JumpKind::Jne);
                                 // 低 64 位匹配, 检查高 64 位
-                                self.emit(&[0x4C, 0x8B, 0x4C, 0x24, 0x08]); // mov r9, [rsp+8] (switch high)
+                                self.load_stack(9, sw_slot + 8); // r9 = switch high
                                 if case_high == 0 {
                                     self.emit(&[0x4D, 0x85, 0xC9]); // test r9, r9
                                 } else {
@@ -8145,7 +8215,7 @@ impl Codegen {
                             } else {
                                 self.gen_expr(val, 2);
                                 // gen_expr 可能覆写 rcx, 比较前重新加载
-                                self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
+                                self.load_stack(1, sw_slot); // rcx = switch 值
                                 self.emit(&[0x48, 0x39, 0xD1]);
                                 self.jmp_rel32(&l_case, JumpKind::Je);
                             }
@@ -8177,13 +8247,8 @@ impl Codegen {
                         }
                     }
                 }
-                // break 出口: 弹出 switch 值后跳到 l_end
+                // break 出口: switch 值保存在帧内槽, 无需弹栈
                 self.label(&l_break);
-                if switch_is_int128 {
-                    self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16 (清理switch值: low+high)
-                } else {
-                    self.emit(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8 (清理switch值)
-                }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_end);
                 self.break_targets.pop();
@@ -8478,7 +8543,7 @@ impl Codegen {
                     self.gen_int_promote(dst, ty);
                 }
             }
-            Expr::Binop { op, l, r, .. } => {
+            Expr::Binop { op, l, r, ty: binop_ty, .. } => {
                 // 逻辑与/或优先于浮点路径：比较结果为 int，但操作数可为浮点
                 if matches!(op, BinOp::AndAnd | BinOp::OrOr) {
                     let l_false = self.fresh_label();
@@ -8547,6 +8612,26 @@ impl Codegen {
                         if dst != 0 {
                             self.mov(0, dst);
                         }
+                    } else if Self::is_integer_type(&binop_ty) {
+                        // 复合赋值脱糖形态: `int a += double d` 的 Binop.ty
+                        // 标注为 LHS 整数类型 (parser.rs C99 6.5.17 计算后回
+                        // 转语义), 但 gen_float_binop 的混合运算结果在 xmm0
+                        // — 必须转回整数, 否则 Assign 层按 ty=整数直接存
+                        // dst 中的陈旧值 (mix.c: a+=d 得 1 而非 20)。
+                        // 普通表达式 `a + d` 的 ty 是通常算术转换类型
+                        // (浮点), 不受影响。
+                        let fl_ty = if matches!(l.ty(), Type::LongDouble)
+                            || matches!(r.ty(), Type::LongDouble)
+                        {
+                            Type::LongDouble
+                        } else if matches!(l.ty(), Type::Double)
+                            || matches!(r.ty(), Type::Double)
+                        {
+                            Type::Double
+                        } else {
+                            Type::Float
+                        };
+                        self.emit_implicit_float_to_int(dst, &fl_ty, &binop_ty);
                     }
                     return;
                 }
@@ -10869,6 +10954,14 @@ impl Codegen {
                 // *e: 求值内部表达式得到地址, 然后按结果类型大小加载
                 let load_ty = ty.clone();
                 let load_size = load_ty.size().max(1);
+                // C11 6.3.2.1p3: *e 的类型是数组时 (e 指向数组的指针),
+                // 值上下文衰减为首元素地址 = e 的值本身, 不得按数组
+                // 大小加载内容 (va-arg-21: vprintf(s, **ap_ptr) 会把
+                // va_list 前 8 字节当指针传入 → 段错误)。
+                if matches!(load_ty, Type::Array(_, _)) {
+                    self.gen_expr(e, dst);
+                    return;
+                }
                 self.gen_expr(e, 0);
                 // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)
                 if let Some(seg) = Self::ptr_seg_prefix(&e.ty()) {
@@ -11403,6 +11496,15 @@ impl Codegen {
                     // va_arg(*ptr, type): 加载指针值到 rcx，然后使用基于寄存器的 va_arg
                     self.gen_expr(e, 0); // 将指针值加载到 rax
                     self.mov(1, 0); // rcx = rax (va_list 指针)
+                    self.gen_va_arg_ptr(arg_ty, dst);
+                } else if matches!(ap.ty(), Type::Ptr(_)) {
+                    // 指针类型 ap 表达式 (如 va_list* 数组元素): 加载指针值
+                    self.gen_expr(ap, 0);
+                    self.mov(1, 0);
+                    self.gen_va_arg_ptr(arg_ty, dst);
+                } else if self.gen_lvalue_addr(ap, 1) {
+                    // 数组类型 lvalue (成员 a.g / 下标 aps[4]): va_list 是
+                    // 单元素数组, lvalue 地址即 va_list 指针
                     self.gen_va_arg_ptr(arg_ty, dst);
                 } else {
                     self.mov_imm(dst, 0);
@@ -18062,9 +18164,67 @@ impl Codegen {
         self.emit_return_tail();
     }
 
+    /// mov [base+disp], src (64 位). 统一 REX 计算: R=src>=8 (reg 字段),
+    /// B=base>=8 (rm 字段). 避免 REX.R/B 位混淆 (见 gen_va_arg_ptr 注释).
+    fn emit_store_reg_mem(&mut self, base: u8, disp: i32, src: u8) {
+        let mut rex: u8 = 0x48;
+        if src >= 8 {
+            rex |= 0x04; // REX.R
+        }
+        if base >= 8 {
+            rex |= 0x01; // REX.B
+        }
+        let rm = base & 7;
+        if disp == 0 && rm != 5 {
+            self.emit(&[rex, 0x89, ((src & 7) << 3) | rm]);
+        } else if disp.abs() < 128 {
+            self.emit(&[rex, 0x89, 0x40 | ((src & 7) << 3) | rm]);
+            self.emit(&(disp as i8).to_le_bytes());
+        } else {
+            self.emit(&[rex, 0x89, 0x80 | ((src & 7) << 3) | rm]);
+            self.emit(&disp.to_le_bytes());
+        }
+    }
+
+    /// mov dword [base+disp], imm32. B=base>=8 (rm 字段); C7 /0 无 reg 扩展需求.
+    fn emit_store_imm32_mem(&mut self, base: u8, disp: i32, imm: i32) {
+        let mut rex: u8 = 0x40;
+        if base >= 8 {
+            rex |= 0x01; // REX.B
+        }
+        let rm = base & 7;
+        if disp.abs() < 128 {
+            self.emit(&[rex, 0xC7, 0x40 | rm]);
+            self.emit(&(disp as i8).to_le_bytes());
+        } else {
+            self.emit(&[rex, 0xC7, 0x80 | rm]);
+            self.emit(&disp.to_le_bytes());
+        }
+        self.emit(&imm.to_le_bytes());
+    }
+
+    /// va_list 栈槽预留类型: 24 字节 (3 个 8 字节槽), 对齐 8。
+    /// emit_va_start 用它注册栈槽 — 若按默认懒分配 (1 槽, Type::Int),
+    /// 四字段写入会向下覆盖相邻变量槽 (scross: i 槽被
+    /// overflow_arg_area 覆盖, bar(i) 收到指针垃圾)。
+    fn va_list_slot_ty() -> Type {
+        Type::Array(Box::new(Type::ULong.into()), ArraySize::Const(3))
+    }
+
     /// 初始化 SysV AMD64 va_list 结构 (24 字节)。
     fn emit_va_start(&mut self, ap_name: &str) {
-        let ap_off = self.var_offset(ap_name);
+        if self.is_global_not_local(ap_name) {
+            // 全局 va_list: rip 相对写真全局内存, 与 gen_va_arg_global
+            // 的读取路径一致 (跨函数可见, 如 stdarg-1 f2: va_start(gap)
+            // 后 bar 内 va_arg(gap,...))。懒分配栈槽是函数私有的, 读写
+            // 跨函数不一致。
+            self.emit_global_addr(10, ap_name); // r10 = &gap
+            self.emit_va_start_at(10);
+            return;
+        }
+        // 局部: 按 va_list 真实大小 (24B=3 槽) 注册栈槽,
+        // 避免懒分配 1 槽时四字段写入覆盖相邻变量
+        let ap_off = self.register_var(ap_name, &Self::va_list_slot_ty());
         let gp_init = self.variadic_named_gp.min(6) * 8;
         // SSE 命名参数各占 reg_save_area 中 16 字节槽
         let fp_init = 48 + self.variadic_named_fp * 16;
@@ -18080,6 +18240,21 @@ impl Codegen {
         self.store_stack(0, ap_off + 16);
     }
 
+    /// va_start 通用版: 将 SysV 四字段写入 [base] 指向的 va_list 结构
+    /// (base 是寄存器编号, 地址由 gen_lvalue_addr 产生 — 覆盖成员
+    /// va_start(a.g, i) / 下标 va_start(aps[4], i) 场景).
+    /// gp/fp/overflow/reg_save 计算与 emit_va_start 共享.
+    fn emit_va_start_at(&mut self, base: u8) {
+        let gp_init = self.variadic_named_gp.min(6) * 8;
+        let fp_init = 48 + self.variadic_named_fp * 16;
+        self.emit_store_imm32_mem(base, 0, gp_init);
+        self.emit_store_imm32_mem(base, 4, fp_init);
+        self.emit_lea_r13(0, self.variadic_overflow_offset);
+        self.emit_store_reg_mem(base, 8, 0);
+        self.emit_lea_r13(0, self.variadic_reg_save_offset);
+        self.emit_store_reg_mem(base, 16, 0);
+    }
+
     fn store_stack_imm32(&mut self, off: i32, val: i32) {
         // mov dword [r13+off], imm32
         if off.abs() < 128 {
@@ -18089,6 +18264,202 @@ impl Codegen {
             self.emit(&off.to_le_bytes());
         }
         self.emit(&val.to_le_bytes());
+    }
+
+    /// 全局 va_list 标量 va_arg: 直接 rip 相对访问全局结构 (r10 基址).
+    /// 全局 va_list (stdarg-1 的 gap) 无栈槽, var_offset 会懒分配无关
+    /// 槽导致跨函数读写不一致; rip 相对寻址无需帧槽且语义正确。
+    fn gen_va_arg_global(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
+        let step = (arg_ty.size().div_ceil(8) * 8) as i32;
+        let sz = arg_ty.size();
+        let overflow = self.fresh_label();
+        let done = self.fresh_label();
+        self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
+        self.emit(&[0x41, 0x8B, 0x02]); // mov eax, [r10] (gp_offset)
+        self.emit(&[0x83, 0xF8, 0x30]); // cmp $48, %eax
+        self.jmp_rel32(&overflow, JumpKind::Jge);
+        // 寄存器保存区路径: rcx = reg_save_area
+        self.emit(&[0x49, 0x8B, 0x4A, 0x10]); // mov rcx, [r10+16]
+        match sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x04, 0x01]),
+            2 => self.emit(&[0x0F, 0xB7, 0x04, 0x01]),
+            4 => self.emit(&[0x8B, 0x04, 0x01]),
+            _ => self.emit(&[0x48, 0x8B, 0x04, 0x01]),
+        }
+        self.emit(&[0x41, 0x83, 0x02, 0x08]); // add dword [r10], 8
+        self.jmp_rel32(&done, JumpKind::Jmp);
+        self.label(&overflow);
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        match sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x01]),
+            2 => self.emit(&[0x0F, 0xB7, 0x01]),
+            4 => self.emit(&[0x8B, 0x01]),
+            _ => self.emit(&[0x48, 0x8B, 0x01]),
+        }
+        self.push(0);
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        self.emit(&[0x48, 0x83, 0xC1]); // add rcx, imm8
+        self.emit(&step.to_le_bytes()[..1]);
+        self.emit(&[0x49, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
+        self.pop(0);
+        self.label(&done);
+        if dst != 0 {
+            self.mov(dst, 0);
+        }
+    }
+
+    /// 全局 va_list 浮点 va_arg (fp_offset + reg_save XMM 槽)
+    fn gen_va_arg_fp_global(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
+        let overflow = self.fresh_label();
+        let done = self.fresh_label();
+        self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
+        self.emit(&[0x41, 0x8B, 0x42, 0x04]); // mov eax, [r10+4] (fp_offset)
+        self.emit(&[0x3D, 0xB0, 0x00, 0x00, 0x00]); // cmp $176, %eax
+        self.jmp_rel32(&overflow, JumpKind::Jge);
+        self.emit(&[0x49, 0x8B, 0x4A, 0x10]); // mov rcx, [r10+16]
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x01]); // movss xmm0, [rcx+rax]
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x01]); // movsd xmm0, [rcx+rax]
+        }
+        self.emit(&[0x41, 0x83, 0x42, 0x04, 0x10]); // add dword [r10+4], 16
+        self.jmp_rel32(&done, JumpKind::Jmp);
+        self.label(&overflow);
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x01]);
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
+        }
+        self.push(0);
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]);
+        self.emit(&[0x48, 0x83, 0xC1, 0x08]); // add rcx, 8
+        self.emit(&[0x49, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
+        self.pop(0);
+        self.label(&done);
+        if dst != 0 {
+            self.mov_xmm(dst, 0);
+        }
+    }
+
+    /// 全局 va_list long double va_arg: 始终从 overflow_arg_area 读 16 字节
+    fn gen_va_arg_long_double_global(&mut self, ap_name: &str) {
+        self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd xmm0, [rcx]
+        self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
+        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
+        self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp]
+        self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
+        self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
+        self.emit(&[0x49, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
+        // 结果在 st(0) (x87 栈顶)
+    }
+
+    /// 全局 va_list 聚合 va_arg: 逻辑与 gen_va_arg_struct 相同,
+    /// 仅字段访问改为 r10 (rip 相对基址) 寻址。
+    fn gen_va_arg_struct_global(&mut self, ap_name: &str, arg_ty: &Type) {
+        let sz = arg_ty.size();
+        let align = (arg_ty.align() as i32).max(8);
+        let step = ((sz + 7) & !7) as i32;
+        let classes = Self::abi_classes(arg_ty);
+        let has_memory = classes.iter().any(|c| {
+            matches!(
+                c,
+                AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87
+            )
+        });
+        let n_gp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Integer))
+            .count() as i32;
+        let n_fp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+            .count() as i32;
+
+        // 加载 va_list 字段: rax=gp_offset, rdx=fp_offset,
+        // rcx=reg_save_area, r8=overflow_arg_area, r10=&va_list
+        self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
+        self.emit(&[0x41, 0x8B, 0x02]); // mov eax, [r10]
+        self.emit(&[0x41, 0x8B, 0x52, 0x04]); // mov edx, [r10+4]
+        self.emit(&[0x49, 0x8B, 0x4A, 0x10]); // mov rcx, [r10+16]
+        self.emit(&[0x4D, 0x8B, 0x42, 0x08]); // mov r8, [r10+8]
+
+        let overflow = self.fresh_label();
+        let regs = self.fresh_label();
+        let done = self.fresh_label();
+        if has_memory {
+            self.jmp_rel32(&overflow, JumpKind::Jmp);
+        } else {
+            self.emit(&[0x3D]); // cmp eax, imm32
+            self.emit(&(48 - 8 * n_gp).to_le_bytes());
+            self.jmp_rel32(&overflow, JumpKind::Jg);
+            if n_fp > 0 {
+                self.emit(&[0x81, 0xFA]); // cmp edx, imm32
+                self.emit(&(176 - 16 * n_fp).to_le_bytes());
+                self.jmp_rel32(&overflow, JumpKind::Jg);
+            }
+            self.jmp_rel32(&regs, JumpKind::Jmp);
+        }
+
+        // ---- 溢出区路径 ----
+        self.label(&overflow);
+        if align > 8 {
+            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
+            self.emit(&(align - 1).to_le_bytes());
+            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
+            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
+            self.emit(&(!(align - 1)).to_le_bytes());
+        }
+        self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
+        self.emit(&[0xFC]); // cld
+        self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
+        self.emit(&(sz as u32).to_le_bytes());
+        self.emit(&[0xF3, 0xA4]); // rep movsb
+        self.emit(&[0x49, 0x81, 0xC0]); // add r8, step
+        self.emit(&step.to_le_bytes());
+        self.emit(&[0x4D, 0x89, 0x42, 0x08]); // mov [r10+8], r8
+        self.jmp_rel32(&done, JumpKind::Jmp);
+
+        // ---- 寄存器保存区路径 ----
+        self.label(&regs);
+        for (c, cls) in classes.iter().enumerate() {
+            let off8 = (c as i32) * 8;
+            match cls {
+                AbiClass::Integer => {
+                    self.emit(&[0x4C, 0x8B, 0x0C, 0x01]); // mov r9, [rcx+rax*1]
+                    if off8 == 0 {
+                        self.emit(&[0x4C, 0x89, 0x0F]); // mov [rdi], r9
+                    } else if off8 < 128 {
+                        self.emit(&[0x4C, 0x89, 0x4F]);
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x4C, 0x89, 0x8F]);
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC0, 0x08]); // add rax, 8
+                }
+                AbiClass::Sse | AbiClass::SseUp => {
+                    self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x11]); // movsd xmm0, [rcx+rdx*1]
+                    if off8 == 0 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x07]); // movq [rdi], xmm0
+                    } else if off8 < 128 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x47]);
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x87]);
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC2, 0x10]); // add rdx, 16
+                }
+                _ => {}
+            }
+        }
+        // 回写推进后的偏移
+        self.emit(&[0x41, 0x89, 0x02]); // mov [r10], eax
+        self.emit(&[0x41, 0x89, 0x52, 0x04]); // mov [r10+4], edx
+        self.label(&done);
     }
 
     /// SysV va_arg: 按 gp_offset/fp_offset 与 overflow_arg_area 读取参数。
@@ -18101,6 +18472,11 @@ impl Codegen {
         // 16 字节, 不经过寄存器保存区
         if matches!(arg_ty, Type::LongDouble) {
             self.gen_va_arg_long_double(ap_name, dst);
+            return;
+        }
+        // 全局 va_list: 无栈槽, 直接 rip 相对访问全局结构 (r10 基址)
+        if self.is_global_not_local(ap_name) {
+            self.gen_va_arg_global(ap_name, arg_ty, dst);
             return;
         }
         let ap_off = self.var_offset(ap_name);
@@ -18151,6 +18527,11 @@ impl Codegen {
 
     /// SysV va_arg 浮点路径：fp_offset + reg_save_area XMM 槽。
     fn gen_va_arg_fp(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
+        // 全局 va_list: 直接 rip 相对访问 (r10 基址)
+        if self.is_global_not_local(ap_name) {
+            self.gen_va_arg_fp_global(ap_name, arg_ty, dst);
+            return;
+        }
         let ap_off = self.var_offset(ap_name);
         let reg_step = 16i32; // reg_save_area 中 XMM 槽为 16 字节对齐
         let overflow_step = 8i32; // overflow_arg_area 中 double/float 8 字节对齐
@@ -18205,6 +18586,11 @@ impl Codegen {
     /// dcc 内部以 double 精度表示 long double (调用方传 8 字节 double
     /// + 8 字节零). 因此读 8 字节 double 后转为 x87 格式.
     fn gen_va_arg_long_double(&mut self, ap_name: &str, _dst: u8) {
+        // 全局 va_list: 直接 rip 相对访问 (r10 基址)
+        if self.is_global_not_local(ap_name) {
+            self.gen_va_arg_long_double_global(ap_name);
+            return;
+        }
         let ap_off = self.var_offset(ap_name);
         // rax = overflow_arg_area (va_list + 8)
         self.emit(&[0x49, 0x8B, 0x85]);
@@ -18231,6 +18617,11 @@ impl Codegen {
     /// (ABI §3.5.7 va_arg 伪码: gp/fp 偏移预算不足时整体走
     /// overflow_arg_area, 否则逐 eightbyte 从 reg_save_area 取。)
     fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &Type) {
+        // 全局 va_list: 直接 rip 相对访问 (r10 基址)
+        if self.is_global_not_local(ap_name) {
+            self.gen_va_arg_struct_global(ap_name, arg_ty);
+            return;
+        }
         let ap_off = self.var_offset(ap_name);
         let sz = arg_ty.size();
         let align = (arg_ty.align() as i32).max(8);
@@ -18346,27 +18737,25 @@ impl Codegen {
     }
 
     /// SysV va_arg (指针版本): rcx = va_list 指针，按 gp_offset/fp_offset 读取参数。
+    /// 暂存用 r11 (caller-saved scratch), 不可用 rbx — 外层表达式
+    /// 求值可能存活在 callee-saved 寄存器中。
     fn gen_va_arg_ptr(&mut self, arg_ty: &Type, dst: u8) {
         if matches!(arg_ty, Type::Float | Type::Double) && self.target.sse {
             self.gen_va_arg_ptr_fp(arg_ty, dst);
             return;
         }
-        // Long double: 始终在栈上 (overflow), 不走寄存器路径
+        // Long double: SysV MEMORY 类, 始终从 overflow_arg_area 读 8 字节
+        // double → st(0) (与 gen_va_arg_long_double 约定一致), 推进后回写。
         if matches!(arg_ty, Type::LongDouble) {
-            // rcx = va_list 指针, 需要转换为 ap_name 风格偏移
-            // 简化: 直接从 rcx 指向的 va_list 结构读取
-            // overflow_arg_area 在 va_list+8
-            self.emit(&[0x48, 0x8B, 0x49, 0x08]); // mov rcx, [rcx+8] (overflow_arg_area)
-            // 加载 16 字节 long double: 低 8 字节到 rax, 高 8 字节到 rdx
-            self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-            self.emit(&[0x48, 0x8B, 0x51, 0x08]); // mov rdx, [rcx+8]
-            // 推进 overflow_arg_area 16 字节
-            self.push(0); // 保存 rax
+            self.emit(&[0x49, 0x89, 0xCB]); // mov r11, rcx (回写基址)
+            self.emit(&[0x48, 0x8B, 0x49, 0x08]); // mov rcx, [rcx+8] (overflow)
+            self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd xmm0, [rcx]
+            self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
+            self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
+            self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp] → st(0)
+            self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
             self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-            // 需要回写 rcx 到 va_list+8, 但 rcx 原始值已丢失
-            // 简化处理: 不调用此路径 (Ptr 版本用于 va_arg(*ptr, type))
-            self.pop(0);
-            if dst != 0 { self.mov(dst, 0); }
+            self.emit(&[0x49, 0x89, 0x4B, 0x08]); // mov [r11+8], rcx (回写)
             return;
         }
         let step = (arg_ty.size().div_ceil(8) * 8) as i32;
@@ -18376,14 +18765,15 @@ impl Codegen {
         self.emit(&[0x8B, 0x01]); // mov eax, (rcx)
         self.emit(&[0x83, 0xF8, 0x30]); // cmp $48, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
-        // reg_save_area + gp_offset: 从 (rcx+16) 加载 reg_save_area
-        self.emit(&[0x48, 0x8B, 0x59, 0x10]); // mov rbx, 16(rcx)
+        // reg_save_area + gp_offset: 从 (rcx+16) 加载到 r11
+        // REX 0x4C: R=1 使 reg=r11, B=0 使 rm=rcx (rm=001+REX.B 会变 r9)
+        self.emit(&[0x4C, 0x8B, 0x59, 0x10]); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         let sz = arg_ty.size();
         match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x04, 0x03]), // movzbl (rbx,rax), eax
-            2 => self.emit(&[0x0F, 0xB7, 0x04, 0x03]), // movzwl (rbx,rax), eax
-            4 => self.emit(&[0x8B, 0x04, 0x03]), // mov (rbx,rax), eax
-            _ => self.emit(&[0x48, 0x8B, 0x04, 0x03]), // mov (rbx,rax), rax
+            1 => self.emit(&[0x41, 0x0F, 0xB6, 0x04, 0x03]), // movzbl (r11,rax), eax
+            2 => self.emit(&[0x41, 0x0F, 0xB7, 0x04, 0x03]), // movzwl (r11,rax), eax
+            4 => self.emit(&[0x41, 0x8B, 0x04, 0x03]), // mov (r11,rax), eax
+            _ => self.emit(&[0x49, 0x8B, 0x04, 0x03]), // mov (r11,rax), rax
         }
         // gp_offset += step
         self.emit(&[0x83, 0x01]); // add (rcx), imm8
@@ -18391,18 +18781,18 @@ impl Codegen {
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         // overflow_arg_area: 从 (rcx+8) 加载
-        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x03]), // movzbl (rbx), eax
-            2 => self.emit(&[0x0F, 0xB7, 0x03]), // movzwl (rbx), eax
-            4 => self.emit(&[0x8B, 0x03]), // mov (rbx), eax
-            _ => self.emit(&[0x48, 0x8B, 0x03]), // mov (rbx), rax
+            1 => self.emit(&[0x41, 0x0F, 0xB6, 0x03]), // movzbl (r11), eax
+            2 => self.emit(&[0x41, 0x0F, 0xB7, 0x03]), // movzwl (r11), eax
+            4 => self.emit(&[0x41, 0x8B, 0x03]), // mov (r11), eax
+            _ => self.emit(&[0x49, 0x8B, 0x03]), // mov (r11), rax
         }
         self.push(0);
-        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
-        self.emit(&[0x48, 0x83, 0xC3]); // add rbx, step
+        self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit(&[0x49, 0x83, 0xC3]); // add r11, step
         self.emit(&step.to_le_bytes()[..1]);
-        self.emit(&[0x48, 0x89, 0x59, 0x08]); // mov 8(rcx), rbx
+        self.emit(&[0x4C, 0x89, 0x59, 0x08]); // mov 8(rcx), r11 (REX.R=1: reg=r11)
         self.pop(0);
         self.label(&done);
         if dst != 0 {
@@ -18421,11 +18811,11 @@ impl Codegen {
         self.emit(&[0x3D, 0xB0, 0x00, 0x00, 0x00]); // cmp $176, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + fp_offset
-        self.emit(&[0x48, 0x8B, 0x59, 0x10]); // mov rbx, 16(rcx)
+        self.emit(&[0x4C, 0x8B, 0x59, 0x10]); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         if matches!(arg_ty, Type::Float) {
-            self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x03]); // movss (rbx,rax), xmm0
+            self.emit(&[0xF3, 0x41, 0x0F, 0x10, 0x04, 0x03]); // movss (r11,rax), xmm0
         } else {
-            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x03]); // movsd (rbx,rax), xmm0
+            self.emit(&[0xF2, 0x41, 0x0F, 0x10, 0x04, 0x03]); // movsd (r11,rax), xmm0
         }
         // fp_offset += reg_step
         self.emit(&[0x83, 0x41, 0x04]); // add 4(rcx), reg_step
@@ -18433,17 +18823,17 @@ impl Codegen {
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         // overflow_arg_area
-        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
+        self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         if matches!(arg_ty, Type::Float) {
-            self.emit(&[0xF3, 0x0F, 0x10, 0x03]); // movss (rbx), xmm0
+            self.emit(&[0xF3, 0x41, 0x0F, 0x10, 0x03]); // movss (r11), xmm0
         } else {
-            self.emit(&[0xF2, 0x0F, 0x10, 0x03]); // movsd (rbx), xmm0
+            self.emit(&[0xF2, 0x41, 0x0F, 0x10, 0x03]); // movsd (r11), xmm0
         }
         self.push(0);
-        self.emit(&[0x48, 0x8B, 0x59, 0x08]); // mov rbx, 8(rcx)
-        self.emit(&[0x48, 0x83, 0xC3]); // add rbx, overflow_step
+        self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit(&[0x49, 0x83, 0xC3]); // add r11, overflow_step
         self.emit(&overflow_step.to_le_bytes()[..1]);
-        self.emit(&[0x48, 0x89, 0x59, 0x08]); // mov 8(rcx), rbx
+        self.emit(&[0x4C, 0x89, 0x59, 0x08]); // mov 8(rcx), r11 (REX.R=1: reg=r11)
         self.pop(0);
         self.label(&done);
         if dst != 0 {
@@ -19256,8 +19646,14 @@ impl Codegen {
                 }
                 true
             }
-            // __builtin_va_end: no-op
-            "__builtin_va_end" => true,
+            // __builtin_va_end: no-op, 但参数副作用必须求值
+            // (va-arg-21: va_end(**ap_ptr++) 的 ap_ptr++ 推进不可丢失)
+            "__builtin_va_end" => {
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], 0);
+                }
+                true
+            }
             // __builtin_setjmp(buf): 简单实现返回 0 (直接调用情况)
             "__builtin_setjmp" => {
                 self.mov_imm(dst, 0);
@@ -19558,30 +19954,63 @@ impl Codegen {
             "__builtin_va_start" => {
                 if !args.is_empty() {
                     if let Expr::Ident { name, .. } = &args[0] {
-                        self.emit_va_start(&name.name);
+                        if matches!(args[0].ty(), Type::Array(_, _)) {
+                            // 数组类型 Ident: 局部栈槽版 / 全局 rip 版
+                            // (emit_va_start 内部按 is_global_not_local 分派)
+                            self.emit_va_start(&name.name);
+                            return true;
+                        }
+                        // 指针类型 Ident (va_list 形参退化, va-arg-14 的
+                        // va_start(param, param)): 加载指针值作为目标地址
+                        self.gen_expr(&args[0], 1);
+                        self.emit_va_start_at(1);
+                        return true;
+                    }
+                    // 通用: 指针类型表达式 → 加载值; 数组类型 lvalue
+                    // (成员 a.g / 下标 aps[4] / 解引用 *ap_array[0]) → 地址
+                    let ap_ptr = matches!(args[0].ty(), Type::Ptr(_));
+                    let ok = if ap_ptr {
+                        self.gen_expr(&args[0], 1);
+                        true
+                    } else {
+                        self.gen_lvalue_addr(&args[0], 1)
+                    };
+                    if ok {
+                        self.emit_va_start_at(1);
                     }
                 }
                 true
             }
-            // __builtin_va_end(ap): no-op
-            "__builtin_va_end" => true,
             // __builtin_va_arg 已通过 Expr::VaArg 处理, 此处不会到达
             "__builtin_va_arg" => true,
-            // __builtin_va_copy(dest, src): 复制整个 va_list 结构
+            // __builtin_va_copy(dest, src): 复制整个 va_list 结构 (24 字节)
+            // 统一 va_list 地址规则 (与 va_arg 一致): 参数类型是数组
+            // (__dcc_sysv_va_list[1]) → lvalue 地址; 是指针 (va_list 传参
+            // 退化 / va_list*) → 加载指针值。va-arg-10: fap 的 ap 是形参
+            // 指针, &ap 会复制指针变量而非指向的 va_list。
             "__builtin_va_copy" => {
                 if args.len() >= 2 {
-                    if let (
-                        Expr::Ident {
-                            name: dest_name, ..
-                        },
-                        Expr::Ident { name: src_name, .. },
-                    ) = (&args[0], &args[1])
-                    {
-                        let dest_off = self.var_offset(&dest_name.name);
-                        let src_off = self.var_offset(&src_name.name);
-                        for i in 0..3i32 {
-                            self.load_stack(0, src_off + i * 8);
-                            self.store_stack(0, dest_off + i * 8);
+                    let dest_ptr = matches!(args[0].ty(), Type::Ptr(_));
+                    let dest_ok = if dest_ptr {
+                        self.gen_expr(&args[0], 0);
+                        true
+                    } else {
+                        self.gen_lvalue_addr(&args[0], 0)
+                    };
+                    if dest_ok {
+                        self.mov(7, 0); // rdi = dest va_list 地址
+                        let src_ptr = matches!(args[1].ty(), Type::Ptr(_));
+                        let src_ok = if src_ptr {
+                            self.gen_expr(&args[1], 6);
+                            true
+                        } else {
+                            self.gen_lvalue_addr(&args[1], 6)
+                        };
+                        if src_ok {
+                            // rep movsq 复制 3 个 qword
+                            self.emit(&[0xFC]); // cld
+                            self.emit(&[0x48, 0xC7, 0xC1, 0x03, 0, 0, 0]);
+                            self.emit(&[0xF3, 0x48, 0xA5]); // rep movsq
                         }
                     }
                 }
