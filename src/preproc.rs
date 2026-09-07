@@ -200,6 +200,23 @@ pub struct MacroDef {
     variadic: bool,
 }
 
+/// 跨指令延迟展开的缓冲动作 (va-arg-22):
+/// 函数调用实参中间的 #define/#undef 立即执行, 但此前缓冲文本的
+/// 宏展开延迟到 flush; 为按各行被读到的时点展开, 记录 undo 日志
+/// (执行前/后的宏定义), flush 时逆序 undo → 逐段展开 → 顺序 replay。
+struct BufferedDefine {
+    /// 该指令之前切出的缓冲文本
+    text: String,
+    /// 与 text 各行对应的物理行号跨度
+    spans: Vec<(u32, u32)>,
+    /// 目标宏名
+    name: String,
+    /// 指令执行前的定义 (None = 未定义)
+    prev: Option<MacroDef>,
+    /// 指令执行后的定义 (None = 未定义)
+    new: Option<MacroDef>,
+}
+
 /// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量,
 /// line_map 子区间 (相对 out_start, file, src_start, count))
 type MacroCacheData = (
@@ -2057,6 +2074,8 @@ impl Preprocessor {
         let mut active_source = String::new();
         // 与 active_source 中每行对应的物理行号范围 (逻辑行跨度)
         let mut active_spans: Vec<(u32, u32)> = Vec::new();
+        // 跨指令延迟展开的缓冲动作 (本文件的 include 递归各自独立)
+        let mut pending: Vec<BufferedDefine> = Vec::new();
         for ll in &logical {
             self.cur_line = ll.phys_start;
             // 记录原始源行文本 (未去注释), 供诊断 source_line 附着
@@ -2078,11 +2097,56 @@ impl Preprocessor {
             };
 
             if trimmed.starts_with('#') {
-                if !active_source.is_empty() && !self.has_unclosed_paren(&active_source) {
-                    self.flush_active_source(&mut active_source, &mut active_spans);
+                let unclosed =
+                    !active_source.is_empty() && self.has_unclosed_paren(&active_source);
+                if !active_source.is_empty() && !unclosed {
+                    self.flush_active_source(
+                        &mut active_source,
+                        &mut active_spans,
+                        &mut pending,
+                    );
                 }
                 let out_len_before = self.out.len();
-                self.process_directive(trimmed, ll.phys_start);
+                // ISO C 允许指令出现在未闭合的函数调用实参中间 (GCC 测试
+                // va-arg-22): 指令立即执行, 但缓冲文本的宏展开须按各行被
+                // 读到的时点进行。#define/#undef 影响展开用宏表 → 记录
+                // undo 日志并切段, flush 时按历史顺序重放; 其他指令
+                // (include/if/pragma...) 先重放已有段以维持源顺序。
+                let mut record: Option<BufferedDefine> = None;
+                if unclosed && self.is_active() {
+                    let after_hash = trimmed[1..].trim_start();
+                    if let Some(rest) = after_hash.strip_prefix("define") {
+                        if let Some(name) = Self::directive_macro_name(rest) {
+                            record = Some(BufferedDefine {
+                                text: std::mem::take(&mut active_source),
+                                spans: std::mem::take(&mut active_spans),
+                                name,
+                                prev: None,
+                                new: None,
+                            });
+                        }
+                    } else if let Some(rest) = after_hash.strip_prefix("undef") {
+                        if let Some(name) = Self::directive_macro_name(rest) {
+                            record = Some(BufferedDefine {
+                                text: std::mem::take(&mut active_source),
+                                spans: std::mem::take(&mut active_spans),
+                                name,
+                                prev: None,
+                                new: None,
+                            });
+                        }
+                    } else if !pending.is_empty() {
+                        self.replay_pending(&mut pending);
+                    }
+                }
+                if let Some(mut bd) = record {
+                    bd.prev = self.macros.get(&bd.name).cloned();
+                    self.process_directive(trimmed, ll.phys_start);
+                    bd.new = self.macros.get(&bd.name).cloned();
+                    pending.push(bd);
+                } else {
+                    self.process_directive(trimmed, ll.phys_start);
+                }
                 if self.out.len() == out_len_before {
                     self.preserve_lines(ll.phys_start, ll.phys_end);
                 }
@@ -2093,14 +2157,18 @@ impl Preprocessor {
                 // 检测 _Pragma 操作符: 如果当前行包含 _Pragma, 立即刷新
                 // 以确保 _Pragma 效果能影响后续行
                 if trimmed.starts_with("_Pragma") && !self.has_unclosed_paren(&active_source) {
-                    self.flush_active_source(&mut active_source, &mut active_spans);
+                    self.flush_active_source(
+                        &mut active_source,
+                        &mut active_spans,
+                        &mut pending,
+                    );
                 }
             } else {
                 self.preserve_lines(ll.phys_start, ll.phys_end);
             }
         }
         if !active_source.is_empty() {
-            self.flush_active_source(&mut active_source, &mut active_spans);
+            self.flush_active_source(&mut active_source, &mut active_spans, &mut pending);
         }
 
         if self.in_comment {
@@ -2114,18 +2182,35 @@ impl Preprocessor {
         self.file = saved_file;
     }
 
-    /// 对累积的活跃源码块做宏展开并写入输出
+    /// 对累积的活跃源码块做宏展开并写入输出。
+    ///
+    /// 跨指令缓冲段 (pending) 先按历史时点重放展开, 再展开当前段。
+    fn flush_active_source(
+        &mut self,
+        src: &mut String,
+        spans: &mut Vec<(u32, u32)>,
+        pending: &mut Vec<BufferedDefine>,
+    ) {
+        if !pending.is_empty() {
+            self.replay_pending(pending);
+        }
+        let taken_src = std::mem::take(src);
+        let taken_spans = std::mem::take(spans);
+        self.emit_expanded_source(&taken_src, &taken_spans);
+    }
+
+    /// 展开一段缓冲文本并按行输出 (行号映射 + _Pragma 处理)。
     ///
     /// `spans` 与 `src` 中的行一一对应: (phys_start, phys_end)。
     /// 展开结果逐行写出; 空行/注释行跳过, 不输出空行填充。
     /// 行号追踪由 line_map 负责, 不再保持输出行号与源行号物理对齐。
-    /// _Pragma 字符串在展开后立即应用, 以确保后续指令能正确感知其效果。
-    fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
+    fn emit_expanded_source(&mut self, src: &str, spans: &[(u32, u32)]) {
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
         // 立即应用展开阶段累积的 _Pragma 字符串, 以确保后续 # 指令能感知其效果
-        let pending: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
-        for (p, line_no) in pending {
+        let pragmas: Vec<(String, u32)> =
+            std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        for (p, line_no) in pragmas {
             self.apply_pragma_string(&p, line_no);
         }
         let lines: Vec<&str> = expanded.split('\n').collect();
@@ -2164,8 +2249,51 @@ impl Preprocessor {
                 });
             }
         }
-        src.clear();
-        spans.clear();
+    }
+
+    /// 重放跨指令缓冲段: 逆序 undo 宏表到最早快照, 顺序展开输出各段并
+    /// replay 对应 #define/#undef; 结束后宏表与最新状态一致 (无净变更)。
+    fn replay_pending(&mut self, pending: &mut Vec<BufferedDefine>) {
+        if pending.is_empty() {
+            return;
+        }
+        for bd in pending.iter().rev() {
+            Self::restore_macro(&mut self.macros, &bd.name, &bd.prev);
+        }
+        for bd in pending.drain(..) {
+            self.emit_expanded_source(&bd.text, &bd.spans);
+            Self::restore_macro(&mut self.macros, &bd.name, &bd.new);
+        }
+    }
+
+    /// 宏表恢复: Some(d) 重新注册, None 删除 (undo/replay 共用)
+    fn restore_macro(
+        macros: &mut HashMap<String, MacroDef>,
+        name: &str,
+        def: &Option<MacroDef>,
+    ) {
+        match def {
+            Some(d) => {
+                macros.insert(name.to_string(), d.clone());
+            }
+            None => {
+                macros.remove(name);
+            }
+        }
+    }
+
+    /// 从 #define/#undef 指令参数中提取目标宏名
+    fn directive_macro_name(rest: &str) -> Option<String> {
+        let rest = rest.trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            None
+        } else {
+            Some(name)
+        }
     }
 
     /// 不再输出空行填充。
