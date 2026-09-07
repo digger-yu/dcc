@@ -2231,6 +2231,17 @@ impl Codegen {
         }
     }
 
+    /// XMM load [rsp+off] -> xmm_reg with configurable prefix (F2=movsd, F3=movss).
+    fn emit_xmm_load_rsp(&mut self, pfx: u8, xmm: u8, off: usize) {
+        self.emit(&[pfx, 0x0F, 0x10]);
+        if off < 128 {
+            self.emit(&[0x44 | ((xmm & 7) << 3), 0x24, off as u8]);
+        } else {
+            self.emit(&[0x84 | ((xmm & 7) << 3), 0x24]);
+            self.emit(&(off as u32).to_le_bytes());
+        }
+    }
+
     /// 解析 visibility 字符串为 ELF 常量
     fn parse_visibility(vis: &Option<String>) -> u8 {
         match vis.as_deref() {
@@ -6621,6 +6632,20 @@ impl Codegen {
             }
             for (xmm, off, ty) in xmm_param_stores {
                 if matches!(ty, Type::Float) {
+                    // K&R / 无原型函数: float 参数经默认提升后以 double 传入.
+                    // callee 必须先将 xmm 中的 double 转为 float 再存储.
+                    if f.is_old_style {
+                        // cvtsd2ss xmmN, xmmN: double → float
+                        let lo = xmm & 7;
+                        let mut rex = 0u8;
+                        if lo >= 8 { rex |= 0x01; } // REX.B
+                        if lo >= 8 { rex |= 0x04; } // REX.R
+                        if rex != 0 {
+                            self.emit(&[0xF2, rex | 0x40, 0x0F, 0x5A, 0xC0 | ((lo & 7) << 3) | (lo & 7)]);
+                        } else {
+                            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0 | (lo << 3) | lo]);
+                        }
+                    }
                     self.store_xmm32_stack(xmm, off);
                 } else {
                     self.store_xmm64_stack(xmm, off);
@@ -7132,7 +7157,7 @@ impl Codegen {
             None
         };
 
-        let mut staged: Vec<(ArgLoc, usize)> = Vec::new();
+        let mut staged: Vec<(ArgLoc, usize, bool)> = Vec::new();
         for (arg_idx, (arg, arg_locs)) in args.iter().zip(locs.iter()).enumerate() {
             let param_ty = direct
                 .and_then(|name| self.func_param_types.get(name))
@@ -7187,7 +7212,7 @@ impl Codegen {
                         ArgLoc::Stack(off) => self.store_rsp_qword(1, off),
                         _ => {
                             self.store_rsp_qword(1, stage);
-                            staged.push((*loc, stage));
+                            staged.push((*loc, stage, false));
                             stage += 8;
                         }
                     }
@@ -7217,7 +7242,7 @@ impl Codegen {
                                 }
                                 _ => {
                                     self.emit_xmm_store_rsp(pfx, src_xmm, stage);
-                                    staged.push((*loc, stage));
+                                    staged.push((*loc, stage, false));
                                     stage += 8;
                                 }
                             }
@@ -7256,7 +7281,7 @@ impl Codegen {
                             }
                             _ => {
                                 self.emit_xmm_store_rsp(pfx, 0, stage);
-                                staged.push((*loc, stage));
+                                staged.push((*loc, stage, false));
                                 stage += 8;
                             }
                         }
@@ -7276,7 +7301,7 @@ impl Codegen {
                             ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                             _ => {
                                 self.store_rsp_qword(0, stage);
-                                staged.push((*loc, stage));
+                                staged.push((*loc, stage, false));
                                 stage += 8;
                             }
                         }
@@ -7304,7 +7329,7 @@ impl Codegen {
                             ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                             _ => {
                                 self.store_rsp_qword(0, stage);
-                                staged.push((*loc, stage));
+                                staged.push((*loc, stage, false));
                                 stage += 8;
                             }
                         }
@@ -7339,7 +7364,7 @@ impl Codegen {
                             ArgLoc::Stack(off) => self.store_rsp_qword(store_reg, off),
                             _ => {
                                 self.store_rsp_qword(store_reg, stage);
-                                staged.push((*loc, stage));
+                                staged.push((*loc, stage, false));
                                 stage += 8;
                             }
                         }
@@ -7364,7 +7389,7 @@ impl Codegen {
                         ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                         loc => {
                             self.store_rsp_qword(0, stage);
-                            staged.push((loc, stage));
+                            staged.push((loc, stage, false));
                             stage += 8;
                         }
                     }
@@ -7376,6 +7401,14 @@ impl Codegen {
                 if Self::is_integer_type(&arg_ty) {
                     self.emit_scalar_to_xmm0_if_needed(arg, &effective_ty);
                 }
+                // float/double 类型不匹配转换:
+                // 形参是 float 但实参是 double → cvtsd2ss (double→float)
+                // 形参是 double 但实参是 float → cvtss2sd (float→double)
+                if matches!(effective_ty, Type::Float) && matches!(arg_ty, Type::Double) {
+                    self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]); // cvtsd2ss xmm0, xmm0
+                } else if matches!(effective_ty, Type::Double) && matches!(arg_ty, Type::Float) {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
+                }
                 // C 语义: 可变参数函数的 float 参数默认提升为 double
                 // printf("%f", 1.0f) 实际传递的是 double 1.0
                 let is_variadic = direct
@@ -7386,11 +7419,13 @@ impl Codegen {
                     // cvtss2sd xmm0, xmm0: float → double
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
                 }
+                let is_float = matches!(effective_ty, Type::Float);
+                let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                 match arg_locs[0] {
-                    ArgLoc::Stack(off) => self.store_rsp_xmm(0, off),
+                    ArgLoc::Stack(off) => self.emit_xmm_store_rsp(pfx, 0, off),
                     loc => {
-                        self.store_rsp_xmm(0, stage);
-                        staged.push((loc, stage));
+                        self.emit_xmm_store_rsp(pfx, 0, stage);
+                        staged.push((loc, stage, is_float));
                         stage += 8;
                     }
                 }
@@ -7420,7 +7455,7 @@ impl Codegen {
                         ArgLoc::Stack(off) => self.store_rsp_qword(reg, off),
                         loc => {
                             self.store_rsp_qword(reg, stage);
-                            staged.push((loc, stage));
+                            staged.push((loc, stage, false));
                             stage += 8;
                         }
                     }
@@ -7435,7 +7470,7 @@ impl Codegen {
                     ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                     loc => {
                         self.store_rsp_qword(0, stage);
-                        staged.push((loc, stage));
+                        staged.push((loc, stage, false));
                         stage += 8;
                     }
                 }
@@ -7445,10 +7480,13 @@ impl Codegen {
         if let Some(slot) = sret_stage {
             self.load_rsp_qword(7, slot);
         }
-        for (loc, slot) in staged {
+        for (loc, slot, is_float) in staged {
             match loc {
                 ArgLoc::Gp(reg) => self.load_rsp_qword(reg, slot),
-                ArgLoc::Xmm(reg) => self.load_rsp_xmm(reg, slot),
+                ArgLoc::Xmm(reg) => {
+                    let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
+                    self.emit_xmm_load_rsp(pfx, reg, slot);
+                }
                 ArgLoc::Stack(_) => unreachable!(),
             }
         }
@@ -7679,13 +7717,13 @@ impl Codegen {
                                     | Type::LongDouble)
                                 && func_ret_ty.is_int()
                             {
+                                let wide = matches!(
+                                    &func_ret_ty,
+                                    Type::Long
+                                    | Type::LongLong);
                                 match &expr_ty {
                                     Type::Float => {
                                         // cvttss2si rax, xmm0
-                                        let wide = matches!(
-                                            &func_ret_ty,
-                                            Type::Long
-                                            | Type::LongLong);
                                         let rex = 0x48
                                             | if wide { 0x08 }
                                               else { 0 };
@@ -7696,10 +7734,6 @@ impl Codegen {
                                     }
                                     Type::Double => {
                                         // cvttsd2si rax, xmm0
-                                        let wide = matches!(
-                                            &func_ret_ty,
-                                            Type::Long
-                                            | Type::LongLong);
                                         let rex = 0x48
                                             | if wide { 0x08 }
                                               else { 0 };
@@ -7712,10 +7746,6 @@ impl Codegen {
                                         // long double in st(0)
                                         // -> xmm0 first
                                         self.emit_x87_to_xmm0();
-                                        let wide = matches!(
-                                            &func_ret_ty,
-                                            Type::Long
-                                            | Type::LongLong);
                                         let rex = 0x48
                                             | if wide { 0x08 }
                                               else { 0 };
@@ -7726,6 +7756,10 @@ impl Codegen {
                                     }
                                     _ => {}
                                 }
+                                // Saturate out-of-range results
+                                self.emit_float_to_int_saturate(
+                                    0, &expr_ty, wide,
+                                );
                             }
                             // Truncate return value to the function's
                             // declared return type width. For types smaller
@@ -10229,6 +10263,7 @@ impl Codegen {
                             | (if wide { 0x08 } else { 0 })
                             | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                        self.emit_float_to_int_saturate(dst, &Type::Float, wide);
                     }
                     (
                         Type::Double,
@@ -10240,6 +10275,7 @@ impl Codegen {
                             | (if wide { 0x08 } else { 0 })
                             | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                        self.emit_float_to_int_saturate(dst, &Type::Double, wide);
                     }
                     (
                         Type::LongDouble,
@@ -10253,6 +10289,7 @@ impl Codegen {
                             | (if wide { 0x08 } else { 0 })
                             | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                        self.emit_float_to_int_saturate(dst, &Type::LongDouble, wide);
                     }
                     (Type::Complex(inner), Type::Int | Type::Long | Type::Char | Type::Short) => {
                         let is_f32 = matches!(&inner.base, Type::Float);
@@ -11680,13 +11717,13 @@ impl Codegen {
         float_ty: &Type,
         int_ty: &Type,
     ) {
+        let wide = matches!(
+            int_ty,
+            Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+        );
         match float_ty {
             Type::Float => {
                 // cvttss2si dst, xmm0 (F3 REX 0F 2C /r)
-                let wide = matches!(
-                    int_ty,
-                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                );
                 let rex = 0x40
                     | (if wide { 0x08 } else { 0 })
                     | (if dst >= 8 { 0x04 } else { 0 });
@@ -11694,10 +11731,6 @@ impl Codegen {
             }
             Type::Double => {
                 // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                let wide = matches!(
-                    int_ty,
-                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                );
                 let rex = 0x40
                     | (if wide { 0x08 } else { 0 })
                     | (if dst >= 8 { 0x04 } else { 0 });
@@ -11707,10 +11740,6 @@ impl Codegen {
                 // long double in st(0) (x87), convert to double in xmm0
                 self.emit_x87_to_xmm0();
                 // cvttsd2si dst, xmm0
-                let wide = matches!(
-                    int_ty,
-                    Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                );
                 let rex = 0x40
                     | (if wide { 0x08 } else { 0 })
                     | (if dst >= 8 { 0x04 } else { 0 });
@@ -11718,6 +11747,92 @@ impl Codegen {
             }
             _ => {}
         }
+        // Saturate out-of-range results to INT_MAX/INT_MIN
+        // instead of x86 "integer indefinite" value.
+        self.emit_float_to_int_saturate(dst, float_ty, wide);
+    }
+
+    /// Emit saturation logic after cvttss2si / cvttsd2si.
+    ///
+    /// On x86, float-to-int conversion instructions return the
+    /// "integer indefinite" value (0x80000000 for 32-bit,
+    /// 0x8000000000000000 for 64-bit) when the input is NaN,
+    /// infinity, or out of range.  C semantics (and GCC) expect
+    /// saturation to INT_MAX / INT_MIN instead.
+    ///
+    /// Precondition: conversion result is in `dst`, original float
+    ///               still in xmm0.
+    /// Clobbers: rcx, r8, xmm1.
+    fn emit_float_to_int_saturate(
+        &mut self,
+        dst: u8,
+        float_ty: &Type,
+        is_64bit: bool,
+    ) {
+        // Step 1: ucomiss/ucomisd xmm1, xmm0 to get float sign.
+        //   CF=1 → negative/NaN, CF=0 → positive.
+        if matches!(float_ty, Type::Float) {
+            self.emit(&[0x0F, 0x2E, 0xC8]); // ucomiss xmm1, xmm0
+        } else {
+            self.emit(&[0x66, 0x0F, 0x2E, 0xC8]); // ucomisd xmm1, xmm0
+        }
+        // Step 2: save original conversion result to r8.
+        self.mov(8, dst); // mov r8, dst
+        // Step 3: load indefinite value into rcx.
+        if is_64bit {
+            self.mov_imm(1, i64::MIN as i128);
+        } else {
+            self.mov_imm(1, i32::MIN as i128);
+        }
+        // Step 4: cmp dst, rcx (check if result == indefinite).
+        if is_64bit {
+            // 64-bit conversion: full 64-bit compare.
+            if dst == 1 {
+                // dst is rcx: compare rcx with itself (always equal).
+                self.emit(&[0x48, 0x39, 0xC9]); // cmp rcx, rcx
+            } else {
+                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                self.emit(&[rex, 0x39, 0xC8 | (dst & 7)]);
+            }
+        } else {
+            // 32-bit conversion: compare lower 32 bits only.
+            // cvttss2si/cvttsd2si without REX.W zero-extends the
+            // 32-bit result, so we must compare 32-bit values.
+            if dst == 1 {
+                // dst is rcx: 32-bit self-compare.
+                self.emit(&[0x39, 0xC9]); // cmp ecx, ecx
+            } else if dst >= 8 {
+                // Need REX.B for dst register (r8d-r15d).
+                self.emit(&[0x44, 0x39, 0xC8 | (dst & 7)]);
+            } else {
+                // No REX needed.
+                self.emit(&[0x39, 0xC8 | (dst & 7)]);
+            }
+        }
+        // Step 5: load saturated value into r8.
+        //   CF=1 (negative float) → INT_MIN.
+        //   CF=0 (positive float) → INT_MAX.
+        if is_64bit {
+            // cmovc r8, rcx (INT_MIN)
+            self.emit(&[0x4C, 0x0F, 0x42, 0xC1]);
+            // Load INT64_MAX = 0x7FFFFFFFFFFFFFFF into scratch.
+            self.mov_imm(2, i64::MAX as i128);
+            // cmovnc r8, rdx (INT_MAX)
+            self.emit(&[0x4C, 0x0F, 0x43, 0xC2]);
+        } else {
+            // cmovc r8d, ecx (INT32_MIN)
+            self.emit(&[0x4C, 0x0F, 0x42, 0xC1]);
+            // mov edx, 0x7FFFFFFF (INT32_MAX)
+            self.emit(&[0xBA]);
+            self.emit(&0x7FFFFFFFi32.to_le_bytes());
+            // cmovnc r8d, edx (INT32_MAX)
+            self.emit(&[0x4C, 0x0F, 0x43, 0xC2]);
+        }
+        // Step 6: if original == indefinite, use saturated value.
+        //   cmovz dst, r8  (src is always r8, need REX.B for rm ext)
+        let rex_b = 0x01; // r8 in rm field always needs REX.B
+        let rex = 0x48 | rex_b | if dst >= 8 { 0x04 } else { 0 };
+        self.emit(&[rex, 0x0F, 0x44, 0xC0 | ((dst & 7) << 3)]);
     }
 
     fn gen_vector_init_rvalue(
