@@ -12564,79 +12564,129 @@ impl Codegen {
     /// infinity, or out of range.  C semantics (and GCC) expect
     /// saturation to INT_MAX / INT_MIN instead.
     ///
+    /// The old implementation had three bugs:
+    /// 1. xmm1 was never initialized to 0.0, so ucomiss xmm1,xmm0
+    ///    produced undefined CF for the sign check.
+    /// 2. The cmp instruction (step 4) overwrote the CF set by
+    ///    ucomiss (step 1), so cmovc/cmnc in step 5 used stale CF.
+    /// 3. For 32-bit conversions, the indefinite value 0x80000000
+    ///    was loaded into rcx via mov_imm (sign-extended to
+    ///    0xFFFFFFFF80000000), but cvttss2si zero-extends the
+    ///    32-bit result to 0x0000000080000000.  The 64-bit cmp
+    ///    never matched, so negative-overflow saturation to
+    ///    INT32_MIN was silently skipped.
+    ///
+    /// New approach: save the float sign IMMEDIATELY after ucomiss
+    /// via setc+movzx, then use a register-conflict-free compare
+    /// and cmovz for the final replacement.
+    ///
     /// Precondition: conversion result is in `dst`, original float
     ///               still in xmm0.
-    /// Clobbers: rcx, r8, xmm1.
+    /// Clobbers: rcx, r8, r9, xmm1.
     fn emit_float_to_int_saturate(
         &mut self,
         dst: u8,
         float_ty: &Type,
         is_64bit: bool,
     ) {
-        // Step 1: ucomiss/ucomisd xmm1, xmm0 to get float sign.
-        //   CF=1 → negative/NaN, CF=0 → positive.
+        // Step 1: ucomiss/ucomisd xmm0, xmm1 — detect float sign.
+        //   xmm1 = 0.0 (from xorps).  Compare xmm0 vs 0.0:
+        //   CF=1 → xmm0 < 0 (negative), CF=0 → xmm0 >= 0 (positive).
+        //   xmm1 must be 0.0 for a well-defined comparison.
+        self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1 (xmm1 = 0.0)
         if matches!(float_ty, Type::Float) {
-            self.emit(&[0x0F, 0x2E, 0xC8]); // ucomiss xmm1, xmm0
+            self.emit(&[0x0F, 0x2E, 0xC1]); // ucomiss xmm0, xmm1
         } else {
-            self.emit(&[0x66, 0x0F, 0x2E, 0xC8]); // ucomisd xmm1, xmm0
+            self.emit(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
         }
-        // Step 2: save original conversion result to r8.
-        self.mov(8, dst); // mov r8, dst
-        // Step 3: load indefinite value into rcx.
-        if is_64bit {
-            self.mov_imm(1, i64::MIN as i128);
-        } else {
-            self.mov_imm(1, i32::MIN as i128);
-        }
-        // Step 4: cmp dst, rcx (check if result == indefinite).
-        if is_64bit {
-            // 64-bit conversion: full 64-bit compare.
-            if dst == 1 {
-                // dst is rcx: compare rcx with itself (always equal).
-                self.emit(&[0x48, 0x39, 0xC9]); // cmp rcx, rcx
+        // Step 2: save CF (sign) into r9b immediately, before any
+        //   instruction can clobber flags.
+        //   r9 = 1 if negative/NaN, 0 if positive/zero.
+        self.emit(&[0x41, 0x0F, 0x92, 0xC1]); // setc r9b
+        self.emit(&[0x4D, 0x0F, 0xB6, 0xC9]); // movzx r9, r9b
+
+        if dst == 1 {
+            // dst is rcx — the trickiest case since rcx is our
+            // usual scratch register.  Strategy: save original to
+            // r8, compute saturated value in rcx, then:
+            //   cmovz rcx, r8 (not indefinite → restore original)
+
+            // Step 3a: save original dst to r8
+            self.mov(8, dst); // mov r8, rcx
+
+            // Step 3b: compare original with indefinite value.
+            if is_64bit {
+                // i64::MIN cannot be encoded as sign-extended imm32
+                // (low 32 bits are 0, not 0x80000000).  Save r9
+                // (sign), load indefinite into r9, compare, restore.
+                self.emit(&[0x41, 0x51]); // push r9
+                self.mov_imm(9, i64::MIN as i128); // r9 = indefinite
+                self.emit(&[0x4C, 0x39, 0xC8]); // cmp r8, r9
+                self.emit(&[0x41, 0x59]); // pop r9 (restore sign)
             } else {
-                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit(&[rex, 0x39, 0xC8 | (dst & 7)]);
+                // 32-bit: i32::MIN = 0x80000000.
+                // cvttss2si (no REX.W) zero-extends to 0x0000000080000000.
+                // r8 has the same zero-extended value.
+                // Compare 32-bit: cmp r8d, imm32.
+                self.emit(&[0x41, 0x81, 0xF8]); // cmp r8d, imm32
+                self.emit(&i32::MIN.to_le_bytes());
             }
-        } else {
-            // 32-bit conversion: compare lower 32 bits only.
-            // cvttss2si/cvttsd2si without REX.W zero-extends the
-            // 32-bit result, so we must compare 32-bit values.
-            if dst == 1 {
-                // dst is rcx: 32-bit self-compare.
-                self.emit(&[0x39, 0xC9]); // cmp ecx, ecx
-            } else if dst >= 8 {
-                // Need REX.B for dst register (r8d-r15d).
-                self.emit(&[0x44, 0x39, 0xC8 | (dst & 7)]);
+
+            // Step 3c: compute saturated value into rcx based on sign.
+            //   r8 = original, ZF = (original == indefinite).
+            //   r9 = sign (1=neg, 0=pos).
+            if is_64bit {
+                self.mov_imm(dst, i64::MAX as i128); // rcx = INT64_MAX
+                self.mov_imm(10, i64::MIN as i128); // r10 = INT64_MIN
             } else {
-                // No REX needed.
-                self.emit(&[0x39, 0xC8 | (dst & 7)]);
+                self.mov_imm(dst, i32::MAX as i128); // ecx = INT32_MAX
+                self.mov_imm(10, i32::MIN as i128); // r10d = INT32_MIN
             }
-        }
-        // Step 5: load saturated value into r8.
-        //   CF=1 (negative float) → INT_MIN.
-        //   CF=0 (positive float) → INT_MAX.
-        if is_64bit {
-            // cmovc r8, rcx (INT_MIN)
-            self.emit(&[0x4C, 0x0F, 0x42, 0xC1]);
-            // Load INT64_MAX = 0x7FFFFFFFFFFFFFFF into scratch.
-            self.mov_imm(2, i64::MAX as i128);
-            // cmovnc r8, rdx (INT_MAX)
-            self.emit(&[0x4C, 0x0F, 0x43, 0xC2]);
+            // cmovnz rcx, r10: if sign!=0 (negative), rcx = INT_MIN
+            self.emit(&[0x4D, 0x0F, 0x45, 0xCA]); // cmovnz rcx, r10
+            // Now rcx = saturated value (INT_MAX or INT_MIN).
+
+            // Step 3d: if NOT indefinite (ZF=0), restore original.
+            //   if ZF=1 (indefinite): keep rcx = saturated.
+            //   if ZF=0 (not indefinite): rcx = r8 (original).
+            self.emit(&[0x49, 0x0F, 0x45, 0xC8]); // cmovnz rcx, r8
+            // Now: rcx = saturated if indefinite, original otherwise.
         } else {
-            // cmovc r8d, ecx (INT32_MIN)
-            self.emit(&[0x4C, 0x0F, 0x42, 0xC1]);
-            // mov edx, 0x7FFFFFFF (INT32_MAX)
-            self.emit(&[0xBA]);
-            self.emit(&0x7FFFFFFFi32.to_le_bytes());
-            // cmovnc r8d, edx (INT32_MAX)
-            self.emit(&[0x4C, 0x0F, 0x43, 0xC2]);
+            // dst is NOT rcx.  rcx is available as scratch.
+            // r8, r9 are available as scratch.
+
+            // Step 3a: compute saturated value into r8 based on sign.
+            //   r9 = sign (1=neg, 0=pos).  Use test to set flags.
+            if is_64bit {
+                self.mov_imm(8, i64::MAX as i128); // r8 = INT64_MAX
+                self.mov_imm(1, i64::MIN as i128); // rcx = INT64_MIN
+            } else {
+                self.mov_imm(8, i32::MAX as i128); // r8d = INT32_MAX
+                self.mov_imm(1, i32::MIN as i128); // ecx = INT32_MIN
+            }
+            // test r9, r9 → ZF=(r9==0)=(positive)
+            self.emit(&[0x4D, 0x85, 0xC9]); // test r9, r9
+            // cmovnz r8, rcx: if r9!=0 (negative), r8 = INT_MIN
+            self.emit(&[0x4C, 0x0F, 0x45, 0xC1]); // cmovnz r8, rcx
+            // Now r8 = saturated value.
+
+            // Step 3b: check indefinite and select result.
+            //   Reload indefinite into rcx, compare with dst.
+            if is_64bit {
+                self.mov_imm(1, i64::MIN as i128);
+                self.emit(&[0x48, 0x39, 0xC8 | (dst & 7)]); // cmp dst, rcx
+            } else {
+                self.mov_imm(1, i32::MIN as i128);
+                if dst >= 8 {
+                    self.emit(&[0x44, 0x39, 0xC8 | (dst & 7)]);
+                } else {
+                    self.emit(&[0x39, 0xC8 | (dst & 7)]);
+                }
+            }
+            // cmovz dst, r8: if indefinite, dst = saturated.
+            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 } | 0x01;
+            self.emit(&[rex, 0x0F, 0x44, 0xC0 | ((dst & 7) << 3)]);
         }
-        // Step 6: if original == indefinite, use saturated value.
-        //   cmovz dst, r8  (src is always r8, need REX.B for rm ext)
-        let rex_b = 0x01; // r8 in rm field always needs REX.B
-        let rex = 0x48 | rex_b | if dst >= 8 { 0x04 } else { 0 };
-        self.emit(&[rex, 0x0F, 0x44, 0xC0 | ((dst & 7) << 3)]);
     }
 
     fn gen_vector_init_rvalue(
