@@ -18883,8 +18883,11 @@ impl Codegen {
                 // mod=01, reg=rsp(4), r/m=r13(5) → 0x65
                 self.emit(&[0x65, off as i8 as u8]);
             } else {
-                // mod=10, reg=rsp(4), r/m=r13(5) → 0x85
-                self.emit(&[0x85]);
+                // mod=10, reg=rsp(4), r/m=r13(5) → 0xA5 (10 100 101).
+                // 0x85 会把 reg 字段编成 rax: |off|>=128 时变量槽里存的是
+                // rax (对齐后的总大小) 而不是 rsp 基址, 之后所有
+                // M[i][j] 都写到绝对地址 ~size 上 → 段错误。
+                self.emit(&[0xA5]);
                 self.emit(&off.to_le_bytes());
             }
             // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
