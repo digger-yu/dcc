@@ -10413,6 +10413,10 @@ impl<'a> Parser<'a> {
                 let v_s = stripped;
                 let v: f64 = if v_s.starts_with("0x") || v_s.starts_with("0X") {
                     parse_hex_float(v_s)
+                } else if matches!(ty, Type::Float) {
+                    // Float 后缀 (f/F): 先解析为 f32 再提升到 f64,
+                    // 匹配 C 语义 (float 常量的值是最接近的 f32 值)。
+                    v_s.parse::<f32>().unwrap_or(0.0) as f64
                 } else {
                     v_s.parse().unwrap_or(0.0)
                 };

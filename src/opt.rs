@@ -700,6 +700,12 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                     (l.as_ref(), r.as_ref())
                 {
                     if let Some(v) = eval_float_binop(op, *lv, *rv) {
+                        // 结果精度必须匹配目标类型: Float 结果截为 f32
+                        let v = if matches!(ty, crate::ast::Type::Float) {
+                            (v as f32) as f64
+                        } else {
+                            v
+                        };
                         return Expr::Float { v, span, ty };
                     }
                 }
