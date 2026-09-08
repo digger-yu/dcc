@@ -926,3 +926,154 @@ OmpTarget / OmpTargetSimd / Cuda / Hip 四类入口。
 
 详见 `docs/profiling.md`。
 
+---
+
+## 代码生成架构细节 (x86_64)
+
+### 主入口函数
+
+**gen_stmt** (`codegen/x86_64.rs:7207`):
+```rust
+fn gen_stmt(&mut self, s: &Stmt) {
+    match s {
+        Stmt::Return { val, .. } => { /* 返回值处理 */ }
+        Stmt::Expr { e, .. } => { self.gen_expr(e, 0); }
+        Stmt::If { cond, then_, else_ } => { /* 条件跳转 */ }
+        Stmt::While { cond, body } => { /* 循环 */ }
+        Stmt::For { init, cond, step, body } => { /* 循环 */ }
+        Stmt::Switch { expr, cases } => { /* 跳转表 */ }
+        // ...
+    }
+}
+```
+
+**gen_expr** (`codegen/x86_64.rs:7851`):
+```rust
+fn gen_expr(&mut self, e: &Expr, dst: u8) {
+    match e {
+        Expr::Int { v, .. } => { self.mov_imm(dst, *v); }
+        Expr::Float { v, .. } => { /* 加载到 xmm0 */ }
+        Expr::Ident { name, .. } => { /* 加载变量 */ }
+        Expr::Binop { op, l, r, .. } => { /* 二元运算 */ }
+        Expr::Unary { op, e, .. } => { /* 一元运算 */ }
+        Expr::Call { callee, args, .. } => { /* 函数调用 */ }
+        Expr::Assign { l, r, .. } => { /* 赋值 */ }
+        Expr::Cast { ty, e, .. } => { /* 类型转换 */ }
+        Expr::Member { expr, field, .. } => { /* 结构体成员 */ }
+        // ...
+    }
+}
+```
+
+### 函数调用完整流程
+
+```
+Expr::Call { callee, args, .. }
+  ↓
+gen_expr (line 9299)
+  ↓
+emit_sysv_call (line 6775)
+  ├─ abi_classes (line 1744) - 分类每个参数
+  ├─ 计算寄存器/栈分配
+  ├─ 求值每个参数,存入暂存区
+  ├─ 加载到目标寄存器
+  ├─ call 指令
+  └─ 清理栈
+  ↓
+返回值处理
+  ├─ 整数/指针: rax
+  ├─ float/double: xmm0
+  ├─ 结构体 ≤16B: rax[:rdx]
+  └─ 结构体 >16B: sret 缓冲区
+```
+
+### 结构体赋值完整流程
+
+```
+Expr::Assign { l, r, .. }  // struct_var = struct_expr
+  ↓
+gen_expr (line 8319)
+  ├─ 检查是否为向量/聚合体
+  ├─ 生成右侧表达式
+  │   ├─ Ident: 加载地址
+  │   ├─ CompoundLit: 生成到栈上,返回地址
+  │   └─ Call: 调用函数,结果在 rax[:rdx]
+  ├─ 逐 8 字节块复制
+  │   for chunk in 0..chunks {
+  │       load [src + chunk*8] to rax
+  │       store rax to [dst + chunk*8]
+  │   }
+  └─ 处理对齐和重叠
+```
+
+### 位域写入完整流程
+
+```
+Expr::Assign { l: Member { bit_width, bit_offset, .. }, r, .. }
+  ↓
+gen_expr (line 12938)
+  ├─ gen_bitfield_inc_dec (如果是 inc/dec)
+  │   ├─ 加载容器
+  │   ├─ 提取位域值
+  │   ├─ 计算新值
+  │   └─ RMW 写回
+  ├─ 普通赋值:
+  │   ├─ 加载容器到 rcx
+  │   ├─ 清除目标位: rcx &= ~(mask << bit_offset)
+  │   ├─ 加载新值到 rdx
+  │   ├─ shifts: rdx <<= bit_offset
+  │   ├─ 合并: rcx |= rdx
+  │   └─ 存储容器
+  └─ 处理有符号/无符号
+```
+
+### 当前失败模式分析
+
+根据最近修复的提交和失败测试,主要问题集中在:
+
+1. **类型转换不完整**
+   - float/double ↔ int 转换 (最近修复: `2afd511`)
+   - 整数提升后截断 (最近修复: `5327db6`, `fc26a72`)
+   - 返回语句中的类型转换
+
+2. **结构体操作**
+   - 结构体赋值 (`ce137a6`: struct assignment from dereferenced pointer)
+   - 结构体参数传递 (`6c38472`: compound literal passed as struct argument)
+   - 结构体返回值 (`00a1fbe`: struct-return call assigned to global variable)
+
+3. **位域处理**
+   - 位域增减 (`b00e431`: bitfield increment/decrement on global struct members)
+   - 位域掩码 (`3dbdc75`: bitfield mask sign-extension)
+
+4. **va_arg 实现**
+   - va_list 传递 (`083139d`: long double va_arg passing)
+   - 寄存器保存区管理
+
+5. **向量/复数**
+   - 向量运算 (`1afaced`: vector unary Neg and BitNot)
+   - 复数初始化 (`db27cef`: global complex variable-initialization)
+
+### 建议修复优先级
+
+**高优先级** (影响多个测试):
+1. va_arg 完整实现(特别是 va_list 作为参数)
+2. 结构体赋值和参数传递的边界情况
+3. 类型转换完整性(特别是隐式转换)
+
+**中优先级**:
+4. 位域操作的 RMW 正确性
+5. 复数/向量运算
+6. 嵌套函数 trampoline
+
+**低优先级**:
+7. 特定 GCC 扩展的兼容性
+8. 优化相关的问题
+
+### 调试建议
+
+1. **使用 diff_test**: 比较 dcc 和 gcc 的输出,定位差异
+2. **最小化测试用例**: 提取失败测试的核心代码
+3. **检查 ABI 分类**: 使用 `abi_classes` 验证参数/返回值分类
+4. **跟踪栈帧**: 检查变量偏移和栈帧布局
+5. **验证类型转换**: 确保所有隐式转换都正确生成代码
+
