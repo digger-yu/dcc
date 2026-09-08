@@ -73,7 +73,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
         // 数组名在常量表达式中退化为首元素地址 (C11 6.3.2.1p3):
         // (arr)->field / arr + 1 等地址常量链的基址
-        Expr::Ident { name, ty, .. } if matches!(ty, Type::Array(_, _)) => {
+        Expr::Ident { name, ty: Type::Array(_, _), .. } => {
             Ok(ConstValue::Addr {
                 name: name.name.clone(),
                 offset: 0,
@@ -788,10 +788,9 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                     Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 { 0 }
                         else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
                 }
-                BinOp::OrOr => {
-                    Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) != 0 { 1 }
-                        else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
-                }
+                BinOp::OrOr => Ok(ConstValue::Int(
+                    (lv.as_int().unwrap_or(0) != 0 || rv.as_int().unwrap_or(0) != 0) as i128,
+                )),
             }
         }
         Expr::Unary { op, e, .. } => {

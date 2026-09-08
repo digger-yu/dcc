@@ -10,6 +10,7 @@
 /// `detect()` 在 x86_64 上通过 CPUID 指令填充;
 /// 非 x86 平台全部为 false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CpuFeatures {
     // --- CPUID leaf 1, ECX ---
     pub sse3: bool,
@@ -95,52 +96,6 @@ pub struct CpuFeatureOverrides {
     pub apx_f: Option<bool>,
 }
 
-impl Default for CpuFeatures {
-    fn default() -> Self {
-        Self {
-            sse3: false,
-            pclmulqdq: false,
-            ssse3: false,
-            sse4_1: false,
-            sse4_2: false,
-            popcnt: false,
-            aes: false,
-            avx: false,
-            f16c: false,
-            fma: false,
-            bmi1: false,
-            avx2: false,
-            bmi2: false,
-            erms: false,
-            avx512f: false,
-            avx512dq: false,
-            avx512_ifma: false,
-            avx512pf: false,
-            avx512er: false,
-            avx512cd: false,
-            avx512bw: false,
-            avx512vl: false,
-            avx512_vbmi: false,
-            avx512_vbmi2: false,
-            avx512_vnni: false,
-            avx_vnni: false,
-            avx512_bitalg: false,
-            avx512_vpopcntdq: false,
-            avx512_4vnniw: false,
-            avx512_4fmaps: false,
-            cet_ss: false,
-            cet_ibt: false,
-            avx10_1: false,
-            avx10_256: false,
-            avx10_512: false,
-            apx_f: false,
-            movbe: false,
-            xsave: false,
-            osxsave: false,
-        }
-    }
-}
-
 impl CpuFeatures {
     /// 检测当前 CPU 的指令集特性.
     ///
@@ -154,7 +109,7 @@ impl CpuFeatures {
             not(miri)
         ))]
         {
-            return detect_x86();
+            detect_x86()
         }
         #[cfg(not(all(
             any(target_arch = "x86", target_arch = "x86_64"),

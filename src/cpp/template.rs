@@ -375,12 +375,13 @@ impl TemplateRegistry {
         }
         // 选特化度最高的候选 (分数越大越特化)
         // 按 specificity 排序时同步取该候选的绑定表
-        let mut ranked: Vec<(usize, &PartialSpecEntry, Vec<(String, MangleType)>)> = candidates
+        type Ranked<'a> = (usize, &'a PartialSpecEntry, Vec<(String, MangleType)>);
+        let mut ranked: Vec<Ranked<'_>> = candidates
             .into_iter()
-            .zip(candidate_binds.into_iter())
+            .zip(candidate_binds)
             .map(|((s, p), b)| (s, p, b))
             .collect();
-        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
         let (_, p, bindings) = &ranked[0];
         // M30.1: 按偏特化形参名对齐绑定值; pattern 中未出现的形参
         // (极少见) 用主实参同位置兜底, 保证 substitute 不越界

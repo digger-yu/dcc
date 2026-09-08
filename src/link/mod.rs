@@ -1190,7 +1190,7 @@ fn inject_lto_section_from_bundle(
     for obj in &bundle.objects {
         for sec in &obj.sections {
             if sec.name == ".dcc.lto" && !sec.data.is_empty() {
-                if let Some(bc) = lto_bitcode::deserialize_module(&sec.data).ok() {
+                if let Ok(bc) = lto_bitcode::deserialize_module(&sec.data) {
                     bc_modules.push(bc);
                 }
             }

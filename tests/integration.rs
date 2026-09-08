@@ -4476,7 +4476,7 @@ fn asm_section_previous_vdso_pattern() {
     // .altinstr_replacement 必须存在且包含可执行代码
     let alt_sec = elf64_section_data(&obj_data, ".altinstr_replacement")
         .expect("missing .altinstr_replacement (section directive dropped)");
-    assert!(alt_sec.len() > 0, ".altinstr_replacement empty");
+    assert!(!alt_sec.is_empty(), ".altinstr_replacement empty");
     // .altinstructions 必须存在且包含数据条目
     let alt_instr = elf64_section_data(&obj_data, ".altinstructions")
         .expect("missing .altinstructions (previous directive dropped)");
@@ -4484,11 +4484,11 @@ fn asm_section_previous_vdso_pattern() {
     // __bug_table 必须存在
     let bug_table = elf64_section_data(&obj_data, "__bug_table")
         .expect("missing __bug_table");
-    assert!(bug_table.len() > 0, "__bug_table empty");
+    assert!(!bug_table.is_empty(), "__bug_table empty");
     // __ex_table 必须存在 (嵌套 pushsection 在 section 上下文中)
     let ex_table = elf64_section_data(&obj_data, "__ex_table")
         .expect("missing __ex_table (nested pushsection in section context)");
-    assert!(ex_table.len() > 0, "__ex_table empty");
+    assert!(!ex_table.is_empty(), "__ex_table empty");
     // 验证无 R_X86_64_32 绝对重定位 (PIC 不兼容)
     let dump = Command::new("objdump")
         .args(["-r"])
@@ -4532,7 +4532,7 @@ void inline_asm_return(void) { asm volatile("ret"); }
     assert!(dump.status.success(), "objdump -d -r failed");
     let disasm = String::from_utf8_lossy(&dump.stdout);
     let has_naked_ret = disasm.lines().any(|line| {
-        let insn = line.split('\t').last().unwrap_or("").trim();
+        let insn = line.split('\t').next_back().unwrap_or("").trim();
         insn == "ret" || insn == "retq"
     });
     assert!(
@@ -12874,7 +12874,7 @@ fn m26_odr_conflict_rejected() {
 
     // 模块 A: foo() 返回 int
     fs::write(
-        &dir.join("moda.cpp"),
+        dir.join("moda.cpp"),
         "export module moda;\nexport int foo() { return 1; }\n",
     )
     .unwrap();
@@ -12896,7 +12896,7 @@ fn m26_odr_conflict_rejected() {
 
     // 模块 B: foo(int) 接受参数, 与模块 A 的 foo 同名不同定义
     fs::write(
-        &dir.join("modb.cpp"),
+        dir.join("modb.cpp"),
         "export module modb;\nexport int foo(int x) { return x; }\n",
     )
     .unwrap();
@@ -12918,7 +12918,7 @@ fn m26_odr_conflict_rejected() {
 
     // 导入 TU 同时 import moda + modb -> ODR 冲突必须被拒绝
     fs::write(
-        &dir.join("main.cpp"),
+        dir.join("main.cpp"),
         "import moda;\nimport modb;\nint main() { return 0; }\n",
     )
     .unwrap();
@@ -12948,7 +12948,7 @@ fn m26_odr_identical_imports_ok() {
     fs::create_dir_all(&dir).unwrap();
 
     fs::write(
-        &dir.join("moda.cpp"),
+        dir.join("moda.cpp"),
         "export module moda;\nexport int foo() { return 1; }\n",
     )
     .unwrap();
@@ -12969,7 +12969,7 @@ fn m26_odr_identical_imports_ok() {
     );
 
     fs::write(
-        &dir.join("modb.cpp"),
+        dir.join("modb.cpp"),
         "export module modb;\nexport int foo() { return 2; }\n",
     )
     .unwrap();
@@ -12990,7 +12990,7 @@ fn m26_odr_identical_imports_ok() {
     );
 
     fs::write(
-        &dir.join("main.cpp"),
+        dir.join("main.cpp"),
         "import moda;\nimport modb;\nint main() { return 0; }\n",
     )
     .unwrap();
@@ -14059,7 +14059,7 @@ int main(void) {
         .windows(4)
         .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
         .collect();
-    let has_dup = words.iter().any(|&w| w == 0x4e04_0c00);
+    let has_dup = words.contains(&0x4e04_0c00);
     let has_str_q0 = words.iter().any(|&w| w & 0xffc0_03ff == 0x3d80_03e0);
     let has_ldr_q0 = words.iter().any(|&w| w & 0xffc0_03ff == 0x3dc0_03e0);
     assert!(
@@ -14285,7 +14285,7 @@ int main(void) {{
         .arg("-I")
         .arg(generated_include)
         .arg("-o")
-        .arg(&dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())))
         .arg(&src)
         .output()
         .expect("run dcc -MMD");
@@ -14293,7 +14293,7 @@ int main(void) {{
     let dep_text = fs::read_to_string(&dep).unwrap_or_default();
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dep);
-    let _ = fs::remove_file(&dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -14331,12 +14331,12 @@ fn pch_negative_hash_mismatch_with_define() {
     let create_out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-create={}", pch.display()))
         .args(["-c", "-o"])
-        .arg(&dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())))
         .arg(&create_src)
         .output()
         .expect("run PCH create");
     let _ = fs::remove_file(&create_src);
-    let _ = fs::remove_file(&dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())));
     assert!(
         create_out.status.success(),
         "PCH create: {}",
@@ -14349,7 +14349,7 @@ fn pch_negative_hash_mismatch_with_define() {
         .args(["-DPCH_VALUE=200"])
         .arg(format!("-fpch-include={}", pch.display()))
         .args(["-c", "-o"])
-        .arg(&dir.join(format!("dcc-pch-neg-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-pch-neg-{}.o", std::process::id())))
         .arg(&src)
         .output()
         .expect("run PCH include with mismatch");
@@ -14357,7 +14357,7 @@ fn pch_negative_hash_mismatch_with_define() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(&dir.join(format!("dcc-pch-neg-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-pch-neg-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
@@ -14385,7 +14385,7 @@ fn pch_negative_corrupted_content() {
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-include={}", pch.display()))
         .args(["-c", "-o"])
-        .arg(&dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())))
         .arg(&src)
         .output()
         .expect("run PCH include with corrupted file");
@@ -14393,7 +14393,7 @@ fn pch_negative_corrupted_content() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(&dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
@@ -14421,7 +14421,7 @@ fn pch_negative_version_incompatibility() {
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-include={}", pch.display()))
         .args(["-c", "-o"])
-        .arg(&dir.join(format!("dcc-pch-ver-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-pch-ver-{}.o", std::process::id())))
         .arg(&src)
         .output()
         .expect("run PCH include with version mismatch");
@@ -14429,7 +14429,7 @@ fn pch_negative_version_incompatibility() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(&dir.join(format!("dcc-pch-ver-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-pch-ver-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
@@ -14460,14 +14460,14 @@ fn pch_negative_write_failure_snapshot() {
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-create={}", pch.display()))
         .args(["-c", "-o"])
-        .arg(&dir.join(format!("dcc-pch-wf-{}.o", std::process::id())))
+        .arg(dir.join(format!("dcc-pch-wf-{}.o", std::process::id())))
         .arg(&src)
         .output()
         .expect("run PCH create with write failure");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&dir.join(format!("dcc-pch-wf-{}.o", std::process::id())));
+    let _ = fs::remove_file(dir.join(format!("dcc-pch-wf-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
@@ -16663,7 +16663,7 @@ int test_func(int x) { return x + 1; }
     let obj_bytes = fs::read(&obj_path).unwrap();
     let _obj_str = String::from_utf8_lossy(&obj_bytes);
     // ELF should have mcount as undefined symbol
-    assert!(obj_bytes.len() > 0, "object file should be generated");
+    assert!(!obj_bytes.is_empty(), "object file should be generated");
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 
@@ -17408,7 +17408,7 @@ fn multi_file_parallel_compile() {
         assert!(obj.exists(), "{name}.o not produced");
         let bytes = fs::read(&obj).expect("read .o");
         assert!(
-            bytes.len() > 4 && &bytes[0..4] == &[0x7f, b'E', b'L', b'F'],
+            bytes.len() > 4 && bytes[0..4] == [0x7f, b'E', b'L', b'F'],
             "{name}.o is not valid ELF"
         );
     }
@@ -21663,7 +21663,7 @@ fn openmp_parallel_for_pragma() {
     ];
     let cfg = dcc::cli::parse(&args).expect("-fopenmp should parse");
     // -fopenmp is accepted (may produce warning but doesn't error)
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 
 // ===== Commit 11: Vectorization Directives =====
@@ -21676,7 +21676,7 @@ fn dir_vector_always() {
         "input.c".to_string(),
     ];
     let cfg = dcc::cli::parse(&args).expect("should parse");
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 
 #[test]
@@ -21687,7 +21687,7 @@ fn dir_ivdep() {
         "input.c".to_string(),
     ];
     let cfg = dcc::cli::parse(&args).expect("should parse");
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 
 #[test]
@@ -21698,7 +21698,7 @@ fn dir_unroll() {
         "input.c".to_string(),
     ];
     let cfg = dcc::cli::parse(&args).expect("should parse");
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 
 #[test]
@@ -21709,7 +21709,7 @@ fn pragma_simd() {
         "input.c".to_string(),
     ];
     let cfg = dcc::cli::parse(&args).expect("should parse");
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 #[test]
 fn openmp_simd_pragma() {
@@ -21720,7 +21720,7 @@ fn openmp_simd_pragma() {
         "input.c".to_string(),
     ];
     let cfg = dcc::cli::parse(&args).expect("-fopenmp=simd should parse");
-    assert!(cfg.opt >= 0);
+    assert_eq!(cfg.opt, 0);
 }
 // ===== Commit 9: Software Pipelining =====
 

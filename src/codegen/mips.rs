@@ -667,7 +667,7 @@ impl MipsCodegen {
         // 从帧底向帧顶写入, 相对于 $fp 的负偏移
         let words = frame_size / 4;
         for i in 0..words {
-            let fp_off = -((frame_size - (i as usize) * 4) as i16);
+            let fp_off = -((frame_size - i * 4) as i16);
             self.emit_sw(0, 30, fp_off); // sw $zero, fp_off($fp)
         }
     }
@@ -1231,7 +1231,7 @@ impl MipsCodegen {
                     }
                 }
             }
-            Expr::ComplexLit { real, imag: _, .. } => {
+            Expr::ComplexLit { real, .. } => {
                 // 简化: 返回实部
                 self.emit_load_imm(2, *real as i32);
             }
@@ -1738,6 +1738,9 @@ impl MipsCodegen {
     }
 
     /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    // 参数即内联 asm 的完整上下文 (asm 文本/输出/输入/修饰符/clobber/标签/行号等),
+    // 与所有后端的 `emit_inline_asm` 签名保持一致, 打包成结构体收益有限。
+    #[allow(clippy::too_many_arguments)]
     fn emit_inline_asm(
         &mut self,
         asm_str: &str,
@@ -1980,8 +1983,7 @@ impl MipsCodegen {
             | ((fmt as u32) << 21)
             | ((ft as u32) << 16)
             | ((fs as u32) << 11)
-            | ((fd as u32) << 6)
-            | 0b000000;
+            | ((fd as u32) << 6);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -2083,7 +2085,7 @@ impl MipsCodegen {
 
     /// MFC1 rt, fs: Move From Coprocessor 1 (FPU -> GP)
     fn emit_mfc1(&mut self, rt: u8, fs: u8) {
-        let inst: u32 = (0b010001 << 26) | (0b00000 << 21) | ((rt as u32) << 16) | ((fs as u32) << 11);
+        let inst: u32 = (0b010001 << 26) | ((rt as u32) << 16) | ((fs as u32) << 11);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 

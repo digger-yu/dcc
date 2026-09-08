@@ -1698,6 +1698,9 @@ fn write_aggregate_die(
 ///
 /// 使用 DW_TAG_class_type 而非 DW_TAG_structure_type,
 /// 并支持继承 (DW_TAG_inheritance) 和多态 (DW_AT_vtable_elem_count).
+// 一个 class DIE 需要同时携带 abbreviation/字符串表/行表/节偏移等上下文,
+// 打包成结构体收益有限。
+#[allow(clippy::too_many_arguments)]
 fn write_class_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
@@ -2970,29 +2973,29 @@ fn encode_btf_type(
         DwarfTypeKind::Pointer(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0; // 指针通常无名
-            let id = encoder.add_type(name_off, BTF_KIND_PTR, 0, target_id, &[]);
-            id
+
+            encoder.add_type(name_off, BTF_KIND_PTR, 0, target_id, &[])
         }
 
         DwarfTypeKind::Const(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
-            let id = encoder.add_type(name_off, BTF_KIND_CONST, 0, target_id, &[]);
-            id
+
+            encoder.add_type(name_off, BTF_KIND_CONST, 0, target_id, &[])
         }
 
         DwarfTypeKind::Volatile(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
-            let id = encoder.add_type(name_off, BTF_KIND_VOLATILE, 0, target_id, &[]);
-            id
+
+            encoder.add_type(name_off, BTF_KIND_VOLATILE, 0, target_id, &[])
         }
 
         DwarfTypeKind::Restrict(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
-            let id = encoder.add_type(name_off, BTF_KIND_RESTRICT, 0, target_id, &[]);
-            id
+
+            encoder.add_type(name_off, BTF_KIND_RESTRICT, 0, target_id, &[])
         }
 
         DwarfTypeKind::Struct { members } => {
@@ -3014,7 +3017,7 @@ fn encode_btf_type(
                 let offset_bits = m.offset_bits as u32;
                 if m.bit_size > 0 {
                     // 位域: offset | (bit_size << 24)
-                    let offset_enc = offset_bits | ((m.bit_size as u32) << 24);
+                    let offset_enc = offset_bits | (m.bit_size << 24);
                     member_data.extend_from_slice(&offset_enc.to_le_bytes());
                 } else {
                     member_data.extend_from_slice(&offset_bits.to_le_bytes());
@@ -3082,8 +3085,7 @@ fn encode_btf_type(
             arr_data.extend_from_slice(&idx_id.to_le_bytes());
             arr_data.extend_from_slice(&(*count as u32).to_le_bytes());
 
-            let id = encoder.add_type(name_off, BTF_KIND_ARRAY, 0, 0, &arr_data);
-            id
+            encoder.add_type(name_off, BTF_KIND_ARRAY, 0, 0, &arr_data)
         }
 
         DwarfTypeKind::Enum { members: variants, underlying } => {
@@ -3155,7 +3157,7 @@ fn encode_btf_type(
                 member_data.extend_from_slice(&m_type_id.to_le_bytes());
                 let offset_bits = m.offset_bits as u32;
                 if m.bit_size > 0 {
-                    let offset_enc = offset_bits | ((m.bit_size as u32) << 24);
+                    let offset_enc = offset_bits | (m.bit_size << 24);
                     member_data.extend_from_slice(&offset_enc.to_le_bytes());
                 } else {
                     member_data.extend_from_slice(&offset_bits.to_le_bytes());

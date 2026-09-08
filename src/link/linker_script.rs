@@ -1984,7 +1984,7 @@ impl Parser {
                             // 例如 .text.asan.* 后接 .text.tsan → 两个独立模式
                             if last_char == '*' {
                                 let second = s.chars().nth(1);
-                                if second.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                                if second.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                                     break;
                                 }
                             }
@@ -1992,7 +1992,7 @@ impl Parser {
                             // 比如 .text. + .data → 新模式
                             if last_char == '.' {
                                 let second = s.chars().nth(1);
-                                if second.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                                if second.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                                     break;
                                 }
                             }
@@ -2393,6 +2393,12 @@ pub struct EvalContext {
     pub memory_regions: HashMap<String, (u64, u64)>,
 }
 
+impl Default for EvalContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EvalContext {
     pub fn new() -> Self {
         Self {
@@ -2463,12 +2469,8 @@ impl EvalContext {
                         BinOp::Add => li.wrapping_add(ri),
                         BinOp::Sub => li.wrapping_sub(ri),
                         BinOp::Mul => li.wrapping_mul(ri),
-                        BinOp::Div => {
-                            if ri == 0 { 0 } else { li / ri }
-                        }
-                        BinOp::Mod => {
-                            if ri == 0 { 0 } else { li % ri }
-                        }
+                        BinOp::Div => li.checked_div(ri).unwrap_or(0),
+                        BinOp::Mod => li.checked_rem(ri).unwrap_or(0),
                         BinOp::BitAnd => li & ri,
                         BinOp::BitOr => li | ri,
                         BinOp::BitXor => li ^ ri,
@@ -2694,6 +2696,897 @@ impl LinkerScript {
         }
         let mut parser = Parser::new(tokens);
         parser.parse()
+    }
+}
+
+// ─── Linker Script Executor ─────────────────────────────────────────────────
+
+use super::object::InputBundle;
+use super::resolve::ResolvedSymbol;
+use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
+
+/// 链接脚本执行结果
+pub struct ScriptLayoutResult {
+    /// 输出节列表（按脚本顺序）
+    pub sections: Vec<ScriptOutputSection>,
+    /// 符号赋值
+    pub symbols: Vec<ScriptSymbol>,
+    /// 入口地址
+    pub entry: Option<u64>,
+    /// 断言失败消息
+    pub assert_failures: Vec<String>,
+    /// COMMON 符号放置信息（*(COMMON) 模式处理结果）
+    pub common_placements: Vec<CommonPlacement>,
+    /// 脚本定义的段 (来自 PHDRS 块执行)
+    pub segments: Vec<ScriptSegment>,
+}
+
+/// 脚本 PHDRS 块执行后生成的段描述
+///
+/// 每个 ScriptSegment 对应一个 PHDRS 定义，包含该段应覆盖的
+/// 输出节索引列表。当脚本未定义 PHDRS 时此向量为空，
+/// layout 层回退到默认 2-segment 模型。
+pub struct ScriptSegment {
+    /// PHDR 名称
+    pub name: String,
+    /// 段类型 (PT_LOAD=1, PT_DYNAMIC=2, ...)
+    pub ty: u32,
+    /// 段标志 (PF_R=4, PF_W=2, PF_X=1)
+    pub flags: u32,
+    /// 该段包含的输出节索引 (在 result.sections 中的位置)
+    pub section_indices: Vec<usize>,
+    /// 段虚拟地址 (首节 VMA)
+    pub vma: u64,
+    /// 段文件大小
+    pub filesz: u64,
+    /// 段内存大小
+    pub memsz: u64,
+}
+
+/// 脚本定义的输出节
+pub struct ScriptOutputSection {
+    pub name: String,
+    pub vma: u64,
+    pub lma: u64,
+    pub align: u64,
+    pub fill: u64,
+    pub size: u64,
+    pub data: Vec<u8>,
+    pub flags: u32,
+    pub ty: u32,
+    pub phdrs: Vec<String>,
+    pub input_sections: Vec<InputSectionMatch>,
+    pub is_discard: bool,
+    pub is_info: bool,
+    /// 是否为 :NONE（不属于任何程序头/LOAD 段）
+    pub is_none_phdr: bool,
+}
+
+/// 输入节匹配结果
+pub struct InputSectionMatch {
+    pub input_index: u32,
+    pub pattern: String,
+    pub offset: u64,
+}
+
+/// 脚本定义的符号
+pub struct ScriptSymbol {
+    pub name: String,
+    pub value: u64,
+    pub is_provide: bool,
+}
+
+/// COMMON 符号放置信息
+///
+/// COMMON 符号没有对应的输入节，它们在 *(COMMON) 模式处理时
+/// 被直接分配到输出节中（类似 .bss 的 NOBITS 空间）。
+pub struct CommonPlacement {
+    /// 符号在 resolved 数组中的索引
+    pub resolved_idx: usize,
+    /// 输出节的 VMA
+    pub output_vma: u64,
+    /// 符号在输出节内的偏移
+    pub offset: u64,
+}
+
+/// 执行链接脚本，生成布局结果
+pub fn execute_script(
+    script: &LinkerScript,
+    bundle: &InputBundle,
+    resolved: &[ResolvedSymbol],
+) -> Result<ScriptLayoutResult, String> {
+    let mut ctx = EvalContext::new();
+    let mut result = ScriptLayoutResult {
+        sections: Vec::new(),
+        symbols: Vec::new(),
+        entry: None,
+        assert_failures: Vec::new(),
+        common_placements: Vec::new(),
+        segments: Vec::new(),
+    };
+    // 跟踪已匹配的输入节，避免重复匹配
+    let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    // 0. 初始化内存区域
+    for region in &script.memory_regions {
+        let origin = ctx.eval(&region.origin).unwrap_or(0);
+        let length = ctx.eval(&region.length).unwrap_or(0);
+        ctx.memory_regions.insert(region.name.clone(), (origin, length));
+    }
+
+    // 0. 将已解析的输入符号加入 ctx.symbols（值为节内偏移，稍后会更新）
+    for sym in resolved {
+        if !sym.name.is_empty() && sym.section > 0 {
+            ctx.symbols.insert(sym.name.clone(), sym.value);
+        }
+    }
+
+    // 1. 处理顶层符号赋值（第一遍：用节相对值）
+    for assign in &script.top_assignments {
+        let value = ctx.eval(&assign.expr).unwrap_or(0);
+        ctx.symbols.insert(assign.name.clone(), value);
+        result.symbols.push(ScriptSymbol {
+            name: assign.name.clone(),
+            value,
+            is_provide: assign.is_provide,
+        });
+    }
+
+    // 2. 处理 SECTIONS 块
+    for cmd in &script.sections {
+        match cmd {
+            SectionCommand::LocationAssign(expr) => {
+                ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
+            }
+            SectionCommand::SymbolAssign(assign) => {
+                let value = ctx.eval(&assign.expr).unwrap_or(0);
+                ctx.symbols.insert(assign.name.clone(), value);
+                result.symbols.push(ScriptSymbol {
+                    name: assign.name.clone(),
+                    value,
+                    is_provide: assign.is_provide,
+                });
+            }
+            SectionCommand::OutputSection(sec_def) => {
+                let out_sec = execute_output_section(
+                    sec_def, bundle, &mut ctx, &mut used_sections, resolved,
+                    &mut result.common_placements,
+                )?;
+                if !out_sec.is_discard {
+                    ctx.section_addrs.insert(out_sec.name.clone(), out_sec.vma);
+                    ctx.section_sizes.insert(out_sec.name.clone(), out_sec.size);
+                    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
+                    result.sections.push(out_sec);
+                }
+            }
+            SectionCommand::AssertCmd(expr, msg) => {
+                let val = ctx.eval(expr).unwrap_or(0);
+                if val == 0 {
+                    result.assert_failures.push(msg.clone());
+                }
+            }
+            SectionCommand::ProvideCmd(name, expr) => {
+                if !ctx.symbols.contains_key(name) {
+                    let value = ctx.eval(expr).unwrap_or(0);
+                    ctx.symbols.insert(name.clone(), value);
+                    result.symbols.push(ScriptSymbol {
+                        name: name.clone(),
+                        value,
+                        is_provide: true,
+                    });
+                }
+            }
+            SectionCommand::Overlay(overlay) => {
+                // OVERLAY: 所有子节共享相同 VMA，但可有不同的 LMA
+                let base_vma = if let Some(ref addr) = overlay.address {
+                    ctx.eval(addr).unwrap_or(ctx.location_counter)
+                } else {
+                    ctx.location_counter
+                };
+
+                let base_lma = if let Some(ref lma_expr) = overlay.lma {
+                    ctx.eval(lma_expr).unwrap_or(0)
+                } else {
+                    base_vma
+                };
+
+                let mut max_size: u64 = 0;
+
+                for sec in &overlay.sections {
+                    // 每个子节创建为独立输出节，VMA 相同
+                    let mut out_sec = ScriptOutputSection {
+                        name: sec.name.clone(),
+                        vma: base_vma,
+                        lma: base_lma,
+                        align: 1,
+                        fill: sec.fill.unwrap_or(0),
+                        size: 0,
+                        data: Vec::new(),
+                        flags: 0,
+                        ty: SHT_PROGBITS,
+                        phdrs: sec.phdrs.clone(),
+                        input_sections: Vec::new(),
+                        is_discard: false,
+                        is_info: false,
+                        is_none_phdr: sec.phdrs.iter().any(|p| p == "NONE"),
+                    };
+
+                    // 处理子节 body
+                    let mut current_offset: u64 = 0;
+                    for item in &sec.body {
+                        match item {
+                            SectionBodyItem::InputSection(spec) => {
+                                // 匹配输入节
+                                let matches = match_input_sections(spec, bundle, &ctx, &used_sections);
+                                for m in matches {
+                                    let in_sec = &bundle.sections[m.input_index as usize];
+                                    // 更新节标志
+                                    out_sec.flags |= in_sec.flags;
+                                    if in_sec.ty == SHT_NOBITS {
+                                        out_sec.ty = SHT_NOBITS;
+                                    }
+                                    // 对齐
+                                    let align = in_sec.align.max(1);
+                                    let aligned = (current_offset + align - 1) & !(align - 1);
+                                    if aligned > current_offset && out_sec.ty != SHT_NOBITS {
+                                        let pad = aligned - current_offset;
+                                        if pad < 0x10000000 {
+                                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                                        }
+                                    }
+                                    current_offset = aligned;
+                                    // 添加数据
+                                    if in_sec.ty != SHT_NOBITS {
+                                        out_sec.data.extend_from_slice(&in_sec.data);
+                                        current_offset += in_sec.data.len() as u64;
+                                    }
+                                    // 记录匹配
+                                    out_sec.input_sections.push(InputSectionMatch {
+                                        input_index: m.input_index,
+                                        pattern: m.pattern,
+                                        offset: aligned,
+                                    });
+                                }
+                            }
+                            SectionBodyItem::SymbolAssign(a) => {
+                                let value = ctx.eval(&a.expr).unwrap_or(0);
+                                ctx.symbols.insert(a.name.clone(), value);
+                                result.symbols.push(ScriptSymbol {
+                                    name: a.name.clone(),
+                                    value,
+                                    is_provide: a.is_provide,
+                                });
+                            }
+                            SectionBodyItem::LocationAssign(expr) => {
+                                let val = ctx.eval(expr).unwrap_or(0);
+                                let new_offset = if val >= out_sec.vma {
+                                    ctx.location_counter = val;
+                                    val.wrapping_sub(out_sec.vma)
+                                } else {
+                                    ctx.location_counter = out_sec.vma.wrapping_add(val);
+                                    val
+                                };
+                                if new_offset > out_sec.data.len() as u64 {
+                                    let pad = new_offset - out_sec.data.len() as u64;
+                                    if pad < 0x10000000 {
+                                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                                    }
+                                }
+                                current_offset = new_offset.max(out_sec.data.len() as u64);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    out_sec.size = out_sec.data.len() as u64;
+                    if out_sec.size > max_size {
+                        max_size = out_sec.size;
+                    }
+
+                    ctx.section_addrs.insert(sec.name.clone(), out_sec.vma);
+                    ctx.section_sizes.insert(sec.name.clone(), out_sec.size);
+                    result.sections.push(out_sec);
+                }
+
+                // 位置计数器前进到最大子节之后
+                ctx.location_counter = base_vma.wrapping_add(max_size);
+            }
+        }
+    }
+
+    // 2.5 将 COMMON 符号加入 ctx.symbols（*(COMMON) 处理后已有放置信息）
+    for cp in &result.common_placements {
+        let sym = &resolved[cp.resolved_idx];
+        let abs_addr = cp.output_vma.wrapping_add(cp.offset);
+        ctx.symbols.insert(sym.name.clone(), abs_addr);
+    }
+
+    // 2.6 INSERT BEFORE/AFTER: 重排输出节顺序
+    for ic in &script.insert_commands {
+        let sec_name = &ic.section_name;
+        // 找到要移动的节的当前位置
+        let src_pos = result.sections.iter().position(|s| s.name == *sec_name);
+        if let Some(src) = src_pos {
+            let sec = result.sections.remove(src);
+            if let Some(ref target) = ic.after {
+                // INSERT AFTER target: 移到 target 之后
+                if let Some(dst) = result.sections.iter().position(|s| s.name == *target) {
+                    result.sections.insert(dst + 1, sec);
+                } else {
+                    result.sections.push(sec); // target 不存在则追加
+                }
+            } else if let Some(ref target) = ic.before {
+                // INSERT BEFORE target: 移到 target 之前
+                if let Some(dst) = result.sections.iter().position(|s| s.name == *target) {
+                    result.sections.insert(dst, sec);
+                } else {
+                    result.sections.push(sec);
+                }
+            }
+        }
+    }
+
+    // 2.7 NOCROSSREFS 验证: 构建符号→输出节映射
+    // 检查 NOCROSSREFS 组内的节之间是否存在跨节引用
+    let mut sym_to_section: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for out_sec in &result.sections {
+        for m in &out_sec.input_sections {
+            // 将属于该输入节的符号映射到输出节
+            for sym in resolved {
+                if sym.section == m.input_index && !sym.name.is_empty() {
+                    sym_to_section.insert(
+                        sym.name.clone(),
+                        out_sec.name.clone(),
+                    );
+                }
+            }
+        }
+    }
+    // 脚本定义的符号归入最近处理的输出节
+    if let Some(last_sec) = result.sections.last() {
+        for ssym in &result.symbols {
+            if !sym_to_section.contains_key(&ssym.name) {
+                sym_to_section.insert(ssym.name.clone(), last_sec.name.clone());
+            }
+        }
+    }
+    for group in &script.no_cross_refs {
+        for i in 0..group.len() {
+            for j in 0..group.len() {
+                if i == j { continue; }
+                let src_sec = &group[i];
+                let dst_sec = &group[j];
+                // 检查 dst_sec 中定义的符号是否被 src_sec 中的代码引用
+                // (需要重定位信息，此处仅记录映射供后续验证)
+                let _ = (src_sec, dst_sec);
+            }
+        }
+    }
+
+    // 3. 处理顶层 ASSERT/PROVIDE
+    for cmd in &script.trailing_commands {
+        match cmd {
+            TrailingCommand::Assert(expr, msg) => {
+                let val = ctx.eval(expr).unwrap_or(0);
+                if val == 0 {
+                    result.assert_failures.push(msg.clone());
+                }
+            }
+            TrailingCommand::Provide(name, expr) => {
+                if !ctx.symbols.contains_key(name) {
+                    let value = ctx.eval(expr).unwrap_or(0);
+                    ctx.symbols.insert(name.clone(), value);
+                    result.symbols.push(ScriptSymbol {
+                        name: name.clone(),
+                        value,
+                        is_provide: true,
+                    });
+                }
+            }
+            TrailingCommand::LocationAssign(expr) => {
+                ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
+            }
+        }
+    }
+
+    // 3.5 更新输入符号为绝对地址
+    // 构建 flat section index → (output VMA + offset within output) 的映射
+    let mut sec_vma_map: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for out_sec in &result.sections {
+        for m in &out_sec.input_sections {
+            sec_vma_map.insert(m.input_index, out_sec.vma.wrapping_add(m.offset));
+        }
+    }
+    // 用绝对地址更新输入符号
+    for sym in resolved {
+        if sym.section > 0 && !sym.name.is_empty() {
+            if let Some(&sec_vma) = sec_vma_map.get(&sym.section) {
+                let abs_addr = sec_vma.wrapping_add(sym.value);
+                ctx.symbols.insert(sym.name.clone(), abs_addr);
+            }
+        }
+    }
+
+    // 3.6 重新求值顶层符号赋值（用绝对地址）
+    for (i, assign) in script.top_assignments.iter().enumerate() {
+        let value = ctx.eval(&assign.expr).unwrap_or(0);
+        ctx.symbols.insert(assign.name.clone(), value);
+        if i < result.symbols.len() {
+            result.symbols[i].value = value;
+        }
+    }
+
+    // 3.7 重新求值 SECTIONS 块内的符号赋值（用绝对地址）
+    let mut sym_idx = script.top_assignments.len();
+    for cmd in &script.sections {
+        if let SectionCommand::SymbolAssign(assign) = cmd {
+            let value = ctx.eval(&assign.expr).unwrap_or(0);
+            ctx.symbols.insert(assign.name.clone(), value);
+            if sym_idx < result.symbols.len() {
+                result.symbols[sym_idx].value = value;
+            }
+            sym_idx += 1;
+        }
+    }
+
+    // 4. 设置入口地址
+    if let Some(ref entry_name) = script.entry {
+        if let Some(&addr) = ctx.symbols.get(entry_name) {
+            result.entry = Some(addr);
+        }
+    }
+
+    // 5. 根据 PHDRS 块构建段信息
+    //    仅当脚本定义了 PHDRS 时才生成 ScriptSegment；
+    //    否则 layout 层使用默认 2-segment 模型。
+    if !script.phdrs.is_empty() {
+        for phdr in &script.phdrs {
+            let pt = phdr.ty.to_pt();
+            // 计算 flags: 显式 FLAGS(N) 优先，否则根据段类型推断
+            let flags = phdr.flags.unwrap_or_else(|| match phdr.ty {
+                PhdrType::PtLoad => {
+                    // 扫描所有映射到此 PHDR 的节来推断 flags
+                    let mut f = 4u32; // PF_R
+                    for sec in &result.sections {
+                        if sec.is_none_phdr {
+                            continue;
+                        }
+                        if sec.phdrs.contains(&phdr.name) {
+                            if sec.flags & SHF_WRITE != 0 {
+                                f |= 2; // PF_W
+                            }
+                            if sec.flags & SHF_EXECINSTR != 0 {
+                                f |= 1; // PF_X
+                            }
+                        }
+                    }
+                    f
+                }
+                PhdrType::PtGnuStack => 6, // PF_R | PF_W
+                PhdrType::PtPhdr => 4,     // PF_R
+                _ => 4,
+            });
+
+            // 收集映射到此 PHDR 的输出节索引
+            let mut section_indices = Vec::new();
+            for (i, sec) in result.sections.iter().enumerate() {
+                if sec.is_none_phdr {
+                    continue;
+                }
+                // 如果节显式映射到此 PHDR
+                if sec.phdrs.contains(&phdr.name) {
+                    section_indices.push(i);
+                } else if sec.phdrs.is_empty() && pt == 1 {
+                    // 无显式 PHDR 映射的节默认属于 PT_LOAD
+                    section_indices.push(i);
+                }
+            }
+
+            // 计算 VMA / filesz / memsz
+            let vma = section_indices
+                .first()
+                .map(|&i| result.sections[i].vma)
+                .unwrap_or(0);
+            let mut filesz = 0u64;
+            let mut memsz = 0u64;
+            for &idx in &section_indices {
+                let sec = &result.sections[idx];
+                let end = sec.vma.wrapping_add(sec.size).wrapping_sub(vma);
+                if sec.ty != SHT_NOBITS {
+                    filesz = filesz.max(end);
+                }
+                memsz = memsz.max(end);
+            }
+
+            result.segments.push(ScriptSegment {
+                name: phdr.name.clone(),
+                ty: pt,
+                flags,
+                section_indices,
+                vma,
+                filesz,
+                memsz,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+/// 执行单个输出节定义
+fn execute_output_section(
+    sec_def: &OutputSectionDef,
+    bundle: &InputBundle,
+    ctx: &mut EvalContext,
+    used_sections: &mut std::collections::HashSet<u32>,
+    resolved: &[ResolvedSymbol],
+    common_placements: &mut Vec<CommonPlacement>,
+) -> Result<ScriptOutputSection, String> {
+    let mut out_sec = ScriptOutputSection {
+        name: sec_def.name.clone(),
+        vma: ctx.location_counter,
+        lma: ctx.location_counter,
+        align: 1,
+        fill: 0,
+        size: 0,
+        data: Vec::new(),
+        flags: 0,
+        ty: SHT_PROGBITS,
+        phdrs: sec_def.phdrs.clone(),
+        input_sections: Vec::new(),
+        is_discard: sec_def.is_discard,
+        is_info: sec_def.is_info,
+        is_none_phdr: sec_def.phdrs.iter().any(|p| p == "NONE"),
+    };
+
+    // 计算地址
+    if let Some(ref addr_expr) = sec_def.address {
+        out_sec.vma = ctx.eval(addr_expr).unwrap_or(ctx.location_counter);
+    }
+    if let Some(ref lma_expr) = sec_def.lma {
+        out_sec.lma = ctx.eval(lma_expr).unwrap_or(out_sec.vma);
+    }
+    if let Some(ref align_expr) = sec_def.align {
+        out_sec.align = ctx.eval(align_expr).unwrap_or(1);
+    }
+    if let Some(fill) = sec_def.fill {
+        out_sec.fill = fill;
+    }
+
+    // 对齐位置计数器
+    if out_sec.align > 1 {
+        ctx.location_counter = ctx.location_counter.wrapping_add(out_sec.align - 1) & !(out_sec.align - 1);
+        out_sec.vma = ctx.location_counter;
+    }
+
+    // 处理节体
+    let mut current_offset: u64 = 0;
+    for item in &sec_def.body {
+        match item {
+            SectionBodyItem::LocationAssign(expr) => {
+                let val = ctx.eval(expr).unwrap_or(0);
+                // val 可能是绝对地址（如 ALIGN 返回的）或相对偏移
+                // 如果 val >= out_sec.vma，视为绝对地址
+                let new_offset = if val >= out_sec.vma {
+                    ctx.location_counter = val;
+                    val.wrapping_sub(out_sec.vma)
+                } else {
+                    // 相对偏移
+                    ctx.location_counter = out_sec.vma.wrapping_add(val);
+                    val
+                };
+                // 如果 new_offset 超出当前数据长度，添加填充字节
+                // 这样 ALIGN 等指令产生的空隙会被填零
+                if new_offset > out_sec.data.len() as u64 {
+                    let pad = new_offset - out_sec.data.len() as u64;
+                    if pad < 0x10000000 {
+                        // 限制最大填充为 256MB，防止错误
+                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                    }
+                }
+                // current_offset 不能回退到已有数据之前
+                current_offset = new_offset.max(out_sec.data.len() as u64);
+            }
+            SectionBodyItem::SymbolAssign(assign) => {
+                let val = ctx.eval(&assign.expr).unwrap_or(0);
+                ctx.symbols.insert(assign.name.clone(), val);
+            }
+            SectionBodyItem::InputSection(spec) => {
+                // 匹配输入节
+                let matches = match_input_sections(spec, bundle, ctx, used_sections);
+                for m in matches {
+                    // 标记为已使用
+                    used_sections.insert(m.input_index);
+                    let in_sec = &bundle.sections[m.input_index as usize];
+                    // 更新节标志
+                    out_sec.flags |= in_sec.flags;
+                    if in_sec.ty == SHT_NOBITS {
+                        out_sec.ty = SHT_NOBITS;
+                    }
+                    // 对齐
+                    let align = in_sec.align.max(1);
+                    let aligned = (current_offset + align - 1) & !(align - 1);
+                    if aligned > current_offset && out_sec.ty != SHT_NOBITS {
+                        let pad = aligned - current_offset;
+                        if pad < 0x10000000 {
+                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                        }
+                    }
+                    current_offset = aligned;
+                    // 添加数据
+                    if in_sec.ty != SHT_NOBITS {
+                        out_sec.data.extend_from_slice(&in_sec.data);
+                        current_offset += in_sec.data.len() as u64;
+                    }
+                    // 记录匹配
+                    out_sec.input_sections.push(InputSectionMatch {
+                        input_index: m.input_index,
+                        pattern: m.pattern,
+                        offset: aligned,
+                    });
+                }
+
+                // *(COMMON) 特殊处理: 收集 COMMON 符号并分配 NOBITS 空间
+                // COMMON 符号没有对应的输入节，它们直接来自符号表
+                if spec.is_common {
+                    out_sec.ty = SHT_NOBITS;
+                    out_sec.flags |= SHF_WRITE | SHF_ALLOC;
+                    for (idx, sym) in resolved.iter().enumerate() {
+                        if !sym.is_common || sym.name.is_empty() {
+                            continue;
+                        }
+                        let align = sym.size.max(1);
+                        let aligned = (current_offset + align - 1) & !(align - 1);
+                        current_offset = aligned + sym.size;
+                        common_placements.push(CommonPlacement {
+                            resolved_idx: idx,
+                            output_vma: out_sec.vma,
+                            offset: aligned,
+                        });
+                    }
+                }
+            }
+            SectionBodyItem::Constructors => {
+                // CONSTRUCTORS 用于 a.out 兼容，现代 ELF 不需要特殊处理
+            }
+            SectionBodyItem::DataFill(value, size) => {
+                let bytes = match size {
+                    1 => vec![*value as u8],
+                    2 => (*value as u16).to_le_bytes().to_vec(),
+                    4 => (*value as u32).to_le_bytes().to_vec(),
+                    8 => value.to_le_bytes().to_vec(),
+                    _ => vec![],
+                };
+                out_sec.data.extend_from_slice(&bytes);
+                current_offset += *size as u64;
+            }
+        }
+    }
+
+    // size 应该是 current_offset 和实际数据长度的最大值
+    // 因为 . = ALIGN(...) 等位置赋值可能重置 current_offset，
+    // 但之前累积的数据仍然在 out_sec.data 中
+    out_sec.size = current_offset.max(out_sec.data.len() as u64);
+    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
+    Ok(out_sec)
+}
+
+/// 应用单个排序条件到匹配列表
+///
+/// - ByName: 按节名升序排序
+/// - ByAlignment: 按对齐值降序排序（对齐值大的在前）
+///
+/// Rust 的 sort_by 是稳定排序，组合排序时从最后一个条件反向应用即可实现多级排序。
+fn apply_sort_criterion(
+    matches: &mut [InputSectionMatch],
+    bundle: &InputBundle,
+    kind: SortKind,
+) {
+    match kind {
+        SortKind::ByName => {
+            matches.sort_by(|a, b| {
+                let na = &bundle.sections[a.input_index as usize].name;
+                let nb = &bundle.sections[b.input_index as usize].name;
+                na.cmp(nb)
+            });
+        }
+        SortKind::ByAlignment => {
+            matches.sort_by(|a, b| {
+                let aa = bundle.sections[a.input_index as usize].align;
+                let ab = bundle.sections[b.input_index as usize].align;
+                ab.cmp(&aa) // 降序，对齐值大的在前
+            });
+        }
+    }
+}
+
+/// 匹配输入节到输出节规范
+///
+/// 按模式顺序匹配输入节，每个模式独立排序后追加到结果中。
+/// 这确保 SORT() 包裹的模式其匹配节按指定方式排序，
+/// 而未包裹的节保持文件出现顺序。
+fn match_input_sections(
+    spec: &InputSectionSpec,
+    bundle: &InputBundle,
+    _ctx: &EvalContext,
+    used_sections: &std::collections::HashSet<u32>,
+) -> Vec<InputSectionMatch> {
+    let mut matches = Vec::new();
+    // 跟踪本次调用中已匹配的节（跨模式去重）
+    let mut locally_used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    // 按模式顺序处理：每个模式独立匹配、排序、追加
+    for pat in &spec.section_patterns {
+        let mut pat_matches = Vec::new();
+
+        for (i, in_sec) in bundle.sections.iter().enumerate() {
+            // 跳过空节名和特殊节
+            if in_sec.name.is_empty()
+                || in_sec.name == ".symtab"
+                || in_sec.name == ".strtab"
+                || in_sec.name == ".shstrtab"
+                || in_sec.name.starts_with(".rela")
+                || in_sec.name.starts_with(".rel")
+            {
+                continue;
+            }
+
+            // 跳过已被之前模式或之前 spec 匹配的节
+            if used_sections.contains(&(i as u32)) || locally_used.contains(&(i as u32)) {
+                continue;
+            }
+
+            // 检查是否被 EXCLUDE_FILE 排除
+            let file_name = &bundle.objects[in_sec.input_obj].name;
+            let excluded = spec.exclude_files.iter().any(|ex| {
+                section_name_matches(file_name, ex)
+            });
+            if excluded {
+                continue;
+            }
+
+            // 检查是否匹配当前模式
+            if section_name_matches(&in_sec.name, &pat.pattern) {
+                pat_matches.push(InputSectionMatch {
+                    input_index: i as u32,
+                    pattern: pat.pattern.clone(),
+                    offset: 0,
+                });
+            }
+        }
+
+        // 根据当前模式的 sort mode 排序
+        // 对于组合排序，从最后一个条件开始反向依次应用稳定排序
+        // 例如 SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*)) 的链为 [ByName, ByAlignment]
+        // 先按 ByAlignment 稳定排序，再按 ByName 稳定排序
+        // 最终效果：主排序按名称，同名称时按对齐值
+        match &pat.sort {
+            SortMode::None => {
+                // 保持文件出现顺序（已是遍历顺序）
+            }
+            SortMode::Single(kind) => {
+                apply_sort_criterion(&mut pat_matches, bundle, *kind);
+            }
+            SortMode::Combined(chain) => {
+                for kind in chain.iter().rev() {
+                    apply_sort_criterion(&mut pat_matches, bundle, *kind);
+                }
+            }
+        }
+
+        // 标记为已匹配并追加到结果
+        for m in &pat_matches {
+            locally_used.insert(m.input_index);
+        }
+        matches.extend(pat_matches);
+    }
+
+    matches
+}
+
+/// 检查节名是否匹配模式（支持通配符 * ? 和字符类 [...]）
+fn section_name_matches(name: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
+        return name == pattern;
+    }
+
+    let name_chars: Vec<char> = name.chars().collect();
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    glob_match(&name_chars, &pattern_chars)
+}
+
+/// 递归通配符匹配，支持 * ? [...]
+fn glob_match(name: &[char], pattern: &[char]) -> bool {
+    let mut ni = 0;
+    let mut pi = 0;
+    let mut star_pi: Option<usize> = None;
+    let mut star_ni: usize = 0;
+
+    while ni < name.len() {
+        if pi < pattern.len() && pattern[pi] == '?' {
+            ni += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == '[' {
+            // 字符类匹配
+            if let Some((matched, end_pi)) = match_char_class(&name[ni], &pattern[pi..]) {
+                if matched {
+                    ni += 1;
+                    pi = end_pi;
+                } else if let Some(si) = star_pi {
+                    pi = si + 1;
+                    star_ni += 1;
+                    ni = star_ni;
+                } else {
+                    return false;
+                }
+            } else if let Some(si) = star_pi {
+                pi = si + 1;
+                star_ni += 1;
+                ni = star_ni;
+            } else {
+                return false;
+            }
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_pi = Some(pi);
+            star_ni = ni;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == name[ni] {
+            ni += 1;
+            pi += 1;
+        } else if let Some(si) = star_pi {
+            pi = si + 1;
+            star_ni += 1;
+            ni = star_ni;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
+}
+
+/// 匹配字符类 [...]，返回 (是否匹配, 结束位置)
+fn match_char_class(c: &char, pattern: &[char]) -> Option<(bool, usize)> {
+    // pattern[0] == '['
+    let mut i = 1;
+    let negate = if i < pattern.len() && (pattern[i] == '!' || pattern[i] == '^') {
+        i += 1;
+        true
+    } else {
+        false
+    };
+
+    let mut matched = false;
+    while i < pattern.len() && pattern[i] != ']' {
+        let start = pattern[i];
+        // 检查范围 a-z
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
+            let end = pattern[i + 2];
+            if *c >= start && *c <= end {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if *c == start {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+
+    if i < pattern.len() && pattern[i] == ']' {
+        let result = if negate { !matched } else { matched };
+        Some((result, i + 1))
+    } else {
+        None // 未找到 ']'
     }
 }
 
@@ -3600,7 +4493,7 @@ mod tests {
         // 测试浮点字面量解析和求值
         let ctx = EvalContext::new();
         // 简单浮点字面量
-        let expr = Expr::Float(3.14);
+        let expr = Expr::Float(3.19);
         assert_eq!(ctx.eval(&expr).unwrap(), 3);
 
         let expr = Expr::Float(0.5);
@@ -3714,11 +4607,11 @@ mod tests {
     #[test]
     fn lex_float_decimal() {
         // 测试小数形式的浮点字面量
-        let text = "3.14";
+        let text = "3.19";
         let mut lexer = Lexer::new(text);
         let tok = lexer.next_token();
         match tok {
-            Token::Float(f) => assert!((f - 3.14).abs() < 1e-10),
+            Token::Float(f) => assert!((f - 3.19).abs() < 1e-10),
             _ => panic!("expected Float token, got {:?}", tok),
         }
 
@@ -4257,7 +5150,7 @@ mod tests {
         }
 
         // 每个 initcall 节是独立的模式，无排序（保持脚本顺序）
-        let levels = vec!["early", "0", "1", "3", "5"];
+        let levels = ["early", "0", "1", "3", "5"];
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
             section_patterns: levels.iter().map(|l| {
@@ -4701,897 +5594,6 @@ mod tests {
         assert!(script.insert_commands[0].before.is_none());
         assert!(script.insert_commands[1].after.is_none());
         assert_eq!(script.insert_commands[1].before.as_deref(), Some(".bss"));
-    }
-}
-
-// ─── Linker Script Executor ─────────────────────────────────────────────────
-
-use super::object::InputBundle;
-use super::resolve::ResolvedSymbol;
-use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
-
-/// 链接脚本执行结果
-pub struct ScriptLayoutResult {
-    /// 输出节列表（按脚本顺序）
-    pub sections: Vec<ScriptOutputSection>,
-    /// 符号赋值
-    pub symbols: Vec<ScriptSymbol>,
-    /// 入口地址
-    pub entry: Option<u64>,
-    /// 断言失败消息
-    pub assert_failures: Vec<String>,
-    /// COMMON 符号放置信息（*(COMMON) 模式处理结果）
-    pub common_placements: Vec<CommonPlacement>,
-    /// 脚本定义的段 (来自 PHDRS 块执行)
-    pub segments: Vec<ScriptSegment>,
-}
-
-/// 脚本 PHDRS 块执行后生成的段描述
-///
-/// 每个 ScriptSegment 对应一个 PHDRS 定义，包含该段应覆盖的
-/// 输出节索引列表。当脚本未定义 PHDRS 时此向量为空，
-/// layout 层回退到默认 2-segment 模型。
-pub struct ScriptSegment {
-    /// PHDR 名称
-    pub name: String,
-    /// 段类型 (PT_LOAD=1, PT_DYNAMIC=2, ...)
-    pub ty: u32,
-    /// 段标志 (PF_R=4, PF_W=2, PF_X=1)
-    pub flags: u32,
-    /// 该段包含的输出节索引 (在 result.sections 中的位置)
-    pub section_indices: Vec<usize>,
-    /// 段虚拟地址 (首节 VMA)
-    pub vma: u64,
-    /// 段文件大小
-    pub filesz: u64,
-    /// 段内存大小
-    pub memsz: u64,
-}
-
-/// 脚本定义的输出节
-pub struct ScriptOutputSection {
-    pub name: String,
-    pub vma: u64,
-    pub lma: u64,
-    pub align: u64,
-    pub fill: u64,
-    pub size: u64,
-    pub data: Vec<u8>,
-    pub flags: u32,
-    pub ty: u32,
-    pub phdrs: Vec<String>,
-    pub input_sections: Vec<InputSectionMatch>,
-    pub is_discard: bool,
-    pub is_info: bool,
-    /// 是否为 :NONE（不属于任何程序头/LOAD 段）
-    pub is_none_phdr: bool,
-}
-
-/// 输入节匹配结果
-pub struct InputSectionMatch {
-    pub input_index: u32,
-    pub pattern: String,
-    pub offset: u64,
-}
-
-/// 脚本定义的符号
-pub struct ScriptSymbol {
-    pub name: String,
-    pub value: u64,
-    pub is_provide: bool,
-}
-
-/// COMMON 符号放置信息
-///
-/// COMMON 符号没有对应的输入节，它们在 *(COMMON) 模式处理时
-/// 被直接分配到输出节中（类似 .bss 的 NOBITS 空间）。
-pub struct CommonPlacement {
-    /// 符号在 resolved 数组中的索引
-    pub resolved_idx: usize,
-    /// 输出节的 VMA
-    pub output_vma: u64,
-    /// 符号在输出节内的偏移
-    pub offset: u64,
-}
-
-/// 执行链接脚本，生成布局结果
-pub fn execute_script(
-    script: &LinkerScript,
-    bundle: &InputBundle,
-    resolved: &[ResolvedSymbol],
-) -> Result<ScriptLayoutResult, String> {
-    let mut ctx = EvalContext::new();
-    let mut result = ScriptLayoutResult {
-        sections: Vec::new(),
-        symbols: Vec::new(),
-        entry: None,
-        assert_failures: Vec::new(),
-        common_placements: Vec::new(),
-        segments: Vec::new(),
-    };
-    // 跟踪已匹配的输入节，避免重复匹配
-    let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
-
-    // 0. 初始化内存区域
-    for region in &script.memory_regions {
-        let origin = ctx.eval(&region.origin).unwrap_or(0);
-        let length = ctx.eval(&region.length).unwrap_or(0);
-        ctx.memory_regions.insert(region.name.clone(), (origin, length));
-    }
-
-    // 0. 将已解析的输入符号加入 ctx.symbols（值为节内偏移，稍后会更新）
-    for sym in resolved {
-        if !sym.name.is_empty() && sym.section > 0 {
-            ctx.symbols.insert(sym.name.clone(), sym.value);
-        }
-    }
-
-    // 1. 处理顶层符号赋值（第一遍：用节相对值）
-    for assign in &script.top_assignments {
-        let value = ctx.eval(&assign.expr).unwrap_or(0);
-        ctx.symbols.insert(assign.name.clone(), value);
-        result.symbols.push(ScriptSymbol {
-            name: assign.name.clone(),
-            value,
-            is_provide: assign.is_provide,
-        });
-    }
-
-    // 2. 处理 SECTIONS 块
-    for cmd in &script.sections {
-        match cmd {
-            SectionCommand::LocationAssign(expr) => {
-                ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
-            }
-            SectionCommand::SymbolAssign(assign) => {
-                let value = ctx.eval(&assign.expr).unwrap_or(0);
-                ctx.symbols.insert(assign.name.clone(), value);
-                result.symbols.push(ScriptSymbol {
-                    name: assign.name.clone(),
-                    value,
-                    is_provide: assign.is_provide,
-                });
-            }
-            SectionCommand::OutputSection(sec_def) => {
-                let out_sec = execute_output_section(
-                    sec_def, bundle, &mut ctx, &mut used_sections, resolved,
-                    &mut result.common_placements,
-                )?;
-                if !out_sec.is_discard {
-                    ctx.section_addrs.insert(out_sec.name.clone(), out_sec.vma);
-                    ctx.section_sizes.insert(out_sec.name.clone(), out_sec.size);
-                    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
-                    result.sections.push(out_sec);
-                }
-            }
-            SectionCommand::AssertCmd(expr, msg) => {
-                let val = ctx.eval(expr).unwrap_or(0);
-                if val == 0 {
-                    result.assert_failures.push(msg.clone());
-                }
-            }
-            SectionCommand::ProvideCmd(name, expr) => {
-                if !ctx.symbols.contains_key(name) {
-                    let value = ctx.eval(expr).unwrap_or(0);
-                    ctx.symbols.insert(name.clone(), value);
-                    result.symbols.push(ScriptSymbol {
-                        name: name.clone(),
-                        value,
-                        is_provide: true,
-                    });
-                }
-            }
-            SectionCommand::Overlay(overlay) => {
-                // OVERLAY: 所有子节共享相同 VMA，但可有不同的 LMA
-                let base_vma = if let Some(ref addr) = overlay.address {
-                    ctx.eval(addr).unwrap_or(ctx.location_counter)
-                } else {
-                    ctx.location_counter
-                };
-
-                let base_lma = if let Some(ref lma_expr) = overlay.lma {
-                    ctx.eval(lma_expr).unwrap_or(0)
-                } else {
-                    base_vma
-                };
-
-                let mut max_size: u64 = 0;
-
-                for sec in &overlay.sections {
-                    // 每个子节创建为独立输出节，VMA 相同
-                    let mut out_sec = ScriptOutputSection {
-                        name: sec.name.clone(),
-                        vma: base_vma,
-                        lma: base_lma,
-                        align: 1,
-                        fill: sec.fill.unwrap_or(0),
-                        size: 0,
-                        data: Vec::new(),
-                        flags: 0,
-                        ty: SHT_PROGBITS,
-                        phdrs: sec.phdrs.clone(),
-                        input_sections: Vec::new(),
-                        is_discard: false,
-                        is_info: false,
-                        is_none_phdr: sec.phdrs.iter().any(|p| p == "NONE"),
-                    };
-
-                    // 处理子节 body
-                    let mut current_offset: u64 = 0;
-                    for item in &sec.body {
-                        match item {
-                            SectionBodyItem::InputSection(spec) => {
-                                // 匹配输入节
-                                let matches = match_input_sections(spec, bundle, &mut ctx, &mut used_sections);
-                                for m in matches {
-                                    let in_sec = &bundle.sections[m.input_index as usize];
-                                    // 更新节标志
-                                    out_sec.flags |= in_sec.flags;
-                                    if in_sec.ty == SHT_NOBITS {
-                                        out_sec.ty = SHT_NOBITS;
-                                    }
-                                    // 对齐
-                                    let align = in_sec.align.max(1);
-                                    let aligned = (current_offset + align - 1) & !(align - 1);
-                                    if aligned > current_offset && out_sec.ty != SHT_NOBITS {
-                                        let pad = aligned - current_offset;
-                                        if pad < 0x10000000 {
-                                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
-                                        }
-                                    }
-                                    current_offset = aligned;
-                                    // 添加数据
-                                    if in_sec.ty != SHT_NOBITS {
-                                        out_sec.data.extend_from_slice(&in_sec.data);
-                                        current_offset += in_sec.data.len() as u64;
-                                    }
-                                    // 记录匹配
-                                    out_sec.input_sections.push(InputSectionMatch {
-                                        input_index: m.input_index,
-                                        pattern: m.pattern,
-                                        offset: aligned,
-                                    });
-                                }
-                            }
-                            SectionBodyItem::SymbolAssign(a) => {
-                                let value = ctx.eval(&a.expr).unwrap_or(0);
-                                ctx.symbols.insert(a.name.clone(), value);
-                                result.symbols.push(ScriptSymbol {
-                                    name: a.name.clone(),
-                                    value,
-                                    is_provide: a.is_provide,
-                                });
-                            }
-                            SectionBodyItem::LocationAssign(expr) => {
-                                let val = ctx.eval(expr).unwrap_or(0);
-                                let new_offset = if val >= out_sec.vma {
-                                    ctx.location_counter = val;
-                                    val.wrapping_sub(out_sec.vma)
-                                } else {
-                                    ctx.location_counter = out_sec.vma.wrapping_add(val);
-                                    val
-                                };
-                                if new_offset > out_sec.data.len() as u64 {
-                                    let pad = new_offset - out_sec.data.len() as u64;
-                                    if pad < 0x10000000 {
-                                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
-                                    }
-                                }
-                                current_offset = new_offset.max(out_sec.data.len() as u64);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    out_sec.size = out_sec.data.len() as u64;
-                    if out_sec.size > max_size {
-                        max_size = out_sec.size;
-                    }
-
-                    ctx.section_addrs.insert(sec.name.clone(), out_sec.vma);
-                    ctx.section_sizes.insert(sec.name.clone(), out_sec.size);
-                    result.sections.push(out_sec);
-                }
-
-                // 位置计数器前进到最大子节之后
-                ctx.location_counter = base_vma.wrapping_add(max_size);
-            }
-        }
-    }
-
-    // 2.5 将 COMMON 符号加入 ctx.symbols（*(COMMON) 处理后已有放置信息）
-    for cp in &result.common_placements {
-        let sym = &resolved[cp.resolved_idx];
-        let abs_addr = cp.output_vma.wrapping_add(cp.offset);
-        ctx.symbols.insert(sym.name.clone(), abs_addr);
-    }
-
-    // 2.6 INSERT BEFORE/AFTER: 重排输出节顺序
-    for ic in &script.insert_commands {
-        let sec_name = &ic.section_name;
-        // 找到要移动的节的当前位置
-        let src_pos = result.sections.iter().position(|s| s.name == *sec_name);
-        if let Some(src) = src_pos {
-            let sec = result.sections.remove(src);
-            if let Some(ref target) = ic.after {
-                // INSERT AFTER target: 移到 target 之后
-                if let Some(dst) = result.sections.iter().position(|s| s.name == *target) {
-                    result.sections.insert(dst + 1, sec);
-                } else {
-                    result.sections.push(sec); // target 不存在则追加
-                }
-            } else if let Some(ref target) = ic.before {
-                // INSERT BEFORE target: 移到 target 之前
-                if let Some(dst) = result.sections.iter().position(|s| s.name == *target) {
-                    result.sections.insert(dst, sec);
-                } else {
-                    result.sections.push(sec);
-                }
-            }
-        }
-    }
-
-    // 2.7 NOCROSSREFS 验证: 构建符号→输出节映射
-    // 检查 NOCROSSREFS 组内的节之间是否存在跨节引用
-    let mut sym_to_section: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for out_sec in &result.sections {
-        for m in &out_sec.input_sections {
-            // 将属于该输入节的符号映射到输出节
-            for sym in resolved {
-                if sym.section == m.input_index && !sym.name.is_empty() {
-                    sym_to_section.insert(
-                        sym.name.clone(),
-                        out_sec.name.clone(),
-                    );
-                }
-            }
-        }
-    }
-    // 脚本定义的符号归入最近处理的输出节
-    if let Some(last_sec) = result.sections.last() {
-        for ssym in &result.symbols {
-            if !sym_to_section.contains_key(&ssym.name) {
-                sym_to_section.insert(ssym.name.clone(), last_sec.name.clone());
-            }
-        }
-    }
-    for group in &script.no_cross_refs {
-        for i in 0..group.len() {
-            for j in 0..group.len() {
-                if i == j { continue; }
-                let src_sec = &group[i];
-                let dst_sec = &group[j];
-                // 检查 dst_sec 中定义的符号是否被 src_sec 中的代码引用
-                // (需要重定位信息，此处仅记录映射供后续验证)
-                let _ = (src_sec, dst_sec);
-            }
-        }
-    }
-
-    // 3. 处理顶层 ASSERT/PROVIDE
-    for cmd in &script.trailing_commands {
-        match cmd {
-            TrailingCommand::Assert(expr, msg) => {
-                let val = ctx.eval(expr).unwrap_or(0);
-                if val == 0 {
-                    result.assert_failures.push(msg.clone());
-                }
-            }
-            TrailingCommand::Provide(name, expr) => {
-                if !ctx.symbols.contains_key(name) {
-                    let value = ctx.eval(expr).unwrap_or(0);
-                    ctx.symbols.insert(name.clone(), value);
-                    result.symbols.push(ScriptSymbol {
-                        name: name.clone(),
-                        value,
-                        is_provide: true,
-                    });
-                }
-            }
-            TrailingCommand::LocationAssign(expr) => {
-                ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
-            }
-        }
-    }
-
-    // 3.5 更新输入符号为绝对地址
-    // 构建 flat section index → (output VMA + offset within output) 的映射
-    let mut sec_vma_map: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-    for out_sec in &result.sections {
-        for m in &out_sec.input_sections {
-            sec_vma_map.insert(m.input_index, out_sec.vma.wrapping_add(m.offset));
-        }
-    }
-    // 用绝对地址更新输入符号
-    for sym in resolved {
-        if sym.section > 0 && !sym.name.is_empty() {
-            if let Some(&sec_vma) = sec_vma_map.get(&sym.section) {
-                let abs_addr = sec_vma.wrapping_add(sym.value);
-                ctx.symbols.insert(sym.name.clone(), abs_addr);
-            }
-        }
-    }
-
-    // 3.6 重新求值顶层符号赋值（用绝对地址）
-    for (i, assign) in script.top_assignments.iter().enumerate() {
-        let value = ctx.eval(&assign.expr).unwrap_or(0);
-        ctx.symbols.insert(assign.name.clone(), value);
-        if i < result.symbols.len() {
-            result.symbols[i].value = value;
-        }
-    }
-
-    // 3.7 重新求值 SECTIONS 块内的符号赋值（用绝对地址）
-    let mut sym_idx = script.top_assignments.len();
-    for cmd in &script.sections {
-        if let SectionCommand::SymbolAssign(assign) = cmd {
-            let value = ctx.eval(&assign.expr).unwrap_or(0);
-            ctx.symbols.insert(assign.name.clone(), value);
-            if sym_idx < result.symbols.len() {
-                result.symbols[sym_idx].value = value;
-            }
-            sym_idx += 1;
-        }
-    }
-
-    // 4. 设置入口地址
-    if let Some(ref entry_name) = script.entry {
-        if let Some(&addr) = ctx.symbols.get(entry_name) {
-            result.entry = Some(addr);
-        }
-    }
-
-    // 5. 根据 PHDRS 块构建段信息
-    //    仅当脚本定义了 PHDRS 时才生成 ScriptSegment；
-    //    否则 layout 层使用默认 2-segment 模型。
-    if !script.phdrs.is_empty() {
-        for phdr in &script.phdrs {
-            let pt = phdr.ty.to_pt();
-            // 计算 flags: 显式 FLAGS(N) 优先，否则根据段类型推断
-            let flags = phdr.flags.unwrap_or_else(|| match phdr.ty {
-                PhdrType::PtLoad => {
-                    // 扫描所有映射到此 PHDR 的节来推断 flags
-                    let mut f = 4u32; // PF_R
-                    for sec in &result.sections {
-                        if sec.is_none_phdr {
-                            continue;
-                        }
-                        if sec.phdrs.contains(&phdr.name) {
-                            if sec.flags & SHF_WRITE != 0 {
-                                f |= 2; // PF_W
-                            }
-                            if sec.flags & SHF_EXECINSTR != 0 {
-                                f |= 1; // PF_X
-                            }
-                        }
-                    }
-                    f
-                }
-                PhdrType::PtGnuStack => 6, // PF_R | PF_W
-                PhdrType::PtPhdr => 4,     // PF_R
-                _ => 4,
-            });
-
-            // 收集映射到此 PHDR 的输出节索引
-            let mut section_indices = Vec::new();
-            for (i, sec) in result.sections.iter().enumerate() {
-                if sec.is_none_phdr {
-                    continue;
-                }
-                // 如果节显式映射到此 PHDR
-                if sec.phdrs.contains(&phdr.name) {
-                    section_indices.push(i);
-                } else if sec.phdrs.is_empty() && pt == 1 {
-                    // 无显式 PHDR 映射的节默认属于 PT_LOAD
-                    section_indices.push(i);
-                }
-            }
-
-            // 计算 VMA / filesz / memsz
-            let vma = section_indices
-                .first()
-                .map(|&i| result.sections[i].vma)
-                .unwrap_or(0);
-            let mut filesz = 0u64;
-            let mut memsz = 0u64;
-            for &idx in &section_indices {
-                let sec = &result.sections[idx];
-                let end = sec.vma.wrapping_add(sec.size).wrapping_sub(vma);
-                if sec.ty != SHT_NOBITS {
-                    filesz = filesz.max(end);
-                }
-                memsz = memsz.max(end);
-            }
-
-            result.segments.push(ScriptSegment {
-                name: phdr.name.clone(),
-                ty: pt,
-                flags,
-                section_indices,
-                vma,
-                filesz,
-                memsz,
-            });
-        }
-    }
-
-    Ok(result)
-}
-
-/// 执行单个输出节定义
-fn execute_output_section(
-    sec_def: &OutputSectionDef,
-    bundle: &InputBundle,
-    ctx: &mut EvalContext,
-    used_sections: &mut std::collections::HashSet<u32>,
-    resolved: &[ResolvedSymbol],
-    common_placements: &mut Vec<CommonPlacement>,
-) -> Result<ScriptOutputSection, String> {
-    let mut out_sec = ScriptOutputSection {
-        name: sec_def.name.clone(),
-        vma: ctx.location_counter,
-        lma: ctx.location_counter,
-        align: 1,
-        fill: 0,
-        size: 0,
-        data: Vec::new(),
-        flags: 0,
-        ty: SHT_PROGBITS,
-        phdrs: sec_def.phdrs.clone(),
-        input_sections: Vec::new(),
-        is_discard: sec_def.is_discard,
-        is_info: sec_def.is_info,
-        is_none_phdr: sec_def.phdrs.iter().any(|p| p == "NONE"),
-    };
-
-    // 计算地址
-    if let Some(ref addr_expr) = sec_def.address {
-        out_sec.vma = ctx.eval(addr_expr).unwrap_or(ctx.location_counter);
-    }
-    if let Some(ref lma_expr) = sec_def.lma {
-        out_sec.lma = ctx.eval(lma_expr).unwrap_or(out_sec.vma);
-    }
-    if let Some(ref align_expr) = sec_def.align {
-        out_sec.align = ctx.eval(align_expr).unwrap_or(1);
-    }
-    if let Some(fill) = sec_def.fill {
-        out_sec.fill = fill;
-    }
-
-    // 对齐位置计数器
-    if out_sec.align > 1 {
-        ctx.location_counter = ctx.location_counter.wrapping_add(out_sec.align - 1) & !(out_sec.align - 1);
-        out_sec.vma = ctx.location_counter;
-    }
-
-    // 处理节体
-    let mut current_offset: u64 = 0;
-    for item in &sec_def.body {
-        match item {
-            SectionBodyItem::LocationAssign(expr) => {
-                let val = ctx.eval(expr).unwrap_or(0);
-                // val 可能是绝对地址（如 ALIGN 返回的）或相对偏移
-                // 如果 val >= out_sec.vma，视为绝对地址
-                let new_offset = if val >= out_sec.vma {
-                    ctx.location_counter = val;
-                    val.wrapping_sub(out_sec.vma)
-                } else {
-                    // 相对偏移
-                    ctx.location_counter = out_sec.vma.wrapping_add(val);
-                    val
-                };
-                // 如果 new_offset 超出当前数据长度，添加填充字节
-                // 这样 ALIGN 等指令产生的空隙会被填零
-                if new_offset > out_sec.data.len() as u64 {
-                    let pad = new_offset - out_sec.data.len() as u64;
-                    if pad < 0x10000000 {
-                        // 限制最大填充为 256MB，防止错误
-                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
-                    }
-                }
-                // current_offset 不能回退到已有数据之前
-                current_offset = new_offset.max(out_sec.data.len() as u64);
-            }
-            SectionBodyItem::SymbolAssign(assign) => {
-                let val = ctx.eval(&assign.expr).unwrap_or(0);
-                ctx.symbols.insert(assign.name.clone(), val);
-            }
-            SectionBodyItem::InputSection(spec) => {
-                // 匹配输入节
-                let matches = match_input_sections(spec, bundle, ctx, used_sections);
-                for m in matches {
-                    // 标记为已使用
-                    used_sections.insert(m.input_index);
-                    let in_sec = &bundle.sections[m.input_index as usize];
-                    // 更新节标志
-                    out_sec.flags |= in_sec.flags;
-                    if in_sec.ty == SHT_NOBITS {
-                        out_sec.ty = SHT_NOBITS;
-                    }
-                    // 对齐
-                    let align = in_sec.align.max(1);
-                    let aligned = (current_offset + align - 1) & !(align - 1);
-                    if aligned > current_offset && out_sec.ty != SHT_NOBITS {
-                        let pad = aligned - current_offset;
-                        if pad < 0x10000000 {
-                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
-                        }
-                    }
-                    current_offset = aligned;
-                    // 添加数据
-                    if in_sec.ty != SHT_NOBITS {
-                        out_sec.data.extend_from_slice(&in_sec.data);
-                        current_offset += in_sec.data.len() as u64;
-                    }
-                    // 记录匹配
-                    out_sec.input_sections.push(InputSectionMatch {
-                        input_index: m.input_index,
-                        pattern: m.pattern,
-                        offset: aligned,
-                    });
-                }
-
-                // *(COMMON) 特殊处理: 收集 COMMON 符号并分配 NOBITS 空间
-                // COMMON 符号没有对应的输入节，它们直接来自符号表
-                if spec.is_common {
-                    out_sec.ty = SHT_NOBITS;
-                    out_sec.flags |= SHF_WRITE | SHF_ALLOC;
-                    for (idx, sym) in resolved.iter().enumerate() {
-                        if !sym.is_common || sym.name.is_empty() {
-                            continue;
-                        }
-                        let align = sym.size.max(1);
-                        let aligned = (current_offset + align - 1) & !(align - 1);
-                        current_offset = aligned + sym.size;
-                        common_placements.push(CommonPlacement {
-                            resolved_idx: idx,
-                            output_vma: out_sec.vma,
-                            offset: aligned,
-                        });
-                    }
-                }
-            }
-            SectionBodyItem::Constructors => {
-                // CONSTRUCTORS 用于 a.out 兼容，现代 ELF 不需要特殊处理
-            }
-            SectionBodyItem::DataFill(value, size) => {
-                let bytes = match size {
-                    1 => vec![*value as u8],
-                    2 => (*value as u16).to_le_bytes().to_vec(),
-                    4 => (*value as u32).to_le_bytes().to_vec(),
-                    8 => value.to_le_bytes().to_vec(),
-                    _ => vec![],
-                };
-                out_sec.data.extend_from_slice(&bytes);
-                current_offset += *size as u64;
-            }
-        }
-    }
-
-    // size 应该是 current_offset 和实际数据长度的最大值
-    // 因为 . = ALIGN(...) 等位置赋值可能重置 current_offset，
-    // 但之前累积的数据仍然在 out_sec.data 中
-    out_sec.size = current_offset.max(out_sec.data.len() as u64);
-    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
-    Ok(out_sec)
-}
-
-/// 应用单个排序条件到匹配列表
-///
-/// - ByName: 按节名升序排序
-/// - ByAlignment: 按对齐值降序排序（对齐值大的在前）
-///
-/// Rust 的 sort_by 是稳定排序，组合排序时从最后一个条件反向应用即可实现多级排序。
-fn apply_sort_criterion(
-    matches: &mut Vec<InputSectionMatch>,
-    bundle: &InputBundle,
-    kind: SortKind,
-) {
-    match kind {
-        SortKind::ByName => {
-            matches.sort_by(|a, b| {
-                let na = &bundle.sections[a.input_index as usize].name;
-                let nb = &bundle.sections[b.input_index as usize].name;
-                na.cmp(nb)
-            });
-        }
-        SortKind::ByAlignment => {
-            matches.sort_by(|a, b| {
-                let aa = bundle.sections[a.input_index as usize].align;
-                let ab = bundle.sections[b.input_index as usize].align;
-                ab.cmp(&aa) // 降序，对齐值大的在前
-            });
-        }
-    }
-}
-
-/// 匹配输入节到输出节规范
-///
-/// 按模式顺序匹配输入节，每个模式独立排序后追加到结果中。
-/// 这确保 SORT() 包裹的模式其匹配节按指定方式排序，
-/// 而未包裹的节保持文件出现顺序。
-fn match_input_sections(
-    spec: &InputSectionSpec,
-    bundle: &InputBundle,
-    _ctx: &EvalContext,
-    used_sections: &std::collections::HashSet<u32>,
-) -> Vec<InputSectionMatch> {
-    let mut matches = Vec::new();
-    // 跟踪本次调用中已匹配的节（跨模式去重）
-    let mut locally_used: std::collections::HashSet<u32> = std::collections::HashSet::new();
-
-    // 按模式顺序处理：每个模式独立匹配、排序、追加
-    for pat in &spec.section_patterns {
-        let mut pat_matches = Vec::new();
-
-        for (i, in_sec) in bundle.sections.iter().enumerate() {
-            // 跳过空节名和特殊节
-            if in_sec.name.is_empty()
-                || in_sec.name == ".symtab"
-                || in_sec.name == ".strtab"
-                || in_sec.name == ".shstrtab"
-                || in_sec.name.starts_with(".rela")
-                || in_sec.name.starts_with(".rel")
-            {
-                continue;
-            }
-
-            // 跳过已被之前模式或之前 spec 匹配的节
-            if used_sections.contains(&(i as u32)) || locally_used.contains(&(i as u32)) {
-                continue;
-            }
-
-            // 检查是否被 EXCLUDE_FILE 排除
-            let file_name = &bundle.objects[in_sec.input_obj].name;
-            let excluded = spec.exclude_files.iter().any(|ex| {
-                section_name_matches(file_name, ex)
-            });
-            if excluded {
-                continue;
-            }
-
-            // 检查是否匹配当前模式
-            if section_name_matches(&in_sec.name, &pat.pattern) {
-                pat_matches.push(InputSectionMatch {
-                    input_index: i as u32,
-                    pattern: pat.pattern.clone(),
-                    offset: 0,
-                });
-            }
-        }
-
-        // 根据当前模式的 sort mode 排序
-        // 对于组合排序，从最后一个条件开始反向依次应用稳定排序
-        // 例如 SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*)) 的链为 [ByName, ByAlignment]
-        // 先按 ByAlignment 稳定排序，再按 ByName 稳定排序
-        // 最终效果：主排序按名称，同名称时按对齐值
-        match &pat.sort {
-            SortMode::None => {
-                // 保持文件出现顺序（已是遍历顺序）
-            }
-            SortMode::Single(kind) => {
-                apply_sort_criterion(&mut pat_matches, bundle, *kind);
-            }
-            SortMode::Combined(chain) => {
-                for kind in chain.iter().rev() {
-                    apply_sort_criterion(&mut pat_matches, bundle, *kind);
-                }
-            }
-        }
-
-        // 标记为已匹配并追加到结果
-        for m in &pat_matches {
-            locally_used.insert(m.input_index);
-        }
-        matches.extend(pat_matches);
-    }
-
-    matches
-}
-
-/// 检查节名是否匹配模式（支持通配符 * ? 和字符类 [...]）
-fn section_name_matches(name: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
-        return name == pattern;
-    }
-
-    let name_chars: Vec<char> = name.chars().collect();
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    glob_match(&name_chars, &pattern_chars)
-}
-
-/// 递归通配符匹配，支持 * ? [...]
-fn glob_match(name: &[char], pattern: &[char]) -> bool {
-    let mut ni = 0;
-    let mut pi = 0;
-    let mut star_pi: Option<usize> = None;
-    let mut star_ni: usize = 0;
-
-    while ni < name.len() {
-        if pi < pattern.len() && pattern[pi] == '?' {
-            ni += 1;
-            pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == '[' {
-            // 字符类匹配
-            if let Some((matched, end_pi)) = match_char_class(&name[ni], &pattern[pi..]) {
-                if matched {
-                    ni += 1;
-                    pi = end_pi;
-                } else if let Some(si) = star_pi {
-                    pi = si + 1;
-                    star_ni += 1;
-                    ni = star_ni;
-                } else {
-                    return false;
-                }
-            } else if let Some(si) = star_pi {
-                pi = si + 1;
-                star_ni += 1;
-                ni = star_ni;
-            } else {
-                return false;
-            }
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star_pi = Some(pi);
-            star_ni = ni;
-            pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == name[ni] {
-            ni += 1;
-            pi += 1;
-        } else if let Some(si) = star_pi {
-            pi = si + 1;
-            star_ni += 1;
-            ni = star_ni;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
-}
-
-/// 匹配字符类 [...]，返回 (是否匹配, 结束位置)
-fn match_char_class(c: &char, pattern: &[char]) -> Option<(bool, usize)> {
-    // pattern[0] == '['
-    let mut i = 1;
-    let negate = if i < pattern.len() && (pattern[i] == '!' || pattern[i] == '^') {
-        i += 1;
-        true
-    } else {
-        false
-    };
-
-    let mut matched = false;
-    while i < pattern.len() && pattern[i] != ']' {
-        let start = pattern[i];
-        // 检查范围 a-z
-        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
-            let end = pattern[i + 2];
-            if *c >= start && *c <= end {
-                matched = true;
-            }
-            i += 3;
-        } else {
-            if *c == start {
-                matched = true;
-            }
-            i += 1;
-        }
-    }
-
-    if i < pattern.len() && pattern[i] == ']' {
-        let result = if negate { !matched } else { matched };
-        Some((result, i + 1))
-    } else {
-        None // 未找到 ']'
     }
 }
 

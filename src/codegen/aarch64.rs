@@ -731,9 +731,7 @@ impl Aarch64Codegen {
                 let prefix_len = m.min(n);
                 let suffix_len = n.saturating_sub(prefix_len);
                 if n > 0 {
-                    out.push_str(&format!(
-                        "\t.section .patchable_function_entry,\"aw\",@progbits\n"
-                    ));
+                    out.push_str("\t.section .patchable_function_entry,\"aw\",@progbits\n");
                 }
                 for _ in 0..prefix_len {
                     out.push_str("\tnop\n");
@@ -3631,7 +3629,7 @@ impl Aarch64Codegen {
     fn mov_w_rd_rs(&mut self, rd: u8, rs: u8) {
         let insn = 0x2a0003e0u32
             | ((rs as u32 & 0x1f) << 16)
-            | ((rd as u32 & 0x1f) << 0);
+            | (rd as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -3641,7 +3639,7 @@ impl Aarch64Codegen {
         if dst == src {
             return;
         }
-        let insn = 0xaa0003e0u32 | ((src as u32 & 0x1f) << 16) | ((dst as u32 & 0x1f) << 0);
+        let insn = 0xaa0003e0u32 | ((src as u32 & 0x1f) << 16) | (dst as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -3660,6 +3658,9 @@ impl Aarch64Codegen {
     }
 
     /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    // 参数即内联 asm 的完整上下文 (asm 文本/输出/输入/修饰符/clobber/标签/行号等),
+    // 与所有后端的 `emit_inline_asm` 签名保持一致, 打包成结构体收益有限。
+    #[allow(clippy::too_many_arguments)]
     fn emit_inline_asm(
         &mut self,
         asm_str: &str,
@@ -3897,7 +3898,7 @@ impl Aarch64Codegen {
         if pages > 0 {
             // Probe loop using x16 (ip0, ABI scratch) as counter
             // movz x16, #pages
-            let movz = 0x52800010u32 | ((pages as u32 & 0xffff) << 5);
+            let movz = 0x52800010u32 | ((pages & 0xffff) << 5);
             self.emit(&movz.to_le_bytes());
             // .probe_loop:
             let loop_start = self.pos();
@@ -4093,7 +4094,7 @@ impl Aarch64Codegen {
         // ADRP Xd, #0 (placeholder, patched by linker via relocation)
         // Encoding: 1 immlo 10000 immhi Rd
         // immlo=00, immhi=0000000000000000000
-        let adrp = 0x90000000u32 | ((rd as u32 & 0x1f) << 0);
+        let adrp = 0x90000000u32 | (rd as u32 & 0x1f);
         self.emit(&adrp.to_le_bytes());
         if self.relocatable {
             let idx = self.ensure_sym("__stack_chk_guard");
@@ -4113,7 +4114,7 @@ impl Aarch64Codegen {
         // LDR Xt, [Xn, #imm] (unsigned offset, 64-bit)
         // imm12 = 0 (placeholder, patched by linker)
         let ldr = 0xf9400000u32
-            | ((rt as u32 & 0x1f) << 0)
+            | (rt as u32 & 0x1f)
             | ((rn as u32 & 0x1f) << 5);
         self.emit(&ldr.to_le_bytes());
         if self.relocatable {
@@ -5661,7 +5662,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(3, &lr); self.label(&ld); true
             }
             "__sync_lock_release" => {
-                if args.len() < 1 { return false; }
+                if args.is_empty() { return false; }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0]); self.mov_x_reg(1, 0);
                 self.mov_w0_imm(0);
@@ -6532,7 +6533,7 @@ mod tests {
         cg.emit_stg(7, 8, 0x1ff); // stg x7, [x8, #-16]
         cg.emit_ldg(0, 0, 0); // ldg x0, [x0]
         let code = &cg.code;
-        let find = |bytes: [u8; 4]| code.windows(4).any(|w| w == &bytes);
+        let find = |bytes: [u8; 4]| code.windows(4).any(|w| w == bytes);
         assert!(find([0x20, 0x10, 0xdf, 0x9a]), "irg x0, x1");
         assert!(find([0xe0, 0x13, 0xdf, 0x9a]), "irg x0, sp");
         assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "irg x16, sp");
@@ -6563,7 +6564,7 @@ mod tests {
         let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
         cg.set_mte_enabled(true);
         cg.compile(&module);
-        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
+        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == bytes);
         // prologue: irg x16, sp
         assert!(
             find([0xf0, 0x13, 0xdf, 0x9a]),
@@ -6624,12 +6625,12 @@ mod tests {
         cg.compile(&module);
         // 调用点前缀: and sp, x19, #0x00ffffffffffffff
         assert!(
-            cg.code.windows(4).any(|w| w == &[0x7f, 0xde, 0x80, 0x92]),
+            cg.code.windows(4).any(|w| w == [0x7f, 0xde, 0x80, 0x92]),
             "call site missing and sp, x19, #mask"
         );
         // 调用点后缀: add sp, x19, #0 (mov sp, x19)
         assert!(
-            cg.code.windows(4).any(|w| w == &[0x7f, 0x02, 0x00, 0x91]),
+            cg.code.windows(4).any(|w| w == [0x7f, 0x02, 0x00, 0x91]),
             "call site missing add sp, x19, #0"
         );
     }
@@ -6647,7 +6648,7 @@ mod tests {
         let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
         let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
         cg.compile(&module);
-        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
+        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == bytes);
         assert!(!find([0xf0, 0x13, 0xdf, 0x9a]), "unexpected irg x16, sp");
         assert!(!find([0xf0, 0x0b, 0x20, 0xd9]), "unexpected stg");
         assert!(
@@ -6683,7 +6684,7 @@ mod tests {
         assert!(ok, "gen_float_expr should succeed for Local float");
         // 验证发射了 ldr s0, [sp, #16] 指令
         // LDR S (32-bit): 0xBD400000 | (imm12/4)<<10 | Rn=sp(31) | Rt=s0(0)
-        let ldr_s0 = 0xBD400000u32 | ((16u32 / 4) << 10) | (31 << 5) | 0;
+        let ldr_s0 = 0xBD400000u32 | ((16u32 / 4) << 10) | (31 << 5);
         let found = cg
             .code
             .windows(4)

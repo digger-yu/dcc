@@ -354,7 +354,7 @@ mod tests {
         )
         .unwrap();
         let result = link_relocatable_with_script(
-            &[p1.clone()],
+            std::slice::from_ref(&p1),
             &out,
             false,
             false,

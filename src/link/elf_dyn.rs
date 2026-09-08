@@ -97,7 +97,10 @@ fn write_elf_shared(layout: &Layout, machine: u16) -> Vec<u8> {
     out
 }
 
-fn build_shstrtab(layout: &Layout) -> (Vec<u8>, Vec<(u32, u32, Vec<u32>)>) {
+/// COMDAT group section 描述: (名称偏移, flags, 成员 section 索引)
+type ComdatGroupEntry = (u32, u32, Vec<u32>);
+
+fn build_shstrtab(layout: &Layout) -> (Vec<u8>, Vec<ComdatGroupEntry>) {
     let mut s = vec![0u8];
     for sec in &layout.sections {
         s.extend_from_slice(sec.name.as_bytes());
@@ -105,7 +108,7 @@ fn build_shstrtab(layout: &Layout) -> (Vec<u8>, Vec<(u32, u32, Vec<u32>)>) {
     }
     s.extend_from_slice(b".symtab\0.strtab\0.shstrtab\0");
     // COMDAT group section names (".group.<signature>")
-    let mut comdat_groups: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+    let mut comdat_groups: Vec<ComdatGroupEntry> = Vec::new();
     for grp in &layout.comdat_groups {
         let name = format!(".group.{}\0", grp.signature);
         let name_off = s.len() as u32;

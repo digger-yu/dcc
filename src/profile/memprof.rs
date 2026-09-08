@@ -125,14 +125,14 @@ impl MemProfData {
         }
         let s =
             String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Self::from_str(&s)
+        Self::parse_text(&s)
     }
 
     /// 从字符串解析 dcc 简化文本格式:
     ///   `alloc <frames...> = <count> <bytes>`
     ///   `lifetime <alloc_frames...> -> <dealloc_frames...> = <bytes>`
     ///   `dealloc <frames...> = <count>`
-    pub fn from_str(input: &str) -> io::Result<Self> {
+    pub fn parse_text(input: &str) -> io::Result<Self> {
         let mut d = Self::default();
         for line in input.lines() {
             let l = line.trim();
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn parse_minimal_memprofdata() {
-        let d = MemProfData::from_str(
+        let d = MemProfData::parse_text(
             "alloc main -> foo -> malloc = 100 4096\nlifetime main -> foo -> malloc => free = 4096\n",
         )
         .unwrap();
@@ -825,14 +825,14 @@ mod tests {
 
     #[test]
     fn parse_dealloc() {
-        let d = MemProfData::from_str("dealloc free = 50\ndealloc my_free = 30\n").unwrap();
+        let d = MemProfData::parse_text("dealloc free = 50\ndealloc my_free = 30\n").unwrap();
         assert_eq!(d.dealloc_counts.get(&vec!["free".into()]), Some(&50));
         assert_eq!(d.dealloc_counts.get(&vec!["my_free".into()]), Some(&30));
     }
 
     #[test]
     fn parse_accumulates_duplicates() {
-        let d = MemProfData::from_str("alloc main = 10 100\nalloc main = 20 200\n").unwrap();
+        let d = MemProfData::parse_text("alloc main = 10 100\nalloc main = 20 200\n").unwrap();
         assert_eq!(d.alloc_counts.get(&vec!["main".into()]), Some(&30));
         assert_eq!(d.alloc_bytes.get(&vec!["main".into()]), Some(&300));
     }
@@ -905,7 +905,7 @@ mod tests {
         );
         d.dealloc_counts.insert(vec!["free".into()], 50);
         let text = d.serialize();
-        let d2 = MemProfData::from_str(&text).unwrap();
+        let d2 = MemProfData::parse_text(&text).unwrap();
         assert_eq!(d2.alloc_counts, d.alloc_counts);
         assert_eq!(d2.alloc_bytes, d.alloc_bytes);
         assert_eq!(d2.lifetime, d.lifetime);
@@ -985,7 +985,7 @@ mod tests {
 
     #[test]
     fn memprof_rejects_unsupported_versions() {
-        let text = MemProfData::from_str("# dcc memprof v0\nalloc main = 10 100\n");
+        let text = MemProfData::parse_text("# dcc memprof v0\nalloc main = 10 100\n");
         let err = text.unwrap_err();
         assert!(err.to_string().contains("unsupported memprof text version"));
 

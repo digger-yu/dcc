@@ -455,10 +455,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
             let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
-            // ADD vector: 0x0E208400 | Q | size<<22 | Rm | Rn | Rd
+            // ADD vector: 0x0E208400 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x0e208400
                 | q
-                | ((0b00u32) << 22) // size=00 for .16b/.8b
                 | ((rm as u32 & 0x1f) << 16)
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
@@ -471,10 +470,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
             let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
-            // SUB vector: 0x2E208400 | Q | size<<22 | Rm | Rn | Rd
+            // SUB vector: 0x2E208400 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x2e208400
                 | q
-                | ((0b00u32) << 22)
                 | ((rm as u32 & 0x1f) << 16)
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
@@ -487,10 +485,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
             let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
-            // MUL vector: 0x0E209C00 | Q | size<<22 | Rm | Rn | Rd
+            // MUL vector: 0x0E209C00 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x0e209c00
                 | q
-                | ((0b00u32) << 22)
                 | ((rm as u32 & 0x1f) << 16)
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
@@ -702,7 +699,6 @@ pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             let imm = parse_riscv_imm(&operands[2])?;
             let insn: u32 = ((imm as u32 & 0xfff) << 20)
                 | ((rs1 as u32) << 15)
-                | (0b000 << 12)
                 | ((rd as u32) << 7)
                 | 0x13;
             Some(insn.to_le_bytes().to_vec())

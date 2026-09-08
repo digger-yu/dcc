@@ -934,6 +934,12 @@ pub struct CoroutineMachine {
     pub suspended: bool,
 }
 
+impl Default for CoroutineMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoroutineMachine {
     pub fn new() -> Self {
         Self {

@@ -27,6 +27,7 @@ use crate::cpp::parser::CppDecl;
 /// 加载 BMF 模块接口文件:
 ///   - `import foo;`    -> `foo.bmf`
 ///   - `import :part;`  -> `<当前模块名>.part.bmf`
+///
 /// 找不到时静默跳过 (lower 端回退为 include / 注释占位).
 /// M27: 加载后执行 ODR 检查, 检测跨模块重复定义冲突.
 pub fn load_imported_modules(

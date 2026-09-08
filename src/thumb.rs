@@ -75,8 +75,8 @@ impl ThumbEncoder {
         let imm3 = (imm16 >> 8) & 0x7;
         let imm8 = imm16 & 0xFF;
 
-        let hw1 = 0xF240u16 | ((i as u16) << 10) | (imm4 as u16);
-        let hw2 = ((rd as u16) << 8) | ((imm3 as u16) << 12) | (imm8 as u16);
+        let hw1 = 0xF240u16 | (i << 10) | imm4;
+        let hw2 = ((rd as u16) << 8) | (imm3 << 12) | imm8;
         ThumbInstruction::T32(((hw1 as u32) << 16) | (hw2 as u32))
     }
 
@@ -89,8 +89,8 @@ impl ThumbEncoder {
         let imm3 = (imm16 >> 8) & 0x7;
         let imm8 = imm16 & 0xFF;
 
-        let hw1 = 0xF2C0u16 | ((i as u16) << 10) | (imm4 as u16);
-        let hw2 = ((rd as u16) << 8) | ((imm3 as u16) << 12) | (imm8 as u16);
+        let hw1 = 0xF2C0u16 | (i << 10) | imm4;
+        let hw2 = ((rd as u16) << 8) | (imm3 << 12) | imm8;
         ThumbInstruction::T32(((hw1 as u32) << 16) | (hw2 as u32))
     }
 
@@ -113,7 +113,7 @@ impl ThumbEncoder {
     /// Encode a B (branch) instruction (16-bit, short)
     /// Branch with signed 8-bit offset (-256 to +254 bytes)
     pub fn b_short(offset: i32) -> ThumbInstruction {
-        assert!(offset >= -256 && offset <= 254, "offset out of range for 16-bit branch");
+        assert!((-256..=254).contains(&offset), "offset out of range for 16-bit branch");
         assert!(offset % 2 == 0, "offset must be even (halfword aligned)");
         let imm8 = ((offset >> 1) & 0xFF) as u16;
         let encoding = 0xE000u16 | imm8;

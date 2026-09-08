@@ -2128,10 +2128,10 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
 
         // 累加 counters
         let mut merged_counters = counters1;
-        for i in 0..n_counters {
+        for counter in merged_counters[..n_counters].iter_mut() {
             let c2 = u64::from_le_bytes(p2[off2..off2 + 8].try_into().unwrap());
             off2 += 8;
-            merged_counters[i] = merged_counters[i].saturating_add(c2);
+            *counter = counter.saturating_add(c2);
         }
 
         // 写出合并后的 profraw (用 p1 的头部 + 合并后的 counters)

@@ -321,8 +321,8 @@ pub fn parse_with_opts(src: &[u8], file: &str, opts: ParseOptions) -> (Program, 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], file: &str, opts: ParseOptions) -> Self {
         let mut lex = Lexer::new(src, file);
-        let cur = lex.next();
-        let peek = lex.next();
+        let cur = lex.next_tok();
+        let peek = lex.next_tok();
         let mut p = Self {
             lex,
             cur,
@@ -377,10 +377,12 @@ impl<'a> Parser<'a> {
         p
     }
     fn advance(&mut self) {
-        self.cur = std::mem::replace(&mut self.peek, self.lex.next());
+        self.cur = std::mem::replace(&mut self.peek, self.lex.next_tok());
     }
 
     /// 增加递归深度并检查限制
+    // `Diagnostic` 在整条 parser 错误链上复用, 不为单个深度查询装箱。
+    #[allow(clippy::result_large_err)]
     fn enter_recursion(&mut self) -> Result<(), Diagnostic> {
         self.parse_depth += 1;
         // 64MB 栈线程足以处理深层嵌套 (如 limits-declparen.c 的 10000 层括号)
@@ -838,39 +840,26 @@ impl<'a> Parser<'a> {
     /// and simple binary ops (`*`, `+`, `-`) between them.
     fn parse_aligned_expr(&mut self, depth: &mut i32) -> Option<usize> {
         let result = self.parse_aligned_term(depth);
-        // Handle +, -, <<, >> at this level
-        loop {
-            if self.cur.kind == TokKind::Plus {
-                self.advance();
-                let rhs = self.parse_aligned_term(depth);
-                if let (Some(l), Some(r)) = (result, rhs) {
-                    return self.parse_aligned_rest(depth, l + r);
-                }
-                return self.parse_aligned_rest(depth, result.unwrap_or(0));
-            } else if self.cur.kind == TokKind::Minus {
-                self.advance();
-                let rhs = self.parse_aligned_term(depth);
-                if let (Some(l), Some(r)) = (result, rhs) {
-                    return self.parse_aligned_rest(depth, l - r);
-                }
-                return self.parse_aligned_rest(depth, result.unwrap_or(0));
-            } else if self.cur.kind == TokKind::Shl {
-                self.advance();
-                let rhs = self.parse_aligned_term(depth);
-                if let (Some(l), Some(r)) = (result, rhs) {
-                    return self.parse_aligned_rest(depth, l << r);
-                }
-                return self.parse_aligned_rest(depth, result.unwrap_or(0));
-            } else if self.cur.kind == TokKind::Shr {
-                self.advance();
-                let rhs = self.parse_aligned_term(depth);
-                if let (Some(l), Some(r)) = (result, rhs) {
-                    return self.parse_aligned_rest(depth, l >> r);
-                }
-                return self.parse_aligned_rest(depth, result.unwrap_or(0));
-            } else {
-                break;
-            }
+        // Handle +, -, <<, >> at this level, then let `parse_aligned_rest`
+        // continue the chain; a non-operator token ends the expression.
+        let op = match self.cur.kind {
+            TokKind::Plus | TokKind::Minus | TokKind::Shl | TokKind::Shr => Some(self.cur.kind),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.advance();
+            let rhs = self.parse_aligned_term(depth);
+            let acc = match (result, rhs) {
+                (Some(l), Some(r)) => match op {
+                    TokKind::Plus => l + r,
+                    TokKind::Minus => l - r,
+                    TokKind::Shl => l << r,
+                    _ => l >> r,
+                },
+                (Some(l), None) => l,
+                (None, _) => 0,
+            };
+            return self.parse_aligned_rest(depth, acc);
         }
         result
     }
@@ -903,7 +892,11 @@ impl<'a> Parser<'a> {
             self.advance();
             let rhs = self.parse_aligned_atom(depth);
             if let (Some(l), Some(r)) = (result, rhs) {
-                result = if op == TokKind::Star { Some(l * r) } else if r != 0 { Some(l / r) } else { Some(l) };
+                result = Some(if op == TokKind::Star {
+                    l * r
+                } else {
+                    l.checked_div(r).unwrap_or(l)
+                });
             }
         }
         result
@@ -3076,7 +3069,6 @@ impl<'a> Parser<'a> {
             // 使用 parse_attributes 而非 try_parse_vector_attr, 因为属性列表中
             // 可能有多个属性 (如 vector_size + may_alias), try_parse_vector_attr
             // 只处理 vector_size 并在遇到逗号等其他属性时无法正确消耗所有 token.
-            let mut ty = ty;
             if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                 let attrs = self.parse_attributes();
                 // 应用 vector_size: 将基类型包装为 Vector
@@ -3718,14 +3710,9 @@ impl<'a> Parser<'a> {
                     let (true_base_ty, ptr_levels) = {
                         let mut ty = parsed_ty;
                         let mut levels: i32 = 0;
-                        loop {
-                            match ty {
-                                Type::Ptr(inner) => {
-                                    ty = inner.base.clone();
-                                    levels += 1;
-                                }
-                                _ => break,
-                            }
+                        while let Type::Ptr(inner) = ty {
+                            ty = inner.base.clone();
+                            levels += 1;
                         }
                         (ty, levels)
                     };
@@ -3864,11 +3851,10 @@ impl<'a> Parser<'a> {
                 // 函数声明 (无 body): 期待 ';' 或 ',' (多声明符如 void f(), g();)
                 if self.cur.kind == TokKind::Semi {
                     self.advance();
-                } else if self.cur.kind != TokKind::Comma {
-                    if !self.expect(TokKind::Semi, "';' or '{'") {
+                } else if self.cur.kind != TokKind::Comma
+                    && !self.expect(TokKind::Semi, "';' or '{'") {
                         return None;
                     }
-                }
                 None
             };
             // 恢复外层函数的 in_function 状态
@@ -4112,7 +4098,7 @@ impl<'a> Parser<'a> {
                 let elem_sz = elem.size().max(1);
                 let num_elems = if elem_sz > 1 {
                     // 宽字符数组: data.len() 是字节数, 除以元素大小得元素个数
-                    (data.len() + elem_sz - 1) / elem_sz
+                    data.len().div_ceil(elem_sz)
                 } else {
                     data.len()
                 };
@@ -4423,11 +4409,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Some(self.parse_expr_bp(2)?)
             } else { None };
-            if self.cur.kind != TokKind::Comma {
-                if !self.expect(TokKind::Semi, "';'") {
+            if self.cur.kind != TokKind::Comma
+                && !self.expect(TokKind::Semi, "';'") {
                     return None;
                 }
-            }
             let sp = inner_name.span.clone();
             self.leave_recursion();
             return Some(vec![Decl::Var(VarDecl {
@@ -4572,11 +4557,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Some(self.parse_expr_bp(2)?)
             } else { None };
-            if self.cur.kind != TokKind::Comma {
-                if !self.expect(TokKind::Semi, "';'") {
+            if self.cur.kind != TokKind::Comma
+                && !self.expect(TokKind::Semi, "';'") {
                     return None;
                 }
-            }
             let sp = name.span.clone();
             self.leave_recursion();
             return Some(vec![Decl::Var(VarDecl {
@@ -4907,11 +4891,10 @@ impl<'a> Parser<'a> {
             };
             // 多声明符支持: int (*b)(), (*c)();
             // 只在不是多声明符（下一个 token 不是逗号）时才消费分号
-            if self.cur.kind != TokKind::Comma {
-                if !self.expect(TokKind::Semi, "';'") {
+            if self.cur.kind != TokKind::Comma
+                && !self.expect(TokKind::Semi, "';'") {
                     return None;
                 }
-            }
             let sp = name.span.clone();
             self.leave_recursion();
             return Some(vec![Decl::Var(VarDecl {
@@ -5719,7 +5702,6 @@ impl<'a> Parser<'a> {
                 "type defaults to 'int' in declaration without a type specifier",
                 Some("add an explicit type such as 'int'"),
             );
-            base = Some(Type::Int);
             return Some(self.finish_type(Type::Int, specifiers_only));
         }
         // struct/union/enum
@@ -6838,7 +6820,7 @@ impl<'a> Parser<'a> {
             loop {
                 let (mut ty, nm) = self.parse_field_declarator(spec.clone());
                 // 字段级属性: 提取 aligned 值
-                let (mut field_aligned, mut field_packed) = self.skip_attributes_extract_aligned();
+                let (field_aligned, field_packed) = self.skip_attributes_extract_aligned();
                 // C23 alignas(N) 在 parse_decl_specifiers 中已解析并
                 // 存入 self.decl_attrs.alignment. 将其合并到字段对齐值,
                 // 取 alignas 与 __attribute__((aligned)) 的较大值.
@@ -8901,14 +8883,14 @@ impl<'a> Parser<'a> {
                         // Complex(Float), codegen 按窄 inner spill/读取宽
                         // 操作数位模式错位 (complex-6 test_float:
                         // 1.0 + 2.0i 实部丢失)。
-                        let inner_a = if let Type::Complex(ref i) = lt { i.base.clone() } else { lt.clone().into() };
-                        let inner_b = if let Type::Complex(ref i) = rt { i.base.clone() } else { rt.clone().into() };
+                        let inner_a = if let Type::Complex(ref i) = lt { i.base.clone() } else { lt.clone() };
+                        let inner_b = if let Type::Complex(ref i) = rt { i.base.clone() } else { rt.clone() };
                         let wider = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
                         Type::Complex(Box::new(wider.into()))
                     } else if is_ia || is_ib {
                         // _Imaginary 算术类型推导
-                        let inner_a = if let Type::Imaginary(ref i) = lt { i.base.clone() } else { lt.clone().into() };
-                        let inner_b = if let Type::Imaginary(ref i) = rt { i.base.clone() } else { rt.clone().into() };
+                        let inner_a = if let Type::Imaginary(ref i) = lt { i.base.clone() } else { lt.clone() };
+                        let inner_b = if let Type::Imaginary(ref i) = rt { i.base.clone() } else { rt.clone() };
                         // 取较宽的内型
                         let wider = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
                         match op {
@@ -9151,7 +9133,7 @@ impl<'a> Parser<'a> {
                 let ty = match &e.ty() {
                     Type::Complex(inner) => inner.base.clone(),
                     Type::Imaginary(inner) => inner.base.clone(),
-                    t => t.clone().into(),
+                    t => t.clone(),
                 };
                 Some(Expr::Real {
                     e: Box::new(e),
@@ -9166,7 +9148,7 @@ impl<'a> Parser<'a> {
                 let ty = match &e.ty() {
                     Type::Complex(inner) => inner.base.clone(),
                     Type::Imaginary(inner) => inner.base.clone(),
-                    t => t.clone().into(),
+                    t => t.clone(),
                 };
                 Some(Expr::Imag {
                     e: Box::new(e),
@@ -9530,10 +9512,7 @@ impl<'a> Parser<'a> {
                         span: sp.clone(),
                     };
                     // 复合字面量后可跟后缀运算符: (int[]){0,1,2}[i]
-                    return Some(match self.parse_postfix_suffix(compound, sp) {
-                        Some(e) => e,
-                        None => return None,
-                    });
+                    return self.parse_postfix_suffix(compound, sp);
                 }
                 let e = self.parse_unary()?;
                 // 严格类型检查: 整数截断 / 整数↔指针转换
@@ -9942,7 +9921,7 @@ impl<'a> Parser<'a> {
                                         if let Ok(v) = const_eval::eval(&idx) {
                                             member.push_str(&v.to_string());
                                         } else {
-                                            member.push_str("?");
+                                            member.push('?');
                                         }
                                         member.push(']');
                                         indices.push(idx);
@@ -10242,7 +10221,7 @@ impl<'a> Parser<'a> {
                     // 注意: abs/labs 不重写, 因为 builtin handler
                     // 不处理参数截断 (int abs(int) 需要先截断到 32 位).
                     let callee_expr = match callee_expr {
-                        Expr::Ident { ref name, span: ref sp, ty: ref ty }
+                        Expr::Ident { ref name, span: ref sp, ref ty }
                             if name.name == "llabs" =>
                         {
                             Expr::Ident {
@@ -10358,8 +10337,8 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     // 无后缀: 按值大小选择第一个能容纳的类型
-                    let fits_u32 = v >= 0 && v <= 0xFFFFFFFF;
-                    let fits_i32 = v >= 0 && v <= 0x7FFFFFFF;
+                    let fits_u32 = (0..=0xFFFFFFFF).contains(&v);
+                    let fits_i32 = (0..=0x7FFFFFFF).contains(&v);
                     let fits_i64 = v >= 0 && v <= i64::MAX as i128;
                     if is_hex_or_oct {
                         // hex/oct: int → unsigned int → long → unsigned long → ...
@@ -10407,11 +10386,9 @@ impl<'a> Parser<'a> {
                 // 先检测虚数后缀 (i/I/j/J), 再检测类型后缀 (f/F/l/L)
                 let mut stripped = s;
                 let mut is_imag = false;
-                let mut imag_pos = None; // 'i' 在类型后缀之前还是之后
                 // 检查末尾是否有 i/I/j/J
                 if stripped.ends_with(['i', 'I', 'j', 'J']) {
                     is_imag = true;
-                    imag_pos = Some("suffix");
                     stripped = &stripped[..stripped.len() - 1];
                 }
                 // 提取类型后缀 (在去掉虚数后缀之后)
@@ -10464,10 +10441,7 @@ impl<'a> Parser<'a> {
                             let narrow = std::mem::take(&mut data);
                             let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
                             data = Vec::with_capacity(narrow.len() * wchar_sz);
-                            for &b in &narrow {
-                                data.push(b);
-                                for _ in 1..wchar_sz { data.push(0); }
-                            }
+                            widen_to_wchar(&mut data, &narrow, wchar_sz);
                         }
                         let wide_bytes = parse_wide_str(&self.cur.text, self.opts.short_wchar);
                         data.extend(wide_bytes);
@@ -10476,10 +10450,7 @@ impl<'a> Parser<'a> {
                             // 已有宽数据: 窄字符串每字节提升为 wchar_t
                             let narrow = parse_str(&self.cur.text);
                             let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
-                            for &b in &narrow {
-                                data.push(b);
-                                for _ in 1..wchar_sz { data.push(0); }
-                            }
+                            widen_to_wchar(&mut data, &narrow, wchar_sz);
                         } else {
                             data.extend(parse_str(&self.cur.text));
                         }
@@ -10489,7 +10460,7 @@ impl<'a> Parser<'a> {
                 // NUL 终止符 (宽字符串需要多个零字节)
                 if is_wide {
                     let wchar_sz = if self.opts.short_wchar { 2 } else { 4 };
-                    for _ in 0..wchar_sz { data.push(0); }
+                    data.resize(data.len() + wchar_sz, 0);
                     let wchar_ty = if self.opts.short_wchar { Type::Short } else { Type::Int };
                     Some(Expr::String {
                         data,
@@ -10519,16 +10490,13 @@ impl<'a> Parser<'a> {
                         // 窄字符串: 每个字节提升为 wchar_t (UTF-32LE/UTF-16LE)
                         let narrow = parse_str(&self.cur.text);
                         let wchar_sz = if short_wchar { 2 } else { 4 };
-                        for &b in &narrow {
-                            data.push(b);
-                            for _ in 1..wchar_sz { data.push(0); }
-                        }
+                        widen_to_wchar(&mut data, &narrow, wchar_sz);
                     }
                     self.advance();
                 }
                 // NUL 终止符 (宽字符串需要 wchar_sz 个零字节)
                 let wchar_sz = if short_wchar { 2 } else { 4 };
-                for _ in 0..wchar_sz { data.push(0); }
+                data.resize(data.len() + wchar_sz, 0);
                 // wchar_t = int (4 bytes) on Linux, or short (2 bytes) with -fshort-wchar
                 let wchar_ty = if short_wchar { Type::Short } else { Type::Int };
                 Some(Expr::String {
@@ -11174,7 +11142,7 @@ fn parse_str(raw: &str) -> Vec<u8> {
                     }
                     d.push(val);
                 }
-                c if c >= b'0' && c <= b'7' => {
+                c if (b'0'..=b'7').contains(&c) => {
                     // 八进制转义: \NNN (1-3 位八进制数字)
                     let mut val: u16 = 0;
                     for _ in 0..3 {
@@ -11211,6 +11179,14 @@ fn parse_str(raw: &str) -> Vec<u8> {
         }
     }
     d
+}
+
+/// 将窄字符串每字节零扩展为 `wchar_sz` (2 或 4) 字节的 wchar_t
+fn widen_to_wchar(dst: &mut Vec<u8>, narrow: &[u8], wchar_sz: usize) {
+    for &b in narrow {
+        dst.push(b);
+        dst.extend(std::iter::repeat_n(0u8, wchar_sz - 1));
+    }
 }
 
 /// Parse wide string literal L"..." to UTF-32LE bytes (4 bytes per wchar_t)
@@ -11291,12 +11267,12 @@ fn parse_wide_str(raw: &str, short_wchar: bool) -> Vec<u8> {
                     }
                     val
                 }
-                Some(c) if c >= '0' && c <= '7' => {
+                Some(c) if ('0'..='7').contains(&c) => {
                     // \NNN 八进制转义, 1-3 位
                     let mut val = (c as u32) - ('0' as u32);
                     for _ in 0..2 {
                         if let Some(h) = it.clone().next() {
-                            if h >= '0' && h <= '7' {
+                            if ('0'..='7').contains(&h) {
                                 val = val * 8 + ((h as u32) - ('0' as u32));
                                 it.next();
                             } else {
@@ -11573,7 +11549,7 @@ fn parse_chr(raw: &str) -> i128 {
                     chars_bytes.push(val);
                     continue;
                 }
-                c if c >= b'0' && c <= b'7' => {
+                c if (b'0'..=b'7').contains(&c) => {
                     // octal escape: \NNN
                     let mut val: i128 = 0;
                     for _ in 0..3 {
@@ -11623,7 +11599,7 @@ fn parse_hex_float(s: &str) -> f64 {
     let s = s.trim_end_matches(['f', 'F', 'l', 'L', 'i', 'I', 'j', 'J']);
 
     // Split into mantissa and exponent at 'p'/'P'
-    let (mantissa_str, exp_str) = if let Some(p_pos) = s.find(|c: char| c == 'p' || c == 'P') {
+    let (mantissa_str, exp_str) = if let Some(p_pos) = s.find(['p', 'P']) {
         (&s[..p_pos], Some(&s[p_pos + 1..]))
     } else {
         (s, None)

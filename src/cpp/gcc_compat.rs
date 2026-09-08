@@ -47,6 +47,7 @@ pub fn typeinfo_struct_decl() -> String {
 /// - ptr 为空: 返回空
 /// - offset < 0 (上转): 返回原指针
 /// - 否则: 按偏移调整到目标子对象
+///
 /// 使用 static inline 避免多 TU 链接冲突.
 pub fn dynamic_cast_runtime() -> String {
     String::from(

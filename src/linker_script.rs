@@ -59,12 +59,8 @@ pub fn parse_linker_script(content: &str) -> Result<LinkerScript, String> {
                     chars.next();
                 }
             }
-            'E' | 'e' => {
-                if try_parse_keyword(&mut chars, "ENTRY") {
-                    parse_entry(&mut chars, content, &mut script)?;
-                } else {
-                    chars.next();
-                }
+            'E' | 'e' if try_parse_keyword(&mut chars, "ENTRY") => {
+                parse_entry(&mut chars, content, &mut script)?;
             }
             _ => {
                 chars.next();

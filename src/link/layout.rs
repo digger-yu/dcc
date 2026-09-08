@@ -202,6 +202,12 @@ pub struct LayoutBuilder {
     pub comdat_discarded: HashSet<u32>,
 }
 
+impl Default for LayoutBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LayoutBuilder {
     pub fn new() -> Self {
         Self {

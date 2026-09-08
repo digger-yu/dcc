@@ -336,7 +336,7 @@ mod tests {
         let lib_path = dir.join("libfoo.a");
         std::fs::write(&lib_path, b"fake-archive").unwrap();
 
-        let result = resolve_static_library("foo", &[dir.clone()], None);
+        let result = resolve_static_library("foo", std::slice::from_ref(&dir), None);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), lib_path);
 

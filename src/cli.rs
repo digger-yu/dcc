@@ -215,6 +215,7 @@ pub struct Config {
 
 /// -ffp-contract= 模式: FP 收缩 (fma) 策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FpContractMode {
     /// -ffp-contract=fast: 允许任意 FP 收缩
     Fast,
@@ -223,13 +224,8 @@ pub enum FpContractMode {
     /// -ffp-contract=off: 禁止 FP 收缩
     Off,
     /// 默认: 与 on 相同 (C 标准)
+    #[default]
     Default,
-}
-
-impl Default for FpContractMode {
-    fn default() -> Self {
-        FpContractMode::Default
-    }
 }
 
 /// ARM 指令集模式 (-mthumb/-marm)
@@ -781,7 +777,8 @@ fn expand_response_files(args: &[String]) -> Result<Vec<String>, CliError> {
 /// 这些选项被 DCC 安全忽略（不产生效果但不报警告）。
 fn is_known_m_option(opt: &str) -> bool {
     // 精确匹配
-    if match opt {
+    if matches!(
+        opt,
         "-mno-red-zone" | "-mred-zone" |
         "-m64" | "-m32" |
         "-mno-sse" | "-mno-sse2" | "-mno-sse3" | "-mno-ssse3" |
@@ -824,9 +821,8 @@ fn is_known_m_option(opt: &str) -> bool {
         "-mno-push-args" | "-mpush-args" |
         "-mno-stack-arg-probe" | "-mstack-arg-probe" |
         "-mno-dwarf2-asm" | "-mdwarf2-asm" |
-        "-mno-tune" => true,
-        _ => false,
-    } {
+        "-mno-tune"
+    ) {
         return true;
     }
     // 前缀匹配: -march=, -mcpu=, -mtune=, -mcmodel=, -mabi=, -mfpu= 等

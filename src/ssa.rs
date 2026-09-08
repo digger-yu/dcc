@@ -52,6 +52,8 @@ pub enum Operand {
 }
 
 #[derive(Debug, Clone)]
+// 指令按值存放在 IR 节点里, 装箱会让每条热路径的模式匹配多一次解引用。
+#[allow(clippy::large_enum_variant)]
 pub enum InstKind {
     /// `dest = op(l, r)` 二元
     Bin { op: BinOp, l: Operand, r: Operand },
@@ -1211,7 +1213,7 @@ impl Builder {
                 // computed goto: 保守处理，跳转到所有已知 label BB
                 let _ = self.lower_expr(expr);
                 // 保守: 添加边到所有已知 label BB
-                for (_, target_bb) in &self.label_bbs {
+                for target_bb in self.label_bbs.values() {
                     if let Some(tbb) = self.func.blocks.get_mut(target_bb) {
                         tbb.preds.push(self.cur.clone());
                         tbb.preds.dedup();
@@ -1681,7 +1683,7 @@ fn insert_label_phis(
         return;
     }
     // 对每个 label BB，检查是否有多个前驱且前驱的变量版本不同
-    for (_label_name, bb_name) in label_bbs {
+    for bb_name in label_bbs.values() {
         let bb = match func.blocks.get(bb_name) {
             Some(b) => b,
             None => continue,
@@ -1943,14 +1945,10 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
 
     // 从后向前构建 if-else 链
     // 最后是 default (如果有)
-    let mut current_else: Option<Box<Stmt>> = if let Some(def) = default_case {
-        Some(Box::new(Stmt::Block {
+    let mut current_else: Option<Box<Stmt>> = default_case.map(|def| Box::new(Stmt::Block {
             b: def.body.clone(),
             span: def.span.clone(),
-        }))
-    } else {
-        None
-    };
+        }));
 
     // 从后向前遍历普通 case，构建嵌套 if-else
     for case in normal_cases.iter().rev() {
@@ -1985,10 +1983,8 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
 fn is_dense_switch(cases: &[Case]) -> bool {
     let mut vals: Vec<i128> = Vec::new();
     for c in cases {
-        if let Some(val_expr) = &c.val {
-            if let Expr::Int { v, .. } = val_expr {
-                vals.push(*v);
-            }
+        if let Some(Expr::Int { v, .. }) = &c.val {
+            vals.push(*v);
         }
     }
     if vals.len() < 2 {

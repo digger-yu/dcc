@@ -1573,11 +1573,8 @@ pub fn preprocess(
     // INT_MIN/INT_MAX already via __INT32_MIN__/__INT32_MAX__
     // UINT_MAX already via __UINT32_MAX__
     // LONG_MIN/LONG_MAX/LONG_ULONG_MAX depend on data model
-    if is_lp64 {
-        pp.define_builtin("__LONG_MIN__", "(-__LONG_MAX__ - 1L)");
-    } else {
-        pp.define_builtin("__LONG_MIN__", "(-__LONG_MAX__ - 1L)");
-    }
+    // __LONG_MIN__ 由 __LONG_MAX__ 导出, LP64/ILP32 下都成立
+    pp.define_builtin("__LONG_MIN__", "(-__LONG_MAX__ - 1L)");
     // LLONG_MIN/LLONG_MAX
     pp.define_builtin("__LLONG_MIN__", "(-__LONG_LONG_MAX__ - 1LL)");
     pp.define_builtin("__ULLONG_MAX__", "18446744073709551615ULL");
@@ -2096,7 +2093,7 @@ impl Preprocessor {
                 trimmed
             };
 
-            if trimmed.starts_with('#') {
+            if let Some(directive) = trimmed.strip_prefix('#') {
                 let unclosed =
                     !active_source.is_empty() && self.has_unclosed_paren(&active_source);
                 if !active_source.is_empty() && !unclosed {
@@ -2114,7 +2111,7 @@ impl Preprocessor {
                 // (include/if/pragma...) 先重放已有段以维持源顺序。
                 let mut record: Option<BufferedDefine> = None;
                 if unclosed && self.is_active() {
-                    let after_hash = trimmed[1..].trim_start();
+                    let after_hash = directive.trim_start();
                     if let Some(rest) = after_hash.strip_prefix("define") {
                         if let Some(name) = Self::directive_macro_name(rest) {
                             record = Some(BufferedDefine {
@@ -4061,6 +4058,7 @@ impl Preprocessor {
     /// * FP_CONTRACT: ON 允许收缩 `a*b+c`, OFF/DEFAULT 禁止
     /// * CX_LIMITED_RANGE: ON 允许有限范围 complex 公式, OFF/DEFAULT
     ///   保持保守公式
+    ///
     /// 未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
     /// 污染语义状态.
     ///
@@ -5469,7 +5467,7 @@ impl Preprocessor {
         // (如 class_shift) 的前缀. 但即便如此仍需词边界检查, 因为替换后
         // 文本会变化, 降序仅降低冲突概率而非完全消除.
         let mut indexed_params: Vec<(usize, &String)> = params.iter().enumerate().collect();
-        indexed_params.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        indexed_params.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
         for (i, param) in &indexed_params {
             let i = *i;
             if i >= args.len() {
@@ -11056,7 +11054,7 @@ int ok = 1;\n";
             b"#include <auto_sys.h>\nint main(void) { return auto_sys_var; }\n",
             "main.c",
             &[],
-            &[sys_dir.clone()],
+            std::slice::from_ref(&sys_dir),
             &[],
             &[],
             &[],
@@ -11109,7 +11107,7 @@ int ok = 1;\n";
         let out = preprocess(
             b"#include <user_header.h>\nint main(void) { return user_var; }\n",
             "main.c",
-            &[user_dir.clone()],
+            std::slice::from_ref(&user_dir),
             &[],
             &[],
             &[],
@@ -11210,8 +11208,8 @@ int ok = 1;\n";
              #warning outer user warning\n\
              int main(void) { return mid_var + inner_var; }\n",
             "main.c",
-            &[user_dir.clone()],
-            &[sys_dir.clone()],
+            std::slice::from_ref(&user_dir),
+            std::slice::from_ref(&sys_dir),
             &[],
             &[],
             &[],
@@ -11436,7 +11434,7 @@ int ok = 1;\n";
         let out = preprocess(
             &fs::read(&src).unwrap(),
             src.to_str().unwrap(),
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             &[],
@@ -11497,7 +11495,7 @@ int ok = 1;\n";
         let out = preprocess(
             &fs::read(&src).unwrap(),
             src.to_str().unwrap(),
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             &[],

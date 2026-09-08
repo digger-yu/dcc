@@ -403,6 +403,20 @@ fn utf8_char_len(b: u8) -> usize {
     }
 }
 
+/// 返回 `name_idx` 处 `dcc-*` 分量的起始下标: 若它位于当前 `TMPDIR` 之下,
+/// 就一并吞掉临时目录根, 使 snapshot 不再依赖 `TMPDIR` 的真实取值
+fn fold_temp_root(s: &str, name_idx: usize) -> usize {
+    let mut root = std::env::temp_dir().to_string_lossy().into_owned();
+    if !root.ends_with('/') {
+        root.push('/');
+    }
+    if s[..name_idx].ends_with(root.as_str()) {
+        name_idx - root.len()
+    } else {
+        name_idx
+    }
+}
+
 /// 将 stderr 中的绝对路径替换为稳定占位符 `<file>`
 fn normalize_stderr(raw: &str, file_path: &Path) -> String {
     let stripped = strip_ansi(raw).replace("\r\n", "\n").replace('\r', "\n");
@@ -415,28 +429,27 @@ fn normalize_stderr(raw: &str, file_path: &Path) -> String {
         normalized = normalized.replace(&canonical_str.replace('\\', "/"), "<file>");
     }
     // 兜底: 把任何 dcc-secret-*-<eXXXX> 临时目录里的 secret.h 折叠为 <secret.h>
-    if let Some(start) = normalized.find("dcc-secret-") {
-        if let Some(end_rel) = normalized[start..].find('/') {
-            let tmp_root = normalized[start..start + end_rel + 1].to_string();
+    if let Some(name_idx) = normalized.find("dcc-secret-") {
+        let begin = fold_temp_root(&normalized, name_idx);
+        if let Some(end_rel) = normalized[name_idx..].find('/') {
+            let tmp_root = normalized[begin..name_idx + end_rel + 1].to_string();
             normalized = normalized.replace(tmp_root.as_str(), "<tmpdir>");
-            let tail = String::from("/") + "secret" + "." + "h";
-            let full = tmp_root.clone() + tail.as_str();
-            normalized = normalized.replace(full.as_str(), "<secret.h>");
         }
     }
     // 兜底: 把 dcc-asm-<pid>.s 折叠为 <asm-tmp>
-    if let Some(start) = normalized.find("dcc-asm-") {
+    if let Some(name_idx) = normalized.find("dcc-asm-") {
+        let begin = fold_temp_root(&normalized, name_idx);
         let bytes = normalized.as_bytes();
         let mut end = bytes.len();
-        for (i, b) in bytes.iter().enumerate().skip(start) {
+        for (i, b) in bytes.iter().enumerate().skip(name_idx) {
             let ch = *b as char;
             if ch == ':' || ch == ' ' || ch == '\n' {
                 end = i;
                 break;
             }
         }
-        let tmp_asm = &normalized[start..end];
-        normalized = normalized.replace(tmp_asm, "<asm-tmp>");
+        let tmp_asm = normalized[begin..end].to_string();
+        normalized = normalized.replace(tmp_asm.as_str(), "<asm-tmp>");
     }
     let sec_h = String::from("sec") + "ret" + "." + "h";
     let sec_h_str: &str = sec_h.as_str();

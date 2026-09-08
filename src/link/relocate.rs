@@ -1003,11 +1003,11 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // CB offset encoding: inst[12]=imm[8], inst[11:10]=imm[4:3],
                     //   inst[6:5]=imm[7:6], inst[4:3]=imm[2:1], inst[2]=imm[5]
                     let new_inst = (inst & !0x1c79)
-                        | (((imm as u16 >> 8) & 1) << 12)
-                        | (((imm as u16 >> 3) & 3) << 10)
-                        | (((imm as u16 >> 6) & 3) << 5)
-                        | (((imm as u16 >> 1) & 3) << 3)
-                        | (((imm as u16 >> 5) & 1) << 2);
+                        | (((imm >> 8) & 1) << 12)
+                        | (((imm >> 3) & 3) << 10)
+                        | (((imm >> 6) & 3) << 5)
+                        | (((imm >> 1) & 3) << 3)
+                        | (((imm >> 5) & 1) << 2);
                     sec.data[r_offset..r_offset + 2].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 R_RISCV_RVC_JUMP if layout.arch == ArchKind::RiscV64 => {
@@ -1019,17 +1019,17 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         u16::from_le_bytes(sec.data[r_offset..r_offset + 2].try_into().unwrap());
                     // CJ offset encoding: complex bit scatter
                     let new_inst = (inst & !0x1fff)
-                        | (((imm as u16 >> 11) & 1) << 12)
-                        | (((imm as u16 >> 4) & 1) << 11)
-                        | (((imm as u16 >> 8) & 1) << 10)
-                        | (((imm as u16 >> 10) & 1) << 9)
-                        | (((imm as u16 >> 6) & 1) << 8)
-                        | (((imm as u16 >> 7) & 1) << 7)
-                        | (((imm as u16 >> 1) & 1) << 6)
-                        | (((imm as u16 >> 5) & 1) << 5)
-                        | (((imm as u16 >> 3) & 1) << 4)
-                        | (((imm as u16 >> 2) & 1) << 3)
-                        | (((imm as u16 >> 9) & 1) << 2);
+                        | (((imm >> 11) & 1) << 12)
+                        | (((imm >> 4) & 1) << 11)
+                        | (((imm >> 8) & 1) << 10)
+                        | (((imm >> 10) & 1) << 9)
+                        | (((imm >> 6) & 1) << 8)
+                        | (((imm >> 7) & 1) << 7)
+                        | (((imm >> 1) & 1) << 6)
+                        | (((imm >> 5) & 1) << 5)
+                        | (((imm >> 3) & 1) << 4)
+                        | (((imm >> 2) & 1) << 3)
+                        | (((imm >> 9) & 1) << 2);
                     sec.data[r_offset..r_offset + 2].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 R_RISCV_ALIGN | R_RISCV_RELAX if layout.arch == ArchKind::RiscV64 => {
@@ -2101,7 +2101,8 @@ mod tests {
         // sym = 0x401004, place = 0x401000, A = 0
         // value = 0x401004 + 0 - 0x401000 = 4
         let mut layout = {
-            let l = Layout {
+
+            Layout {
                 is_pie: false,
                 is_shared: false,
                 base_addr: 0x400000,
@@ -2185,8 +2186,7 @@ mod tests {
                 dynamic_linker: None,
                 arch: ArchKind::X86_64,
                 comdat_groups: vec![],
-            };
-            l
+            }
         };
         apply_relocations(&mut layout).unwrap();
         // S(0x401008) + A(0) - P(0x401000) = 8

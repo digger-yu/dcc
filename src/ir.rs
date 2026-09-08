@@ -336,7 +336,7 @@ fn layout_union_fields(fields: &[ast::Field]) -> (Vec<TypeFieldInfo>, usize, usi
 /// Best-effort size/alignment for an AST type (without full context).
 fn type_size_align(ty: &ast::Type) -> (usize, usize) {
     let sz = ty.size();
-    let al = sz.max(1).min(16);
+    let al = sz.clamp(1, 16);
     (sz.max(1), al)
 }
 
@@ -935,15 +935,14 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                 }
             }
         }
-        ExprKind::VaArg { .. } => {
-            if !expr.children.first().is_some_and(|ap| is_va_list_type(&ap.ty)) {
+        ExprKind::VaArg { .. }
+            if !expr.children.first().is_some_and(|ap| is_va_list_type(&ap.ty)) => {
                 diagnostics.push(Diagnostic::err(
                     "E1005",
                     "va_arg currently requires a va_list object",
                     expr.span.clone(),
                 ));
             }
-        }
         _ => {}
     }
     for child in &expr.children {

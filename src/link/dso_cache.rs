@@ -470,7 +470,7 @@ mod tests {
         let so_path = dir.join("libfoo.so");
         std::fs::write(&so_path, b"fake-so").unwrap();
 
-        let result = resolve_library("foo", &[dir.clone()], None);
+        let result = resolve_library("foo", std::slice::from_ref(&dir), None);
         assert!(result.is_some(), "should find libfoo.so in search path");
         assert_eq!(result.unwrap(), so_path);
 
@@ -501,12 +501,12 @@ mod tests {
         std::fs::write(&so_path, &elf).unwrap();
 
         let mut cache = DsoCache::new();
-        let result = resolve_and_load(&mut cache, "bar", &[dir.clone()], None);
+        let result = resolve_and_load(&mut cache, "bar", std::slice::from_ref(&dir), None);
         assert!(result.is_ok(), "should load: {:?}", result.err());
 
         // 第二次应走缓存
         let (hits_before, misses_before) = cache.stats();
-        let result2 = resolve_and_load(&mut cache, "bar", &[dir.clone()], None);
+        let result2 = resolve_and_load(&mut cache, "bar", std::slice::from_ref(&dir), None);
         assert!(result2.is_ok());
         let (hits_after, misses_after) = cache.stats();
         assert_eq!(hits_after, hits_before + 1, "should be a cache hit");

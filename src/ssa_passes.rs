@@ -372,7 +372,7 @@ pub fn alias_analysis_with_strict(
             }
         }
         let mut next_set = sets.values().copied().max().unwrap_or(0) + 1;
-        for (_set_id, members) in &type_class {
+        for members in type_class.values() {
             if members.len() <= 1 { continue; }
             // 按类型分组
             let mut groups: Vec<(crate::ast::Type, Vec<String>)> = Vec::new();
@@ -424,7 +424,7 @@ fn types_alias_compatible(a: &crate::ast::Type, b: &crate::ast::Type) -> bool {
 }
 
 /// Steensgaard union-find 别名分析核心实现。
-
+///
 /// 给每个 SSA 指针变量分配一个 alias set 编号 (Steensgaard 风格):
 ///   p = &x  => set(p) = set(x)
 ///   p = q   => union(set(p), set(q))
@@ -627,8 +627,8 @@ fn schedule_block(insts: &[Inst]) -> Option<Vec<usize>> {
     // 后续非 memory asm，这正是该调度器需要释放的场景。
     for (idx, inst) in insts.iter().enumerate() {
         if inst_reads_memory(&inst.kind) {
-            for before in 0..idx {
-                if inst_is_memory_ordered(&insts[before].kind) {
+            for (before, prev) in insts[..idx].iter().enumerate() {
+                if inst_is_memory_ordered(&prev.kind) {
                     add_edge(before, idx);
                 }
             }
@@ -1420,11 +1420,7 @@ fn record_operand_use(
             }
         }
         InstKind::AddrOf { base } => record(base),
-        InstKind::Load { e, .. } => {
-            if let Operand::Var(v) = e {
-                record(&v.name());
-            }
-        }
+        InstKind::Load { e: Operand::Var(v), .. } => record(&v.name()),
         InstKind::Store { e, src } => {
             if let Operand::Var(v) = e {
                 record(&v.name());
@@ -1462,11 +1458,7 @@ fn record_operand_use(
                 }
             }
         }
-        InstKind::MemberLoad { obj, .. } => {
-            if let Operand::Var(v) = obj {
-                record(&v.name());
-            }
-        }
+        InstKind::MemberLoad { obj: Operand::Var(v), .. } => record(&v.name()),
         InstKind::MemberStore { obj, src, .. } => {
             if let Operand::Var(v) = obj {
                 record(&v.name());

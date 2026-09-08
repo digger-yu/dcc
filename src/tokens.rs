@@ -292,7 +292,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn next(&mut self) -> Tok {
+    pub fn next_tok(&mut self) -> Tok {
         self.skip_ws_and_comments();
         let line = self.line;
         let col = self.col;
@@ -633,8 +633,8 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 // hex float exponent: p/P followed by decimal exponent
-                if is_float || matches!(self.peek(), Some(b'p') | Some(b'P')) {
-                    if matches!(self.peek(), Some(b'p') | Some(b'P')) {
+                if (is_float || matches!(self.peek(), Some(b'p') | Some(b'P')))
+                    && matches!(self.peek(), Some(b'p') | Some(b'P')) {
                         is_float = true;
                         self.bump();
                         if let Some(b'+') | Some(b'-') = self.peek() {
@@ -648,7 +648,6 @@ impl<'a> Lexer<'a> {
                             }
                         }
                     }
-                }
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {
                 self.bump();
                 self.bump();
@@ -1040,7 +1039,7 @@ mod tests {
     fn malformed_literals_and_unknown_bytes_are_not_eof() {
         for source in [b"\"unterminated\n".as_slice(), b"'unterminated\n", b"@"] {
             let mut lexer = Lexer::new(source, "invalid-token.c");
-            assert_eq!(lexer.next().kind, TokKind::Invalid);
+            assert_eq!(lexer.next_tok().kind, TokKind::Invalid);
         }
     }
 
@@ -1048,8 +1047,8 @@ mod tests {
     fn integer_suffixes_are_part_of_the_number_token() {
         for source in ["1U", "1UL", "1LU", "1ULL", "0xffUL", "0X10llu"] {
             let mut lexer = Lexer::new(source.as_bytes(), "integer-suffix.c");
-            assert_eq!(lexer.next().kind, TokKind::Number, "{source}");
-            assert_eq!(lexer.next().kind, TokKind::Eof, "{source}");
+            assert_eq!(lexer.next_tok().kind, TokKind::Number, "{source}");
+            assert_eq!(lexer.next_tok().kind, TokKind::Eof, "{source}");
         }
     }
 
@@ -1057,39 +1056,39 @@ mod tests {
     fn wide_string_and_char_literals() {
         // L"hello" 应产生 WideStringLit
         let mut lx = Lexer::new(br#"L"hello""#, "wide.c");
-        let tok = lx.next();
+        let tok = lx.next_tok();
         assert_eq!(tok.kind, TokKind::WideStringLit);
         assert_eq!(tok.text.as_str(), r#"L"hello""#);
-        assert_eq!(lx.next().kind, TokKind::Eof);
+        assert_eq!(lx.next_tok().kind, TokKind::Eof);
 
         // L'a' 应产生 WideCharLit
         let mut lx = Lexer::new(b"L'a'", "wide.c");
-        let tok = lx.next();
+        let tok = lx.next_tok();
         assert_eq!(tok.kind, TokKind::WideCharLit);
         assert_eq!(tok.text.as_str(), "L'a'");
-        assert_eq!(lx.next().kind, TokKind::Eof);
+        assert_eq!(lx.next_tok().kind, TokKind::Eof);
 
         // L'\u00e9' 宽字符 (UTF-8 字节序列 e9 在源里)
         let mut lx = Lexer::new("L'\u{e9}'".as_bytes(), "wide.c");
-        let tok = lx.next();
+        let tok = lx.next_tok();
         assert_eq!(tok.kind, TokKind::WideCharLit);
 
         // 普通 'a' 仍是 CharLit, 不被 L 前缀吞
         let mut lx = Lexer::new(b"'a'", "plain.c");
-        assert_eq!(lx.next().kind, TokKind::CharLit);
-        assert_eq!(lx.next().kind, TokKind::Eof);
+        assert_eq!(lx.next_tok().kind, TokKind::CharLit);
+        assert_eq!(lx.next_tok().kind, TokKind::Eof);
 
         // L 后接 identifier (非 ' " 前缀) 应是普通 ident Lx
         let mut lx = Lexer::new(b"Lx", "ident.c");
-        let tok = lx.next();
+        let tok = lx.next_tok();
         assert_eq!(tok.kind, TokKind::Ident);
         assert_eq!(tok.text.as_str(), "Lx");
-        assert_eq!(lx.next().kind, TokKind::Eof);
+        assert_eq!(lx.next_tok().kind, TokKind::Eof);
     }
 
     #[test]
     fn wide_char_unterminated_is_invalid() {
         let mut lx = Lexer::new(b"L'abc", "wide.c");
-        assert_eq!(lx.next().kind, TokKind::Invalid);
+        assert_eq!(lx.next_tok().kind, TokKind::Invalid);
     }
 }

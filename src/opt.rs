@@ -72,7 +72,7 @@ fn trace_inline_decision(callee: &str, decision: &str, reason: &str) {
 /// - `-O3`: 额外启发式内联小型 `static` 零参函数 (cost ≤ 20 AST nodes).
 /// - `noinline` 属性始终被尊重 (除非与 `always_inline` 冲突, 此时
 ///   `always_inline` 优先, 与 GCC 行为一致).
-/// -  speculative 内联深度上限 `INLINE_MAX_DEPTH` (8). 递归函数
+/// - speculative 内联深度上限 `INLINE_MAX_DEPTH` (8). 递归函数
 ///   通过 callee-name 检测阻止直接递归内联.
 pub fn optimize(module: &mut Module, level: u8) {
     optimize_with_target(module, level, false, 0);
@@ -215,15 +215,15 @@ fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool
         Stmt::If { cond, then_, else_, .. } => {
             expr_refs_volatile(cond, vol)
                 || stmt_refs_volatile(then_, vol)
-                || else_.as_ref().map_or(false, |e| stmt_refs_volatile(e, vol))
+                || else_.as_ref().is_some_and(|e| stmt_refs_volatile(e, vol))
         }
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             expr_refs_volatile(cond, vol) || stmt_refs_volatile(body, vol)
         }
         Stmt::For { init, cond, step, body, .. } => {
-            init.as_ref().map_or(false, |i| stmt_refs_volatile(i, vol))
-                || cond.as_ref().map_or(false, |c| expr_refs_volatile(c, vol))
-                || step.as_ref().map_or(false, |s| expr_refs_volatile(s, vol))
+            init.as_ref().is_some_and(|i| stmt_refs_volatile(i, vol))
+                || cond.as_ref().is_some_and(|c| expr_refs_volatile(c, vol))
+                || step.as_ref().is_some_and(|s| expr_refs_volatile(s, vol))
                 || stmt_refs_volatile(body, vol)
         }
         Stmt::Block { b, .. } => b.items.iter().any(|i| block_item_refs_volatile(i, vol)),
@@ -1319,7 +1319,7 @@ fn estimate_inline_cost(_f: &FuncDecl, body: &Block, args: &[Expr]) -> usize {
     // reference to the corresponding parameter in the body.
     // We approximate by counting arg nodes * param references (bounded
     // by body_cost as an upper heuristic).
-    let arg_cost: usize = args.iter().map(|a| expr_node_count(a)).sum::<usize>();
+    let arg_cost: usize = args.iter().map(expr_node_count).sum::<usize>();
     // Total: body + arg duplication (arg cost scaled by param usage ratio)
     body_cost.saturating_add(arg_cost)
 }

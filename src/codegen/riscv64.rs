@@ -2399,8 +2399,8 @@ impl Riscv64Codegen {
                     // FSW fa0, tmp_real(sp)
                     let imm = tmp_real as u32;
                     let insn = ((imm >> 5) & 0x7f) << 25
-                        | (10 as u32) << 20
-                        | (2 as u32) << 15
+                        | 10_u32 << 20
+                        | 2_u32 << 15
                         | 0b010 << 12
                         | (imm & 0x1f) << 7
                         | 0x27;
@@ -2408,8 +2408,8 @@ impl Riscv64Codegen {
                     // FSW fa1, tmp_imag(sp)
                     let imm2 = tmp_imag as u32;
                     let insn2 = ((imm2 >> 5) & 0x7f) << 25
-                        | (11 as u32) << 20
-                        | (2 as u32) << 15
+                        | 11_u32 << 20
+                        | 2_u32 << 15
                         | 0b010 << 12
                         | (imm2 & 0x1f) << 7
                         | 0x27;
@@ -3119,7 +3119,7 @@ impl Riscv64Codegen {
                 self.emit_amoswap(sz, 10, 12, 11); true
             }
             "__sync_lock_release" => {
-                if args.len() < 1 { return false; }
+                if args.is_empty() { return false; }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0]); self.mv_a_reg(11);
                 self.li_reg(12, 0);
@@ -3286,7 +3286,7 @@ impl Riscv64Codegen {
             // 小偏移: 直接用 addi tp, a0
             // addi a0, tp, imm (I-type)
             let imm = (off as u32) & 0xfff;
-            let insn = (imm << 20) | (4u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x13;
+            let insn = ((imm << 20) | (4u32 << 15)) | (10u32 << 7) | 0x13;
             self.emit(&insn.to_le_bytes());
         } else {
             // 大偏移: lui + addi + add
@@ -3303,7 +3303,7 @@ impl Riscv64Codegen {
             });
             // addi a0, a0, %tprel_add_lo12(sym)
             let lo12 = (off as i32) & 0xfff;
-            let insn_addi = ((lo12 as u32) << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x13;
+            let insn_addi = (((lo12 as u32) << 20) | (10u32 << 15)) | (10u32 << 7) | 0x13;
             self.emit(&insn_addi.to_le_bytes());
             let addi_pos = self.pos() - 4;
             self.relocations.push(ElfRela {
@@ -3314,7 +3314,7 @@ impl Riscv64Codegen {
             });
             // add a0, a0, tp (x4)
             // add rd, rs1, rs2: 0x33 | rs2<<20 | rs1<<15 | funct3<<12 | rd<<7
-            let insn_add = (4u32 << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x33;
+            let insn_add = ((4u32 << 20) | (10u32 << 15)) | (10u32 << 7) | 0x33;
             self.emit(&insn_add.to_le_bytes());
         }
     }
@@ -3328,7 +3328,7 @@ impl Riscv64Codegen {
     fn emit_tls_ie_access(&mut self, sym: &str) {
         let idx = self.ensure_sym(sym);
         // lui a5, %got_tpoff_hi20(sym)
-        let insn_lui = (0u32 << 12) | (15u32 << 7) | 0x37;
+        let insn_lui = (15u32 << 7) | 0x37;
         self.emit(&insn_lui.to_le_bytes());
         let lui_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3339,7 +3339,7 @@ impl Riscv64Codegen {
         });
         // ld a5, %got_tpoff_lo12(sym)(a5) - I-type load
         // ld rd, imm(rs1): funct3=011, opcode=0000011
-        let insn_ld = (0u32 << 20) | (15u32 << 15) | (0b011 << 12) | (15u32 << 7) | 0x03;
+        let insn_ld = (15u32 << 15) | (0b011 << 12) | (15u32 << 7) | 0x03;
         self.emit(&insn_ld.to_le_bytes());
         let ld_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3349,7 +3349,7 @@ impl Riscv64Codegen {
             addend: 0,
         });
         // add a0, a5, tp (x4)
-        let insn_add = (4u32 << 20) | (15u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x33;
+        let insn_add = ((4u32 << 20) | (15u32 << 15)) | (10u32 << 7) | 0x33;
         self.emit(&insn_add.to_le_bytes());
     }
 
@@ -3363,7 +3363,7 @@ impl Riscv64Codegen {
     fn emit_tls_desc_access(&mut self, sym: &str) {
         let idx = self.ensure_sym(sym);
         // lui a0, %tlsdesc_hi(sym)
-        let insn_lui = (0u32 << 12) | (10u32 << 7) | 0x37;
+        let insn_lui = (10u32 << 7) | 0x37;
         self.emit(&insn_lui.to_le_bytes());
         let lui_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3373,7 +3373,7 @@ impl Riscv64Codegen {
             addend: 0,
         });
         // ld a0, %tlsdesc_load_lo12(sym)(a0)
-        let insn_ld = (0u32 << 20) | (10u32 << 15) | (0b011 << 12) | (10u32 << 7) | 0x03;
+        let insn_ld = (10u32 << 15) | (0b011 << 12) | (10u32 << 7) | 0x03;
         self.emit(&insn_ld.to_le_bytes());
         let ld_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3383,7 +3383,7 @@ impl Riscv64Codegen {
             addend: 0,
         });
         // addi a0, a0, %tlsdesc_add_lo12(sym)
-        let insn_addi = (0u32 << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x13;
+        let insn_addi = (10u32 << 15) | (10u32 << 7) | 0x13;
         self.emit(&insn_addi.to_le_bytes());
         let addi_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3394,7 +3394,7 @@ impl Riscv64Codegen {
         });
         // jalr ra, a0, %tlsdesc_call(sym)
         // jalr rd, rs1, imm: opcode=1101100, rd=ra(1), rs1=a0(10)
-        let insn_jalr = (0u32 << 20) | (10u32 << 15) | (0b000 << 12) | (1u32 << 7) | 0x67;
+        let insn_jalr = (10u32 << 15) | (1u32 << 7) | 0x67;
         self.emit(&insn_jalr.to_le_bytes());
         let jalr_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
@@ -3404,7 +3404,7 @@ impl Riscv64Codegen {
             addend: 0,
         });
         // add a0, a0, tp (x4)
-        let insn_add = (4u32 << 20) | (10u32 << 15) | (0b000 << 12) | (10u32 << 7) | 0x33;
+        let insn_add = ((4u32 << 20) | (10u32 << 15)) | (10u32 << 7) | 0x33;
         self.emit(&insn_add.to_le_bytes());
     }
 
@@ -3725,6 +3725,9 @@ impl Riscv64Codegen {
     }
 
     /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    // 参数即内联 asm 的完整上下文 (asm 文本/输出/输入/修饰符/clobber/标签/行号等),
+    // 与所有后端的 `emit_inline_asm` 签名保持一致, 打包成结构体收益有限。
+    #[allow(clippy::too_many_arguments)]
     fn emit_inline_asm(
         &mut self,
         asm_str: &str,
@@ -3906,9 +3909,8 @@ impl Riscv64Codegen {
             let loop_end = self.pos();
             let offset = loop_start as i64 - loop_end as i64;
             let off = offset as u32;
-            let bne = ((off >> 12) & 1) << 31
-                | ((off >> 5) & 0x3f) << 25
-                | (0u32) << 20
+            let bne = (((off >> 12) & 1) << 31
+                | ((off >> 5) & 0x3f) << 25)
                 | (5u32) << 15
                 | ((off >> 1) & 0xf) << 8
                 | ((off >> 11) & 1) << 7
@@ -4446,7 +4448,7 @@ impl Riscv64Codegen {
     /// LB - 加载字节 (有符号扩展)
     fn emit_lb(&mut self, rd: u8, rs1: u8, off: i32) {
         let imm = off as u32 & 0xfff;
-        let insn = imm << 20 | (rs1 as u32) << 15 | 0b000 << 12 | (rd as u32) << 7 | 0x03;
+        let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x03;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -4607,7 +4609,7 @@ impl Riscv64Codegen {
     /// FADD.S fd, fs1, fs2: single-precision add
     fn emit_fadd_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
-            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0000000 << 25 | 0x53;
+            (((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7) | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 

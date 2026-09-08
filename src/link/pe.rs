@@ -53,7 +53,7 @@ const IMAGE_SCN_ALIGN_4BYTES: u32 = 0x0030_0000;
 const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
 
 /// Default PE image parameters for x86_64
-const PE_IMAGE_BASE: u64 = 0x14000_0000;
+const PE_IMAGE_BASE: u64 = 0x0001_4000_0000;
 const PE_SECTION_ALIGNMENT: u32 = 0x1000; // 4 KB
 const PE_FILE_ALIGNMENT: u32 = 0x200; // 512 bytes
 
@@ -164,7 +164,7 @@ pub fn write_pe_exec_x86_64(layout: &Layout) -> Vec<u8> {
         if ps.characteristics & IMAGE_SCN_CNT_CODE != 0 {
             size_of_code += ps.raw_size as u32;
         } else if ps.characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0 {
-            size_of_uninitialized_data += ps.virtual_size as u32;
+            size_of_uninitialized_data += ps.virtual_size;
         } else {
             size_of_initialized_data += ps.raw_size as u32;
         }
@@ -224,7 +224,7 @@ pub fn write_pe_exec_x86_64(layout: &Layout) -> Vec<u8> {
         image_base,
         PE_SECTION_ALIGNMENT as u64,
         PE_FILE_ALIGNMENT as u64,
-        image_size as u32,
+        image_size,
         headers_size as u32,
         size_of_code,
         size_of_initialized_data,

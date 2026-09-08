@@ -657,6 +657,10 @@ struct AsmLocalLabels {
     defs: Vec<(usize, u32, String)>,
 }
 
+/// `parse_asm_data_expr` 的求值结果:
+/// (数值, 符号引用 (symbol, rel_type, addend), 延迟标签差值 (left, right))
+type AsmDataExprValue = (i64, Option<(String, u32, i64)>, Option<(String, String)>);
+
 impl AsmLocalLabels {
     fn scan(lines: &[String], scope: u32) -> Self {
         let mut defs = Vec::new();
@@ -1741,7 +1745,6 @@ impl Codegen {
         rhs: &Expr,
         binop_op: BinOp,
         dst: u8,
-        is_swapped: bool,
     ) {
         let lv_ty = target.ty();
         let lv_sz = lv_ty.size();
@@ -1952,8 +1955,8 @@ impl Codegen {
         //   - 含非 SSE/SSEUP 数据 → 全部转 MEMORY
         if num_eightbytes > 1 && classes[0] == AbiClass::Sse {
             let mut all_sse_compatible = true;
-            for i in 1..num_eightbytes {
-                if classes[i] != AbiClass::Sse && classes[i] != AbiClass::SseUp {
+            for (i, class) in classes.iter().enumerate().skip(1) {
+                if *class != AbiClass::Sse && *class != AbiClass::SseUp {
                     // 检查该 eightbyte 是否有字段数据
                     let lo = i * 8;
                     let hi = lo + 8;
@@ -1964,10 +1967,10 @@ impl Codegen {
                 }
             }
             if all_sse_compatible {
-                for i in 1..num_eightbytes {
-                    if classes[i] == AbiClass::Memory {
+                for class in classes.iter_mut().skip(1) {
+                    if *class == AbiClass::Memory {
                         // NoClass 填充 → SSEUP (向量延续)
-                        classes[i] = AbiClass::SseUp;
+                        *class = AbiClass::SseUp;
                     }
                 }
             } else {
@@ -2732,7 +2735,7 @@ impl Codegen {
         locals: &AsmLocalLabels,
         line_idx: usize,
         numeric_label_map: &std::collections::HashMap<String, String>,
-    ) -> (i64, Option<(String, u32, i64)>, Option<(String, String)>) {
+    ) -> AsmDataExprValue {
         let expr = expr.trim();
         if expr.is_empty() {
             return (0, None, None);
@@ -3665,7 +3668,7 @@ impl Codegen {
             }
         }
         // 发射嵌套函数的符号 (它们不在 prog.decls 中)
-        for (nested_name, _) in &self.nested_funcs {
+        for nested_name in self.nested_funcs.keys() {
             if let Some(&off) = self.labels.get(nested_name) {
                 let sz = self.func_sizes.get(nested_name).copied().unwrap_or(0);
                 // 避免重复发射 (如果已经在上面的循环中处理过)
@@ -3882,7 +3885,7 @@ impl Codegen {
                 };
                 Some((base, off + field_off))
             }
-            Expr::Deref { e: inner, .. } => {
+            Expr::Deref { .. } => {
                 // &(*ptr) = ptr, but ptr must be a constant address
                 // This is rare in global init; skip for now
                 None
@@ -5021,7 +5024,7 @@ impl Codegen {
             }
         }
         // 发射所有嵌套函数的符号 (处理深层嵌套或未被上层循环处理的情况)
-        for (nested_name, _) in &self.nested_funcs {
+        for nested_name in self.nested_funcs.keys() {
             // 跳过已发射的符号
             if self.sym_index.contains_key(nested_name) {
                 continue;
@@ -6944,8 +6947,8 @@ impl Codegen {
                                     let off = self.var_offset(&v.name.name);
                                     let copy_len = str_data.len().min(arr_size);
                                     // 复制字符串字节到栈上数组
-                                    for i in 0..copy_len {
-                                        self.mov_imm(0, str_data[i] as i128);
+                                    for (i, &byte) in str_data[..copy_len].iter().enumerate() {
+                                        self.mov_imm(0, byte as i128);
                                         self.emit_store(0, off + i as i32, 1);
                                     }
                                     // 零填充剩余元素
@@ -8588,16 +8591,14 @@ impl Codegen {
     /// BlockItem (parser: parse_decl_specifiers 后直接 parse_var_or_func),
     /// 此时从变量声明的 ty 触发绑定; 语义与独立声明一致。
     fn gen_vm_type_bind(&mut self, ty: &Type) {
-        let (key, has_vla_field, salign) = match ty {
-            Type::Struct(tag, fields, salign) => (
+        let (key, has_vla_field) = match ty {
+            Type::Struct(tag, fields, _) => (
                 format!("struct:{}", tag),
                 fields.iter().any(|f| f.ty.has_vla()),
-                *salign,
             ),
-            Type::Union(tag, fields, salign) => (
+            Type::Union(tag, fields, _) => (
                 format!("union:{}", tag),
                 fields.iter().any(|f| f.ty.has_vla()),
-                *salign,
             ),
             _ => return,
         };
@@ -8634,11 +8635,9 @@ impl Codegen {
             e,
             Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
         ) && matches!(e.ty(), Type::Complex(_))
-        {
-            if self.gen_complex_lvalue_rvalue(e) {
+            && self.gen_complex_lvalue_rvalue(e) {
                 return;
             }
-        }
         match e {
             Expr::Int { v, ty, .. } => {
                 // 按类型宽度截断/零扩展常量值, 避免 mov_imm 对无符号小类型
@@ -8889,7 +8888,7 @@ impl Codegen {
                         if dst != 0 {
                             self.mov(0, dst);
                         }
-                    } else if Self::is_integer_type(&binop_ty) {
+                    } else if Self::is_integer_type(binop_ty) {
                         // 复合赋值脱糖形态: `int a += double d` 的 Binop.ty
                         // 标注为 LHS 整数类型 (parser.rs C99 6.5.17 计算后回
                         // 转语义), 但 gen_float_binop 的混合运算结果在 xmm0
@@ -8908,7 +8907,7 @@ impl Codegen {
                         } else {
                             Type::Float
                         };
-                        self.emit_implicit_float_to_int(dst, &fl_ty, &binop_ty);
+                        self.emit_implicit_float_to_int(dst, &fl_ty, binop_ty);
                     }
                     return;
                 }
@@ -8993,8 +8992,7 @@ impl Codegen {
                     let lr = type_rank(&lt_promo);
                     let rr = type_rank(&rt_promo);
                     if ls && lr > rr { true }
-                    else if rs && rr > lr { true }
-                    else { false }
+                    else { rs && rr > lr }
                 };
                 // 统一路径: 被调用者保存寄存器优先, 帧临时槽后备.
                 // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
@@ -9191,19 +9189,19 @@ impl Codegen {
                 if let Expr::Binop { l: ref binop_l, op: binop_op, r: ref binop_r, .. } = **r {
                     // 检测 compound pattern: target 和 binop 的某个操作数结构相同
                     // 注意: parser 对可交换运算符会交换操作数 (RHS 在左, read 在右)
-                    let compound: Option<(&Expr, bool)> =
+                    let compound: Option<&Expr> =
                         if Self::exprs_structurally_equal(l, binop_l) {
-                            Some((binop_r.as_ref(), false))
+                            Some(binop_r.as_ref())
                         } else if Self::exprs_structurally_equal(l, binop_r) {
-                            Some((binop_l.as_ref(), true))
+                            Some(binop_l.as_ref())
                         } else {
                             None
                         };
-                    if let Some((compound_rhs, is_swapped)) = compound {
+                    if let Some(compound_rhs) = compound {
                         // 仅当 lvalue 含副作用时使用单次求值路径,
                         // 否则走原有路径 (原有路径对所有类型都正确).
                         if Self::expr_has_side_effects(l) {
-                            self.gen_compound_assign_single_eval(l, compound_rhs, binop_op, dst, is_swapped);
+                            self.gen_compound_assign_single_eval(l, compound_rhs, binop_op, dst);
                             return;
                         }
                     }
@@ -9668,7 +9666,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = if *is_arrow {
                         if let Type::Ptr(p) = &expr_ty {
-                            (*p).base.clone()
+                            p.base.clone()
                         } else {
                             expr_ty
                         }
@@ -10352,7 +10350,7 @@ impl Codegen {
                         for i in 0..count {
                             let off = (i * elem_size) as i32;
                             // 加载元素到 rax: 从 [rcx+off]
-                            if off < 128 && off >= -128 {
+                            if (-128..128).contains(&off) {
                                 self.emit(&[0x48, 0x8B, 0x41, off as u8]); // mov rax, [rcx+disp8]
                             } else {
                                 self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
@@ -10691,8 +10689,7 @@ impl Codegen {
                                 }
                             }
                             // dst += rcx
-                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 }
-                                | if 1 >= 8 { 0x01 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
                             self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
                             // 下降到元素类型
                             cur_ty = elem.base.clone();
@@ -10839,7 +10836,7 @@ impl Codegen {
                         // SIB: scale=00, index=100(none), base=101(r13) + REX.B
                         let rex = 0x41; // REX.B for r13
                         self.emit(&[0x66, rex, 0x0F, 0xD6, 0x84, 0x25]);
-                        self.emit(&(temp_off as i32).to_le_bytes());
+                        self.emit(&temp_off.to_le_bytes());
                         // rax = 临时槽地址 (供后续使用)
                         self.emit_lea_r13(0, temp_off);
                         return;
@@ -10857,8 +10854,11 @@ impl Codegen {
                             // dst = 向量地址; movq xmm0, [dst]: F3 [REX.B] 0F 7E /r
                             // F3 前缀 (非 66) 用于 load 语义 (mem → xmm)
                             let rex = if dst >= 8 { 0x41 } else { 0 };
-                            if rex != 0 { self.emit(&[0xF3, rex, 0x0F, 0x7E, 0x00 | ((0 & 7) << 3) | (dst & 7)]); }
-                            else { self.emit(&[0xF3, 0x0F, 0x7E, 0x00 | ((0 & 7) << 3) | (dst & 7)]); }
+                            // ModRM: mod=00, reg=xmm0(000), r/m=dst
+                            let xmm0_reg = 0u8;
+                            let modrm = (xmm0_reg << 3) | (dst & 7);
+                            if rex != 0 { self.emit(&[0xF3, rex, 0x0F, 0x7E, modrm]); }
+                            else { self.emit(&[0xF3, 0x0F, 0x7E, modrm]); }
                             // movq rax, xmm0: 66 REX.W 0F 7E C0
                             self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
                         } else {
@@ -11558,7 +11558,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = if *is_arrow {
                         if let Type::Ptr(p) = &expr_ty {
-                            (*p).base.clone()
+                            p.base.clone()
                         } else {
                             expr_ty
                         }
@@ -11754,7 +11754,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = if *is_arrow {
                     if let Type::Ptr(p) = &expr_ty {
-                        (*p).base.clone()
+                        p.base.clone()
                     } else {
                         expr_ty
                     }
@@ -11958,8 +11958,6 @@ impl Codegen {
                     return;
                 }
                 // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
-                let size = ty.size();
-                let aligned_size = (size + 15) & !15; // 16 字节对齐
                 // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
                 let compound_name = format!("__compound_lit_{}", self.pos());
                 let base_offset = self.register_var(&compound_name, ty);
@@ -12196,13 +12194,12 @@ impl Codegen {
                 }
                 // 有符号 int: 64 位寄存器低 32 位已正确, 无需操作
             }
-            Type::Long | Type::ULong | Type::LongLong | Type::ULongLong => {
-                if !is_signed {
+            Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+                if !is_signed => {
                     // 无符号 long: 已经是 64 位, 无需操作
                     // (64 位有符号和无符号的位模式相同)
                 }
                 // 有符号 long: 同上, 无需操作
-            }
             _ => {}
         }
     }
@@ -13392,7 +13389,7 @@ impl Codegen {
                                 // 对于数组: 每个标量占 elem_size 字节
                                 if let Some(Type::Array(elem_ty, _)) = &field_ty {
                                     let es = elem_ty.size();
-                                    let max_extra = if es > 0 { remaining / es } else { 0 };
+                                    let max_extra = remaining.checked_div(es).unwrap_or(0);
                                     let mut extra = 0usize;
                                     while extra < max_extra && k < inits.len() {
                                         if let InitItem::Expr(e) = &inits[k] {
@@ -13449,7 +13446,7 @@ impl Codegen {
                             let bit_shift = bit_off % 8;
                             let shifted = val << bit_shift;
                             let bytes = shifted.to_le_bytes();
-                            let write_len = ((bit_shift as u32 + bit_w + 7) / 8) as usize;
+                            let write_len = (bit_shift + bit_w).div_ceil(8) as usize;
                             for (j, &b) in bytes[..write_len.min(8)].iter().enumerate() {
                                 if byte_off + j < data.len() {
                                     data[byte_off + j] |= b;
@@ -14405,7 +14402,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = if *is_arrow {
                     if let Type::Ptr(ref p) = expr_ty {
-                        (*p).base.clone()
+                        p.base.clone()
                     } else {
                         expr_ty
                     }
@@ -14987,11 +14984,10 @@ impl Codegen {
         let is_double = matches!(elem_ty, Type::Double);
 
         // SIMD 快速路径: 128-bit 向量使用 XMM 打包指令
-        if vec_size == 16 {
-            if self.try_vector_binop_xmm(op, l, r, result_off, &elem_ty, count, elem_size, is_float, is_double) {
+        if vec_size == 16
+            && self.try_vector_binop_xmm(op, l, r, result_off, &elem_ty, count, elem_size, is_float, is_double) {
                 return;
             }
-        }
 
         // 标量回退路径
         if is_float || is_double {
@@ -15207,7 +15203,7 @@ impl Codegen {
 
     /// movdqu xmm, [r13 + off]: 自动选择 disp8 或 disp32 编码
     fn emit_movdqu_r13_to_xmm(&mut self, xmm_reg: u8, off: i32) {
-        if off >= -128 && off <= 127 {
+        if (-128..=127).contains(&off) {
             // mod=01, rm=101: [r13+disp8]
             let modrm = 0x45 | ((xmm_reg & 7) << 3);
             self.emit(&[0xF3, 0x41, 0x0F, 0x6F, modrm]);
@@ -15222,7 +15218,7 @@ impl Codegen {
 
     /// movdqu [r13 + off], xmm: 自动选择 disp8 或 disp32 编码
     fn emit_movdqu_xmm_to_r13(&mut self, xmm_reg: u8, off: i32) {
-        if off >= -128 && off <= 127 {
+        if (-128..=127).contains(&off) {
             // mod=01, rm=101: [r13+disp8]
             let modrm = 0x45 | ((xmm_reg & 7) << 3);
             self.emit(&[0xF3, 0x41, 0x0F, 0x7F, modrm]);
@@ -16209,7 +16205,7 @@ impl Codegen {
                     // 零扩展除数从32位到64位
                     if need_zero_ext {
                         // mov src, src (zero-extends to 64-bit)
-                        let src_byte = (src & 7) as u8;
+                        let src_byte = src & 7;
                         self.emit(&[0x89, 0xC0 | (src_byte << 3) | src_byte]);
                     }
                     if is_signed {
@@ -17525,7 +17521,6 @@ impl Codegen {
     ///   (如 _Complex float 返回值赋给 _Complex double)
     /// - r 为标量: 虚部 = 0
     fn gen_complex_imag_into_xmm0(&mut self, r: &Expr, inner: &Type) {
-        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
         let r_inner = match r.ty() {
             Type::Complex(ref c) | Type::Imaginary(ref c) => Some(c.base.clone()),
             _ => None,
@@ -18646,7 +18641,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = if *is_arrow {
                     if let Type::Ptr(p) = &expr_ty {
-                        (*p).base.clone()
+                        p.base.clone()
                     } else {
                         expr_ty
                     }
@@ -20476,7 +20471,7 @@ impl Codegen {
         // 生成唯一的 mangled 名称, 避免不同函数的同名
         // static local 在 globals 中冲突.
         let mangled = format!(
-            ".Lsl{}.{}", self.static_local_counter, &v.name.name
+            ".Lsl{}.{}", self.static_local_counter, v.name.name
         );
         self.static_local_counter += 1;
         self.globals.insert(
@@ -21145,7 +21140,7 @@ impl Codegen {
             "__builtin_pow" | "__builtin_powf" | "__builtin_powl" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 // SysV ABI: float/double 参数在 xmm0, xmm1
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     self.gen_expr(&args[0], 0); // xmm0 = arg0
                 }
                 if args.len() >= 2 {
@@ -22220,7 +22215,6 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                let op_size = args[0].ty().size().max(args[1].ty().size()).max(4); // 至少 32 位
                 // 溢出检测基于结果类型 (第三个参数解引用后的类型)
                 let result_ty = match &args[2].ty() {
                     Type::Ptr(p) => p.base.clone(),
@@ -24294,7 +24288,7 @@ impl Codegen {
                 // 处理常量数组下标: "b[2][3]" → 加 2*stride1 + 3*stride2
                 if !bracket_part.is_empty() {
                     let mut cur_ty = field.ty.clone();
-                    for idx_str in bracket_part.split(|c| c == '[' || c == ']') {
+                    for idx_str in bracket_part.split(['[', ']']) {
                         if idx_str.is_empty() { continue; }
                         if let Ok(idx_val) = idx_str.parse::<usize>() {
                             // stride = 当前数组元素类型的大小
@@ -24644,7 +24638,7 @@ impl Codegen {
                 self.emit_mov_from_mem(sz, dst); // mov reg, [rdi]
                 match ord {
                     0 | 3 => {} // RELAXED/RELEASE: no barrier needed
-                    2 | _ => { // ACQUIRE/SEQ_CST: mfence after load
+                    _ => { // ACQUIRE/SEQ_CST: mfence after load
                         self.emit(&[0x0F, 0xAE, 0xF0]);
                     }
                 }
@@ -24850,7 +24844,7 @@ impl Codegen {
                 true
             }
             "__sync_lock_release" => {
-                if args.len() < 1 { return false; }
+                if args.is_empty() { return false; }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 // mov [rdi], 0 (size-dependent)
@@ -28547,7 +28541,7 @@ impl Codegen {
             if prefixes.contains(&trimmed.as_str()) && i + 1 < lines.len() {
                 // 前缀独占一行: 与下一行合并
                 let mut merged = lines[i].trim().to_string();
-                merged.push_str(" ");
+                merged.push(' ');
                 merged.push_str(lines[i + 1].trim());
                 result.push(merged);
                 i += 2;
@@ -36550,6 +36544,51 @@ impl Codegen {
     }
 }
 
+/// 将 f64 (IEEE 754 双精度) 转换为 x87 80-bit 扩展精度格式 (10 字节, LE)
+/// x87 格式: 1 bit sign + 15 bits exponent (bias 16383) + 64 bits significand (explicit integer bit)
+fn f64_to_x87_80(v: f64) -> Vec<u8> {
+    let bits = v.to_bits();
+    let sign = (bits >> 63) & 1;
+    let exp_f64 = ((bits >> 52) & 0x7FF) as i64;
+    let frac_f64 = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    if exp_f64 == 0 && frac_f64 == 0 {
+        // Zero
+        let mut result = vec![0u8; 10];
+        result[9] = (sign as u8) << 7;
+        return result;
+    }
+
+    if exp_f64 == 0x7FF {
+        // Infinity or NaN
+        let sign_byte = (sign as u8) << 7;
+        if frac_f64 == 0 {
+            // Infinity
+            let mut result = vec![0u8; 10];
+            result[8] = 0x80;
+            result[9] = 0xFF | sign_byte;
+            return result;
+        } else {
+            // NaN
+            let mut result = vec![0u8; 10];
+            let sig_x87 = 0x8000_0000_0000_0000u64 | (frac_f64 << 11);
+            result[0..8].copy_from_slice(&sig_x87.to_le_bytes());
+            result[9] = 0xFF | sign_byte;
+            return result;
+        }
+    }
+
+    // Normal number: f64 bias=1023, x87 bias=16383
+    let exp_x87 = (exp_f64 - 1023 + 16383) as u16;
+    let sig_x87 = 0x8000_0000_0000_0000u64 | (frac_f64 << 11);
+
+    let mut result = vec![0u8; 10];
+    result[0..8].copy_from_slice(&sig_x87.to_le_bytes());
+    result[8] = (exp_x87 & 0xFF) as u8;
+    result[9] = ((sign as u8) << 7) | ((exp_x87 >> 8) as u8);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36613,49 +36652,4 @@ mod tests {
             cg.code
         );
     }
-}
-
-/// 将 f64 (IEEE 754 双精度) 转换为 x87 80-bit 扩展精度格式 (10 字节, LE)
-/// x87 格式: 1 bit sign + 15 bits exponent (bias 16383) + 64 bits significand (explicit integer bit)
-fn f64_to_x87_80(v: f64) -> Vec<u8> {
-    let bits = v.to_bits();
-    let sign = (bits >> 63) & 1;
-    let exp_f64 = ((bits >> 52) & 0x7FF) as i64;
-    let frac_f64 = bits & 0x000F_FFFF_FFFF_FFFF;
-
-    if exp_f64 == 0 && frac_f64 == 0 {
-        // Zero
-        let mut result = vec![0u8; 10];
-        result[9] = (sign as u8) << 7;
-        return result;
-    }
-
-    if exp_f64 == 0x7FF {
-        // Infinity or NaN
-        let sign_byte = (sign as u8) << 7;
-        if frac_f64 == 0 {
-            // Infinity
-            let mut result = vec![0u8; 10];
-            result[8] = 0x80;
-            result[9] = 0xFF | sign_byte;
-            return result;
-        } else {
-            // NaN
-            let mut result = vec![0u8; 10];
-            let sig_x87 = 0x8000_0000_0000_0000u64 | (frac_f64 << 11);
-            result[0..8].copy_from_slice(&sig_x87.to_le_bytes());
-            result[9] = 0xFF | sign_byte;
-            return result;
-        }
-    }
-
-    // Normal number: f64 bias=1023, x87 bias=16383
-    let exp_x87 = (exp_f64 - 1023 + 16383) as u16;
-    let sig_x87 = 0x8000_0000_0000_0000u64 | (frac_f64 << 11);
-
-    let mut result = vec![0u8; 10];
-    result[0..8].copy_from_slice(&sig_x87.to_le_bytes());
-    result[8] = (exp_x87 & 0xFF) as u8;
-    result[9] = ((sign as u8) << 7) | ((exp_x87 >> 8) as u8);
-    result
 }

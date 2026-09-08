@@ -673,7 +673,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
             };
             debug::DwarfType {
                 name: name.to_string(),
-                byte_size: (*bits as u64 + 7) / 8,
+                byte_size: (*bits as u64).div_ceil(8),
                 kind: debug::DwarfTypeKind::Base(if *signed {
                     debug::TypeEncoding::Signed
                 } else {
@@ -690,7 +690,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
             };
             debug::DwarfType {
                 name: name.to_string(),
-                byte_size: (*bits as u64 + 7) / 8,
+                byte_size: (*bits as u64).div_ceil(8),
                 kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
             }
         }
@@ -732,7 +732,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
             byte_size: 0,
             kind: debug::DwarfTypeKind::Func {
                 ret: Box::new(value_type_to_dwarf(ret)),
-                params: params.iter().map(|p| value_type_to_dwarf(p)).collect(),
+                params: params.iter().map(value_type_to_dwarf).collect(),
             },
         },
         ValueType::Vector(elem, count) => debug::DwarfType {

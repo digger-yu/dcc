@@ -1351,8 +1351,8 @@ impl ArmCodegen {
                 // 简化: 将实部和虚部存入栈, 返回地址
                 let is_double = matches!(ty, crate::ast::Type::Complex(ref inner) if matches!(&inner.base, crate::ast::Type::Double | crate::ast::Type::LongDouble));
                 let size = if is_double { 8 } else { 4 };
-                let real_off = self.alloc_local("<cx_r>", size as i32);
-                let imag_off = self.alloc_local("<cx_i>", size as i32);
+                let real_off = self.alloc_local("<cx_r>", size);
+                let imag_off = self.alloc_local("<cx_i>", size);
                 // 存储实部
                 if is_double {
                     self.load_float_d0(*real);
@@ -1886,6 +1886,9 @@ impl ArmCodegen {
     }
 
     /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    // 参数即内联 asm 的完整上下文 (asm 文本/输出/输入/修饰符/clobber/标签/行号等),
+    // 与所有后端的 `emit_inline_asm` 签名保持一致, 打包成结构体收益有限。
+    #[allow(clippy::too_many_arguments)]
     fn emit_inline_asm(
         &mut self,
         asm_str: &str,
@@ -2195,7 +2198,7 @@ impl ArmCodegen {
             | (sn_hi << 16)
             | (sd_hi << 12)
             | n_bit
-            | (sm_hi << 0)
+            | sm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2213,7 +2216,7 @@ impl ArmCodegen {
             | (sn_hi << 16)
             | (sd_hi << 12)
             | n_bit
-            | (sm_hi << 0)
+            | sm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2231,7 +2234,7 @@ impl ArmCodegen {
             | (sn_hi << 16)
             | (sd_hi << 12)
             | n_bit
-            | (sm_hi << 0)
+            | sm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2249,7 +2252,7 @@ impl ArmCodegen {
             | (sn_hi << 16)
             | (sd_hi << 12)
             | n_bit
-            | (sm_hi << 0)
+            | sm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2267,7 +2270,7 @@ impl ArmCodegen {
             | (dn_hi << 16)
             | (dd_hi << 12)
             | n_bit
-            | (dm_hi << 0)
+            | dm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2285,7 +2288,7 @@ impl ArmCodegen {
             | (dn_hi << 16)
             | (dd_hi << 12)
             | n_bit
-            | (dm_hi << 0)
+            | dm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2303,7 +2306,7 @@ impl ArmCodegen {
             | (dn_hi << 16)
             | (dd_hi << 12)
             | n_bit
-            | (dm_hi << 0)
+            | dm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2321,7 +2324,7 @@ impl ArmCodegen {
             | (dn_hi << 16)
             | (dd_hi << 12)
             | n_bit
-            | (dm_hi << 0)
+            | dm_hi
             | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
@@ -2337,7 +2340,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | m_bit
-            | (sm_hi << 0);
+            | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2352,7 +2355,7 @@ impl ArmCodegen {
             | d_bit
             | (dd_hi << 12)
             | m_bit
-            | (dm_hi << 0);
+            | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2370,7 +2373,7 @@ impl ArmCodegen {
         let inst = 0xEE000A10u32
             | d_bit
             | (sd_hi << 12)
-            | ((rn as u32) << 0);
+            | (rn as u32);
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2382,7 +2385,7 @@ impl ArmCodegen {
         let inst = 0xEE100A10u32
             | m_bit
             | (sm_hi << 12)
-            | ((rn as u32) << 0);
+            | (rn as u32);
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2395,7 +2398,7 @@ impl ArmCodegen {
             | ((rn as u32) << 12)
             | (((rn + 1) as u32) << 16)
             | m_bit
-            | (dm_hi << 0);
+            | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2408,7 +2411,7 @@ impl ArmCodegen {
             | ((rn as u32) << 12)
             | (((rn + 1) as u32) << 16)
             | m_bit
-            | (dm_hi << 0);
+            | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2423,7 +2426,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | m_bit
-            | (sm_hi << 0);
+            | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2438,7 +2441,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | m_bit
-            | (sm_hi << 0);
+            | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2453,7 +2456,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | m_bit
-            | (dm_hi << 0);
+            | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2468,7 +2471,7 @@ impl ArmCodegen {
             | d_bit
             | (dd_hi << 12)
             | m_bit
-            | (sm_hi << 0);
+            | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2483,7 +2486,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | m_bit
-            | (sm_hi << 0);
+            | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -2498,7 +2501,7 @@ impl ArmCodegen {
             | d_bit
             | (dd_hi << 12)
             | m_bit
-            | (dm_hi << 0);
+            | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 

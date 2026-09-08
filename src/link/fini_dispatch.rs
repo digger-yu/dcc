@@ -47,6 +47,12 @@ pub struct DtorEntry {
     pub vaddr: u64,
 }
 
+impl Default for FiniArrayBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FiniArrayBuilder {
     pub fn new() -> Self {
         Self { dtors: Vec::new() }

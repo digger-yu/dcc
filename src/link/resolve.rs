@@ -42,7 +42,7 @@ pub fn resolve_comdat_groups(bundle: &InputBundle) -> HashSet<u32> {
     }
 
     // 对每个签名, 保留第一个, 丢弃其余
-    for (_sig, grp_indices) in &groups_by_sig {
+    for grp_indices in groups_by_sig.values() {
         if grp_indices.len() <= 1 {
             continue;
         }

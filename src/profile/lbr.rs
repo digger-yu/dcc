@@ -76,7 +76,7 @@ impl LbrProfile {
         // Otherwise treat as text brstack
         let s =
             String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Self::from_str(&s)
+        Self::parse_text(&s)
     }
 
     /// 从文件路径解析 `perf script -F brstack` 输出
@@ -92,7 +92,7 @@ impl LbrProfile {
     }
 
     /// 从字符串解析 brstack 格式
-    pub fn from_str(input: &str) -> io::Result<Self> {
+    pub fn parse_text(input: &str) -> io::Result<Self> {
         let mut profile = LbrProfile::default();
         for line in input.lines() {
             profile.parse_brstack_line(line);
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn parse_brstack() {
-        let p = LbrProfile::from_str(
+        let p = LbrProfile::parse_text(
             "main 0x1000 foo 0x2000 5\nfoo 0x2010 main 0x1020 7\nunknown 0x0 main 0x1000 3\n",
         )
         .unwrap();
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn parse_with_mispredict() {
-        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 M 10\nmain 0x1000 foo 0x2000 P 8\n")
+        let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 M 10\nmain 0x1000 foo 0x2000 P 8\n")
             .unwrap();
         assert_eq!(p.hot_edge_count("main", "foo"), 2);
         assert_eq!(
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn parse_with_cycles() {
-        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 100\nmain 0x1000 foo 0x2000 200\n")
+        let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 100\nmain 0x1000 foo 0x2000 200\n")
             .unwrap();
         assert_eq!(
             p.edge_cycles.get(&("main".into(), "foo".into())),
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn inbound_outbound_edges() {
         let p =
-            LbrProfile::from_str("a 0x0 c 0x0\nb 0x0 c 0x0\nb 0x0 c 0x0\nc 0x0 d 0x0\n").unwrap();
+            LbrProfile::parse_text("a 0x0 c 0x0\nb 0x0 c 0x0\nb 0x0 c 0x0\nc 0x0 d 0x0\n").unwrap();
         let inbound = p.inbound_edges("c");
         assert_eq!(inbound.len(), 2);
         let outbound = p.outbound_edges("c");
@@ -435,8 +435,8 @@ mod tests {
 
     #[test]
     fn merge_profiles() {
-        let mut a = LbrProfile::from_str("main 0x0 foo 0x0 5\n").unwrap();
-        let b = LbrProfile::from_str("main 0x0 foo 0x0 3\nbar 0x0 baz 0x0 1\n").unwrap();
+        let mut a = LbrProfile::parse_text("main 0x0 foo 0x0 5\n").unwrap();
+        let b = LbrProfile::parse_text("main 0x0 foo 0x0 3\nbar 0x0 baz 0x0 1\n").unwrap();
         a.merge(&b);
         assert_eq!(a.hot_edge_count("main", "foo"), 2);
         assert_eq!(a.hot_edge_count("bar", "baz"), 1);
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn summary_stats() {
-        let p = LbrProfile::from_str(
+        let p = LbrProfile::parse_text(
             "main 0x0 foo 0x0 M 10\nfoo 0x0 main 0x0 P 20\nunknown 0x0 main 0x0 5\n",
         )
         .unwrap();
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn hot_entries_sorted_by_count() {
-        let p = LbrProfile::from_str(
+        let p = LbrProfile::parse_text(
             "unknown 0x0 a 0x0\nunknown 0x0 b 0x0\nunknown 0x0 b 0x0\nunknown 0x0 b 0x0\nunknown 0x0 b 0x0\nunknown 0x0 b 0x0\nunknown 0x0 c 0x0\nunknown 0x0 c 0x0\nunknown 0x0 c 0x0\n",
         )
         .unwrap();
@@ -558,13 +558,13 @@ mod tests {
     /// serialize() produces text output compatible with brstack.
     #[test]
     fn lbr_serialize_roundtrip() {
-        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n")
+        let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n")
             .unwrap();
         let text = p.serialize();
         assert!(text.contains("main 0x1000 foo 0x2000 M 100"));
         assert!(text.contains("foo 0x2000 bar 0x3000 P 200"));
         // Parse back
-        let p2 = LbrProfile::from_str(&text).unwrap();
+        let p2 = LbrProfile::parse_text(&text).unwrap();
         assert_eq!(p2.hot_edge_count("main", "foo"), 1);
         assert_eq!(p2.hot_edge_count("foo", "bar"), 1);
     }

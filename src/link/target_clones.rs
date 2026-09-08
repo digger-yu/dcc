@@ -214,7 +214,6 @@ pub fn generate_resolver_code(tcf: &TargetClonesFunc) -> (Vec<u8>, Vec<(usize, u
         .iter()
         .filter(|v| v.arch != "default" && v.name != tcf.default_variant)
         .enumerate()
-        .map(|(i, v)| (i, v))
         .collect();
     dispatch_variants.sort_by(|a, b| {
         let na = arch_to_cpuid_bits(&b.1.arch).len();
@@ -322,7 +321,7 @@ pub fn generate_resolver_blob(
         blob.extend_from_slice(&code);
         // 对齐到 16 字节 (INT3 padding)
         let align = (16 - (blob.len() % 16)) % 16;
-        blob.extend(std::iter::repeat(0xCC).take(align));
+        blob.extend(std::iter::repeat_n(0xCC, align));
         entries.push((tcf.resolver_name.clone(), offset, size));
     }
 

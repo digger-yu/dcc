@@ -40,7 +40,7 @@ impl OffloadKind {
             OffloadKind::Hip => "hip",
         }
     }
-    pub fn from_str(s: &str) -> Option<OffloadKind> {
+    pub fn from_name(s: &str) -> Option<OffloadKind> {
         match s {
             "omp-target" => Some(OffloadKind::OmpTarget),
             "omp-target-simd" => Some(OffloadKind::OmpTargetSimd),

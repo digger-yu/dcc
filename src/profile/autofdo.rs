@@ -92,7 +92,7 @@ impl AutoFdoProfile {
         }
         let s =
             String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Self::from_str(&s)
+        Self::parse_text(&s)
     }
 
     /// 从字符串解析 dcc 简化文本格式:
@@ -100,7 +100,7 @@ impl AutoFdoProfile {
     ///   `func <name> <total>`
     ///   `line <name> <line> <col> <samples>`
     ///   `calls <caller> <callee> <count>`
-    pub fn from_str(input: &str) -> io::Result<Self> {
+    pub fn parse_text(input: &str) -> io::Result<Self> {
         let mut p = AutoFdoProfile::default();
         for line in input.lines() {
             let l = line.trim();
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn parse_minimal_profile() {
-        let p = AutoFdoProfile::from_str(
+        let p = AutoFdoProfile::parse_text(
             "# dcc autofdo v1\nfunc main 100\nfunc foo 10\nline main 5 1 4\n",
         )
         .unwrap();
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_unsupported_text_version() {
-        let err = AutoFdoProfile::from_str("# dcc autofdo v0\nfunc main 100\n").unwrap_err();
+        let err = AutoFdoProfile::parse_text("# dcc autofdo v0\nfunc main 100\n").unwrap_err();
         assert!(
             err.to_string().contains("unsupported autofdo text version"),
             "{err}"
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn parse_calls() {
-        let p = AutoFdoProfile::from_str("func main 100\nfunc helper 50\ncalls main helper 30\n")
+        let p = AutoFdoProfile::parse_text("func main 100\nfunc helper 50\ncalls main helper 30\n")
             .unwrap();
         assert_eq!(p.calls.get(&("main".into(), "helper".into())), Some(&30));
         let callers = p.callers_of("helper");
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn parse_accumulates_duplicates() {
-        let p = AutoFdoProfile::from_str("func main 50\nfunc main 50\n").unwrap();
+        let p = AutoFdoProfile::parse_text("func main 50\nfunc main 50\n").unwrap();
         assert_eq!(p.func_samples.get("main"), Some(&100));
     }
 
@@ -489,7 +489,7 @@ mod tests {
         p.line_samples.insert(("main".into(), 5, 1), 4);
         p.calls.insert(("main".into(), "foo".into()), 10);
         let text = p.serialize();
-        let p2 = AutoFdoProfile::from_str(&text).unwrap();
+        let p2 = AutoFdoProfile::parse_text(&text).unwrap();
         assert_eq!(p2.func_samples, p.func_samples);
         assert_eq!(p2.line_samples, p.line_samples);
         assert_eq!(p2.calls, p.calls);
@@ -544,7 +544,7 @@ mod tests {
     /// Text format discriminator parsing.
     #[test]
     fn autofdo_parse_discriminator_records() {
-        let p = AutoFdoProfile::from_str(
+        let p = AutoFdoProfile::parse_text(
             "func main 100\n\
              disc main 10 0 30\n\
              disc main 10 1 20\n\
@@ -614,7 +614,7 @@ mod tests {
         p.discriminated_samples.insert(("main".into(), 10, 0), 30);
         p.discriminated_samples.insert(("main".into(), 10, 1), 20);
         let text = p.serialize();
-        let p2 = AutoFdoProfile::from_str(&text).unwrap();
+        let p2 = AutoFdoProfile::parse_text(&text).unwrap();
         assert_eq!(p2.discriminated_samples, p.discriminated_samples);
     }
 }

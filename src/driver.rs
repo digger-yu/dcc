@@ -906,15 +906,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
     // Compute target info for optimizer (VNNI vectorization etc.)
     let opt_has_vnni = cfg.cpu_feature_overrides.avx_vnni == Some(true)
-        || cfg.march.as_deref().map_or(false, |m| {
+        || cfg.march.as_deref().is_some_and(|m| {
             matches!(m, "x86-64-v4" | "sapphirerapids" | "granite-rapids" | "icelake-server" | "icelake-client")
         });
     let opt_vec_bits: u32 = if cfg.cpu_feature_overrides.avx512f == Some(true)
-        || cfg.march.as_deref().map_or(false, |m| m == "x86-64-v4")
+        || (cfg.march.as_deref() == Some("x86-64-v4"))
     {
         512
     } else if cfg.cpu_feature_overrides.avx2 == Some(true)
-        || cfg.march.as_deref().map_or(false, |m| {
+        || cfg.march.as_deref().is_some_and(|m| {
             matches!(m, "x86-64-v3" | "x86-64-v4" | "haswell" | "skylake" | "skylake-avx512")
         })
     {
@@ -1610,6 +1610,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
 ///   2. 调 cpp 前端 lex/parse/lower → 降级到 C 字符串
 ///   3. 写到临时 .c 文件
 ///   4. 调 C 链路 (re-preprocess / parse / IR / codegen) 写 .o 或 .s
+///
 /// M30.4: AST lower 可能因 parser 容错恢复丢失尾部的 `main` 函数.
 /// 检测: 若预处理文本含 `main` 定义但 lowered C 不含, 从预处理文本
 /// 提取 `main` 函数体并追加到 lowered C 末尾.
@@ -1634,7 +1635,7 @@ fn recover_missing_main(c_src: String, pp_text: &str) -> String {
             break;
         }
         // 也检测 "int\nmain (void)" 模式: 上一行是 "int", 当前行是 "main ("
-        if t.starts_with("main") && t.contains('(') == false {
+        if t.starts_with("main") && !t.contains('(') {
             // 检查下一行是否继续 main 的签名
             if i + 1 < pp_lines.len() && pp_lines[i + 1].trim().starts_with('(') {
                 main_start = Some(i);
@@ -1658,8 +1659,8 @@ fn recover_missing_main(c_src: String, pp_text: &str) -> String {
     let mut brace_depth = 0i32;
     let mut found_open = false;
     let mut main_end = main_start;
-    for i in main_start..pp_lines.len() {
-        for ch in pp_lines[i].chars() {
+    for (i, line) in pp_lines.iter().enumerate().skip(main_start) {
+        for ch in line.chars() {
             if ch == '{' { brace_depth += 1; found_open = true; }
             if ch == '}' { brace_depth -= 1; }
         }
@@ -1672,10 +1673,7 @@ fn recover_missing_main(c_src: String, pp_text: &str) -> String {
         return c_src;
     }
     // 提取 main 函数文本
-    let main_text: String = pp_lines[main_start..=main_end]
-        .iter()
-        .copied()
-        .collect::<Vec<&str>>()
+    let main_text: String = pp_lines[main_start..=main_end].to_vec()
         .join("\n");
     // 追加到 lowered C 末尾
     let mut result = c_src;
@@ -1911,10 +1909,10 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             }
             search_dirs.extend(cfg.include_paths.iter().cloned());
             search_dirs.extend(cfg.system_paths.iter().cloned());
-            let imported = crate::cpp::modules::load_imported_modules(&decls, &search_dirs);
+            let imported = crate::cpp::modules::load_imported_modules(decls, &search_dirs);
             let mut lower = Lower::new();
             lower.imported_modules = imported;
-            lower.lower_decls(&decls);
+            lower.lower_decls(decls);
             if let Some(msg) = lower.odr_check() {
                 return Err(vec![Diagnostic::err(
                     "E0103",

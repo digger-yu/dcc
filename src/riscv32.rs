@@ -94,25 +94,25 @@ impl RvEncoder {
     pub fn addi(rd: u8, rs1: u8, imm12: i32) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32);
         let imm = (imm12 as u32) & 0xFFF;
-        RvInstruction((imm << 20) | ((rs1 as u32) << 15) | (0 << 12) | ((rd as u32) << 7) | opcode::OP_IMM)
+        RvInstruction(((imm << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP_IMM)
     }
 
     /// Encode ADD rd, rs1, rs2
     pub fn add(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction(((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0 << 12) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction((((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
     }
 
     /// Encode SUB rd, rs1, rs2
     pub fn sub(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction((0x20 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0 << 12) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(((0x20 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
     }
 
     /// Encode MUL rd, rs1, rs2 (M extension)
     pub fn mul(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction((0x02 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (0 << 12) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(((0x02 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
     }
 
     /// Encode DIV rd, rs1, rs2 (M extension)
@@ -146,11 +146,10 @@ impl RvEncoder {
         let bits4_1 = (imm >> 1) & 0xF;
         let bit11 = (imm >> 11) & 1;
 
-        let encoding = (bit12 << 31)
+        let encoding = ((bit12 << 31)
             | (bits10_5 << 25)
             | ((rs2 as u32) << 20)
-            | ((rs1 as u32) << 15)
-            | (0 << 12)
+            | ((rs1 as u32) << 15))
             | (bits4_1 << 8)
             | (bit11 << 7)
             | opcode::BRANCH;
@@ -188,14 +187,14 @@ pub mod compressed {
     /// Encode C.J offset (16-bit)
     pub fn c_j(offset: i32) -> u16 {
         let imm = offset as u16;
-        let bit11 = ((imm >> 11) & 1) as u16;
-        let bit4 = ((imm >> 4) & 1) as u16;
-        let bit9_8 = ((imm >> 8) & 3) as u16;
-        let bit10 = ((imm >> 10) & 1) as u16;
-        let bit6 = ((imm >> 6) & 1) as u16;
-        let bit7 = ((imm >> 7) & 1) as u16;
-        let bit3_1 = ((imm >> 1) & 7) as u16;
-        let bit5 = ((imm >> 5) & 1) as u16;
+        let bit11 = (imm >> 11) & 1;
+        let bit4 = (imm >> 4) & 1;
+        let bit9_8 = (imm >> 8) & 3;
+        let bit10 = (imm >> 10) & 1;
+        let bit6 = (imm >> 6) & 1;
+        let bit7 = (imm >> 7) & 1;
+        let bit3_1 = (imm >> 1) & 7;
+        let bit5 = (imm >> 5) & 1;
 
         0xA001u16
             | (bit11 << 12)

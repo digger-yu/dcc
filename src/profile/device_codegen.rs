@@ -462,6 +462,23 @@ pub fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatu
     }
 }
 
+/// CUDA / ROCm driver `*LaunchKernel` 的统一签名:
+/// (func, gridDim{xyz}, blockDim{xyz}, sharedBytes, stream, kernelParams, extra)
+#[cfg(target_os = "linux")]
+type KernelLaunchFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    *mut std::ffi::c_void,
+    *mut *const std::ffi::c_void,
+    *mut *const std::ffi::c_void,
+) -> i32;
+
 /// 通过 CUDA driver API 真正启动 kernel。
 ///
 /// 解析 cuModuleLoadData / cuModuleGetFunction / cuLaunchKernel 后:
@@ -484,21 +501,7 @@ fn cuda_launch(func: &str, cubin: &[u8], params: &KernelLaunchParams) -> Result<
                     *const std::ffi::c_char,
                 ) -> i32,
             > = dlsym_fn(handle, "cuModuleGetFunction");
-            let launch: Option<
-                unsafe extern "C" fn(
-                    *mut std::ffi::c_void,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    *mut std::ffi::c_void,
-                    *mut *const std::ffi::c_void,
-                    *mut *const std::ffi::c_void,
-                ) -> i32,
-            > = dlsym_fn(handle, "cuLaunchKernel");
+            let launch: Option<KernelLaunchFn> = dlsym_fn(handle, "cuLaunchKernel");
             let (Some(load_mod), Some(get_fn), Some(launch)) = (load_mod, get_fn, launch) else {
                 return Err("CUDA driver symbols missing (cuModuleLoadData / \
                             cuModuleGetFunction / cuLaunchKernel)"
@@ -566,21 +569,7 @@ fn rocm_launch(func: &str, hsaco: &[u8], params: &KernelLaunchParams) -> Result<
                     *const std::ffi::c_char,
                 ) -> i32,
             > = dlsym_fn(handle, "hipModuleGetFunction");
-            let launch: Option<
-                unsafe extern "C" fn(
-                    *mut std::ffi::c_void,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    u32,
-                    *mut std::ffi::c_void,
-                    *mut *const std::ffi::c_void,
-                    *mut *const std::ffi::c_void,
-                ) -> i32,
-            > = dlsym_fn(handle, "hipLaunchKernel");
+            let launch: Option<KernelLaunchFn> = dlsym_fn(handle, "hipLaunchKernel");
             let (Some(load_mod), Some(get_fn), Some(launch)) = (load_mod, get_fn, launch) else {
                 return Err("ROCm driver symbols missing (hipModuleLoadData / \
                             hipModuleGetFunction / hipLaunchKernel)"

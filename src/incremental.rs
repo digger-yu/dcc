@@ -307,7 +307,7 @@ mod tests {
     use super::*;
 
     fn make_test_config(source_path: &Path, output_path: &Path) -> Config {
-        let cfg = Config {
+        Config {
             inputs: vec![source_path.to_path_buf()],
             output: output_path.to_path_buf(),
             output_explicit: true,
@@ -422,8 +422,7 @@ mod tests {
             align_jumps: 0,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
-        };
-        cfg
+        }
     }
 
     #[test]

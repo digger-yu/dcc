@@ -361,11 +361,7 @@ fn collect_item_lines(item: &BlockItem, out: &mut Vec<u32>) {
 fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
     out.push(stmt_span(s).line);
     match s {
-        Stmt::Return { val, .. } => {
-            if let Some(e) = val {
-                out.push(expr_span(e).line);
-            }
-        }
+        Stmt::Return { val: Some(e), .. } => out.push(expr_span(e).line),
         Stmt::Expr { e, .. } => out.push(expr_span(e).line),
         Stmt::If {
             cond, then_, else_, ..
@@ -1501,15 +1497,13 @@ mod tests {
         let items = f.body.as_ref().unwrap().items.clone();
         let mut calls = Vec::new();
         for item in &items {
-            if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item {
-                if let Expr::Call { callee, args, .. } = e {
-                    if let Expr::Ident { name, .. } = callee.as_ref() {
-                        if name.name == "__dcc_gcov_counter_inc" {
-                            let Expr::Int { v, .. } = &args[0] else {
-                                continue;
-                            };
-                            calls.push(*v);
-                        }
+            if let BlockItem::Stmt(Stmt::Expr { e: Expr::Call { callee, args, .. }, .. }) = item {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if name.name == "__dcc_gcov_counter_inc" {
+                        let Expr::Int { v, .. } = &args[0] else {
+                            continue;
+                        };
+                        calls.push(*v);
                     }
                 }
             }

@@ -332,21 +332,13 @@ pub enum CppDecl {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct CppBody {
     pub stmts: Vec<CppStmt>,
     /// M30.2: true = 纯声明 (类内 `Ret m() const;` 无 body). lower 端据此
     /// 输出原型而非空 weak 定义 (空定义会与类外定义产生重复符号, 链接器
     /// 可能选空的那个, 静默吞掉正确实现).
     pub is_decl: bool,
-}
-
-impl Default for CppBody {
-    fn default() -> Self {
-        CppBody {
-            stmts: Vec::new(),
-            is_decl: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1930,8 +1922,8 @@ impl<'a> CppParser<'a> {
         };
         let path = self.parse_qualified_name()?;
         // C++11: using Name = Type; (类型别名声明)
-        if !is_namespace && path.len() == 1 {
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
+        if !is_namespace && path.len() == 1
+            && matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
                 self.bump(); // consume '='
                 let target = self.parse_mangle_type()?;
                 if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
@@ -1942,7 +1934,6 @@ impl<'a> CppParser<'a> {
                     (format!("{:?}", target), vec![]));
                 return Ok(CppDecl::Typedef { target, name: path[0].clone() });
             }
-        }
         // M10+: using Base::Base 形式 (继承构造)
         if path.len() == 2 && path[0] == path[1] {
             // `using Base::Base;` 继承构造
@@ -10284,11 +10275,7 @@ mod tests {
                 let mut stmts: Vec<&CppStmt> = body.stmts.iter().collect();
                 while let Some(s) = stmts.pop() {
                     match s {
-                        CppStmt::LocalVar { init: Some(e), .. } => {
-                            if let CppExpr::IntLit(v) = e {
-                                vals.push(*v);
-                            }
-                        }
+                        CppStmt::LocalVar { init: Some(CppExpr::IntLit(v)), .. } => vals.push(*v),
                         CppStmt::Return(Some(CppExpr::IntLit(v))) => vals.push(*v),
                         _ => {}
                     }

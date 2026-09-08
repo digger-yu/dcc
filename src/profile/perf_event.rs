@@ -49,7 +49,7 @@ impl TopdownL1 {
             Self::BackendBound,
         ]
     }
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "retiring" => Some(TopdownL1::Retiring),
             "bad_speculation" | "badspec" => Some(TopdownL1::BadSpeculation),
@@ -99,7 +99,7 @@ impl TopdownL2 {
             TopdownL2::memory_bound | TopdownL2::core_bound => TopdownL1::BackendBound,
         }
     }
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "retiring_base" => Some(TopdownL2::retiring_base),
             "retiring_microcode" => Some(TopdownL2::retiring_microcode),
@@ -151,14 +151,14 @@ impl PerfRecord {
     pub fn read(path: &Path) -> io::Result<Self> {
         let mut s = String::new();
         std::fs::File::open(path)?.read_to_string(&mut s)?;
-        Self::from_str(&s)
+        Self::parse_text(&s)
     }
 
     /// 从字符串解析 dcc 文本格式:
     ///   `event <name> <count> [<unit>]`
     ///   `topdown <slot> <count>`
     ///   `topdown_l2 <slot> <count>`
-    pub fn from_str(input: &str) -> io::Result<Self> {
+    pub fn parse_text(input: &str) -> io::Result<Self> {
         let mut r = PerfRecord::default();
         for line in input.lines() {
             let l = line.trim();
@@ -178,14 +178,14 @@ impl PerfRecord {
                 Some("topdown") => {
                     let slot_str = it.next().unwrap_or("");
                     let count: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-                    if let Some(slot) = TopdownL1::from_str(slot_str) {
+                    if let Some(slot) = TopdownL1::from_name(slot_str) {
                         *r.topdown_l1.entry(slot).or_insert(0) += count;
                     }
                 }
                 Some("topdown_l2") => {
                     let slot_str = it.next().unwrap_or("");
                     let count: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-                    if let Some(slot) = TopdownL2::from_str(slot_str) {
+                    if let Some(slot) = TopdownL2::from_name(slot_str) {
                         *r.topdown_l2.entry(slot).or_insert(0) += count;
                     }
                 }
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn parse_events() {
-        let r = PerfRecord::from_str(
+        let r = PerfRecord::parse_text(
             "# perf stat output\nevent cycles 1000000\nevent instructions 500000\n",
         )
         .unwrap();
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn parse_topdown_l1() {
-        let r = PerfRecord::from_str(
+        let r = PerfRecord::parse_text(
             "topdown retiring 30\ntopdown bad_speculation 20\ntopdown frontend_bound 30\ntopdown backend_bound 20\n",
         )
         .unwrap();
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn parse_topdown_l2() {
         let r =
-            PerfRecord::from_str("topdown_l2 branch_mispredict 15\ntopdown_l2 memory_bound 10\n")
+            PerfRecord::parse_text("topdown_l2 branch_mispredict 15\ntopdown_l2 memory_bound 10\n")
                 .unwrap();
         assert_eq!(r.topdown_l2.get(&TopdownL2::branch_mispredict), Some(&15));
         assert_eq!(r.topdown_l2.get(&TopdownL2::memory_bound), Some(&10));
@@ -389,7 +389,7 @@ mod tests {
         r.add_topdown(TopdownL1::BackendBound, 60);
         r.add_topdown_l2(TopdownL2::memory_bound, 40);
         let text = r.serialize();
-        let r2 = PerfRecord::from_str(&text).unwrap();
+        let r2 = PerfRecord::parse_text(&text).unwrap();
         assert_eq!(r2.events, r.events);
         assert_eq!(r2.topdown_l1, r.topdown_l1);
         assert_eq!(r2.topdown_l2, r.topdown_l2);
@@ -421,17 +421,17 @@ mod tests {
     #[test]
     fn topdown_from_str_aliases() {
         assert_eq!(
-            TopdownL1::from_str("badspec"),
+            TopdownL1::from_name("badspec"),
             Some(TopdownL1::BadSpeculation)
         );
         assert_eq!(
-            TopdownL1::from_str("frontend"),
+            TopdownL1::from_name("frontend"),
             Some(TopdownL1::FrontendBound)
         );
         assert_eq!(
-            TopdownL1::from_str("backend"),
+            TopdownL1::from_name("backend"),
             Some(TopdownL1::BackendBound)
         );
-        assert_eq!(TopdownL1::from_str("unknown"), None);
+        assert_eq!(TopdownL1::from_name("unknown"), None);
     }
 }

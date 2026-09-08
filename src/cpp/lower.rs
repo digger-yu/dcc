@@ -434,7 +434,7 @@ fn remove_struct_inheritance(s: &str) -> String {
                     continue;
                 }
             }
-            i = i + kw_len;
+            i += kw_len;
             continue;
         }
         result.push(bytes[i] as char);
@@ -560,12 +560,10 @@ fn clean_struct_bodies(s: &str) -> String {
                                         && fname != "using" && fname != "new"
                                         && fname != "delete" && fname != "this"
                                         && !fname.starts_with('~')
-                                        && fname != &name
-                                    {
-                                        if !field_names.contains(&fname.to_string()) {
+                                        && fname != name
+                                        && !field_names.contains(&fname.to_string()) {
                                             field_names.push(fname.to_string());
                                         }
-                                    }
                                 }
                             }
                             scan += 1;
@@ -605,11 +603,10 @@ fn clean_struct_bodies(s: &str) -> String {
                                         while sk < len && bytes[sk] != b'{' && bytes[sk] != b';' {
                                             sk += 1;
                                         }
-                                        if sk < len && bytes[sk] == b'{' {
-                                            if !member_fn_names.contains(&ident.to_string()) {
+                                        if sk < len && bytes[sk] == b'{'
+                                            && !member_fn_names.contains(&ident.to_string()) {
                                                 member_fn_names.push(ident.to_string());
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -864,7 +861,7 @@ fn clean_struct_bodies(s: &str) -> String {
                             let mut fixed_body = body.to_string();
                             for fname in &field_names {
                                 // 替换裸字段名 (前面没有 . 或 ->)
-                                let pattern = format!("{}", fname);
+                                let pattern = fname.to_string();
                                 let replacement = format!("this_->{}", fname);
                                 // 简单替换: 只在单词边界替换
                                 fixed_body = replace_word(&fixed_body, &pattern, &replacement);
@@ -1288,7 +1285,7 @@ fn clean_struct_bodies(s: &str) -> String {
                         // 收集参数名 (用于替换 param.field → param->field)
                         let param_names: Vec<String> = params_clean.split(',')
                             .filter_map(|p| {
-                                let parts: Vec<&str> = p.trim().split_whitespace().collect();
+                                let parts: Vec<&str> = p.split_whitespace().collect();
                                 if parts.len() >= 2 {
                                     // 最后一个部分是参数名 (可能包含 * 或 &)
                                     let name = parts.last().unwrap().trim_start_matches('*').trim_start_matches('&');
@@ -1570,13 +1567,21 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
             // 检查前面是否是 '[' (数组索引内部), 如果是, 则当前名字是变量/表达式
             let is_inside_brackets = k > 0 && result.as_bytes()[k-1] == b'[';
             
-            // 如果后面是标识符 (类型位置), 强制添加 struct 前缀
-            if is_type_before_ident && !has_struct_prefix && !is_struct_def {
-                result.push_str("struct ");
-            } else if !has_struct_prefix && !is_struct_def && !is_func_call
-                && !is_var_after_ptr && !is_var_after_type && !is_func_arg
-                && !is_after_return && !is_array_access && !is_expr_operator
-                && !is_member_access && !is_member_lhs && !is_inside_brackets
+            // 如果后面是标识符 (类型位置), 或者不落在任何"此处不是类型名"
+            // 的启发式例外中, 强制添加 struct 前缀
+            let is_unqualified_name = !is_func_call
+                && !is_var_after_ptr
+                && !is_var_after_type
+                && !is_func_arg
+                && !is_after_return
+                && !is_array_access
+                && !is_expr_operator
+                && !is_member_access
+                && !is_member_lhs
+                && !is_inside_brackets;
+            if !has_struct_prefix
+                && !is_struct_def
+                && (is_type_before_ident || is_unqualified_name)
             {
                 result.push_str("struct ");
             }
@@ -1770,7 +1775,7 @@ fn convert_if_condition_decls(s: &str) -> String {
                                 || (first_token.chars().all(|c| c.is_alphanumeric()
                                     || c == '_')
                                     && first_token.chars().next()
-                                        .map_or(false, |c| c.is_alphabetic()
+                                        .is_some_and(|c| c.is_alphabetic()
                                         || c == '_'));
                             
                             // Also check that no part contains binary operators
@@ -2509,11 +2514,10 @@ fn generate_struct_typedefs(s: &str) -> String {
                 let k = skip_ws(bytes, name_end);
                 // Only collect if followed by '{' (definition) or
                 // ';' (forward declaration)
-                if k < len && (bytes[k] == b'{' || bytes[k] == b';') {
-                    if !name.is_empty() && !enum_names.contains(&name) {
+                if k < len && (bytes[k] == b'{' || bytes[k] == b';')
+                    && !name.is_empty() && !enum_names.contains(&name) {
                         enum_names.push(name);
                     }
-                }
             }
         }
         i += 1;
@@ -2531,7 +2535,7 @@ fn generate_struct_typedefs(s: &str) -> String {
     for name in &enum_names {
         result.push_str(&format!("typedef enum {} {};\n", name, name));
     }
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(s);
     result
 }
@@ -2622,7 +2626,7 @@ fn fix_flattened_enum_refs(s: &str) -> String {
                     // (in declaration context, not as a function name)
                     // Exclude cases where the identifier is followed by '(' (function)
                     let is_type_usage = {
-                        let search_type = format!("{}", flattened_type);
+                        let search_type = flattened_type.to_string();
                         let mut found_type = false;
                         let mut search_pos = 0;
                         while let Some(pos) = s[search_pos..].find(&search_type) {
@@ -3238,14 +3242,13 @@ fn replace_template_usages(s: &str) -> String {
                         break; // Not a template
                     }
                     // Check for comparison operators (==, !=, <=, >=)
-                    if k + 1 < len {
-                        if (bytes[k] == b'=' && bytes[k+1] == b'=')
+                    if k + 1 < len
+                        && ((bytes[k] == b'=' && bytes[k+1] == b'=')
                             || (bytes[k] == b'!' && bytes[k+1] == b'=')
                             || (bytes[k] == b'<' && bytes[k+1] == b'=')
-                            || (bytes[k] == b'>' && bytes[k+1] == b'=') {
+                            || (bytes[k] == b'>' && bytes[k+1] == b'=')) {
                             has_comparison = true;
                         }
-                    }
                     k += 1;
                 }
                 // Only replace if identifier contains template keywords
@@ -3393,7 +3396,7 @@ fn flatten_scope_operators(s: &str) -> String {
         // 检测 `::`
         if bytes[i] == b':' && i+1 < len && bytes[i+1] == b':' {
             // 检查前面是否是标识符 (形成 ident:: 模式)
-            if result.len() > 0 && {
+            if !result.is_empty() && {
                 let rb = result.as_bytes();
                 let rl = rb.len();
                 rl > 0 && is_ident_char(rb[rl-1])
@@ -3533,7 +3536,7 @@ fn replace_word(s: &str, from: &str, to: &str) -> String {
             if before_ok && after_ok {
                 result.push_str(to);
                 // 保留空格避免粘连
-                if !to.is_empty() && to.as_bytes().last().map_or(false, |b| b.is_ascii_alphanumeric()) {
+                if !to.is_empty() && to.as_bytes().last().is_some_and(|b| b.is_ascii_alphanumeric()) {
                     // 检查后面是否需要空格
                     if i + flen < len && is_ident_char(bytes[i + flen]) {
                         result.push(' ');
@@ -3665,7 +3668,7 @@ fn replace_lambdas(s: &str) -> String {
                         j += 1;
                     }
                     // 成功匹配 lambda, 替换为 0
-                    result.push_str("0");
+                    result.push('0');
                     i = j;
                     continue;
                 }
@@ -3822,50 +3825,45 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
                 if j < len && is_ident_char(bytes[j]) {
                     let (name, name_end) = read_ident(bytes, j);
                     let k = skip_ws(bytes, name_end);
-                    if k < len && bytes[k] == b'{' {
-                        if !struct_names.contains(&name) {
+                    if k < len && bytes[k] == b'{'
+                        && !struct_names.contains(&name) {
                             struct_names.push(name);
                         }
-                    }
                 }
             }
             i += 1;
         }
     }
     // Sort longest first to avoid substring false matches
-    struct_names.sort_by(|a, b| b.len().cmp(&a.len()));
+    struct_names.sort_by_key(|n| std::cmp::Reverse(n.len()));
 
     // Step 2: Replace destructor patterns
     // ClassName_~ClassName( → void _dtor_ClassName (
     let mut result = s.to_string();
     for name in &struct_names {
         let pattern = format!("{}_~{}", name, name);
-        loop {
-            if let Some(pos) = result.find(&pattern) {
-                // Check word boundary before pattern
-                if pos > 0 {
-                    let prev = result.as_bytes()[pos - 1];
-                    if is_ident_char(prev) { break; }
-                }
-                let after = pos + pattern.len();
-                // Skip whitespace after pattern
-                let mut j = after;
-                let rb = result.as_bytes();
-                while j < rb.len() && (rb[j] as char).is_ascii_whitespace() {
-                    j += 1;
-                }
-                // Must be followed by (
-                if j < rb.len() && rb[j] == b'(' {
-                    let replacement = format!("void _dtor_{} ", name);
-                    result = format!(
-                        "{}{}{}",
-                        &result[..pos],
-                        replacement,
-                        &result[after..]
-                    );
-                } else {
-                    break;
-                }
+        while let Some(pos) = result.find(&pattern) {
+            // Check word boundary before pattern
+            if pos > 0 {
+                let prev = result.as_bytes()[pos - 1];
+                if is_ident_char(prev) { break; }
+            }
+            let after = pos + pattern.len();
+            // Skip whitespace after pattern
+            let mut j = after;
+            let rb = result.as_bytes();
+            while j < rb.len() && (rb[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            // Must be followed by (
+            if j < rb.len() && rb[j] == b'(' {
+                let replacement = format!("void _dtor_{} ", name);
+                result = format!(
+                    "{}{}{}",
+                    &result[..pos],
+                    replacement,
+                    &result[after..]
+                );
             } else {
                 break;
             }
@@ -3877,74 +3875,70 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
     // Also skip initializer list : member(init) { body }
     for name in &struct_names {
         let pattern = format!("{}_{}", name, name);
-        loop {
-            if let Some(pos) = result.find(&pattern) {
-                // Check word boundary before pattern
-                if pos > 0 {
-                    let prev = result.as_bytes()[pos - 1];
-                    if is_ident_char(prev) { break; }
-                }
-                let after = pos + pattern.len();
-                let rb = result.as_bytes();
-                // Skip whitespace
-                let mut j = after;
-                while j < rb.len()
-                    && (rb[j] as char).is_ascii_whitespace()
-                {
-                    j += 1;
-                }
-                // Must be followed by (
-                if j >= rb.len() || rb[j] != b'(' { break; }
-                // Find matching )
-                let mut depth = 1i32;
-                j += 1; // skip (
-                while j < rb.len() && depth > 0 {
-                    if rb[j] == b'(' { depth += 1; }
-                    else if rb[j] == b')' { depth -= 1; }
-                    j += 1;
-                }
-                // j is now right after matching ')'
-                // Save this position - we keep params up to here
-                let after_params = j;
-                // Skip whitespace
-                while j < rb.len()
-                    && (rb[j] as char).is_ascii_whitespace()
-                {
-                    j += 1;
-                }
-                // Skip initializer list : member(init), ...
-                if j < rb.len() && rb[j] == b':'
-                    && (j + 1 >= rb.len() || rb[j + 1] != b':')
-                {
-                    j += 1;
-                    let mut bd = 0i32;
-                    while j < rb.len() {
-                        if rb[j] == b'(' { bd += 1; }
-                        else if rb[j] == b')' { bd -= 1; }
-                        else if rb[j] == b'{' && bd == 0 { break; }
-                        j += 1;
-                    }
-                }
-                let _replacement = format!("void _ctor_{}", name);
-                // Count parameters to disambiguate overloaded constructors
-                let params_str = &result[after..after_params];
-                let param_count = if params_str.trim().is_empty() || params_str.trim() == "void" {
-                    0
-                } else {
-                    params_str.split(',').count()
-                };
-                let replacement = format!("void _ctor_{}_{}", name, param_count);
-                // Keep: prefix + replacement + params + rest from j
-                result = format!(
-                    "{}{} {}{}",
-                    &result[..pos],
-                    replacement,
-                    &result[after..after_params],
-                    &result[j..]
-                );
-            } else {
-                break;
+        while let Some(pos) = result.find(&pattern) {
+            // Check word boundary before pattern
+            if pos > 0 {
+                let prev = result.as_bytes()[pos - 1];
+                if is_ident_char(prev) { break; }
             }
+            let after = pos + pattern.len();
+            let rb = result.as_bytes();
+            // Skip whitespace
+            let mut j = after;
+            while j < rb.len()
+                && (rb[j] as char).is_ascii_whitespace()
+            {
+                j += 1;
+            }
+            // Must be followed by (
+            if j >= rb.len() || rb[j] != b'(' { break; }
+            // Find matching )
+            let mut depth = 1i32;
+            j += 1; // skip (
+            while j < rb.len() && depth > 0 {
+                if rb[j] == b'(' { depth += 1; }
+                else if rb[j] == b')' { depth -= 1; }
+                j += 1;
+            }
+            // j is now right after matching ')'
+            // Save this position - we keep params up to here
+            let after_params = j;
+            // Skip whitespace
+            while j < rb.len()
+                && (rb[j] as char).is_ascii_whitespace()
+            {
+                j += 1;
+            }
+            // Skip initializer list : member(init), ...
+            if j < rb.len() && rb[j] == b':'
+                && (j + 1 >= rb.len() || rb[j + 1] != b':')
+            {
+                j += 1;
+                let mut bd = 0i32;
+                while j < rb.len() {
+                    if rb[j] == b'(' { bd += 1; }
+                    else if rb[j] == b')' { bd -= 1; }
+                    else if rb[j] == b'{' && bd == 0 { break; }
+                    j += 1;
+                }
+            }
+            let _replacement = format!("void _ctor_{}", name);
+            // Count parameters to disambiguate overloaded constructors
+            let params_str = &result[after..after_params];
+            let param_count = if params_str.trim().is_empty() || params_str.trim() == "void" {
+                0
+            } else {
+                params_str.split(',').count()
+            };
+            let replacement = format!("void _ctor_{}_{}", name, param_count);
+            // Keep: prefix + replacement + params + rest from j
+            result = format!(
+                "{}{} {}{}",
+                &result[..pos],
+                replacement,
+                &result[after..after_params],
+                &result[j..]
+            );
         }
     }
 
@@ -3954,6 +3948,7 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
 /// 去除 C++ 特有关键字, 使 extern "C" 块内的声明可被 C 编译器接受.
 /// 目前去除:
 ///   - `noexcept` / `noexcept(expr)`
+///
 /// 强制展平所有剩余的 :: 为 _ (除了字符串字面量中的)
 /// 用于 AST 路径和 fallback 路径的后处理
 pub fn flatten_all_scope_operators(s: &str) -> String {
@@ -3992,11 +3987,10 @@ fn collect_struct_members(s: &str) -> Vec<(String, Vec<String>)> {
                                 let after = skip_ws(bytes, ident_end);
                                 if after < len && (bytes[after] == b';'
                                     || bytes[after] == b'[' || bytes[after] == b'='
-                                    || bytes[after] == b')') {
-                                    if !members.contains(&ident) {
+                                    || bytes[after] == b')')
+                                    && !members.contains(&ident) {
                                         members.push(ident);
                                     }
-                                }
                             }
                         }
                         j += 1;
@@ -4102,7 +4096,7 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                     if params.trim().is_empty() { "" } else { ", " }
                                 ));
                                 result.push_str(params);
-                                result.push_str(")");
+                                result.push(')');
                                 
                                 if has_init_list {
                                     // Parse initializer list: member(value), ...
@@ -4232,7 +4226,7 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                 result.push_str(", ");
                                 result.push_str(params.trim());
                             }
-                            result.push_str(")");
+                            result.push(')');
                             // Parse body and rewrite member accesses
                             let mut bd = 1i32;
                             let body_start = after_paren + 1;
@@ -4247,7 +4241,7 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                             result.push_str(" {");
                             let fixed_body = rewrite_member_accesses(body, &struct_info.1);
                             result.push_str(&fixed_body);
-                            result.push_str("}");
+                            result.push('}');
                             i = k;
                             continue;
                         }
@@ -4282,8 +4276,7 @@ fn rewrite_member_accesses(body: &str, members: &[String]) -> String {
                 // Check it's not preceded by '->' or '.' (already qualified)
                 let before_ok = if i == 0 { true }
                     else if bytes[i-1] == b'>' && i >= 2 && bytes[i-2] == b'-' { false }
-                    else if bytes[i-1] == b'.' { false }
-                    else { true };
+                    else { bytes[i-1] != b'.' };
                 if before_ok {
                     result.push_str("this_->");
                 }
@@ -4370,7 +4363,7 @@ fn convert_member_call_sites(s: &str, structs: &[(String, Vec<String>)]) -> Stri
                                         result.push_str(", ");
                                         result.push_str(args.trim());
                                     }
-                                    result.push_str(")");
+                                    result.push(')');
                                 } else {
                                     // obj.method(args) -> Class_method(&obj, args)
                                     result.push_str(&full_fn);
@@ -4380,7 +4373,7 @@ fn convert_member_call_sites(s: &str, structs: &[(String, Vec<String>)]) -> Stri
                                         result.push_str(", ");
                                         result.push_str(args.trim());
                                     }
-                                    result.push_str(")");
+                                    result.push(')');
                                     i = j;
                                     continue;
                                 }
@@ -4483,8 +4476,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
                         }
                     }
                     // Also check _ctor_ClassName pattern
-                    if fname.starts_with("_ctor_") {
-                        let cname = &fname[6..];
+                    if let Some(cname) = fname.strip_prefix("_ctor_") {
                         if structs.iter().any(|(sn, _)| sn == cname) {
                             in_member_fn = true;
                             current_class = cname.to_string();
@@ -4523,7 +4515,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
                             result.push_str(", ");
                             result.push_str(args.trim());
                         }
-                        result.push_str(")");
+                        result.push(')');
                         i = j;
                         continue;
                     }
@@ -4627,40 +4619,36 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
         // 注意: 必须跳过出现在块注释内的 "template <" (如 lower 的注册注释
         // `/* template <T, U> (registered ...) */`), 否则会从注释中间一路
         // 删到后面的 '{'/EOF, 截断输出并留下未闭合的 `/* `.
-        loop {
-            if let Some(pos) = find_template_lt_outside_comments(&result) {
-                // Find matching '>'
-                let after_lt = pos + "template <".len();
-                let bytes = result.as_bytes();
-                let mut depth = 1i32;
-                let mut j = after_lt;
-                while j < bytes.len() && depth > 0 {
-                    if bytes[j] == b'<' { depth += 1; }
-                    else if bytes[j] == b'>' { depth -= 1; }
-                    j += 1;
-                }
-                if depth == 0 {
-                    // Skip past > and whitespace/newlines to find { or ;
-                    let mut k = j;
-                    while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
-                    if k < bytes.len() && bytes[k] == b'{' {
-                        let mut bd = 1i32;
-                        k += 1;
-                        while k < bytes.len() && bd > 0 {
-                            if bytes[k] == b'{' { bd += 1; }
-                            else if bytes[k] == b'}' { bd -= 1; }
-                            k += 1;
-                        }
-                    } else if k < bytes.len() && bytes[k] == b';' {
+        while let Some(pos) = find_template_lt_outside_comments(&result) {
+            // Find matching '>'
+            let after_lt = pos + "template <".len();
+            let bytes = result.as_bytes();
+            let mut depth = 1i32;
+            let mut j = after_lt;
+            while j < bytes.len() && depth > 0 {
+                if bytes[j] == b'<' { depth += 1; }
+                else if bytes[j] == b'>' { depth -= 1; }
+                j += 1;
+            }
+            if depth == 0 {
+                // Skip past > and whitespace/newlines to find { or ;
+                let mut k = j;
+                while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                if k < bytes.len() && bytes[k] == b'{' {
+                    let mut bd = 1i32;
+                    k += 1;
+                    while k < bytes.len() && bd > 0 {
+                        if bytes[k] == b'{' { bd += 1; }
+                        else if bytes[k] == b'}' { bd -= 1; }
                         k += 1;
                     }
-                    // Remove from pos to k
-                    result = format!("{}{}", &result[..pos], &result[k..]);
-                } else {
-                    break; // No more template patterns to remove
+                } else if k < bytes.len() && bytes[k] == b';' {
+                    k += 1;
                 }
+                // Remove from pos to k
+                result = format!("{}{}", &result[..pos], &result[k..]);
             } else {
-                break;
+                break; // No more template patterns to remove
             }
         }
     }
@@ -5144,7 +5132,7 @@ fn fix_missing_struct_keywords(s: &str) -> String {
                 && !before_brace.contains(')')
                 && !before_brace.contains('=')
                 && before_brace.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && !c_keywords.iter().any(|k| before_brace == *k)
+                && !c_keywords.contains(&before_brace)
                 && i + 1 < lines.len()
                 && (lines[i + 1].trim() == "};" || lines[i + 1].trim().starts_with("void _ZN"))
         } else {
@@ -5271,7 +5259,7 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
                     let all_underscore = params_str.split(',').all(|p| {
                         let p = p.trim();
                         p.ends_with(" _") || p == "void* _" || p == "..." ||
-                        p.split_whitespace().last().map_or(false, |n| n == "_")
+                        (p.split_whitespace().last() == Some("_"))
                     });
                     if all_underscore && j + 1 < lines2.len() && lines2[j + 1].trim() == "}" {
                         // 空函数体且所有参数名为 _: 转为声明
@@ -6008,8 +5996,8 @@ fn convert_conversion_operators(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for line in s.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("operator ") {
-            let rest = &trimmed[9..]; // after "operator "
+        if let Some(rest) = trimmed.strip_prefix("operator ") {
+            // after "operator "
             if let Some(paren_pos) = rest.find('(') {
                 let func_name = rest[..paren_pos].trim();
                 let after = &rest[paren_pos..];
@@ -6078,11 +6066,7 @@ fn fix_inline_member_calls(s: &str) -> String {
                         // Check for *this_ or *this pattern (pointer parameter named this_)
                         let this_pattern_ok = if after_sname + 5 <= bytes.len() && bytes[after_sname..after_sname+5] == *b"*this" {
                             true
-                        } else if after_sname + 6 <= bytes.len() && bytes[after_sname..after_sname+6] == *b" *this" {
-                            true
-                        } else {
-                            false
-                        };
+                        } else { after_sname + 6 <= bytes.len() && bytes[after_sname..after_sname+6] == *b" *this" };
                         if this_pattern_ok {
                             // Found a function with struct sname *this_ parameter
                             // Now find the function name: go backward from '(' (skip whitespace)
@@ -6281,7 +6265,7 @@ fn convert_new_delete_expressions(s: &str) -> String {
                 let expr = s[i+7..j].trim();
                 result.push_str("free (");
                 result.push_str(expr);
-                result.push_str(")");
+                result.push(')');
                 i = j;
                 continue;
             }
@@ -6330,7 +6314,7 @@ fn convert_new_delete_expressions(s: &str) -> String {
                         result.push_str(", ");
                         result.push_str(args);
                     }
-                    result.push_str(")");
+                    result.push(')');
                     i = n;
                     continue;
                 }
@@ -6356,7 +6340,7 @@ fn convert_new_delete_expressions(s: &str) -> String {
                     result.push_str(class_name);
                     result.push_str(" (");
                     result.push_str(args);
-                    result.push_str(")");
+                    result.push(')');
                     i = m;
                     continue;
                 } else if k < len && bytes[k] == b'*' {
@@ -6412,7 +6396,7 @@ fn convert_vector_member_calls(s: &str) -> String {
                 result.push_str(var_name);
                 result.push_str(", ");
                 result.push_str(args);
-                result.push_str(")");
+                result.push(')');
                 i = j;
                 continue;
             } else if rest.starts_with("count (") || rest.starts_with("count(") {
@@ -6438,7 +6422,7 @@ fn convert_vector_member_calls(s: &str) -> String {
                 result.push_str(var_name);
                 result.push_str("_count (&");
                 result.push_str(var_name);
-                result.push_str(")");
+                result.push(')');
                 i = j;
                 continue;
             } else if rest.starts_with("truncate (") || rest.starts_with("truncate(") {
@@ -6467,7 +6451,7 @@ fn convert_vector_member_calls(s: &str) -> String {
                 result.push_str(var_name);
                 result.push_str(", ");
                 result.push_str(args);
-                result.push_str(")");
+                result.push(')');
                 i = j;
                 continue;
             }
@@ -7052,6 +7036,12 @@ fn template_arg_to_c(ty: &MangleType) -> String {
         }
         // M30.1: 非类型实参序列化为 `n<值>` 标识符片段
         MangleType::NonType(v) => format!("n{}", v),
+    }
+}
+
+impl Default for Lower {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -9587,7 +9577,7 @@ impl Lower {
                     // (如 parser 误将 "signed short int" 解析为 Class)
                     let is_bad_struct = c_target.starts_with("struct ")
                         && !self.classes.contains(&c_target[7..].to_string())
-                        && !self.typedef_aliases.contains_key(&c_target[7..].to_string());
+                        && !self.typedef_aliases.contains_key(&c_target[7..]);
                     // 跳过自引用 typedef (如 `typedef cpp_hashnode cpp_hashnode;`)
                     // 其中 c_target 和 qname 相同
                     let is_self_ref_output = c_target == qname;
@@ -10504,7 +10494,7 @@ impl Lower {
                     match case_expr {
                         Some(e) => {
                             self.out.push_str("case ");
-                            self.emit_expr(&e);
+                            self.emit_expr(e);
                             self.out.push_str(":\n");
                         }
                         None => {
@@ -11443,8 +11433,8 @@ fn c_decl_type_to_mangle(ty: &str) -> MangleType {
     if let Some(rest) = t.strip_prefix("struct ") {
         return MangleType::Class(rest.trim().to_string());
     }
-    if t.ends_with('*') {
-        return MangleType::Pointer(Box::new(c_decl_type_to_mangle(&t[..t.len() - 1].trim())));
+    if let Some(inner) = t.strip_suffix('*') {
+        return MangleType::Pointer(Box::new(c_decl_type_to_mangle(inner.trim())));
     }
     match t {
         "void" => MangleType::Void,

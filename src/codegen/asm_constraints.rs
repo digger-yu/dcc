@@ -272,10 +272,9 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             match rest.chars().next() {
                 Some('r') => ConstraintKind::OutputReg,
                 Some('m') => ConstraintKind::OutputMem,
-                Some(l) if matches!(l, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q') => {
-                    ConstraintKind::OutputReg
-                }
-                _ => ConstraintKind::OutputReg, // 默认按寄存器
+                // 'a'/'b'/'c'/'d'/'S'/'D'/'q'/'Q' 等固定寄存器约束与其余
+                // 未知字符一样按寄存器处理
+                _ => ConstraintKind::OutputReg,
             }
         }
         '+' => {
@@ -283,9 +282,8 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             match rest.chars().next() {
                 Some('r') => ConstraintKind::InOutReg,
                 Some('m') => ConstraintKind::InOutMem,
-                Some(l) if matches!(l, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q') => {
-                    ConstraintKind::InOutReg
-                }
+                // 'a'/'b'/'c'/'d'/'S'/'D'/'q'/'Q' 等固定寄存器约束与其余
+                // 未知字符一样按寄存器处理
                 _ => ConstraintKind::InOutReg,
             }
         }
@@ -511,14 +509,13 @@ pub fn resolve_asm_operands(
                     op.reg = Some(r);
                 }
             }
-            ConstraintKind::Matched(target) => {
+            ConstraintKind::Matched(target)
                 // 复用目标操作数的寄存器
-                if *target < result.len() {
+                if *target < result.len() => {
                     if let Some(ref r) = result[*target].reg {
                         op.reg = Some(r.clone());
                     }
                 }
-            }
             _ => {}
         }
         result.push(op);
@@ -555,7 +552,7 @@ fn parse_label_offset_expr(
 ) -> usize {
     let len = chars.len();
     while pos < len && (chars[pos] == '+' || chars[pos] == '-') {
-        let sign = chars[pos] as char;
+        let sign = chars[pos];
         result.push(sign);
         pos += 1;
         if pos >= len {

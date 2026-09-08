@@ -1108,7 +1108,7 @@ impl Type {
             Type::Array(elem, ArraySize::Const(n)) => {
                 let elem_sz = elem.size();
                 // 防止超大数组大小导致内存分配失败 (如 [100000000000000001][3])
-                elem_sz.checked_mul(*n).unwrap_or(usize::MAX)
+                elem_sz.saturating_mul(*n)
             }
             Type::Array(_, ArraySize::Var(_)) => 8, // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
@@ -1126,19 +1126,19 @@ impl Type {
                             f.offset
                         } else if let Some(bw) = f.bit_width {
                             // 位域字段: 结束位置 = offset + ceil((bit_offset + bw) / 8)
-                            f.offset + ((f.bit_offset + bw + 7) / 8) as usize
+                            f.offset + (f.bit_offset + bw).div_ceil(8) as usize
                         } else {
                             f.offset + f.ty.size()
                         }
                     })
                     .max()
                     .unwrap_or(0);
-                let aligned = if *align > 1 {
+
+                if *align > 1 {
                     (size + align - 1) & !(align - 1)
                 } else {
                     size
-                };
-                aligned
+                }
             }
             Type::Union(_, fields, align) => {
                 let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
@@ -1367,7 +1367,7 @@ impl Type {
                         let container_align = f.ty.align();
                         let container_bits = (container_align * 8) as u32;
                         let align_bits = container_bits;
-                        if global_bit_pos % align_bits != 0 {
+                        if !global_bit_pos.is_multiple_of(align_bits) {
                             global_bit_pos = (global_bit_pos + align_bits - 1) & !(align_bits - 1);
                         }
                         f.offset = (global_bit_pos / 8) as usize;
@@ -1379,7 +1379,7 @@ impl Type {
                     global_bit_pos += bw;
                 } else {
                     // 非位域字段: 对齐到下一个字节边界
-                    if global_bit_pos % 8 != 0 {
+                    if !global_bit_pos.is_multiple_of(8) {
                         global_bit_pos = (global_bit_pos + 7) & !7;
                     }
                     f.offset = (global_bit_pos / 8) as usize;

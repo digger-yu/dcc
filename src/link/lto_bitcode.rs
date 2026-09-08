@@ -1267,8 +1267,8 @@ impl ConstPropagationCtx {
                     }
                 }
             }
-            ExprKind::Unary(op) => {
-                if expr.children.len() == 1 {
+            ExprKind::Unary(op)
+                if expr.children.len() == 1 => {
                     let operand = &expr.children[0];
                     if let Some(val) = operand.literal {
                         if let Some(result) = fold_unary_op(*op, val) {
@@ -1280,7 +1280,6 @@ impl ConstPropagationCtx {
                         }
                     }
                 }
-            }
             _ => {}
         }
         None
@@ -1295,7 +1294,7 @@ fn is_likely_const_name(name: &str) -> bool {
     }
     // 全大写字母（C 宏常量约定）
     if name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
-        return !name.is_empty() && name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+        return !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     }
     // 以 const_ 开头
     if name.starts_with("const_") || name.contains("_const_") {
@@ -2217,23 +2216,23 @@ impl DeadStoreCtx {
     pub fn analyze(&mut self, modules: &[BitcodeModule]) {
         for module in modules {
             for func in &module.functions {
-                for (idx, stmt) in func.body.iter().enumerate() {
-                    self.analyze_stmt(stmt, &func.name, idx);
+                for stmt in func.body.iter() {
+                    self.analyze_stmt(stmt);
                 }
             }
         }
     }
 
-    fn analyze_stmt(&mut self, stmt: &TypedStmt, func_name: &str, stmt_idx: usize) {
+    fn analyze_stmt(&mut self, stmt: &TypedStmt) {
         for expr in &stmt.expressions {
-            self.analyze_expr(expr, func_name, stmt_idx);
+            self.analyze_expr(expr);
         }
         for nested in &stmt.nested {
-            self.analyze_stmt(nested, func_name, stmt_idx);
+            self.analyze_stmt(nested);
         }
     }
 
-    fn analyze_expr(&mut self, expr: &TypedExpr, func_name: &str, stmt_idx: usize) {
+    fn analyze_expr(&mut self, expr: &TypedExpr) {
         match &expr.kind {
             ExprKind::Assign => {
                 // 左侧是存储目标
@@ -2246,23 +2245,22 @@ impl DeadStoreCtx {
                 // 只递归处理右侧（值），不处理左侧（目标）
                 if expr.children.len() > 1 {
                     for child in expr.children.iter().skip(1) {
-                        self.analyze_expr(child, func_name, stmt_idx);
+                        self.analyze_expr(child);
                     }
                 }
                 return;
             }
-            ExprKind::Local(name) => {
+            ExprKind::Local(name)
                 // 读取全局变量
-                if self.is_global_name(name) {
+                if self.is_global_name(name) => {
                     *self.read_counts.entry(name.clone()).or_insert(0) += 1;
                     self.stats.total_reads += 1;
                 }
-            }
             _ => {}
         }
 
         for child in &expr.children {
-            self.analyze_expr(child, func_name, stmt_idx);
+            self.analyze_expr(child);
         }
     }
 
@@ -2647,9 +2645,9 @@ impl AliasCtx {
                     self.pointer_vars.insert(name.clone());
                 }
             }
-            ExprKind::Assign => {
+            ExprKind::Assign
                 // 分析赋值：如果右侧是 Address，记录别名
-                if expr.children.len() >= 2 {
+                if expr.children.len() >= 2 => {
                     let lhs = &expr.children[0];
                     let rhs = &expr.children[1];
                     if let ExprKind::Local(ptr_name) = &lhs.kind {
@@ -2666,7 +2664,6 @@ impl AliasCtx {
                         }
                     }
                 }
-            }
             _ => {}
         }
 

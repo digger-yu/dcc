@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     // 10000 层括号) 导致栈溢出. 256MB 足以处理极端嵌套场景.
     let stack_size = 256 * 1024 * 1024; // 256 MB
     let builder = std::thread::Builder::new().stack_size(stack_size);
-    let handler = builder.spawn(|| main_inner()).unwrap();
+    let handler = builder.spawn(main_inner).unwrap();
     match handler.join() {
         Ok(code) => code,
         Err(_) => ExitCode::from(1),

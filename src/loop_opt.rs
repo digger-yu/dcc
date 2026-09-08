@@ -810,7 +810,7 @@ fn generate_tiled_loop(
     ivar: &str,
     lo: i128,
     hi: i128,
-    body: &Box<Stmt>,
+    body: &Stmt,
     tile_size: usize,
     span: &Span,
 ) -> Vec<BlockItem> {
@@ -950,7 +950,7 @@ fn is_parallelizable_for(
     init: &Option<Box<Stmt>>,
     cond: &Option<Expr>,
     step: &Option<Expr>,
-    body: &Box<Stmt>,
+    body: &Stmt,
 ) -> bool {
     // 必须有简单归纳变量
     if detect_simple_for(init, cond, step).is_none() {
@@ -1045,7 +1045,7 @@ fn is_pipelineable(
     init: &Option<Box<Stmt>>,
     cond: &Option<Expr>,
     step: &Option<Expr>,
-    body: &Box<Stmt>,
+    body: &Stmt,
 ) -> bool {
     if detect_simple_for(init, cond, step).is_none() {
         return false;
@@ -1119,9 +1119,8 @@ fn int_ty() -> Type {
 }
 
 /// 替换循环体中的索引变量为新的表达式
-fn subst_index_var(body: &Box<Stmt>, old_var: &str, new_expr: &Expr) -> Box<Stmt> {
-    let body = body.as_ref().clone();
-    Box::new(subst_stmt(&body, old_var, new_expr))
+fn subst_index_var(body: &Stmt, old_var: &str, new_expr: &Expr) -> Box<Stmt> {
+    Box::new(subst_stmt(body, old_var, new_expr))
 }
 
 fn subst_stmt(s: &Stmt, old: &str, new_e: &Expr) -> Stmt {

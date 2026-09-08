@@ -1059,7 +1059,7 @@ fn instrument_expr(
             if let Expr::Call { callee, .. } = expr {
                 let type_hash = cfi_type_hash(callee_ty);
                 let wrapped_callee = wrap_with_cfi_check(callee, type_hash, &span);
-                *callee = Box::new(wrapped_callee);
+                **callee = wrapped_callee;
             }
         }
         ExprKind::Binop(op) => {
@@ -1719,9 +1719,9 @@ fn make_tsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) ->
         ]
     };
     let param_tys = if matches!(size, 1 | 2 | 4 | 8 | 16) {
-        vec![Type::Ptr(Box::new(Type::Void.into())).into()]
+        vec![Type::Ptr(Box::new(Type::Void.into()))]
     } else {
-        vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()]
+        vec![Type::Ptr(Box::new(Type::Void.into())), Type::ULong]
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
@@ -1815,9 +1815,9 @@ fn make_asan_call(
         ]
     };
     let param_tys = if has_fixed_size_runtime {
-        vec![Type::Ptr(Box::new(Type::Void.into())).into()]
+        vec![Type::Ptr(Box::new(Type::Void.into()))]
     } else {
-        vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()]
+        vec![Type::Ptr(Box::new(Type::Void.into())), Type::ULong]
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
