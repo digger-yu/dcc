@@ -6052,6 +6052,26 @@ impl Preprocessor {
         let chars: Vec<char> = expr.chars().collect();
         let mut i = 0;
         while i < chars.len() {
+            // 宽字符常量 L'...': 保留给 parse_number 处理
+            if chars[i] == 'L' && i + 1 < chars.len() && chars[i + 1] == '\'' {
+                result.push('L');
+                i += 1;
+                result.push('\'');
+                i += 1;
+                while i < chars.len() && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    result.push('\'');
+                    i += 1;
+                }
+                continue;
+            }
             // 字符常量: 直接保留给 parse_number 处理
             if chars[i] == '\'' {
                 result.push('\'');
@@ -6382,6 +6402,11 @@ impl Preprocessor {
 
     fn parse_primary(bytes: &[u8], pos: &mut usize) -> i64 {
         Self::skip_ws(bytes, pos);
+        // 宽字符常量 L'...'
+        if *pos + 1 < bytes.len() && bytes[*pos] == b'L' && bytes[*pos + 1] == b'\'' {
+            *pos += 1; // skip L
+            return Self::parse_char_const(bytes, pos);
+        }
         if *pos < bytes.len() && bytes[*pos] == b'\'' {
             return Self::parse_char_const(bytes, pos);
         }
