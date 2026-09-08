@@ -10767,9 +10767,43 @@ impl Codegen {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
                             // 最后一条表达式语句: 结果放入 dst
                             self.gen_expr(e, dst);
+                            // 聚合类型 (struct/union) 由函数调用寄存器返回时,
+                            // rax:rdx 含值本身而非地址。物化到临时槽使 rax = 地址,
+                            // 与 gen_aggregate_assign 的 StmtExpr 地址约定一致。
+                            let e_ty = e.ty();
+                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                                && !Self::needs_memory_return(&e_ty)
+                                && matches!(e, Expr::Call { .. })
+                            {
+                                let sz = e_ty.size();
+                                let temp_off = self.alloc_sret_slot(sz);
+                                // Store rax:rdx to temp slot based on size
+                                if sz <= 8 {
+                                    self.store_stack(0, temp_off);
+                                } else {
+                                    self.store_stack(0, temp_off);
+                                    self.store_stack(2, temp_off + 8);
+                                }
+                                self.emit_lea_r13(dst, temp_off);
+                            }
                         }
                         BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
                             self.gen_expr(e, dst);
+                            let e_ty = e.ty();
+                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                                && !Self::needs_memory_return(&e_ty)
+                                && matches!(e, Expr::Call { .. })
+                            {
+                                let sz = e_ty.size();
+                                let temp_off = self.alloc_sret_slot(sz);
+                                if sz <= 8 {
+                                    self.store_stack(0, temp_off);
+                                } else {
+                                    self.store_stack(0, temp_off);
+                                    self.store_stack(2, temp_off + 8);
+                                }
+                                self.emit_lea_r13(dst, temp_off);
+                            }
                         }
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
