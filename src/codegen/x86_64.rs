@@ -16573,12 +16573,10 @@ impl Codegen {
         // (旧 LongDouble 向后 -8-inner_sz 与整体拷贝窗口 [off, off+size) 错位)
         let part_off = if is_real { 0 } else { inner_sz };
         let lva_ok = self.gen_lvalue_addr(e, 0);
-        eprintln!("[DBG] gen_complex_part is_real={} e_ty={:?} lva={}", is_real, e.ty(), lva_ok);
         if lva_ok {
             // lvalue 形态 (变量/字段/下标/解引用): 直接对内存分量寻址
             if is_float {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                eprintln!("[DBG2] lva-branch float part_off={}", part_off);
                 self.emit(&[pfx, 0x0F, 0x10]); // movss/movsd xmm0, [rax+disp]
                 if part_off == 0 {
                     self.emit(&[0x00]);
