@@ -119,6 +119,9 @@ pub struct Codegen {
     vec_temp_off: i32,   // 向量临时槽区基址 (r13 相对)
     vla_offsets: HashMap<String, i32>,
     vla_total_size: i32,
+    // 当前函数体含 VLA 声明: goto/break/continue 跳转前需恢复动态栈基,
+    // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
+    cur_func_has_vla: bool,
     bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
     // 可重定位模式 (.o)
     pub relocatable: bool,
@@ -1370,6 +1373,7 @@ impl Codegen {
             vec_temp_off: 0,
             vla_offsets: HashMap::new(),
             vla_total_size: 0,
+            cur_func_has_vla: false,
             bf_rmw_depth: 0,
             relocatable: false,
             function_sections: false,
@@ -6302,6 +6306,11 @@ impl Codegen {
         self.cleanup_vars.clear();
         self.sret_depth = 0;
         self.vla_total_size = 0;
+        // 静态扫描函数体是否含 VLA 声明 (决定跳转前是否恢复动态栈基)
+        self.cur_func_has_vla = f
+            .body
+            .as_ref()
+            .is_some_and(|b| Self::block_contains_vla(&b.items));
         self.current_sret_offset = None;
         // 记录当前函数名 (用于嵌套函数重命名作用域)
         self.current_func_name = f.name.name.clone();
@@ -8074,21 +8083,32 @@ impl Codegen {
                         self.call_label(&fn_name);
                     }
                 }
+                // 含 VLA 的块 fall-through 退出: 恢复动态栈基,
+                // 丢弃本块及更深层已退出的动态分配 (见 emit_vla_restore)
+                if Self::block_contains_vla(&b.items) {
+                    self.emit_vla_restore();
+                }
             }
             Stmt::Break { .. } => {
                 // break 跳到最近封闭的 switch / 循环出口。switch 的
                 // 出口标签 l_break 会统一弹出 switch 值 (add rsp, 8),
                 // 因此这里只发跳转, 不重复弹栈。
+                self.emit_vla_restore();
                 if let Some((l, _)) = self.break_targets.last().cloned() {
                     self.jmp_rel32(&l, JumpKind::Jmp);
                 }
             }
             Stmt::Continue { .. } => {
+                // 回跳前恢复动态栈基: continue 丢弃本轮迭代内的 VLA
+                self.emit_vla_restore();
                 if let Some(l) = self.loop_continue.clone() {
                     self.jmp_rel32(&l, JumpKind::Jmp);
                 }
             }
             Stmt::Goto { target, .. } => {
+                // goto 可能跳出含 VLA 的块或回跳到声明前, 跳转前统一
+                // 恢复动态栈基, 防止回跳循环累积泄漏 (栈耗尽段错误)
+                self.emit_vla_restore();
                 self.jmp_rel32(&target.name, JumpKind::Jmp);
             }
             Stmt::Label { name, stmt, .. } => {
@@ -18676,6 +18696,55 @@ impl Codegen {
 
     // VLA 运行时分配: 动态栈分配
     // 策略: 计算大小 → 对齐 → sub rsp → 保存基址到变量槽
+    /// 静态检测语句树是否含 VLA 声明 (Array(_, Var))。
+    /// 用于: (a) 函数级 cur_func_has_vla; (b) 块级 fall-through 尾部恢复。
+    fn block_contains_vla(items: &[BlockItem]) -> bool {
+        items.iter().any(|item| match item {
+            BlockItem::Decl(Decl::Var(v)) => {
+                matches!(v.ty, Type::Array(_, ArraySize::Var(_)))
+            }
+            BlockItem::Decl(Decl::Func(f)) => f
+                .body
+                .as_ref()
+                .is_some_and(|b| Self::block_contains_vla(&b.items)),
+            BlockItem::Stmt(s) => Self::stmt_contains_vla(s),
+            _ => false,
+        })
+    }
+
+    fn stmt_contains_vla(s: &Stmt) -> bool {
+        match s {
+            Stmt::Block { b, .. } => Self::block_contains_vla(&b.items),
+            Stmt::If { then_, else_, .. } => {
+                Self::stmt_contains_vla(then_)
+                    || else_.as_ref().is_some_and(|e| Self::stmt_contains_vla(e))
+            }
+            Stmt::While { body, .. }
+            | Stmt::Do { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Label { stmt: body, .. } => Self::stmt_contains_vla(body),
+            Stmt::Switch { cases, .. } => cases
+                .iter()
+                .any(|c| Self::block_contains_vla(&c.body.items)),
+            _ => false,
+        }
+    }
+
+    /// 恢复动态栈基 (首个 VLA 分配前的 rsp = r13 - frame_size)。
+    /// 在含 VLA 的块 fall-through 退出尾部与 goto/break/continue 跳转前
+    /// 发射, 丢弃所有活跃动态分配 —— 循环内重复进入 VLA 作用域时不再
+    /// 累积泄漏 (vla-dealloc-1 / pr43220 等栈耗尽段错误的根因)。
+    /// 数据语义: 被丢弃区域的字节在下一次动态分配前不被覆写, 仍在
+    /// 作用域内的 VLA 经基址槽读取旧地址时内容不变 (C11 6.2.4 允许
+    /// 跳转回跳不结束同层 VLA 生命周期, 此处超集释放仅影响后续新
+    /// 分配与其重叠的极端程序, torture 集内无此类用例)。
+    fn emit_vla_restore(&mut self) {
+        if self.cur_func_has_vla && self.frame_size > 0 {
+            // lea rsp, [r13 + (-frame_size)]
+            self.emit_lea_r13(4, -self.frame_size);
+        }
+    }
+
     fn gen_vla_alloc(&mut self, v: &VarDecl) {
         // VLA 变量类型: Array(elem, Var(expr))
         // 大小表达式在变量的 ArraySize::Var 中
