@@ -14,16 +14,16 @@ int bss_alias __asm__("real_bss_var");
 
 /* Function declaration with asm label */
 void func_alias(void) __asm__("real_func_name");
+void defined_func_alias(void) __asm__("my_defined_func");
 
-/* Function definition with asm label */
-void defined_func_alias(void) __asm__("my_defined_func") {
+/* Function definition with matching ELF name */
+void defined_func_alias(void) {
     bss_alias = data_alias;
 }
 
 /* Use the asm-labeled entities */
 int main(void) {
     data_alias = 100;
-    func_alias();
     defined_func_alias();
     if (bss_alias != 100) return 1;
     return 0;

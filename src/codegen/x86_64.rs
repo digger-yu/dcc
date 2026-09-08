@@ -6925,6 +6925,10 @@ impl Codegen {
                             self.cleanup_vars
                                 .push((v.name.name.clone(), fn_name.clone()));
                         }
+                        // 定义+声明一体的 struct/union 类型绑定 (同 gen_block_items)
+                        if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                            self.gen_vm_type_bind(&v.ty);
+                        }
                         self.register_var(&v.name.name, &v.ty);
                         if Self::type_has_vla(&v.ty) {
                             self.gen_vla_alloc(v);
@@ -8481,6 +8485,12 @@ impl Codegen {
                         self.cleanup_vars
                             .push((v.name.name.clone(), fn_name.clone()));
                     }
+                    // 定义+声明一体的 struct/union 类型: 变量声明点即类型
+                    // 声明点, 触发 VM 槽绑定/静态清除 (parser 不产生独立
+                    // StructDef BlockItem)
+                    if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                        self.gen_vm_type_bind(&v.ty);
+                    }
                     self.register_var(&v.name.name, &v.ty);
                     if Self::type_has_vla(&v.ty) {
                         self.gen_vla_alloc(v);
@@ -8549,16 +8559,6 @@ impl Codegen {
     /// 重复声明同名类型每次迭代重写槽 (重新绑定)。静态类型
     /// (重)声明清除残留绑定, 避免外层同名静态类型误读槽。
     fn gen_vm_struct_bind(&mut self, sd: &StructDef, is_union: bool) {
-        let key = if is_union {
-            format!("union:{}", sd.name.name)
-        } else {
-            format!("struct:{}", sd.name.name)
-        };
-        let has_vla_field = sd.fields.iter().any(|f| f.ty.has_vla());
-        if !has_vla_field {
-            self.vm_struct_size_slots.remove(&key);
-            return;
-        }
         // struct 尾部对齐: packed 布局时字段 align 全为 1, 推导值
         // 自然为 1 (无尾部圆整); 非 packed 时为最大字段对齐。
         let salign = sd
@@ -8580,9 +8580,34 @@ impl Codegen {
                 salign,
             )
         };
+        self.gen_vm_type_bind(&vm_ty);
+    }
+
+    /// 按类型 (而非 StructDef) 绑定/清除 VM 类型槽。定义+声明一体
+    /// 形式 `struct S { char w[y]; } *p, a;` 不产生独立 StructDef
+    /// BlockItem (parser: parse_decl_specifiers 后直接 parse_var_or_func),
+    /// 此时从变量声明的 ty 触发绑定; 语义与独立声明一致。
+    fn gen_vm_type_bind(&mut self, ty: &Type) {
+        let (key, has_vla_field, salign) = match ty {
+            Type::Struct(tag, fields, salign) => (
+                format!("struct:{}", tag),
+                fields.iter().any(|f| f.ty.has_vla()),
+                *salign,
+            ),
+            Type::Union(tag, fields, salign) => (
+                format!("union:{}", tag),
+                fields.iter().any(|f| f.ty.has_vla()),
+                *salign,
+            ),
+            _ => return,
+        };
+        if !has_vla_field {
+            self.vm_struct_size_slots.remove(&key);
+            return;
+        }
         let slot_name = format!("__vmsize_{}", key);
         let slot = self.register_var(&slot_name, &Type::Long);
-        self.gen_sizeof_runtime(&vm_ty, 0); // rax = 总大小 (运行时)
+        self.gen_sizeof_runtime(ty, 0); // rax = 总大小 (运行时)
         self.emit_store_rax_r13(slot);
         self.vm_struct_size_slots.insert(key, slot);
     }
@@ -9214,16 +9239,35 @@ impl Codegen {
                 }
                 if let Expr::Ident { name, ty: l_ty, .. } = lv {
                     let sz = l_ty.size();
+                    // VM struct/union (含 VLA 字段的局部类型) 即使编译期
+                    // size() 回退值 <= 8 也必须走整体拷贝: 其语义大小是
+                    // 运行时值, 标量 8 字节路径会把聚合 rvalue (地址约定)
+                    // 当内容存入 (20070919-1: b = p[2] 后 b.w 变地址字节)
                     let is_aggregate = matches!(
                         l_ty,
                         Type::Struct(_, _, _)
                             | Type::Union(_, _, _)
                             | Type::Array(_, ArraySize::Const(_))
                             | Type::Atomic(_)
-                    ) && (sz > 8 || matches!(r.as_ref(), Expr::CompoundLit { .. }));
+                    ) && (sz > 8
+                        || matches!(r.as_ref(), Expr::CompoundLit { .. })
+                        || l_ty.has_vla());
                     if is_aggregate {
                         // struct/array 整体赋值: 逐块拷贝
                         self.gen_aggregate_assign(&name.name, l_ty, r);
+                        // 赋值表达式的值 = 左值转换后的值 (C11 6.5.16p3)。
+                        // 聚合 rvalue 统一约定为地址: 供链式聚合赋值
+                        // (a = (b = c)) 与语句表达式块值 (20070919-1:
+                        // a = ({ ...; p[3] = b; })) 继续传递。
+                        if self.is_global_not_local(&name.name) {
+                            self.emit_global_addr(dst, &name.name);
+                        } else if let Some(&off) = self.vla_offsets.get(&name.name) {
+                            // VM struct/VLA 变量: 地址 = 数据区基址
+                            self.load_stack(dst, off);
+                        } else {
+                            let aoff = self.var_offset(&name.name);
+                            self.emit_lea_r13(dst, aoff);
+                        }
                     } else if matches!(l_ty, Type::Complex(_)) {
                         // _Complex 赋值: 统一走整体拷贝。8B 的 rax 单槽路径
                         // 无法表达浮点 complex rvalue (值在 xmm0, rax 是地址/垃圾)
@@ -9404,6 +9448,20 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
+                        // 聚合元素赋值 (VM struct / >8B struct): rep movsb
+                        // 整体拷贝。标量 store 会把聚合 rvalue (地址约定)
+                        // 或 8 字节内容截断写入, 语义都错 (20070919-1)
+                        let is_agg_elem = matches!(
+                            elem_ty,
+                            Type::Struct(_, _, _)
+                                | Type::Union(_, _, _)
+                                | Type::Array(_, ArraySize::Const(_))
+                                | Type::Atomic(_)
+                        ) && (es > 8 || elem_ty.has_vla());
+                        if is_agg_elem {
+                            self.gen_agg_elem_store(r, elem_ty, es, dst);
+                            return;
+                        }
                         // _Complex 浮点元素: 逐分量写 (实部 [rcx], 虚部
                         // [rcx+isz])。若落入下方整数 store, gen_expr 遗留
                         // 在 rax 的值 (如 conj 的 flip 掩码) 会覆盖实部。
@@ -9450,6 +9508,18 @@ impl Codegen {
                         self.push(0);
                         self.gen_expr(r, 0);
                         self.pop(1);
+                        // 聚合元素赋值: rep movsb 整体拷贝 (同 Ident arr 路径)
+                        let is_agg_elem = matches!(
+                            elem_ty,
+                            Type::Struct(_, _, _)
+                                | Type::Union(_, _, _)
+                                | Type::Array(_, ArraySize::Const(_))
+                                | Type::Atomic(_)
+                        ) && (es > 8 || elem_ty.has_vla());
+                        if is_agg_elem {
+                            self.gen_agg_elem_store(r, elem_ty, es, dst);
+                            return;
+                        }
                         // _Complex 浮点元素: 逐分量写 (同上, 防止整数
                         // store 把 rax 残值写进实部)
                         if matches!(elem_ty, Type::Complex(ref c)
@@ -9484,7 +9554,7 @@ impl Codegen {
                     let is_deref_aggregate = matches!(
                         assign_l_ty,
                         Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _)
-                    ) && assign_l_ty.size() > 8;
+                    ) && (assign_l_ty.size() > 8 || assign_l_ty.has_vla());
                     if is_deref_aggregate {
                         // Aggregate *ptr assignment: use rep movsb
                         // to correctly handle packed/misaligned structs.
@@ -9533,7 +9603,18 @@ impl Codegen {
                             self.emit(&[seg]);
                         }
                         self.emit(&[0xFC]); // cld
-                        self.mov_imm(1, agg_sz as i128); // rcx = size
+                        // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
+                        // 槽优先), 其余为编译期 size
+                        if assign_l_ty.has_vla() {
+                            if let Some(slot) = self.vm_size_slot(&assign_l_ty) {
+                                self.emit_mov_mem_r13(1, slot);
+                            } else {
+                                self.gen_sizeof_runtime(&assign_l_ty, 11);
+                                self.mov(1, 11);
+                            }
+                        } else {
+                            self.mov_imm(1, agg_sz as i128); // rcx = size
+                        }
                         self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
                     } else {
                     self.gen_expr(ptr_e, 0); // rax = address
@@ -10299,17 +10380,22 @@ impl Codegen {
                 match op {
                     UnOp::Neg => {
                         // neg r/m: 根据类型大小选择操作数尺寸。
-                        // 64 位类型用 REX.W; 32 位有符号也用 REX.W
-                        // (寄存器保存符号扩展值, 32 位 neg 会破坏上 32 位);
-                        // 32 位无符号用 REX (无 .W) 保持零扩展;
-                        // 16/8 位需要额外处理但当前仅覆盖 >= 32 位。
+                        // 64 位类型用 REX.W; 32 位有符号 + trapv 用 32 位 neg
+                        // (检测 32 位溢出); 32 位有符号无 trapv 用 REX.W
+                        // (寄存器保存符号扩展值, 64 位 neg 保持上 32 位一致);
+                        // 32 位无符号用 REX (无 .W) 保持零扩展。
                         let ty_size = e.ty().size();
                         let is_signed = Self::is_signed_int(&e.ty());
-                        if ty_size >= 8 || (ty_size >= 4 && is_signed) {
-                            // 64-bit neg: 对有符号 32+ 位类型,
+                        let use_32bit_neg = ty_size == 4 && is_signed && self.trapv;
+                        if ty_size >= 8 || (ty_size >= 4 && is_signed && !use_32bit_neg) {
+                            // 64-bit neg: 对有符号 32+ 位类型 (非 trapv),
                             // 寄存器值已符号扩展到 64 位, 必须用
                             // REX.W neg 保持上 32 位一致
                             let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
+                        } else if use_32bit_neg {
+                            // 32-bit neg for trapv: 检测 32 位溢出
+                            let rex = 0x40 | if dst >= 8 { 0x44 } else { 0 };
                             self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                         } else {
                             // 32 位无符号: REX 前缀无 .W
@@ -10331,6 +10417,11 @@ impl Codegen {
                                 "__dcc_trapv_overflow".to_string(),
                             ));
                             self.label(&ok);
+                            // 32 位 trapv neg 后符号扩展: 32 位 neg 结果在 eax,
+                            // 需要 movslq 到 rax 保持 dcc 的 64 位寄存器约定
+                            if e.ty().size() == 4 {
+                                self.emit(&[0x48, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            }
                         }
                     }
                     UnOp::Not => {
@@ -10669,6 +10760,16 @@ impl Codegen {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
                             self.register_var(&v.name.name, &v.ty);
+                            // 定义+声明一体的 struct/union 类型绑定 +
+                            // VLA/VM struct 变量动态分配 (语句表达式内)
+                            if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                                self.gen_vm_type_bind(&v.ty);
+                            }
+                            // VLA/VM struct 变量: 语句表达式内也需动态分配
+                            // 数据区并写元数据槽 (20070919-1: ({ struct S b; ... }))
+                            if Self::type_has_vla(&v.ty) {
+                                self.gen_vla_alloc(v);
+                            }
                             if let Some(init) = &v.init {
                                 // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
                                 if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
@@ -10693,6 +10794,14 @@ impl Codegen {
                                 }
                             }
                         }
+                        BlockItem::Decl(Decl::StructDef(sd)) => {
+                            // 局部类型声明: 重新绑定 VM struct 大小槽
+                            // (与 gen_block_items 同一语义)
+                            self.gen_vm_struct_bind(sd, false);
+                        }
+                        BlockItem::Decl(Decl::UnionDef(sd)) => {
+                            self.gen_vm_struct_bind(sd, true);
+                        }
                         _ => {}
                     }
                 }
@@ -10709,7 +10818,7 @@ impl Codegen {
                 }
                 let src_ty = e.ty();
                 // 标量整数→向量 (同尺寸): 直接用 movq 将 GP 寄存器值移入 XMM
-                // 避免通过内存复制的复杂路径 (可能因 rep movsb 源地址错误而崩溃)
+                // 然后存到临时槽, 供后续 aggregate assign 使用
                 if let Type::Vector(_, _) = ty {
                     if src_ty.size() == ty.size()
                         && src_ty.size() <= 8
@@ -10721,23 +10830,47 @@ impl Codegen {
                         }
                         // movq xmm0, rax: 66 REX.W 0F 6E C0
                         self.emit_movq_gp_to_xmm(0, 0);
+                        // 存 xmm0 到临时槽, 供后续 aggregate assign 从内存读
+                        let vec_size = ty.size();
+                        let temp_off = self.vector_temp_base(0, vec_size);
+                        // movq [r13+temp_off], xmm0: 66 REX.B 0F D6 /r (store)
+                        // 位移可能超出 8 位, 用 mod=10 (32-bit disp)
+                        // ModRM: mod=10, reg=xmm0(000), r/m=100(SIB)
+                        // SIB: scale=00, index=100(none), base=101(r13) + REX.B
+                        let rex = 0x41; // REX.B for r13
+                        self.emit(&[0x66, rex, 0x0F, 0xD6, 0x84, 0x25]);
+                        self.emit(&(temp_off as i32).to_le_bytes());
+                        // rax = 临时槽地址 (供后续使用)
+                        self.emit_lea_r13(0, temp_off);
                         return;
                     }
                 }
-                // 向量→标量整数 (同尺寸): 用 movq 将 XMM 低位移入 GP 寄存器
+                // 向量→标量整数 (同尺寸): 从向量内存加载低 64 位到 GP 寄存器
                 if let Type::Vector(_, _) = src_ty {
                     if src_ty.size() == ty.size()
                         && ty.size() <= 8
                         && ty.is_int()
                     {
-                        self.gen_expr(e, dst);
-                        // 向量结果约定在临时槽 0, 加载到 xmm0
-                        let toff = self.vector_temp_base(0, src_ty.size());
-                        // movq xmm0, [r13+toff]: 66 REX.W 0F 7E 45 off
-                        self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0x45]);
-                        self.emit(&[toff as u8]);
-                        // movq rax, xmm0: 66 REX.W 0F 7E C0
-                        self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+                        // 对 lvalue 向量: 取地址 + movq 从内存到 xmm0 + movq 到 rax
+                        // 对 rvalue 向量: 已在临时槽, 从槽 movq
+                        if self.gen_lvalue_addr(e, dst) {
+                            // dst = 向量地址; movq xmm0, [dst]: F3 [REX.B] 0F 7E /r
+                            // F3 前缀 (非 66) 用于 load 语义 (mem → xmm)
+                            let rex = if dst >= 8 { 0x41 } else { 0 };
+                            if rex != 0 { self.emit(&[0xF3, rex, 0x0F, 0x7E, 0x00 | ((0 & 7) << 3) | (dst & 7)]); }
+                            else { self.emit(&[0xF3, 0x0F, 0x7E, 0x00 | ((0 & 7) << 3) | (dst & 7)]); }
+                            // movq rax, xmm0: 66 REX.W 0F 7E C0
+                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+                        } else {
+                            self.gen_expr(e, dst);
+                            // 向量结果约定在临时槽 0, 加载到 xmm0
+                            let toff = self.vector_temp_base(0, src_ty.size());
+                            // movq xmm0, [r13+toff]: 66 REX.W 0F 7E 45 off
+                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0x45]);
+                            self.emit(&[toff as u8]);
+                            // movq rax, xmm0: 66 REX.W 0F 7E C0
+                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+                        }
                         if dst != 0 {
                             self.mov(0, dst);
                         }
@@ -11373,6 +11506,11 @@ impl Codegen {
                     } else if self.is_global_not_local(&name.name)
                     {
                         self.emit_global_addr(dst, &name.name);
+                    } else if let Some(&off) = self.vla_offsets.get(&name.name) {
+                        // VLA/VM struct 变量: 取地址 = 数据区基址 (元数
+                        // 据槽), 与数组名衰减语义一致 (C11 6.5.3.2: &
+                        // 返回对象首地址, 非元数据槽)
+                        self.load_stack(dst, off);
                     } else {
                         let off = self.var_offset(&name.name);
                         // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
@@ -12578,6 +12716,49 @@ impl Codegen {
                         covered = covered.max(i + 1);
                         continue;
                     }
+                    if let Expr::String { data, .. } = value {
+                        // 字符串字面量初始化嵌套子对象 (C11 6.7.9p14):
+                        // 2D char 数组行 / struct 数组元素。
+                        // gen_expr(String) 返回 rodata 指针, 直接
+                        // emit_store 会把指针存入数组/字段 (原有缺陷:
+                        // char t[2][8] = {"abc"} 存地址)。
+                        // 目标块: 2D 时是一行 (elem_size), elision 传入
+                        // 的 1D char 数组是整个 ty (ty.size())
+                        let blk = if Self::is_char_array(&elem_ty.base) {
+                            Some((base + (i * elem_size) as i32, elem_size))
+                        } else if Self::is_char_array(ty) {
+                            Some((base, ty.size()))
+                        } else {
+                            None
+                        };
+                        if let Some((dst_off, blk_sz)) = blk {
+                            self.zero_mem(dst_off, blk_sz);
+                            for (j, &b) in data.iter().enumerate() {
+                                if j < blk_sz {
+                                    self.mov_imm(0, b as i128);
+                                    self.emit_store(0, dst_off + j as i32, 1);
+                                }
+                            }
+                            covered = covered.max(i + 1);
+                            continue;
+                        }
+                        if matches!(
+                            &elem_ty.base,
+                            Type::Struct(_, _, _) | Type::Union(_, _, _)
+                        ) {
+                            // brace elision (C11 6.7.9p17): 字符串初始化
+                            // 聚合元素 → 递归到聚合分支的字符串字段路径
+                            // (整元素零填 + 首个 char 数组字段逐字节拷贝)
+                            let sub: Vec<InitItem> = vec![InitItem::Expr(value.clone())];
+                            self.gen_init_list_at(
+                                base + (i * elem_size) as i32,
+                                &elem_ty.base,
+                                &sub,
+                            );
+                            covered = covered.max(i + 1);
+                            continue;
+                        }
+                    }
                     self.gen_expr(value, 0);
                     // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
                     if matches!(
@@ -12652,6 +12833,25 @@ impl Codegen {
                                 // 但初始化值不是 InitList, 收集剩余标量值作为该字段的初始化器
                                 let is_agg_field = matches!(&f.ty, Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _));
                                 let is_plain_value = !matches!(e, Expr::InitList { .. });
+                                // 字符串 ↔ char 数组字段一对一 (C11 6.7.9p14):
+                                // 不能走 brace elision 的连续收集 —
+                                // struct { char a[8]; char b[8]; } = {"x","y"}
+                                // 会把两个字符串都吞给 a, b 全零。
+                                if let (true, Expr::String { data, .. }) =
+                                    (Self::is_char_array(&f.ty) && is_plain_value, e)
+                                {
+                                    let dst = base + f.offset as i32;
+                                    self.zero_mem(dst, f.ty.size());
+                                    for (j, &b) in data.iter().enumerate() {
+                                        if j < f.ty.size() {
+                                            self.mov_imm(0, b as i128);
+                                            self.emit_store(0, dst + j as i32, 1);
+                                        }
+                                    }
+                                    field_idx += 1;
+                                    init_idx += 1;
+                                    continue;
+                                }
                                 // 聚合字段被同类型聚合值初始化 (如 `struct A a = {2, b}` 中 b 是 struct B):
                                 // 直接复制整个聚合值, 不走 brace elision (后者将 b 误作标量初始化 b.x)
                                 let expr_ty = e.ty();
@@ -12913,6 +13113,16 @@ impl Codegen {
     }
 
     // 内存块清零: emit_store 仅支持 1/2/4/8 字节, 按块拆解
+    /// char 系数组 (char/signed char/unsigned char) 判定:
+    /// 字符串字面量初始化子对象的类型门槛 (C11 6.7.9p14)。
+    fn is_char_array(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Array(e, _)
+                if matches!(e.base, Type::Char | Type::SChar | Type::UChar)
+        )
+    }
+
     fn zero_mem(&mut self, off: i32, size: usize) {
         let mut o = off;
         let mut rem = size;
@@ -15645,6 +15855,9 @@ impl Codegen {
                 // align_up(上一字段末尾, 本字段对齐), 字段大小 =
                 // sizeof 运行时值 (VLA 字段) 或静态值。最后圆整到
                 // struct 对齐。
+                // scratch 与 dst 互斥: dst=r11 时 (聚合拷贝/步长回退)
+                // 改用 r10, 否则 add dst,scratch 变自加 (r11+=r11)
+                let tmp: u8 = if dst == 11 { 10 } else { 11 };
                 let mut acc_open = false;
                 for f in fields.iter() {
                     let fa = f.field_align.unwrap_or(f.ty.align()).max(1);
@@ -15654,12 +15867,12 @@ impl Codegen {
                         }
                         // 首个 VLA 字段: dst = f.offset + sizeof(f)
                         self.mov_imm(dst, f.offset as i128);
-                        self.gen_sizeof_runtime(&f.ty, 11); // r11
-                        // add dst, r11: opcode 01 /r → r/m=dst(B), reg=src(R)
+                        self.gen_sizeof_runtime(&f.ty, tmp);
+                        // add dst, tmp: opcode 01 /r → r/m=dst(B), reg=src(R)
                         let rex = 0x48
-                            | if 11 >= 8 { 0x04 } else { 0 }
+                            | if tmp >= 8 { 0x04 } else { 0 }
                             | if dst >= 8 { 0x01 } else { 0 };
-                        self.emit(&[rex, 0x01, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                        self.emit(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         acc_open = true;
                     } else {
                         // 动态区: dst = align_up(dst, fa) + sizeof(f)
@@ -15672,11 +15885,11 @@ impl Codegen {
                             self.emit(&(!m as u64 as u32).to_le_bytes());
                         }
                         if f.ty.has_vla() {
-                            self.gen_sizeof_runtime(&f.ty, 11);
+                            self.gen_sizeof_runtime(&f.ty, tmp);
                             let rex = 0x48
-                                | if 11 >= 8 { 0x04 } else { 0 }
+                                | if tmp >= 8 { 0x04 } else { 0 }
                                 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit(&[rex, 0x01, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                            self.emit(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         } else {
                             let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
@@ -15699,21 +15912,23 @@ impl Codegen {
             Type::Union(_, fields, _) => {
                 // VM union: sizeof = max(字段大小)。静态字段取 size(),
                 // VLA 字段运行时求值后取 64 位无符号 max。
+                // scratch 与 dst 互斥 (同 Struct 分支)
+                let tmp: u8 = if dst == 11 { 10 } else { 11 };
                 let mut static_max = 0usize;
                 let mut acc_open = false;
                 for f in fields.iter() {
                     if f.ty.has_vla() {
-                        self.gen_sizeof_runtime(&f.ty, 11); // r11
+                        self.gen_sizeof_runtime(&f.ty, tmp);
                         if acc_open {
-                            // dst = max(dst, r11): cmp dst, r11; cmova dst, r11
-                            // cmp r/m64(dst,B), r64(r11,R); cmovcc r/m←reg 同式
+                            // dst = max(dst, tmp): cmp dst, tmp; cmova dst, tmp
+                            // cmp r/m64(dst,B), r64(tmp,R); cmovcc r/m←reg 同式
                             let rex = 0x48
-                                | if 11 >= 8 { 0x04 } else { 0 }
+                                | if tmp >= 8 { 0x04 } else { 0 }
                                 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit(&[rex, 0x39, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
-                            self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                            self.emit(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
+                            self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         } else {
-                            self.mov(dst, 11);
+                            self.mov(dst, tmp);
                             acc_open = true;
                         }
                     } else {
@@ -15722,12 +15937,12 @@ impl Codegen {
                 }
                 if acc_open && static_max > 0 {
                     // dst = max(dst, static_max)
-                    self.mov_imm(11, static_max as i128);
+                    self.mov_imm(tmp, static_max as i128);
                     let rex = 0x48
-                        | if 11 >= 8 { 0x04 } else { 0 }
+                        | if tmp >= 8 { 0x04 } else { 0 }
                         | if dst >= 8 { 0x01 } else { 0 };
-                    self.emit(&[rex, 0x39, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
-                    self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                    self.emit(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
+                    self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                 } else if !acc_open {
                     self.mov_imm(dst, static_max as i128);
                 }
@@ -18501,6 +18716,39 @@ impl Codegen {
         }
     }
 
+    /// 聚合元素赋值 `arr[i] = r` 的整体拷贝: 调用方已把目标地址 pop 到
+    /// rcx。源地址 → rsi, 目标 → rdi, 大小 → rcx, rep movsb。
+    /// 赋值表达式值 = 目标地址 (聚合 rvalue 地址约定, 供链式赋值/语句
+    /// 表达式块值继续传递)。
+    fn gen_agg_elem_store(&mut self, r: &Expr, elem_ty: &Type, es: i32, dst: u8) {
+        self.push(1); // 保存目标地址 (rcx)
+        if !self.gen_lvalue_addr(r, 6) {
+            // 非 lvalue 源 (CompoundLit 等): gen_expr 约定返回聚合地址
+            self.gen_expr(r, 0);
+            self.mov(6, 0);
+        }
+        self.pop(7); // rdi = 目标地址
+        // 表达式值 = 目标地址 (dst=0 → rax), 必须在 rep movsb 之前取:
+        // rep movsb 会把 rdi 前进到目标末尾, 之后取 rdi 得到的是 &elem+n
+        // (20070919-1: a = ({... p[3] = b;}) 的块值变成 p[3]+8, 源读到
+        // 数组外全 0)。大小读取只用 rcx/r11, 不破坏 rax。
+        self.mov(dst, 7);
+        // rcx = 拷贝大小: VM struct/union 运行时 (声明点绑定槽优先,
+        // C11 6.2.4p7), 其余编译期元素大小
+        if elem_ty.has_vla() {
+            if let Some(slot) = self.vm_size_slot(elem_ty) {
+                self.emit_mov_mem_r13(1, slot);
+            } else {
+                self.gen_sizeof_runtime(elem_ty, 11);
+                self.mov(1, 11);
+            }
+        } else {
+            self.mov_imm(1, es.max(1) as i128);
+        }
+        self.emit(&[0xFC]); // cld
+        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+    }
+
     // struct/array 整体赋值: 逐块拷贝 (src → dst)
     // 策略: 取源地址 + 取目标地址 + rep movsb
     fn gen_aggregate_assign(&mut self, dst_name: &str, dst_ty: &Type, r: &Expr) {
@@ -18619,6 +18867,9 @@ impl Codegen {
                 Expr::Ident { name: src_name, .. } => {
                     if self.is_global_var(&src_name.name) {
                         self.emit_global_addr(6, &src_name.name); // rsi = 全局变量地址
+                    } else if let Some(&off) = self.vla_offsets.get(&src_name.name) {
+                        // VM struct/VLA 变量: 源地址 = 数据区基址槽
+                        self.load_stack(6, off);
                     } else {
                         let src_off = self.var_offset(&src_name.name);
                         self.emit_lea_r13(6, src_off); // rsi = 源地址 (reg 6 = rsi)
@@ -18630,6 +18881,17 @@ impl Codegen {
                 Expr::Deref { e: inner, .. } => {
                     self.gen_expr(inner, 0); // rax = ptr
                     self.mov(6, 0); // rsi = rax (source address)
+                    true
+                }
+                // 聚合 lvalue 源 (p[i] / s.f): 直接取地址。通用回退路径
+                // 把 rax:rdx 当前 16 字节内容物化, 对聚合 rvalue (地址
+                // 约定) 会拷成地址字节 (20070919-1)
+                Expr::Index { .. } | Expr::Member { .. } => self.gen_lvalue_addr(r, 6),
+                // 链式聚合赋值 / 语句表达式块值: gen_expr 约定返回聚合
+                // 目标地址, 直接作源 (20070919-1: a = ({ ...; p[3] = b; }))
+                Expr::Assign { .. } | Expr::StmtExpr { .. } => {
+                    self.gen_expr(r, 0);
+                    self.mov(6, 0); // rsi = rax (聚合源地址)
                     true
                 }
                 _ => false,
@@ -18867,10 +19129,26 @@ impl Codegen {
         // 2. 取目标地址到 rdi
         if is_global_dst {
             self.emit_global_addr(7, dst_name); // rdi = 全局变量地址
+        } else if let Some(&off) = self.vla_offsets.get(dst_name) {
+            // VM struct/VLA 变量: 目标地址 = 数据区基址 (元数据槽)
+            self.load_stack(7, off);
         } else {
             self.emit_lea_r13(7, dst_off); // rdi = 目标地址
         }
                                        // 3. rep movsq + rep movsb 拷贝
+        if dst_ty.has_vla() {
+            // VM struct/union: 拷贝大小是运行时值 (声明点绑定槽优先,
+            // C11 6.2.4p7), 不能用编译期 size() 回退值
+            if let Some(slot) = self.vm_size_slot(dst_ty) {
+                self.emit_mov_mem_r13(1, slot); // rcx = 绑定大小
+            } else {
+                self.gen_sizeof_runtime(dst_ty, 11);
+                self.mov(1, 11);
+            }
+            self.emit(&[0xFC]); // cld
+            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+            return;
+        }
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
@@ -19168,9 +19446,38 @@ impl Codegen {
         }
     }
 
+    /// VM struct/union 声明点绑定大小槽 (gen_vm_struct_bind 注册):
+    /// sizeof / 聚合拷贝 / 指针步长的运行时大小来源 (C11 6.2.4p7)。
+    fn vm_size_slot(&self, ty: &Type) -> Option<i32> {
+        match ty {
+            Type::Struct(tag, _, _) => {
+                self.vm_struct_size_slots.get(&format!("struct:{}", tag)).copied()
+            }
+            Type::Union(tag, _, _) => {
+                self.vm_struct_size_slots.get(&format!("union:{}", tag)).copied()
+            }
+            _ => None,
+        }
+    }
+
     /// rcx *= Index 步长: 元素类型是 VLA 时从 stride 槽加载运行时值,
     /// 否则按编译期 es 立即数乘 (es==1 无操作)。
     fn emit_index_scale(&mut self, es: i32, arr: &Expr, elem_ty: &Type) {
+        // Ptr(VM struct) 索引: 元素大小是运行时值 (sizeof 语义), 不能用
+        // 编译期 size() 回退值; es==1 早退前先判定, 避免回退值 1 漏乘
+        if matches!(elem_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+            && elem_ty.has_vla()
+        {
+            if let Some(slot) = self.vm_size_slot(elem_ty) {
+                self.emit_mov_mem_r13(2, slot);
+                self.emit(&[0x48, 0x0F, 0xAF, 0xCA]); // imul rcx, rdx
+            } else {
+                self.gen_sizeof_runtime(elem_ty, 11);
+                // imul rcx, r11: REX.W+B (r11 作 r/m), modrm reg=rcx
+                self.emit(&[0x49, 0x0F, 0xAF, 0xCB]);
+            }
+            return;
+        }
         if es == 1 {
             return;
         }
@@ -19185,6 +19492,42 @@ impl Codegen {
     }
 
     fn gen_vla_alloc(&mut self, v: &VarDecl) {
+        // VM struct/union 变量 (局部类型含 VLA 字段): 整体大小是运行时
+        // 值, 数据区在 rsp 动态区, 元数据槽布局与 VLA 数组统一:
+        // [off]=数据基址, [off+8]=步长 (VM struct 无数组语义, 占位 0),
+        // [off+16]=声明时总大小 (sizeof/聚合拷贝取用)。
+        // C11 6.2.4p7: 生命周期开始时类型大小固定, 不随后续维度变量
+        // 改变 (20070919-1)
+        if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+            && Self::type_has_vla(&v.ty)
+        {
+            let off = self.var_offset(&v.name.name);
+            self.vla_offsets.insert(v.name.name.clone(), off);
+            // rax = 声明时总大小: 声明点绑定槽优先 (gen_vm_struct_bind
+            // 已在类型声明点求值), 缺失则运行时重算
+            if let Some(slot) = self.vm_size_slot(&v.ty) {
+                self.emit_mov_mem_r13(0, slot);
+            } else {
+                self.gen_sizeof_runtime(&v.ty, 0);
+            }
+            self.emit_store_rax_r13(off + 16);
+            self.mov_imm(0, 0i128);
+            self.emit_store_rax_r13(off + 8); // stride 槽占位 0
+            // 对齐 16 字节后 sub rsp 分配数据区, 基址存入 [off]
+            // (与 VLA 数组同一约定, gen_lvalue_addr/load_stack 统一读)
+            self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
+            self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
+            self.emit(&[0x48, 0x29, 0xC4]); // sub rsp, rax
+            let rex = 0x49u8; // mov [r13 + off], rsp
+            self.emit(&[rex, 0x89]);
+            if off.abs() < 128 {
+                self.emit(&[0x65, off as i8 as u8]);
+            } else {
+                self.emit(&[0xA5]);
+                self.emit(&off.to_le_bytes());
+            }
+            return;
+        }
         // VLA 变量: 最外层 ArraySize::Var, 或外层常量但内层含 Var
         // (int a[2][N] → Array(Array(Int,Var(N)), Const(2)))。两者的总
         // 大小都是运行时值, 需动态栈分配 + 3 槽元数据 (基址/行大小/

@@ -1987,11 +1987,14 @@ impl<'a> Parser<'a> {
                 "__builtin_fmal" => return Type::LongDouble,
                 // 数学函数
                 "__builtin_sqrtf" | "__builtin_ceilf" | "__builtin_floorf" |
-                "__builtin_roundf" | "__builtin_truncf" => return Type::Float,
+                "__builtin_roundf" | "__builtin_truncf" |
+                "__builtin_fminf" | "__builtin_fmaxf" => return Type::Float,
                 "__builtin_sqrt" | "__builtin_ceil" | "__builtin_floor" |
-                "__builtin_round" | "__builtin_trunc" => return Type::Double,
+                "__builtin_round" | "__builtin_trunc" |
+                "__builtin_fmin" | "__builtin_fmax" => return Type::Double,
                 "__builtin_sqrtl" | "__builtin_ceill" | "__builtin_floorl" |
                 "__builtin_roundl" | "__builtin_truncl" |
+                "__builtin_fminl" | "__builtin_fmaxl" |
                 "__builtin_powl" | "__builtin_logl" | "__builtin_expl" |
                 "__builtin_sinl" => return Type::LongDouble,
                 "__builtin_pow" | "__builtin_powf" |
