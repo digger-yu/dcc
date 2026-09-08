@@ -4491,6 +4491,38 @@ impl Preprocessor {
                 }
                 continue;
             }
+            // pp-number: 数字开头的 token 整体跳过 (含后缀 F/L/U/LL/i/j 等),
+            // 防止 0.0F 中的 F 被当作标识符展开为宏值。
+            // C 标准 pp-number 语法: 以数字或 ".数字" 开头, 后续可含
+            // 数字/字母/./e/E/p/P/+/-/' 等, 直到不匹配的字符为止。
+            if chars[i].is_ascii_digit()
+                || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit())
+            {
+                let start = i;
+                i += 1;
+                while i < len {
+                    let c = chars[i];
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                        i += 1;
+                    } else if (c == 'e' || c == 'E'
+                                || c == 'p' || c == 'P')
+                                && i + 1 < len
+                                && (chars[i + 1] == '+' || chars[i + 1] == '-')
+                    {
+                        i += 2; // exponent + sign
+                    } else if c == '\'' && i + 1 < len
+                                && chars[i + 1].is_ascii_alphanumeric()
+                    {
+                        i += 2; // C23 digit separator
+                    } else {
+                        break;
+                    }
+                }
+                for &ch in &chars[start..i] {
+                    out.push(ch);
+                }
+                continue;
+            }
             // 标识符
             if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
