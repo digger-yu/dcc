@@ -10963,7 +10963,7 @@ impl Codegen {
                     // 源整数值由 gen_expr(e, dst) 求值到 dst 寄存器,
                     // 转换指令必须读取 dst (而非固定 rax), 否则嵌套在
                     // Binop 右操作数 (dst=rcx 等) 时会读到错误寄存器.
-                    (src @ (Type::Int | Type::Long | Type::Char | Type::Short), Type::Float) => {
+                    (src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short), Type::Float) => {
                         // cvtsi2ss xmm0, dst (F3 0F 2A /r)
                         let wide = matches!(src, Type::Long | Type::LongLong);
                         let rex = 0x40
@@ -10972,7 +10972,7 @@ impl Codegen {
                         self.emit(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
                     }
                     (
-                        src @ (Type::Int | Type::Long | Type::Char | Type::Short),
+                        src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short),
                         Type::Double | Type::LongDouble,
                     ) => {
                         // cvtsi2sd xmm0, dst (F2 0F 2A /r)
@@ -12285,21 +12285,26 @@ impl Codegen {
         self.jmp_rel32(&l_done, JumpKind::Jns);
 
         // --- 溢出路径: 原值 > INT64_MAX ---
-        // 加载 2^63 浮点常量到 scratch, 移入 xmm1
-        if is_double {
-            // 2^63 as double = 0x43E0000000000000
-            self.mov_imm(scratch, 0x43E0000000000000i128);
-        } else {
-            // 2^63 as float = 0x4F000000
-            self.mov_imm(scratch, 0x4F000000i128);
-        }
+        // 加载 2^63 浮点常量到 xmm1.
+        // 注意: movq 将 GPR 64 位内容解释为 double 位模式,
+        // 所以不能直接加载 float 32 位模式 (会被误解释为极小 double).
+        // 统一使用 double 精度: 加载 2^63 as double,
+        // float 情况下先将 xmm0 提升为 double 再减.
+        // 2^63 as double = 0x43E0000000000000
+        self.mov_imm(scratch, 0x43E0000000000000i128);
         // movq xmm1, scratch
         self.emit_movq_gp_to_xmm(1, scratch);
-        // subss/subsd xmm0, xmm1
-        if is_double {
-            self.emit(&[0xF2, 0x0F, 0x5C, 0xC1]);
-        } else {
-            self.emit(&[0xF3, 0x0F, 0x5C, 0xC1]);
+        if !is_double {
+            // float 情况: 先将 xmm0 从 float 提升为 double
+            // cvtss2sd xmm0, xmm0: F3 0F 5A C0
+            self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+        }
+        // subsd xmm0, xmm1 (double 精度减 2^63)
+        self.emit(&[0xF2, 0x0F, 0x5C, 0xC1]);
+        if !is_double {
+            // float 情况: 减完后转回 float
+            // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
+            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
         }
         // cvttss2si/cvttsd2si dst, xmm0 (余数, 现在 fits in int64)
         if is_double {
@@ -12496,7 +12501,15 @@ impl Codegen {
             let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
             self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         }
-        if matches!(elem_ty, Type::Float) {
+        // 无符号 64 位类型: cvtsi2ssq/cvtsi2sdq 将有符号 64 位
+        // 解释转换, 对 >INT63 的值产生错误结果.
+        // 使用 emit_ulong_to_float: 检查符号位, 正数直接转换,
+        // bit63=1 则 shr 1 + 转换 + 乘 2.0.
+        let is_unsigned_64 = matches!(expr_ty, Type::ULong | Type::ULongLong);
+        if is_unsigned_64 {
+            let is_double = !matches!(elem_ty, Type::Float);
+            self.emit_ulong_to_float(0, is_double);
+        } else if matches!(elem_ty, Type::Float) {
             if is_64bit || is_unsigned_small {
                 // cvtsi2ssq xmm0, rax (REX.W + F3 0F 2A C0)
                 self.emit(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0]);

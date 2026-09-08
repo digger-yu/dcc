@@ -460,6 +460,11 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                         return Ok(ConstValue::Int(signed));
                     }
                 }
+                // Integer → float/double/long double cast:
+                // Convert the integer value to f64.
+                if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                    return Ok(ConstValue::Float(i as f64));
+                }
                 return Ok(ConstValue::Int(i));
             }
             // Float → integer cast: convert with saturation (match x86 behavior
