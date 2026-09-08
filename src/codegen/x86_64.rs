@@ -9283,6 +9283,23 @@ impl Codegen {
                                 dst, &r_ty, l_ty,
                             );
                         }
+                        // Implicit float→float precision conversion
+                        // when both sides are float but different
+                        // precision (e.g. `float f = double_expr;`).
+                        // Without cvtsd2ss, movss would store the raw
+                        // lower 32 bits of the double, not the float
+                        // representation.
+                        if matches!(
+                            l_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) && matches!(
+                            &r_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) {
+                            self.emit_float_precision_convert(
+                                &r_ty, l_ty,
+                            );
+                        }
                         // Implicit int→float conversion when RHS is
                         // integer but LHS is float (e.g. `ping = 0;`).
                         // The integer result sits in eax; convert it to
@@ -12397,6 +12414,52 @@ impl Codegen {
         true
     }
 
+    /// Emit float precision conversion in xmm0.
+    /// Precondition: float value is in xmm0 with src_ty precision.
+    /// Postcondition: value in xmm0 has dst_ty precision.
+    /// No-op if src_ty == dst_ty or both are effectively the same
+    /// (LongDouble is internally double).
+    fn emit_float_precision_convert(
+        &mut self,
+        src_ty: &Type,
+        dst_ty: &Type,
+    ) {
+        // LongDouble is internally stored/computed as double in xmm0,
+        // so treat LongDouble same as Double for conversion purposes.
+        let src_is_single = matches!(src_ty, Type::Float);
+        let dst_is_single = matches!(dst_ty, Type::Float);
+        if src_is_single == dst_is_single {
+            // Both single or both double/long-double: no conversion
+            return;
+        }
+        if src_is_single && !dst_is_single {
+            // float → double: cvtss2sd xmm0, xmm0
+            self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+        } else {
+            // double/long-double → float: cvtsd2ss xmm0, xmm0
+            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
+        }
+    }
+
+    /// Return the wider of two float types for usual arithmetic
+    /// conversions.  Non-float operand defers to the other side.
+    /// LongDouble > Double > Float in width.
+    fn widest_float_type(a: &Type, b: &Type) -> Type {
+        let rank = |t: &Type| -> u8 {
+            match t {
+                Type::Float => 1,
+                Type::Double => 2,
+                Type::LongDouble => 3,
+                _ => 0,
+            }
+        };
+        if rank(a) >= rank(b) && rank(a) > 0 {
+            a.clone()
+        } else {
+            b.clone()
+        }
+    }
+
     fn emit_scalar_to_xmm0_if_needed(&mut self, expr: &Expr, elem_ty: &Type) {
         if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
             return;
@@ -14642,13 +14705,10 @@ impl Codegen {
     // -mno-sse 模式: 使用 x87 FPU 指令, 结果在 st(0)
     // 左操作数保存到帧临时槽 (避免嵌套 binop 时 xmm 寄存器冲突)
     fn gen_float_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
-        // Determine the target float type from whichever operand is float.
-        // This is needed for mixed int/float expressions like `a - step`.
-        let float_ty = if matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble) {
-            l.ty()
-        } else {
-            r.ty()
-        };
+        // Determine the target float type per C usual arithmetic
+        // conversions: the wider float type wins.  For mixed int/float
+        // expressions like `a - step`, the float operand's type is used.
+        let float_ty = Self::widest_float_type(&l.ty(), &r.ty());
         let is_float = matches!(float_ty, Type::Float);
         let is_long_double = matches!(float_ty, Type::LongDouble);
         // -mno-sse 目标走 x87; SSE 模式下 long double 按 double 运算 (xmm0)
