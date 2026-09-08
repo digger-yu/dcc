@@ -95,6 +95,8 @@ pub struct Preprocessor {
     pack_stack: Vec<Option<usize>>,
     /// #pragma pack 变更历史: (行号, 新对齐). 供 parser 按位置查询
     pack_history: Vec<(u32, Option<usize>)>,
+    /// #pragma push_macro/pop_macro 栈: 宏名 -> 历史定义栈 (None 表示未定义)
+    macro_stack: HashMap<String, Vec<Option<MacroDef>>>,
     /// #pragma weak 记录的弱符号集合 (在 codegen 中处理)
     pub weak_symbols: HashSet<String>,
     /// #pragma STDC FENV_ACCESS 状态
@@ -569,6 +571,7 @@ pub fn preprocess(
         deps: Vec::new(),
         pack_stack: vec![None],
         pack_history: vec![(0, None)],
+        macro_stack: HashMap::new(),
         weak_symbols: HashSet::new(),
         fenv_access: false,
         fp_contract: false,
@@ -2945,6 +2948,55 @@ impl Preprocessor {
                 // #pragma unroll / #pragma unroll N — 展开指示
                 self.openmp_pragmas
                     .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+            } else if let Some(rest) = pragma_text.strip_prefix("push_macro") {
+                // #pragma push_macro("macro_name")
+                // 保存当前宏定义到栈, 以便后续 pop_macro 恢复
+                let rest = rest.trim();
+                if let Some(arg) = rest.strip_prefix("(").and_then(|s| s.strip_suffix(")")) {
+                    let arg = arg.trim();
+                    // 去除引号
+                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
+                        &arg[1..arg.len()-1]
+                    } else {
+                        arg
+                    };
+                    if !macro_name.is_empty() {
+                        // 保存当前宏定义 (如果存在)
+                        let saved = self.macros.get(macro_name).cloned();
+                        self.macro_stack.entry(macro_name.to_string())
+                            .or_insert_with(Vec::new)
+                            .push(saved);
+                    }
+                }
+            } else if let Some(rest) = pragma_text.strip_prefix("pop_macro") {
+                // #pragma pop_macro("macro_name")
+                // 恢复之前保存的宏定义
+                let rest = rest.trim();
+                if let Some(arg) = rest.strip_prefix("(").and_then(|s| s.strip_suffix(")")) {
+                    let arg = arg.trim();
+                    // 去除引号
+                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
+                        &arg[1..arg.len()-1]
+                    } else {
+                        arg
+                    };
+                    if !macro_name.is_empty() {
+                        if let Some(stack) = self.macro_stack.get_mut(macro_name) {
+                            if let Some(saved_def) = stack.pop() {
+                                match saved_def {
+                                    Some(def) => {
+                                        // 恢复之前的定义
+                                        self.macros.insert(macro_name.to_string(), def);
+                                    }
+                                    None => {
+                                        // 之前未定义, 现在取消定义
+                                        self.macros.remove(macro_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             // 其他 #pragma 忽略
         } else if let Some(rest) = directive.strip_prefix("error") {
