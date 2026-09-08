@@ -6459,11 +6459,19 @@ impl Codegen {
                             .iter()
                             .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
                             .count();
+                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
+                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
+                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
+                        // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
                             .var_map
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
+                            .map(|(_, ty)| match ty {
+                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                t => t.size().div_ceil(8) as i32 * 8,
+                            })
                             .sum();
                         // 多块参数同 register_var: off 下移 (chunks-1)*8
                         let hdr = 48 + temp_slots * 8;
@@ -6507,11 +6515,19 @@ impl Codegen {
                         }
                     } else if matches!(&p.ty, Type::LongDouble) && self.target.sse {
                         // A2: long double 为 SysV Memory 类 — 16 字节整体在栈上传递
+                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
+                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
+                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
+                        // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
                             .var_map
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
+                            .map(|(_, ty)| match ty {
+                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                t => t.size().div_ceil(8) as i32 * 8,
+                            })
                             .sum();
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr) - 8; // 数据占 [off, off+16)
@@ -6520,11 +6536,19 @@ impl Codegen {
                         stack_param_stores.push((stack_arg_idx + 1, off + 8));
                         stack_arg_idx += 2;
                     } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
+                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
+                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
+                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
+                        // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
                             .var_map
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
+                            .map(|(_, ty)| match ty {
+                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                t => t.size().div_ceil(8) as i32 * 8,
+                            })
                             .sum();
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
@@ -6539,11 +6563,19 @@ impl Codegen {
                             self.variadic_named_fp += 1;
                         }
                     } else if gp_idx < 6 {
+                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
+                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
+                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
+                        // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
                             .var_map
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
+                            .map(|(_, ty)| match ty {
+                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                t => t.size().div_ceil(8) as i32 * 8,
+                            })
                             .sum();
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
@@ -6552,11 +6584,19 @@ impl Codegen {
                         gp_idx += 1;
                         self.variadic_named_gp += 1;
                     } else {
+                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
+                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
+                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
+                        // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
                             .var_map
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
+                            .map(|(_, ty)| match ty {
+                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                t => t.size().div_ceil(8) as i32 * 8,
+                            })
                             .sum();
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
@@ -9213,10 +9253,7 @@ impl Codegen {
                         self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                         self.gen_expr(idx, 1); // rcx = index
                         self.pop(0); // 恢复基址到 rax
-                        if es != 1 {
-                            self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
-                            self.emit(&es.to_le_bytes());
-                        }
+                        self.emit_index_scale(es, arr, elem_ty);
                         self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
@@ -9262,10 +9299,7 @@ impl Codegen {
                         self.push(0);
                         self.gen_expr(idx, 1);
                         self.pop(0);
-                        if es != 1 {
-                            self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
-                            self.emit(&es.to_le_bytes());
-                        }
+                        self.emit_index_scale(es, arr, elem_ty);
                         self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
                         self.push(0);
                         self.gen_expr(r, 0);
@@ -11049,10 +11083,7 @@ impl Codegen {
                             // 保存元素索引 (imul 会覆盖 rcx): libubsan handler 第二参数
                             self.emit(&[0x48, 0x89, 0xce]); // mov rsi, rcx
                         }
-                        if es != 1 {
-                            self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
-                            self.emit(&es.to_le_bytes());
-                        }
+                        self.emit_index_scale(es, arr, elem_ty);
                         // -fbounds-check: 数组下标运行时边界检查
                         if self.bounds_check {
                             if let Type::Array(_, crate::ast::ArraySize::Const(n)) = arr_ty {
@@ -11108,10 +11139,7 @@ impl Codegen {
                     self.push(0);
                     self.gen_expr(idx, 1);
                     self.pop(0);
-                    if es != 1 {
-                        self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
-                        self.emit(&es.to_le_bytes());
-                    }
+                    self.emit_index_scale(es, arr, elem_ty);
                     self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
                     self.emit_load_mem_typed(es as usize, elem_ty);
                     if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
@@ -11297,10 +11325,7 @@ impl Codegen {
                     self.push(0);
                     self.gen_expr(idx, 1);
                     self.pop(0);
-                    if es != 1 {
-                        self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, es
-                        self.emit(&es.to_le_bytes());
-                    }
+                    self.emit_index_scale(es, arr, elem_ty);
                     self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
                     if dst != 0 {
                         self.mov(dst, 0);
@@ -16089,7 +16114,13 @@ impl Codegen {
         if self.reg_bindings.contains_key(name) {
             return 0;
         }
-        let slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
+        let mut slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
+        // VLA: 追加 8 字节 stride 槽 (数据区 [off,off+8) 基址,
+        // [off+8,off+16) 运行时行大小, 供 2D VLA 索引步长取用)
+        let is_vla = matches!(ty, Type::Array(_, ArraySize::Var(_)));
+        if is_vla {
+            slots += 1;
+        }
         let slots = slots.max(1) as i32;
         // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
         // 帧布局: r13+0 saved r13 / r13+8 ret addr / r13-16..-48 callee-saved 保存区
@@ -16103,8 +16134,13 @@ impl Codegen {
         // 的高 8 字节踩上一个指针参数槽)
         // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
         let hdr = 48 + self.temp_slots * 8;
+        let alloc_sz = if is_vla {
+            ty.size() + 8
+        } else {
+            ty.size()
+        };
         let mut off = -(used + hdr) - (slots - 1) * 8;
-        while off + ty.size() as i32 > 0 {
+        while off + alloc_sz as i32 > 0 {
             off -= 8;
         }
         self.var_map.insert(name.to_string(), (off, ty.clone()));
@@ -18178,10 +18214,7 @@ impl Codegen {
                 self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                 self.gen_expr(idx, 1); // rcx = index
                 self.pop(0);
-                if es != 1 {
-                    self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
-                    self.emit(&es.to_le_bytes());
-                }
+                self.emit_index_scale(es, arr, elem_ty);
                 self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -18743,24 +18776,103 @@ impl Codegen {
         }
     }
 
+    /// mov r64, [r13 + off] (加载任意 r13 相对栈槽)
+    fn emit_mov_mem_r13(&mut self, reg: u8, off: i32) {
+        self.emit(&[0x49, 0x8B]);
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    /// mov [r13 + off], rax (存储 rax 到任意 r13 相对栈槽)
+    fn emit_store_rax_r13(&mut self, off: i32) {
+        self.emit(&[0x49, 0x89]);
+        if off.abs() < 128 {
+            self.emit(&[0x45, off as i8 as u8]);
+        } else {
+            self.emit(&[0x85]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    /// rax = ty 的字节大小; ty 含 VLA 维 (Array(_, Var)) 时运行时求值,
+    /// 编译期已知大小直接 mov imm。仅支持最外一层动态维: 内层仍是 VLA
+    /// 时按编译期 fallback (8) 近似 (torture 无多维全动态 VLA 用例)。
+    fn emit_vla_elem_size(&mut self, ty: &Type) {
+        match ty {
+            Type::Array(inner, ArraySize::Var(n_expr)) => {
+                self.gen_expr(n_expr, 0); // rax = 本维元素个数
+                let isz = inner.size() as i32;
+                if isz != 1 {
+                    self.emit(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
+                    self.emit(&isz.to_le_bytes());
+                }
+            }
+            _ => {
+                let sz = ty.size().max(1) as i32;
+                self.emit(&[0x48, 0xC7, 0xC0]); // mov rax, imm32 (sign-ext)
+                self.emit(&sz.to_le_bytes());
+            }
+        }
+    }
+
+    /// Index 元素类型为 VLA (Array(_, Var)) 时步长是运行时值:
+    /// 返回基 VLA 变量的 stride 槽 offset (var_off + 8, 见 register_var)。
+    /// arr 链沿 Index 递归找 VLA 根 (如 M1[i] 的 arr=Ident M1);
+    /// 非 VLA 元素或非 VLA 变量返回 None, 调用方回退编译期 elem.size()。
+    fn vla_runtime_stride_slot(&self, arr: &Expr, elem_ty: &Type) -> Option<i32> {
+        if !matches!(elem_ty, Type::Array(_, ArraySize::Var(_))) {
+            return None;
+        }
+        let mut cur = arr;
+        loop {
+            match cur {
+                Expr::Ident { name, .. } => {
+                    return self.vla_offsets.get(&name.name).map(|off| off + 8);
+                }
+                Expr::Index { arr: inner, .. } => cur = inner,
+                _ => return None,
+            }
+        }
+    }
+
+    /// rcx *= Index 步长: 元素类型是 VLA 时从 stride 槽加载运行时值,
+    /// 否则按编译期 es 立即数乘 (es==1 无操作)。
+    fn emit_index_scale(&mut self, es: i32, arr: &Expr, elem_ty: &Type) {
+        if es == 1 {
+            return;
+        }
+        if let Some(slot) = self.vla_runtime_stride_slot(arr, elem_ty) {
+            // mov rdx, [r13+slot]; imul rcx, rdx
+            self.emit_mov_mem_r13(2, slot);
+            self.emit(&[0x48, 0x0F, 0xAF, 0xCA]);
+        } else {
+            self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
+            self.emit(&es.to_le_bytes());
+        }
+    }
+
     fn gen_vla_alloc(&mut self, v: &VarDecl) {
         // VLA 变量类型: Array(elem, Var(expr))
         // 大小表达式在变量的 ArraySize::Var 中
         if let Type::Array(elem_ty, ArraySize::Var(ref size_expr)) = &v.ty {
-            // 求值大小表达式到 rax
+            // 行 (元素) 大小: elem 自身是 VLA (2D+) 时为运行时值
+            self.emit_vla_elem_size(&elem_ty.base); // rax = stride
+            let off = self.var_offset(&v.name.name);
+            self.vla_offsets.insert(v.name.name.clone(), off);
+            // mov [r13 + off + 8], rax: 存 stride 到 stride 槽
+            self.emit_store_rax_r13(off + 8);
+            // rax = 元素个数
             self.gen_expr(size_expr, 0);
-            // rax = 元素数量, 乘以元素大小
-            let es = elem_ty.size() as i32;
-            if es != 1 {
-                self.emit(&[0x48, 0x69, 0xc0]); // imul rax, rax, imm32
-                self.emit(&es.to_le_bytes());
-            }
+            // rax *= stride: mov rcx, [r13+off+8]; imul rax, rcx
+            self.emit_mov_mem_r13(1, off + 8);
+            self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx
             // 对齐到 16 字节: (rax + 15) & ~15
             self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
             self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
-                                                  // 保存 VLA 大小到 vla_offsets
-            let off = self.var_offset(&v.name.name);
-            self.vla_offsets.insert(v.name.name.clone(), off);
             // 保存当前 rsp (VLA 基址)
             // sub rsp, rax: 48 29 C4
             self.emit(&[0x48, 0x29, 0xC4]);
@@ -19740,13 +19852,21 @@ impl Codegen {
                         }
                         // 未注册的 static local (名称冲突) 回退到栈分配
                     }
-                    let slots = v.ty.size().div_ceil(8).max(1) as i32;
+                    // VLA: 追加 8 字节 stride 槽 (与 register_var 一致,
+                    // 数据区 [off,off+8) 基址, [off+8,off+16) 运行时行大小)
+                    let is_vla = matches!(v.ty, Type::Array(_, ArraySize::Var(_)));
+                    let alloc_sz = if is_vla {
+                        v.ty.size() + 8
+                    } else {
+                        v.ty.size()
+                    };
+                    let slots = alloc_sz.div_ceil(8).max(1) as i32;
                     let used: i32 = var_map.values().map(|_| 8).sum();
                     // KASAN 红区: 每个变量后追加 kasan_rz_slots 个 8 字节槽位
                     // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
                     let hdr = 48 + temp_slots * 8;
                     let mut off = -(used + hdr) - (slots - 1) * 8;
-                    while off + v.ty.size() as i32 > 0 {
+                    while off + alloc_sz as i32 > 0 {
                         off -= 8;
                     }
                     var_map
