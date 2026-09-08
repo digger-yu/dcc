@@ -1189,10 +1189,15 @@ impl Type {
     /// Array(Array(Int, Var(N)), Const(2))) 也算 VLA: 总大小是
     /// 运行时值, sizeof 必须运行时求值 (C11 6.5.3.4p2), 静态
     /// size() 的 Var 维度 fallback (8 字节) 会得出错误结果。
+    /// 结构体/联合体含 VLA 字段 (variable-sized struct, GCC 扩展)
+    /// 同理: 整体大小是运行时值。
     pub fn has_vla(&self) -> bool {
         match self {
             Type::Array(_, ArraySize::Var(_)) => true,
             Type::Array(elem, ArraySize::Const(_)) => elem.base.has_vla(),
+            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                fields.iter().any(|f| f.ty.has_vla())
+            }
             _ => false,
         }
     }

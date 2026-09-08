@@ -119,6 +119,12 @@ pub struct Codegen {
     vec_temp_off: i32,   // 向量临时槽区基址 (r13 相对)
     vla_offsets: HashMap<String, i32>,
     vla_total_size: i32,
+    /// 局部 variable-sized struct (含 VLA 字段) 的声明时绑定总大小槽:
+    /// 类型名 → 槽偏移。类型声明语句执行时求值一次 (C11 6.2.4p7:
+    /// VM 类型在声明时绑定维度, 后续 sizeof 读槽不重算, 20041218-2:
+    /// 声明后 n++ 不影响 sizeof(struct s))。循环内重复声明同名类型
+    /// 每次迭代重写槽 (重新绑定)。
+    vm_struct_size_slots: HashMap<String, i32>,
     // 当前函数体含 VLA 声明: goto/break/continue 跳转前需恢复动态栈基,
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
     cur_func_has_vla: bool,
@@ -1373,6 +1379,7 @@ impl Codegen {
             vec_temp_off: 0,
             vla_offsets: HashMap::new(),
             vla_total_size: 0,
+            vm_struct_size_slots: HashMap::new(),
             cur_func_has_vla: false,
             bf_rmw_depth: 0,
             relocatable: false,
@@ -7022,6 +7029,14 @@ impl Codegen {
                             }
                         }
                     }
+                    // 函数体顶层的局部 struct/union 定义: 含 VLA 字段时
+                    // 声明点绑定总大小槽 (与 gen_block_items 同处理)
+                    BlockItem::Decl(Decl::StructDef(sd)) => {
+                        self.gen_vm_struct_bind(sd, false);
+                    }
+                    BlockItem::Decl(Decl::UnionDef(sd)) => {
+                        self.gen_vm_struct_bind(sd, true);
+                    }
                     _ => {}
                 }
             }
@@ -8456,7 +8471,6 @@ impl Codegen {
                     if v.is_extern && v.init.is_none() {
                         continue;
                     }
-                    // P1-5: register asm 变量绑定到指定寄存器
                     if let Some(ref reg_name) = v.register_name {
                         if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
                             self.reg_bindings.insert(v.name.name.clone(), reg_idx);
@@ -8513,9 +8527,64 @@ impl Codegen {
                         }
                     }
                 }
+                // 局部 struct/union 定义声明: 含 VLA 字段时在声明点
+                // 求值总大小存入绑定槽 (C11 6.2.4p7), 供 sizeof(类型)
+                // 读槽 (20041218-2: 声明后 n++ 不影响 sizeof)。
+                // 静态类型 (重)声明则清除残留绑定。
+                BlockItem::Decl(Decl::StructDef(sd)) => {
+                    self.gen_vm_struct_bind(sd, false);
+                }
+                BlockItem::Decl(Decl::UnionDef(sd)) => {
+                    self.gen_vm_struct_bind(sd, true);
+                }
                 _ => {}
             }
         }
+    }
+
+    /// 局部 variable-sized struct/union (含 VLA 字段) 类型声明:
+    /// 声明点求值总大小存入绑定槽 (C11 6.2.4p7: VM 类型在声明时
+    /// 绑定维度)。后续 sizeof(类型) 读槽而不重算维度表达式
+    /// (20041218-2: 声明后 n++ 不影响 sizeof(struct s))。循环内
+    /// 重复声明同名类型每次迭代重写槽 (重新绑定)。静态类型
+    /// (重)声明清除残留绑定, 避免外层同名静态类型误读槽。
+    fn gen_vm_struct_bind(&mut self, sd: &StructDef, is_union: bool) {
+        let key = if is_union {
+            format!("union:{}", sd.name.name)
+        } else {
+            format!("struct:{}", sd.name.name)
+        };
+        let has_vla_field = sd.fields.iter().any(|f| f.ty.has_vla());
+        if !has_vla_field {
+            self.vm_struct_size_slots.remove(&key);
+            return;
+        }
+        // struct 尾部对齐: packed 布局时字段 align 全为 1, 推导值
+        // 自然为 1 (无尾部圆整); 非 packed 时为最大字段对齐。
+        let salign = sd
+            .fields
+            .iter()
+            .map(|f| f.field_align.unwrap_or(f.ty.align()).max(1))
+            .max()
+            .unwrap_or(1);
+        let vm_ty = if is_union {
+            Type::Union(
+                sd.name.name.clone(),
+                Arc::new(sd.fields.clone()),
+                salign,
+            )
+        } else {
+            Type::Struct(
+                sd.name.name.clone(),
+                Arc::new(sd.fields.clone()),
+                salign,
+            )
+        };
+        let slot_name = format!("__vmsize_{}", key);
+        let slot = self.register_var(&slot_name, &Type::Long);
+        self.gen_sizeof_runtime(&vm_ty, 0); // rax = 总大小 (运行时)
+        self.emit_store_rax_r13(slot);
+        self.vm_struct_size_slots.insert(key, slot);
     }
 
     fn gen_expr(&mut self, e: &Expr, dst: u8) {
@@ -10456,6 +10525,20 @@ impl Codegen {
                 }
             }
             Expr::SizeofTy { ty, .. } => {
+                // VM struct/union (含 VLA 字段的局部类型): sizeof 读
+                // 声明时绑定槽, 不用当前变量值重算 (C11 6.2.4p7;
+                // 20041218-2: 声明后 n++ 不影响 sizeof(struct s))
+                let vm_key = match ty {
+                    Type::Struct(n, _, _) => Some(format!("struct:{}", n)),
+                    Type::Union(n, _, _) => Some(format!("union:{}", n)),
+                    _ => None,
+                };
+                if let Some(k) = vm_key {
+                    if let Some(&slot) = self.vm_struct_size_slots.get(&k) {
+                        self.emit_mov_mem_r13(dst, slot);
+                        return;
+                    }
+                }
                 if Self::type_has_vla(ty) {
                     self.gen_sizeof_runtime(ty, dst);
                 } else {
@@ -15553,6 +15636,100 @@ impl Codegen {
                     self.imul_imm(dst, *c as i128);
                 } else {
                     self.mov_imm(dst, ty.size() as i128);
+                }
+            }
+            Type::Struct(_, fields, salign) => {
+                // VM struct (GCC 扩展 variable-sized struct): VLA 字段
+                // 之前的偏移是编译期布局 (parser 不受 VLA fallback 影响),
+                // 首个 VLA 字段起转入运行时累计: 字段偏移 =
+                // align_up(上一字段末尾, 本字段对齐), 字段大小 =
+                // sizeof 运行时值 (VLA 字段) 或静态值。最后圆整到
+                // struct 对齐。
+                let mut acc_open = false;
+                for f in fields.iter() {
+                    let fa = f.field_align.unwrap_or(f.ty.align()).max(1);
+                    if !acc_open {
+                        if !f.ty.has_vla() {
+                            continue; // 静态前缀: f.offset 编译期正确
+                        }
+                        // 首个 VLA 字段: dst = f.offset + sizeof(f)
+                        self.mov_imm(dst, f.offset as i128);
+                        self.gen_sizeof_runtime(&f.ty, 11); // r11
+                        // add dst, r11: opcode 01 /r → r/m=dst(B), reg=src(R)
+                        let rex = 0x48
+                            | if 11 >= 8 { 0x04 } else { 0 }
+                            | if dst >= 8 { 0x01 } else { 0 };
+                        self.emit(&[rex, 0x01, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                        acc_open = true;
+                    } else {
+                        // 动态区: dst = align_up(dst, fa) + sizeof(f)
+                        if fa > 1 {
+                            let m = (fa - 1) as i128;
+                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&m.to_le_bytes());
+                            self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
+                            self.emit(&(!m as u64 as u32).to_le_bytes());
+                        }
+                        if f.ty.has_vla() {
+                            self.gen_sizeof_runtime(&f.ty, 11);
+                            let rex = 0x48
+                                | if 11 >= 8 { 0x04 } else { 0 }
+                                | if dst >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x01, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                        } else {
+                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&(f.ty.size() as u32).to_le_bytes());
+                        }
+                    }
+                }
+                if !acc_open {
+                    // 无 VLA 字段 (不应发生, has_vla 才进来): 静态大小
+                    self.mov_imm(dst, ty.size() as i128);
+                } else if *salign > 1 {
+                    let m = (*salign - 1) as i128;
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                    self.emit(&m.to_le_bytes());
+                    self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
+                    self.emit(&(!m as u64 as u32).to_le_bytes());
+                }
+            }
+            Type::Union(_, fields, _) => {
+                // VM union: sizeof = max(字段大小)。静态字段取 size(),
+                // VLA 字段运行时求值后取 64 位无符号 max。
+                let mut static_max = 0usize;
+                let mut acc_open = false;
+                for f in fields.iter() {
+                    if f.ty.has_vla() {
+                        self.gen_sizeof_runtime(&f.ty, 11); // r11
+                        if acc_open {
+                            // dst = max(dst, r11): cmp dst, r11; cmova dst, r11
+                            // cmp r/m64(dst,B), r64(r11,R); cmovcc r/m←reg 同式
+                            let rex = 0x48
+                                | if 11 >= 8 { 0x04 } else { 0 }
+                                | if dst >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x39, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                            self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                        } else {
+                            self.mov(dst, 11);
+                            acc_open = true;
+                        }
+                    } else {
+                        static_max = static_max.max(f.ty.size());
+                    }
+                }
+                if acc_open && static_max > 0 {
+                    // dst = max(dst, static_max)
+                    self.mov_imm(11, static_max as i128);
+                    let rex = 0x48
+                        | if 11 >= 8 { 0x04 } else { 0 }
+                        | if dst >= 8 { 0x01 } else { 0 };
+                    self.emit(&[rex, 0x39, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                    self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((11 & 7) << 3) | (dst & 7)]);
+                } else if !acc_open {
+                    self.mov_imm(dst, static_max as i128);
                 }
             }
             _ => self.mov_imm(dst, ty.size() as i128),
