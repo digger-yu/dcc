@@ -1184,6 +1184,19 @@ impl Type {
         }
     }
 
+    /// 类型是否含 VLA 维度 (任意层数组出现 ArraySize::Var)。
+    /// 外层常量但内层可变的多维数组 (int a[2][N] →
+    /// Array(Array(Int, Var(N)), Const(2))) 也算 VLA: 总大小是
+    /// 运行时值, sizeof 必须运行时求值 (C11 6.5.3.4p2), 静态
+    /// size() 的 Var 维度 fallback (8 字节) 会得出错误结果。
+    pub fn has_vla(&self) -> bool {
+        match self {
+            Type::Array(_, ArraySize::Var(_)) => true,
+            Type::Array(elem, ArraySize::Const(_)) => elem.base.has_vla(),
+            _ => false,
+        }
+    }
+
     pub fn is_ptr(&self) -> bool {
         matches!(self, Type::Ptr(_))
     }

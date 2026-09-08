@@ -6412,6 +6412,10 @@ impl Codegen {
         if let Some(body) = &f.body {
             self.registered_static_locals = self.register_static_locals_block(&body.items);
         }
+        // VLA 形参: (名字, 维度表达式, 元素大小)。`char a[2][++N]`
+        // 已退化为 Ptr(Array(Char, Var(++N))), 维度表达式保留但需在
+        // 序言求值 (C11 6.9.1p10: 每次调用求值, 副作用生效)
+        let mut vla_param_dims: Vec<(String, Expr, usize)> = Vec::new();
         if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
             if let Some(body) = &f.body {
@@ -6438,6 +6442,16 @@ impl Codegen {
             let mut stack_arg_idx = 0usize;
             for p in f.params.iter() {
                 if let Some(nm) = &p.name {
+                    // VLA 形参检测: 记录维度表达式, 序言中求值并存 stride 槽
+                    if let Type::Ptr(q) = &p.ty {
+                        if let Type::Array(elem, ArraySize::Var(se)) = &q.base {
+                            vla_param_dims.push((
+                                nm.name.clone(),
+                                (**se).clone(),
+                                elem.base.size(),
+                            ));
+                        }
+                    }
                     // __int128 / 聚合体按 8 字节块占用 GP 寄存器或栈槽
                     // 所有 struct/union/array 均走聚合路径, 确保 SSE 类
                     // 小结构体 (<=8B) 也能正确从 XMM 寄存器接收.
@@ -6460,8 +6474,7 @@ impl Codegen {
                             .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
                             .count();
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
-                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
@@ -6469,7 +6482,18 @@ impl Codegen {
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
                             .map(|(_, ty)| match ty {
-                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
+                                // (基址/行大小/总大小元数据, 与 pre_register_vars
+                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
+                                // 多维 VLA 同理 (type_has_vla 判定)
+                                t if Self::type_has_vla(t) => {
+                                    t.size() as i32 + 16
+                                }
+                                Type::Ptr(q)
+                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
+                                {
+                                    16 // VLA 形参: 指针槽 + stride 槽
+                                }
                                 t => t.size().div_ceil(8) as i32 * 8,
                             })
                             .sum();
@@ -6516,8 +6540,7 @@ impl Codegen {
                     } else if matches!(&p.ty, Type::LongDouble) && self.target.sse {
                         // A2: long double 为 SysV Memory 类 — 16 字节整体在栈上传递
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
-                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
@@ -6525,7 +6548,18 @@ impl Codegen {
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
                             .map(|(_, ty)| match ty {
-                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
+                                // (基址/行大小/总大小元数据, 与 pre_register_vars
+                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
+                                // 多维 VLA 同理 (type_has_vla 判定)
+                                t if Self::type_has_vla(t) => {
+                                    t.size() as i32 + 16
+                                }
+                                Type::Ptr(q)
+                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
+                                {
+                                    16 // VLA 形参: 指针槽 + stride 槽
+                                }
                                 t => t.size().div_ceil(8) as i32 * 8,
                             })
                             .sum();
@@ -6537,8 +6571,7 @@ impl Codegen {
                         stack_arg_idx += 2;
                     } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
-                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
@@ -6546,7 +6579,18 @@ impl Codegen {
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
                             .map(|(_, ty)| match ty {
-                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
+                                // (基址/行大小/总大小元数据, 与 pre_register_vars
+                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
+                                // 多维 VLA 同理 (type_has_vla 判定)
+                                t if Self::type_has_vla(t) => {
+                                    t.size() as i32 + 16
+                                }
+                                Type::Ptr(q)
+                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
+                                {
+                                    16 // VLA 形参: 指针槽 + stride 槽
+                                }
                                 t => t.size().div_ceil(8) as i32 * 8,
                             })
                             .sum();
@@ -6564,8 +6608,7 @@ impl Codegen {
                         }
                     } else if gp_idx < 6 {
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
-                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
@@ -6573,7 +6616,18 @@ impl Codegen {
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
                             .map(|(_, ty)| match ty {
-                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
+                                // (基址/行大小/总大小元数据, 与 pre_register_vars
+                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
+                                // 多维 VLA 同理 (type_has_vla 判定)
+                                t if Self::type_has_vla(t) => {
+                                    t.size() as i32 + 16
+                                }
+                                Type::Ptr(q)
+                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
+                                {
+                                    16 // VLA 形参: 指针槽 + stride 槽
+                                }
                                 t => t.size().div_ceil(8) as i32 * 8,
                             })
                             .sum();
@@ -6585,8 +6639,7 @@ impl Codegen {
                         self.variadic_named_gp += 1;
                     } else {
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // 但 VLA 条目固定 16 (基址槽 + stride 槽, 其 ty.size()
-                        // 恒为 8 反映不出 stride 槽)。Void 为变量 pad 占位, 0 字节。
+                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
                         let used: i32 = self
@@ -6594,7 +6647,18 @@ impl Codegen {
                             .values()
                             .filter(|(_, ty)| !matches!(ty, Type::Void))
                             .map(|(_, ty)| match ty {
-                                Type::Array(_, ArraySize::Var(_)) => 16,
+                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
+                                // (基址/行大小/总大小元数据, 与 pre_register_vars
+                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
+                                // 多维 VLA 同理 (type_has_vla 判定)
+                                t if Self::type_has_vla(t) => {
+                                    t.size() as i32 + 16
+                                }
+                                Type::Ptr(q)
+                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
+                                {
+                                    16 // VLA 形参: 指针槽 + stride 槽
+                                }
                                 t => t.size().div_ceil(8) as i32 * 8,
                             })
                             .sum();
@@ -6804,6 +6868,19 @@ impl Codegen {
                 self.emit_kasan_stack_unpoison_vars();
             }
         }
+        // VLA 形参维度求值: 序言尾 (非 main 路径两分支汇合点) 执行,
+        // 此时帧已建立、参数槽与静态链槽均已写入。副作用 (++N 等) 每次
+        // 调用生效 (C11 6.9.1p10); 行大小 = 维度表达式值 * 元素大小,
+        // 存入形参指针槽前 off-8 的 stride 槽, 供 sizeof(a[i]) 与索引
+        // 步长读取声明时绑定的行大小 (C11 6.2.4p7)。
+        for (pname, se, elem_sz) in &vla_param_dims {
+            let off = self.var_offset(pname);
+            self.gen_expr(se, 0);
+            if *elem_sz != 1 {
+                self.imul_imm(0, *elem_sz as i128);
+            }
+            self.emit_store_rax_r13(off - 8);
+        }
         // 预收集嵌套函数并预注册重命名 (在编译函数体之前，这样调用点能使用正确的名称)
         let mut nested_decls: Vec<FuncDecl> = Vec::new();
         if let Some(body) = &f.body {
@@ -6842,7 +6919,7 @@ impl Codegen {
                                 .push((v.name.name.clone(), fn_name.clone()));
                         }
                         self.register_var(&v.name.name, &v.ty);
-                        if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
+                        if Self::type_has_vla(&v.ty) {
                             self.gen_vla_alloc(v);
                         } else if let Some(init) = &v.init {
                             if let Expr::InitList { inits, .. } = init {
@@ -8391,7 +8468,7 @@ impl Codegen {
                             .push((v.name.name.clone(), fn_name.clone()));
                     }
                     self.register_var(&v.name.name, &v.ty);
-                    if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
+                    if Self::type_has_vla(&v.ty) {
                         self.gen_vla_alloc(v);
                     } else if let Some(init) = &v.init {
                         if let Expr::InitList { inits, .. } = init {
@@ -10389,11 +10466,18 @@ impl Codegen {
                 // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
                 Expr::String { data, .. } => self.mov_imm(dst, data.len() as i128),
                 _ => {
-                    let ty = e.ty();
-                    if Self::type_has_vla(&ty) {
-                        self.gen_sizeof_runtime(&ty, dst);
+                    // VLA 变量的声明时绑定大小: 直接读分配槽 (基址变量
+                    // 的总大小 / 2D 的行大小), 不重新求值维度表达式 —
+                    // 后者会重复副作用 (pr22061-3: ++N 再自增)
+                    if let Some(slot) = self.vla_bound_size_slot(e) {
+                        self.emit_mov_mem_r13(dst, slot);
                     } else {
-                        self.mov_imm(dst, ty.size() as i128);
+                        let ty = e.ty();
+                        if Self::type_has_vla(&ty) {
+                            self.gen_sizeof_runtime(&ty, dst);
+                        } else {
+                            self.mov_imm(dst, ty.size() as i128);
+                        }
                     }
                 }
             },
@@ -13921,6 +14005,23 @@ impl Codegen {
                     // 前缀: 返回新值 (已在 rax)
                     if dst != 0 { self.mov(dst, 0); }
                 }
+            } else if self.current_func_is_nested
+                && self.upvar_offsets.contains_key(&name.name)
+            {
+                // 嵌套函数 upvar: 通过静态链对父帧变量读-改-写。
+                // 不能走 var_offset 懒分配 — 那会在本帧新建同名局部,
+                // 副作用丢失 (pr22061-3 形参维度 ++N 就发生在序言)。
+                let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
+                let ty_sz = inner_ty.size().max(1);
+                self.load_upvar(dst, parent_off, ty_sz);
+                if !is_pre {
+                    self.push(dst); // 后缀: 保存旧值
+                }
+                self.emit_inc_dec_reg(dst, is_inc, step);
+                self.store_upvar(dst, parent_off, ty_sz);
+                if !is_pre {
+                    self.pop(dst); // 后缀: 恢复旧值到 dst
+                }
             } else {
                 let off = self.var_offset(&name.name);
                 let ty_sz = inner_ty.size().max(1);
@@ -15422,13 +15523,11 @@ impl Codegen {
         self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
     }
 
-    /// 类型是否含 VLA (运行时数组), 决定 sizeof 是否需运行时求值
+    /// 类型是否含 VLA (运行时数组), 决定 sizeof 是否需运行时求值。
+    /// 逻辑收敛到 Type::has_vla (ast.rs), 常量折叠 (const_eval)
+    /// 与 codegen 共用同一判定。
     fn type_has_vla(ty: &Type) -> bool {
-        match ty {
-            Type::Array(_, ArraySize::Var(_)) => true,
-            Type::Array(elem, ArraySize::Const(_)) => Self::type_has_vla(&elem.base),
-            _ => false,
-        }
+        ty.has_vla()
     }
 
     /// sizeof 运行时求值 (处理 VLA): dst = 元素个数 * 元素大小
@@ -15860,17 +15959,10 @@ impl Codegen {
 
     fn var_offset(&mut self, name: &str) -> i32 {
         if let Some(&(off, _)) = self.var_map.get(name) {
-            if name == "xl" || name == "rr" {
-                eprintln!("[VOFF] {} = {} (frame={})", name, off, self.frame_size);
-            }
             return off;
         }
         // 懒分配路径: 委托给 register_var 以保证偏移计算一致
-        let off = self.register_var(name, &Type::Int);
-        if name == "xl" || name == "rr" {
-            eprintln!("[VOFF-LAZY] {} = {} (frame={})", name, off, self.frame_size);
-        }
-        off
+        self.register_var(name, &Type::Int)
     }
 
     /// 全局变量 RIP-relative 加载: reg = [global_var]
@@ -16115,11 +16207,14 @@ impl Codegen {
             return 0;
         }
         let mut slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
-        // VLA: 追加 8 字节 stride 槽 (数据区 [off,off+8) 基址,
-        // [off+8,off+16) 运行时行大小, 供 2D VLA 索引步长取用)
-        let is_vla = matches!(ty, Type::Array(_, ArraySize::Var(_)));
+        // VLA: 追加 16 字节元信息槽 (数据区 [off,off+8) 基址,
+        // [off+8,off+16) 运行时行大小 (2D 索引步长),
+        // [off+16,off+24) 声明时总大小 (sizeof 用声明时绑定值,
+        // 不能重新求值维度表达式 — C11 6.2.4p7))
+        // 含外层常量的多维 VLA (int a[2][N]): 总大小也是运行时值
+        let is_vla = Self::type_has_vla(ty);
         if is_vla {
-            slots += 1;
+            slots += 2;
         }
         let slots = slots.max(1) as i32;
         // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
@@ -16135,7 +16230,7 @@ impl Codegen {
         // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
         let hdr = 48 + self.temp_slots * 8;
         let alloc_sz = if is_vla {
-            ty.size() + 8
+            ty.size() + 16
         } else {
             ty.size()
         };
@@ -16144,7 +16239,6 @@ impl Codegen {
             off -= 8;
         }
         self.var_map.insert(name.to_string(), (off, ty.clone()));
-        eprintln!("[REG] register_var name={} off={} slots={} ty={:?}", name, off, slots, ty);
         // 为数组/向量预留额外槽位 (空插入占位, 保持 var_map 完整性)
         for i in 1..slots {
             let placeholder_name = format!("__pad_{}_{}", name, i);
@@ -18731,9 +18825,7 @@ impl Codegen {
     /// 用于: (a) 函数级 cur_func_has_vla; (b) 块级 fall-through 尾部恢复。
     fn block_contains_vla(items: &[BlockItem]) -> bool {
         items.iter().any(|item| match item {
-            BlockItem::Decl(Decl::Var(v)) => {
-                matches!(v.ty, Type::Array(_, ArraySize::Var(_)))
-            }
+            BlockItem::Decl(Decl::Var(v)) => Self::type_has_vla(&v.ty),
             BlockItem::Decl(Decl::Func(f)) => f
                 .body
                 .as_ref()
@@ -18798,9 +18890,8 @@ impl Codegen {
         }
     }
 
-    /// rax = ty 的字节大小; ty 含 VLA 维 (Array(_, Var)) 时运行时求值,
-    /// 编译期已知大小直接 mov imm。仅支持最外一层动态维: 内层仍是 VLA
-    /// 时按编译期 fallback (8) 近似 (torture 无多维全动态 VLA 用例)。
+    /// rax = ty 的字节大小; ty 任意层含 VLA 维 (Array(_, Var)) 时运行时
+    /// 求值, 编译期已知大小直接 mov imm。
     fn emit_vla_elem_size(&mut self, ty: &Type) {
         match ty {
             Type::Array(inner, ArraySize::Var(n_expr)) => {
@@ -18811,12 +18902,35 @@ impl Codegen {
                     self.emit(&isz.to_le_bytes());
                 }
             }
+            Type::Array(inner, ArraySize::Const(n)) if Self::type_has_vla(&inner.base) => {
+                // 内层仍是 VLA (如 int a[2][N] 的 elem, 或 3D a[2][3][N]
+                // 的 stride): 递归求内层运行时大小, 再乘本维常量个数
+                self.emit_vla_elem_size(&inner.base);
+                if *n != 1 {
+                    self.imul_imm(0, *n as i128);
+                }
+            }
             _ => {
                 let sz = ty.size().max(1) as i32;
                 self.emit(&[0x48, 0xC7, 0xC0]); // mov rax, imm32 (sign-ext)
                 self.emit(&sz.to_le_bytes());
             }
         }
+    }
+
+    /// VLA 形参 (2D+: 形参退化为 Ptr(Array(_, Var)), C11 6.7.6.3p8)
+    /// 的 stride 槽: 位于指针槽前 off-8 (见 compile_func 序言求值)。
+    /// 1D 形参退化为 Ptr(元素类型), 无维度信息, 返回 None。
+    fn param_vla_stride_slot(&self, name: &str) -> Option<i32> {
+        self.var_map.get(name).and_then(|&(off, ref ty)| {
+            if matches!(ty, Type::Ptr(q)
+                if matches!(&q.base, Type::Array(_, ArraySize::Var(_))))
+            {
+                Some(off - 8)
+            } else {
+                None
+            }
+        })
     }
 
     /// Index 元素类型为 VLA (Array(_, Var)) 时步长是运行时值:
@@ -18831,11 +18945,49 @@ impl Codegen {
         loop {
             match cur {
                 Expr::Ident { name, .. } => {
-                    return self.vla_offsets.get(&name.name).map(|off| off + 8);
+                    if let Some(&off) = self.vla_offsets.get(&name.name) {
+                        return Some(off + 8);
+                    }
+                    // VLA 形参: stride 槽在指针槽前
+                    return self.param_vla_stride_slot(&name.name);
                 }
                 Expr::Index { arr: inner, .. } => cur = inner,
                 _ => return None,
             }
+        }
+    }
+
+    /// sizeof(expr) 对 VLA 的声明时绑定值槽 (C11 6.2.4p7: VLA 生命周期
+    /// 开始时维度值固定, 后续 sizeof 不得重新求值维度表达式 — 表达式
+    /// 可能含副作用 (pr22061-3 的 ++N) 或依赖已改变的变量)。
+    /// 支持: sizeof(vla_var) → 总大小槽 (off+16);
+    ///       sizeof(vla_var[i]) 且元素仍是 VLA (如 2D 的 a[0]) →
+    ///       行大小槽 (off+8)。其余返回 None 走原路径。
+    fn vla_bound_size_slot(&self, e: &Expr) -> Option<i32> {
+        match e {
+            Expr::Ident { name, .. } => {
+                self.vla_offsets.get(&name.name).map(|off| off + 16)
+            }
+            Expr::Index { arr, ty, .. } => {
+                if !matches!(ty, Type::Array(_, ArraySize::Var(_))) {
+                    return None; // 元素非 VLA: 编译期 size 即可
+                }
+                let mut cur = arr.as_ref();
+                loop {
+                    match cur {
+                        Expr::Ident { name, .. } => {
+                            if let Some(&off) = self.vla_offsets.get(&name.name) {
+                                return Some(off + 8);
+                            }
+                            // VLA 形参: stride 槽在指针槽前
+                            return self.param_vla_stride_slot(&name.name);
+                        }
+                        Expr::Index { arr: inner, .. } => cur = inner,
+                        _ => return None,
+                    }
+                }
+            }
+            _ => None,
         }
     }
 
@@ -18856,20 +19008,34 @@ impl Codegen {
     }
 
     fn gen_vla_alloc(&mut self, v: &VarDecl) {
-        // VLA 变量类型: Array(elem, Var(expr))
-        // 大小表达式在变量的 ArraySize::Var 中
-        if let Type::Array(elem_ty, ArraySize::Var(ref size_expr)) = &v.ty {
-            // 行 (元素) 大小: elem 自身是 VLA (2D+) 时为运行时值
-            self.emit_vla_elem_size(&elem_ty.base); // rax = stride
-            let off = self.var_offset(&v.name.name);
-            self.vla_offsets.insert(v.name.name.clone(), off);
-            // mov [r13 + off + 8], rax: 存 stride 到 stride 槽
-            self.emit_store_rax_r13(off + 8);
-            // rax = 元素个数
-            self.gen_expr(size_expr, 0);
+        // VLA 变量: 最外层 ArraySize::Var, 或外层常量但内层含 Var
+        // (int a[2][N] → Array(Array(Int,Var(N)), Const(2)))。两者的总
+        // 大小都是运行时值, 需动态栈分配 + 3 槽元数据 (基址/行大小/
+        // 声明时总大小)
+        // (const_n, var_e): 最外层维度个数 — 常量或运行时表达式二选一
+        let (elem_ty, const_n, var_e) = match &v.ty {
+            Type::Array(elem, ArraySize::Var(se)) => (elem, 0usize, Some(se.as_ref())),
+            Type::Array(elem, ArraySize::Const(n)) if Self::type_has_vla(&elem.base) => {
+                (elem, *n, None)
+            }
+            _ => return,
+        };
+        // 行 (元素) 大小: elem 自身是 VLA (2D+) 时为运行时值
+        self.emit_vla_elem_size(&elem_ty.base); // rax = stride
+        let off = self.var_offset(&v.name.name);
+        self.vla_offsets.insert(v.name.name.clone(), off);
+        // mov [r13 + off + 8], rax: 存 stride 到 stride 槽
+        self.emit_store_rax_r13(off + 8);
+        // rax = 元素个数
+        match var_e {
+            Some(se) => self.gen_expr(se, 0),
+            None => self.mov_imm(0, const_n as i128),
+        }
             // rax *= stride: mov rcx, [r13+off+8]; imul rax, rcx
             self.emit_mov_mem_r13(1, off + 8);
             self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx
+            // mov [r13 + off + 16], rax: 声明时总大小 (未对齐), sizeof 取用
+            self.emit_store_rax_r13(off + 16);
             // 对齐到 16 字节: (rax + 15) & ~15
             self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
             self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
@@ -18891,7 +19057,6 @@ impl Codegen {
                 self.emit(&off.to_le_bytes());
             }
             // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
-        }
     }
 
     // 函数尾声: 恢复 r13 + 返回
@@ -19855,11 +20020,12 @@ impl Codegen {
                         }
                         // 未注册的 static local (名称冲突) 回退到栈分配
                     }
-                    // VLA: 追加 8 字节 stride 槽 (与 register_var 一致,
-                    // 数据区 [off,off+8) 基址, [off+8,off+16) 运行时行大小)
-                    let is_vla = matches!(v.ty, Type::Array(_, ArraySize::Var(_)));
+                    // VLA: 追加 16 字节元信息槽 (与 register_var 一致:
+                    // 基址 + 运行时行大小 + 声明时总大小)。含外层常量的
+                    // 多维 VLA (int a[2][N]): 总大小也是运行时值
+                    let is_vla = Self::type_has_vla(&v.ty);
                     let alloc_sz = if is_vla {
-                        v.ty.size() + 8
+                        v.ty.size() + 16
                     } else {
                         v.ty.size()
                     };

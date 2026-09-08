@@ -169,7 +169,14 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             name: label.name.clone(),
             offset: 0,
         }),
+        // 含 VLA 维度的 sizeof 不可常量折叠 (C11 6.5.3.4p2 运行时求值):
+        // 静态 ty.size() 对 Var 维度用 8 字节 fallback, 折叠结果错误
+        // (如 int a[2][N] 折成 16, 真值 N*4*2)。返回 NotConstant 让
+        // 调用方 (if 分支折叠/静态断言/case 标签等) 走运行时路径,
+        // codegen 的 SizeofExpr 分支读声明时绑定槽。
+        Expr::SizeofTy { ty, .. } if ty.has_vla() => Err(ConstEvalError::NotConstant),
         Expr::SizeofTy { ty, .. } => Ok(ConstValue::Int(ty.size() as i128)),
+        Expr::SizeofExpr { e, .. } if e.ty().has_vla() => Err(ConstEvalError::NotConstant),
         Expr::SizeofExpr { e, .. } => match e.as_ref() {
             // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
             Expr::String { data, .. } => Ok(ConstValue::Int(data.len() as i128)),

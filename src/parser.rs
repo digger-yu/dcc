@@ -3899,6 +3899,18 @@ impl<'a> Parser<'a> {
                             &mut captured,
                         );
                     }
+                    // VLA 形参维度表达式 (int a[2][++N]) 也可能捕获外层
+                    // 变量: 维度表达式在形参类型里而不在函数体里,
+                    // collect_upvars 看不到, 但序言求值 (++N 副作用) 需要
+                    // 静态链访问 N (pr22061-3/4)
+                    for p in &params {
+                        Self::collect_upvars_param_type(
+                            &p.ty,
+                            &child_flat,
+                            &parent_flat,
+                            &mut captured,
+                        );
+                    }
                     captured
                 };
                 // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
@@ -10802,6 +10814,31 @@ impl<'a> Parser<'a> {
                 );
                 None
             }
+        }
+    }
+
+    /// 扫描形参类型中 VLA 维度表达式捕获的外层变量。
+    /// `void foo(int a[2][++N])` 退化后 p.ty = Ptr(Array(Int, Var(PreInc N))),
+    /// 维度表达式在类型里而不在函数体里, collect_upvars 看不到;
+    /// 但序言求值 (++N 副作用) 需要静态链访问 N (pr22061-3/4)。
+    fn collect_upvars_param_type(
+        ty: &Type,
+        local_vars: &HashMap<String, Type>,
+        parent_locals: &HashMap<String, Type>,
+        out: &mut Vec<(String, i32)>,
+    ) {
+        match ty {
+            Type::Ptr(q) => {
+                Self::collect_upvars_param_type(&q.base, local_vars, parent_locals, out);
+            }
+            Type::Array(elem, ArraySize::Var(se)) => {
+                Self::collect_upvars_expr(se, local_vars, parent_locals, out);
+                Self::collect_upvars_param_type(&elem.base, local_vars, parent_locals, out);
+            }
+            Type::Array(elem, _) => {
+                Self::collect_upvars_param_type(&elem.base, local_vars, parent_locals, out);
+            }
+            _ => {}
         }
     }
 
