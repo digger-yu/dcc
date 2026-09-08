@@ -12798,6 +12798,48 @@ impl Codegen {
         }
     }
 
+    /// C11 6.7.9p14 brace elision: 把扁平标量初始值分组到子聚合体中。
+    /// 如 elem_ty=int[3], inits={1,2,3,4,5,6} → {{1,2,3},{4,5,6}}。
+    /// 对 struct 元素: 按字段数分组。支持混合 (已有 InitList 保持原样)。
+    fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
+        let sub_count = match elem_ty {
+            Type::Array(_, ArraySize::Const(n)) => *n,
+            Type::Struct(fields, _, _) => fields.len(),
+            Type::Union(_, _, _) => 1,
+            _ => return inits.to_vec(),
+        };
+        if sub_count == 0 {
+            return inits.to_vec();
+        }
+        let mut result = Vec::new();
+        let mut idx = 0;
+        while idx < inits.len() {
+            if let InitItem::Expr(Expr::InitList { .. }) = &inits[idx] {
+                // 已有花括号, 保持原样
+                result.push(inits[idx].clone());
+                idx += 1;
+            } else {
+                // 收集 sub_count 个标量值到一个 InitList
+                let mut group = Vec::new();
+                for _ in 0..sub_count {
+                    if idx < inits.len() {
+                        if let InitItem::Expr(e) = &inits[idx] {
+                            group.push(InitItem::Expr(e.clone()));
+                        }
+                        idx += 1;
+                    }
+                }
+                let span = Span::point("", 0, 0);
+                result.push(InitItem::Expr(Expr::InitList {
+                    inits: group,
+                    span: span.clone(),
+                    ty: elem_ty.clone(),
+                }));
+            }
+        }
+        result
+    }
+
     /// 递归初始化列表展开: 任意嵌套深度的数组/结构体初始化器按 C11 6.7.9
     /// 逐元素/逐字段写入 base 起始的内存块。三维及以上数组元素与 struct
     /// 数组字段的子元素仍是 InitList, gen_expr 对数组类型 InitList rvalue
@@ -12805,6 +12847,28 @@ impl Codegen {
     fn gen_init_list_at(&mut self, base: i32, ty: &Type, inits: &[InitItem]) {
         match ty {
             Type::Array(elem_ty, _) => {
+                // C11 6.7.9p14 brace elision: 元素类型是聚合体但
+                // 初始值不是花括号包裹时, 把标量值分组到子聚合中
+                // 如 int a[2][3] = {1,2,3,4,5,6} → {{1,2,3},{4,5,6}}
+                let effective_inits;
+                if matches!(&elem_ty.base,
+                    Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _))
+                {
+                    // 检查是否需要 brace elision: 首个值是标量 (非 InitList)
+                    let needs_elision = inits.iter().any(|item| {
+                        matches!(item, InitItem::Expr(e) if !matches!(e, Expr::InitList { .. }))
+                    });
+                    if needs_elision {
+                        effective_inits = Self::group_for_brace_elision(
+                            &elem_ty.base, inits,
+                        );
+                    } else {
+                        effective_inits = inits.to_vec();
+                    }
+                } else {
+                    effective_inits = inits.to_vec();
+                }
+                let inits = &effective_inits;
                 // 数组初始化: int a[] = {1, 2, 3}
                 // 数组在栈上布局: arr[0] 在 base, arr[1] 在 base + elem_size, ...
                 // 注意: 虽然栈向下增长，但数组元素地址是递增的
@@ -12873,6 +12937,8 @@ impl Codegen {
                         covered = covered.max(i + 1);
                         continue;
                     }
+                    // C11 6.7.9p14 brace elision 已由循环前的
+                    // group_for_brace_elision 预处理, 此处不再需要
                     if let Expr::String { data, .. } = value {
                         // 字符串字面量初始化嵌套子对象 (C11 6.7.9p14):
                         // 2D char 数组行 / struct 数组元素。
