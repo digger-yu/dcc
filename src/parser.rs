@@ -8879,12 +8879,17 @@ impl<'a> Parser<'a> {
                             rt
                         }
                     } else if is_ca || is_cb {
-                        // 复数算术结果仍为复数（供 Cast 等类型推导）
-                        if is_ca {
-                            lt
-                        } else {
-                            rt
-                        }
+                        // 复数算术结果仍为复数 (供 Cast 等类型推导):
+                        // 取较宽的内型 (C99 6.3.1.8: _Complex float 与
+                        // _Complex double 运算 → _Complex double)。旧实现
+                        // 任取一侧, Complex(Float) + Complex(Double) 标为
+                        // Complex(Float), codegen 按窄 inner spill/读取宽
+                        // 操作数位模式错位 (complex-6 test_float:
+                        // 1.0 + 2.0i 实部丢失)。
+                        let inner_a = if let Type::Complex(ref i) = lt { i.base.clone() } else { lt.clone().into() };
+                        let inner_b = if let Type::Complex(ref i) = rt { i.base.clone() } else { rt.clone().into() };
+                        let wider = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
+                        Type::Complex(Box::new(wider.into()))
                     } else if is_ia || is_ib {
                         // _Imaginary 算术类型推导
                         let inner_a = if let Type::Imaginary(ref i) = lt { i.base.clone() } else { lt.clone().into() };
