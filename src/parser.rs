@@ -5022,7 +5022,10 @@ impl<'a> Parser<'a> {
         } else {
             // 有 *: 限定符属于 pointed-to 类型
             // 将 skip_ptr_qualifiers 收集的限定符应用到内部类型
-            let inner_quals = self.decl_quals;
+            // spec_quals 包含基类型前的限定符 (如 const char *)
+            // decl_quals 包含基类型后、* 前的限定符 (如 char const *)
+            let inner_quals = self.spec_quals | self.decl_quals;
+            self.spec_quals = QualifierFlags::NONE;
             self.decl_quals = QualifierFlags::NONE;
             let ty = self.parse_ptr_suffix_with_quals(ty, inner_quals);
             // 抽象函数指针声明符
@@ -11073,6 +11076,10 @@ impl<'a> Parser<'a> {
                 if matches!(&pa.base, Type::Void) || matches!(&pb.base, Type::Void) {
                     return true;
                 }
+                // Pointee qualifiers matter (not top-level)
+                if pa.quals != pb.quals {
+                    return false;
+                }
                 Self::types_compatible(&pa.base, &pb.base)
             }
             (Type::Void, Type::Void) => true,
@@ -11080,7 +11087,25 @@ impl<'a> Parser<'a> {
             (Type::Accum, Type::Accum) => true,
             (Type::Struct(na, _, _), Type::Struct(nb, _, _)) => na == nb,
             (Type::Union(na, _, _), Type::Union(nb, _, _)) => na == nb,
-            (Type::Enum(na, _, _), Type::Enum(nb, _, _)) => na == nb,
+            (Type::Enum(na, va, _), Type::Enum(nb, vb, _)) => {
+                if na.is_empty() && nb.is_empty() {
+                    // Both anonymous: compatible only if same variants
+                    va == vb
+                } else {
+                    na == nb
+                }
+            }
+            (Type::Array(ea, sa), Type::Array(eb, sb)) => {
+                if !Self::types_compatible(&ea.base, &eb.base) {
+                    return false;
+                }
+                // If both sizes are specified and non-zero, they must match
+                match (&sa, &sb) {
+                    (ArraySize::Const(0), _) | (_, ArraySize::Const(0)) => true,
+                    (ArraySize::Const(a), ArraySize::Const(b)) => a == b,
+                    _ => true, // VLA: assume compatible
+                }
+            }
             _ => a == b,
         }
     }
