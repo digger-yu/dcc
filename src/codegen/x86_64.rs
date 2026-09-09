@@ -17175,13 +17175,13 @@ impl Codegen {
     // 避免大数组导致 O(n²) 超时. 占位槽创建有上限避免 O(n) hang.
     fn register_var(&mut self, name: &str, ty: &Type) -> i32 {
         if let Some(entry) = self.var_map.get(name) {
-            // If the variable was previously registered via the lazy
-            // var_offset path (which defaults to Type::Int), update
-            // the type to the correct one. This is critical for
-            // struct/union types where the load size depends on the
-            // actual type, not the default Int.
+            // 变量已存在 (外层作用域同名变量或 pre_register_vars 预分配).
+            // 始终更新类型: 内层作用域可能用不同类型遮蔽外层变量
+            // (如外层 unsigned long xx, 内层 signed int xx).
+            // 更新类型确保 mov_to_stack/mov_from_stack 按正确宽度
+            // 存取栈槽 (如 signed int 用 4 字节 store, movsxd load).
             let (off, ref existing_ty) = *entry;
-            if matches!(existing_ty, Type::Int) && !matches!(ty, Type::Int) {
+            if existing_ty != ty {
                 self.var_map.insert(name.to_string(), (off, ty.clone()));
             }
             return off;
@@ -17248,7 +17248,17 @@ impl Codegen {
             return;
         }
         let off = self.var_offset(name);
-        self.store_stack(reg, off);
+        // 按变量声明类型宽度存储, 避免 64 位 store 把高位垃圾
+        // 写入小类型变量的栈槽 (后续 idiv 等指令加载时会读
+        // 到错误的高位). 例如 `signed int xx = ulong_x` 必须只
+        // 写 4 字节, 使 movsxd 加载时能正确符号扩展.
+        let sz = self.var_map.get(name)
+            .map(|(_, t)| t.size())
+            .unwrap_or(8);
+        match sz {
+            1 | 2 | 4 => self.emit_store(reg, off, sz),
+            _ => self.store_stack(reg, off),
+        }
     }
     fn mov_from_stack(&mut self, reg: u8, name: &str) {
         // P1-5: register asm 变量直接从绑定寄存器加载
@@ -21434,6 +21444,9 @@ impl Codegen {
                     } else {
                         off
                     };
+                    // or_insert: 同名变量在内层作用域跳过 (复用外层栈槽).
+                    // 代码生成阶段 register_var 更新类型, 确保 mov_to_stack
+                    // / mov_from_stack 按当前作用域的类型宽度存取.
                     var_map
                         .entry(v.name.name.clone())
                         .or_insert((off, v.ty.clone()));
