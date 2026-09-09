@@ -2025,9 +2025,16 @@ impl Aarch64Codegen {
             if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
                 if let (ExprKind::Local(d), ExprKind::Local(s)) = (&dst.kind, &src.kind) {
                     if let (Some(&doff), Some(&soff)) = (self.locals.get(d), self.locals.get(s)) {
-                        // 简化: 8 字节指针拷贝
-                        self.ldr_wt_sp(0, soff);
-                        self.str_wt_sp(0, doff);
+                        // 24 字节结构体拷贝: 3 个 qword
+                        // qword 1: gp_offset(4B) + fp_offset(4B)
+                        self.ldr_xt_sp(0, soff);
+                        self.str_xt_sp(0, doff);
+                        // qword 2: overflow_arg_area
+                        self.ldr_xt_sp(0, soff + 8);
+                        self.str_xt_sp(0, doff + 8);
+                        // qword 3: reg_save_area
+                        self.ldr_xt_sp(0, soff + 16);
+                        self.str_xt_sp(0, doff + 16);
                     }
                 }
             }
@@ -2319,55 +2326,111 @@ impl Aarch64Codegen {
     // 初始化 AAPCS64 va_list 变量.
     // va_list 是指向寄存器保存区的 void* 指针 (本后端用单指针简化版).
     // ap 局部 (aarch64 上是一个指针) 被写为 va_save_base_off 的地址.
+    // va_list 现在是 24 字节结构体:
+    //   { gp_offset(4B), fp_offset(4B), overflow_arg_area(8B), reg_save_area(8B) }
+    // gen_va_start 写入完整四字段。
     fn gen_va_start(&mut self, ap_name: &str) {
         let ap_off = match self.locals.get(ap_name) {
             Some(&o) => o,
             None => return,
         };
-        // 计算 va_save_base 绝对地址到 x9, 然后存入 ap.
-        // AAPCS64 要求 [sp+off] 范围 [0, 504], 我们的 64 字节 < 256, 不会越界.
-        // x9 是 caller-saved 临时寄存器, 跨调用无需保存.
+        // gp_offset = 0
+        self.mov_w0_imm(0);
+        self.emit_str_x(0, 31, ap_off as u32, 4); // str w0, [sp, #ap_off]
+        // fp_offset = 0
+        self.emit_str_x(0, 31, (ap_off + 4) as u32, 4); // str w0, [sp, #ap_off+4]
+        // overflow_arg_area = sp + frame_bytes
+        self.mov_x_reg_sp_off(9, self.frame_bytes);
+        self.emit_str_x(9, 31, (ap_off + 8) as u32, 8); // str x9, [sp, #ap_off+8]
+        // reg_save_area = sp + va_save_base_off
         self.mov_x_reg_sp_off(9, self.va_save_base_off);
-        // str x9, [sp, #ap_off] (8 字节存储, 需 8 字节对齐 ap_off)
-        debug_assert!(
-            ap_off >= 0 && ap_off % 8 == 0,
-            "gen_va_start: ap_off must be 8-byte aligned, got {ap_off}"
-        );
-        let insn = 0xf900_0000u32 | (((ap_off / 8) as u32) & 0xfff) << 10 | (31u32 << 5) | 9u32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_str_x(9, 31, (ap_off + 16) as u32, 8); // str x9, [sp, #ap_off+16]
     }
 
     // 读取下一个变参 (整数路径) 到 w0.
-    // 策略: 先从 GP 保存区 (va_save_base + va_gp_offs*8) 读,
-    //       超出 8 个则从 caller 栈读.
+    // 从 va_list 结构体读取 gp_offset, 判断寄存器保存区还是溢出区.
     fn gen_va_arg_int(&mut self, ap_name: &str) {
-        if self.va_gp_offs < 8 {
-            let off = self.va_save_base_off + self.va_gp_offs * 8;
-            self.ldr_wt_sp(0, off);
-            self.va_gp_offs += 1;
-        } else {
-            // 从 caller 栈读取: 栈参数位于 frame + 128 (GP+float 保存区之后)
-            let stack_off = self.frame_bytes + 128 + (self.va_gp_offs - 8) * 8;
-            self.ldr_xt_sp(0, stack_off);
-            self.va_gp_offs += 1;
-        }
-        let _ = ap_name;
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // x9 = va_list 地址
+        self.mov_x_reg_sp_off(9, ap_off);
+        // w0 = gp_offset (从 va_list[0])
+        self.emit_ldr_x(0, 9, 0, 4);
+        // cmp w0, #48
+        self.emit_cmp_imm_w(0, 48);
+        let overflow = self.fresh_label("va_int_of");
+        let done = self.fresh_label("va_int_done");
+        // bge overflow
+        self.emit_bcond(&overflow, 0xa); // GE = 0xa
+        // ---- 寄存器保存区路径 ----
+        // x1 = reg_save_area (从 va_list[16])
+        self.emit_ldr_x(1, 9, 16, 8);
+        // x0 = x1 + x0 (reg_save_area + gp_offset)
+        // gp_offset < 48, 高 32 位为 0, x0 即零扩展后的偏移
+        self.emit_add_x_reg(0, 1, 0);
+        self.emit_ldr_x(0, 0, 0, 4); // ldr w0, [x0]
+        // gp_offset += 8
+        self.emit_ldr_x(1, 9, 0, 4); // w1 = 旧 gp_offset (从 va_list[0] 重新加载)
+        self.emit_add_imm_w(1, 1, 8);
+        self.emit_str_x(1, 9, 0, 4); // str w1, [x9, #0]
+        self.b(&done);
+        // ---- 溢出区路径 ----
+        self.emit_label_raw(&overflow);
+        // x1 = overflow_arg_area (从 va_list[8])
+        self.emit_ldr_x(1, 9, 8, 8);
+        // w0 = [x1]
+        self.emit_ldr_x(0, 1, 0, 4);
+        // x1 += 8
+        self.emit_add_imm_x(1, 1, 8);
+        // 写回 overflow_arg_area
+        self.emit_str_x(1, 9, 8, 8);
+        self.emit_label_raw(&done);
     }
 
     // 读取下一个变参 (浮点路径) 到 s0.
-    // 策略: 先从 float 保存区 (va_save_base+64 + va_flt_offs*8) 读,
-    //       超出 8 个则从 caller 栈读.
-    fn gen_va_arg_float(&mut self, _ap_name: &str) {
-        if self.va_flt_offs < 8 {
-            let off = self.va_save_base_off + 64 + self.va_flt_offs * 8;
-            self.ldr_s0_sp(off);
-            self.va_flt_offs += 1;
-        } else {
-            // 从 caller 栈读取
-            let stack_off = self.frame_bytes + 128 + (self.va_flt_offs - 8) * 8;
-            self.ldr_s0_sp(stack_off);
-            self.va_flt_offs += 1;
-        }
+    // 从 va_list 结构体读取 fp_offset, 判断寄存器保存区还是溢出区.
+    fn gen_va_arg_float(&mut self, ap_name: &str) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // x9 = va_list 地址
+        self.mov_x_reg_sp_off(9, ap_off);
+        // w0 = fp_offset (从 va_list[4])
+        self.emit_ldr_x(0, 9, 4, 4);
+        // cmp w0, #128
+        self.emit_cmp_imm_w(0, 128);
+        let overflow = self.fresh_label("va_flt_of");
+        let done = self.fresh_label("va_flt_done");
+        // bge overflow
+        self.emit_bcond(&overflow, 0xa); // GE = 0xa
+        // ---- 寄存器保存区路径 ----
+        // x1 = reg_save_area + 64 (float 保存区起始)
+        self.emit_ldr_x(1, 9, 16, 8); // x1 = reg_save_area
+        self.emit_add_imm_x(1, 1, 64); // x1 += 64
+        // x0 = x1 + x0 (float_save + fp_offset)
+        self.emit_add_x_reg(0, 1, 0);
+        // s0 = [x0] (单精度加载)
+        // ldr s0, [x0]: 0xBD400000 | (0<<10) | (0<<5) | 0
+        self.emit(&0xBD400000u32.to_le_bytes());
+        // fp_offset += 8
+        self.emit_ldr_x(1, 9, 4, 4); // w1 = 旧 fp_offset
+        self.emit_add_imm_w(1, 1, 8);
+        self.emit_str_x(1, 9, 4, 4); // str w1, [x9, #4]
+        self.b(&done);
+        // ---- 溢出区路径 ----
+        self.emit_label_raw(&overflow);
+        // x1 = overflow_arg_area (从 va_list[8])
+        self.emit_ldr_x(1, 9, 8, 8);
+        // s0 = [x1]
+        self.emit(&0xBD400020u32.to_le_bytes()); // ldr s0, [x1]
+        // x1 += 8
+        self.emit_add_imm_x(1, 1, 8);
+        // 写回 overflow_arg_area
+        self.emit_str_x(1, 9, 8, 8);
+        self.emit_label_raw(&done);
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
@@ -3944,6 +4007,23 @@ impl Aarch64Codegen {
 
     fn cmp_w0_w1(&mut self) {
         self.emit(&[0x3f, 0x00, 0x01, 0x6b]);
+    }
+
+    /// cmp wn, #imm12 — 32 位立即数比较 (subs wzr, wn, #imm)
+    fn emit_cmp_imm_w(&mut self, rn: u8, imm: u32) {
+        let insn = 0x7100001fu32
+            | (imm << 10)
+            | ((rn as u32 & 0x1f) << 5);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// add wd, wn, #imm12 — 32 位立即加法
+    fn emit_add_imm_w(&mut self, dst: u8, src: u8, imm: u32) {
+        let insn = 0x11000000u32
+            | (imm << 10)
+            | ((src as u32 & 0x1f) << 5)
+            | (dst as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
     }
 
     fn cbz_w0(&mut self, label: &str) {
@@ -6398,7 +6478,7 @@ mod tests {
     }
 
     // M25: AArch64 va_arg 整数路径 单元测试
-    // 验证 gen_va_arg_int 从保存区顺序读 w0
+    // 验证 gen_va_arg_int 生成运行时偏移读取代码
     #[test]
     fn aarch64_va_arg_int_reads_sequentially_from_save_area() {
         let mut cg = Aarch64Codegen::new(
@@ -6408,43 +6488,30 @@ mod tests {
             true,
         );
         cg.is_current_func_variadic = true;
-        cg.va_save_base_off = 0;
-        cg.va_gp_offs = 0;
-        // 注册一个假 va_list 局部
-        cg.locals.insert("ap".to_string(), 100);
-        // 读 3 个变参
+        cg.va_save_base_off = 128;
+        cg.frame_bytes = 256;
+        // 注册一个假 va_list 局部 (24 字节结构体, 8 字节对齐)
+        cg.locals.insert("ap".to_string(), 96);
+        // 生成 va_arg_int
         cg.gen_va_arg_int("ap");
-        cg.gen_va_arg_int("ap");
-        cg.gen_va_arg_int("ap");
-        // 验证: 3 条 ldr w0, [sp, #off] 指令
-        let ldr_w_count = cg
-            .code
-            .windows(4)
-            .filter(|w| {
-                // ldr W: byte3 = 0xb9, byte2 bit6-4 = 100 (32-bit ldr)
-                w[3] == 0xb9 && (w[2] & 0x70) == 0x40
-            })
-            .count();
-        assert_eq!(
-            ldr_w_count, 3,
-            "expected 3 ldr w0, [sp, #off] instructions, got {ldr_w_count}"
+        // 验证: 代码包含 cmp w0, #48 (0x71000000 | 48<<10 | 0<<5 | 31)
+        let cmp_insn = 0x7100001fu32 | (48u32 << 10);
+        let has_cmp = cg.code.windows(4).any(|w| {
+            u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == cmp_insn
+        });
+        assert!(has_cmp, "expected cmp w0, #48 instruction");
+        // 验证: 代码包含条件分支 bge (cond=0xa)
+        let has_bge = cg.code.windows(4).any(|w| {
+            let insn = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (insn & 0xff00001f) == 0x5400000a // b.ge
+        });
+        assert!(has_bge, "expected b.ge instruction");
+        // 验证: 代码非空且长度合理 (> 20 字节)
+        assert!(
+            cg.code.len() > 20,
+            "expected > 20 bytes of code, got {}",
+            cg.code.len()
         );
-        // 验证偏移按 0, 8, 16 递增 (每 8 字节一槽, x 寄存器 8 字节)
-        let mut offs = Vec::new();
-        for w in cg.code.windows(4) {
-            if w[3] == 0xb9 && (w[2] & 0x70) == 0x40 {
-                let insn = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-                let imm12 = (insn >> 10) & 0xfff;
-                offs.push((imm12 * 4) as i32);
-            }
-        }
-        assert_eq!(
-            offs,
-            vec![0, 8, 16],
-            "expected offsets [0, 8, 16], got {offs:?}"
-        );
-        // 验证 va_gp_offs 推进
-        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
 
     // 嵌套 sret: 验证 gen_function 在返回 >16B 聚合时保存 x0 到 <sret_ptr>
