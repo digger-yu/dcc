@@ -6542,6 +6542,22 @@ impl Codegen {
             if let Some(body) = &f.body {
                 Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.static_local_map, &f.name.name);
             }
+            // 预计算已注册局部变量的总大小, 用于参数偏移计算.
+            // limits-fndefn.c 有 100,000 个参数, 每次重新遍历 var_map
+            // 会导致 O(n²) 超时. 使用累加值避免重复扫描.
+            let var_contribution = |ty: &Type| -> i32 {
+                match ty {
+                    t if Self::type_has_vla(t) => t.size() as i32 + 16,
+                    Type::Ptr(q) if matches!(&q.base, Type::Array(_, crate::ast::ArraySize::Var(_))) => 16,
+                    t => t.size().div_ceil(8) as i32 * 8,
+                }
+            };
+            let mut param_used_total: i32 = self
+                .var_map
+                .values()
+                .filter(|(_, ty)| !matches!(ty, Type::Void))
+                .map(|(_, ty)| var_contribution(ty))
+                .sum();
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
             self.variadic_named_params =
@@ -6598,30 +6614,14 @@ impl Codegen {
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
-                        let used: i32 = self
-                            .var_map
-                            .values()
-                            .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| match ty {
-                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
-                                // (基址/行大小/总大小元数据, 与 pre_register_vars
-                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
-                                // 多维 VLA 同理 (type_has_vla 判定)
-                                t if Self::type_has_vla(t) => {
-                                    t.size() as i32 + 16
-                                }
-                                Type::Ptr(q)
-                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
-                                {
-                                    16 // VLA 形参: 指针槽 + stride 槽
-                                }
-                                t => t.size().div_ceil(8) as i32 * 8,
-                            })
-                            .sum();
+                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
+                        let used = param_used_total;
                         // 多块参数同 register_var: off 下移 (chunks-1)*8
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr) - (chunks as i32 - 1) * 8;
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        // 更新累加值: 聚合参数占 chunks * 8 字节
+                        param_used_total += (p.ty.size().div_ceil(8) * 8) as i32;
                         // SysV: 按 abi_classes 逐 chunk 分配 GP/XMM/栈
                         if gp_idx + need_gp <= 6 && fp_idx + need_fp <= 8 {
                             for c in 0..chunks {
@@ -6664,29 +6664,13 @@ impl Codegen {
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
-                        let used: i32 = self
-                            .var_map
-                            .values()
-                            .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| match ty {
-                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
-                                // (基址/行大小/总大小元数据, 与 pre_register_vars
-                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
-                                // 多维 VLA 同理 (type_has_vla 判定)
-                                t if Self::type_has_vla(t) => {
-                                    t.size() as i32 + 16
-                                }
-                                Type::Ptr(q)
-                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
-                                {
-                                    16 // VLA 形参: 指针槽 + stride 槽
-                                }
-                                t => t.size().div_ceil(8) as i32 * 8,
-                            })
-                            .sum();
+                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
+                        let used = param_used_total;
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr) - 8; // 数据占 [off, off+16)
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        // 更新累加值: long double 占 16 字节
+                        param_used_total += 16;
                         stack_param_stores.push((stack_arg_idx, off));
                         stack_param_stores.push((stack_arg_idx + 1, off + 8));
                         stack_arg_idx += 2;
@@ -6695,29 +6679,13 @@ impl Codegen {
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
-                        let used: i32 = self
-                            .var_map
-                            .values()
-                            .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| match ty {
-                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
-                                // (基址/行大小/总大小元数据, 与 pre_register_vars
-                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
-                                // 多维 VLA 同理 (type_has_vla 判定)
-                                t if Self::type_has_vla(t) => {
-                                    t.size() as i32 + 16
-                                }
-                                Type::Ptr(q)
-                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
-                                {
-                                    16 // VLA 形参: 指针槽 + stride 槽
-                                }
-                                t => t.size().div_ceil(8) as i32 * 8,
-                            })
-                            .sum();
+                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
+                        let used = param_used_total;
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        // 更新累加值: float/double 占 8 字节
+                        param_used_total += 8;
                         if fp_idx < 8 {
                             xmm_param_stores.push((fp_idx as u8, off, p.ty.clone()));
                             fp_idx += 1;
@@ -6732,29 +6700,13 @@ impl Codegen {
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
-                        let used: i32 = self
-                            .var_map
-                            .values()
-                            .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| match ty {
-                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
-                                // (基址/行大小/总大小元数据, 与 pre_register_vars
-                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
-                                // 多维 VLA 同理 (type_has_vla 判定)
-                                t if Self::type_has_vla(t) => {
-                                    t.size() as i32 + 16
-                                }
-                                Type::Ptr(q)
-                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
-                                {
-                                    16 // VLA 形参: 指针槽 + stride 槽
-                                }
-                                t => t.size().div_ceil(8) as i32 * 8,
-                            })
-                            .sum();
+                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
+                        let used = param_used_total;
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        // 更新累加值: 标量参数占 8 字节
+                        param_used_total += 8;
                         param_stores.push((arg_regs[gp_idx], off));
                         gp_idx += 1;
                         self.variadic_named_gp += 1;
@@ -6763,29 +6715,13 @@ impl Codegen {
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
                         // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
                         // 会少算 chunks 导致参数间重叠。
-                        let used: i32 = self
-                            .var_map
-                            .values()
-                            .filter(|(_, ty)| !matches!(ty, Type::Void))
-                            .map(|(_, ty)| match ty {
-                                // VLA 局部实际占 slots 条目 = ty.size()/8 + 2
-                                // (基址/行大小/总大小元数据, 与 pre_register_vars
-                                // 的 alloc_sz = ty.size()+16 同式); 外层常量的
-                                // 多维 VLA 同理 (type_has_vla 判定)
-                                t if Self::type_has_vla(t) => {
-                                    t.size() as i32 + 16
-                                }
-                                Type::Ptr(q)
-                                    if matches!(&q.base, Type::Array(_, ArraySize::Var(_))) =>
-                                {
-                                    16 // VLA 形参: 指针槽 + stride 槽
-                                }
-                                t => t.size().div_ceil(8) as i32 * 8,
-                            })
-                            .sum();
+                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
+                        let used = param_used_total;
                         let hdr = 48 + temp_slots * 8;
                         let off = -(used + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        // 更新累加值: 标量参数占 8 字节
+                        param_used_total += 8;
                         stack_param_stores.push((stack_arg_idx, off));
                         stack_arg_idx += 1;
                         self.variadic_named_gp += 1;
