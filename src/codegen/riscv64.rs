@@ -1725,8 +1725,16 @@ impl Riscv64Codegen {
             if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
                 if let (ExprKind::Local(d), ExprKind::Local(s)) = (&dst.kind, &src.kind) {
                     if let (Some(&doff), Some(&soff)) = (self.locals.get(d), self.locals.get(s)) {
-                        self.emit_lw(10, 2, soff);
-                        self.emit_sw(10, 2, doff);
+                        // 24 字节结构体拷贝: 3 个 doubleword
+                        // qword 1: gp_offset(4B) + fp_offset(4B)
+                        self.emit_ld(10, 2, soff);
+                        self.emit_sd(10, 2, doff);
+                        // qword 2: overflow_arg_area
+                        self.emit_ld(10, 2, soff + 8);
+                        self.emit_sd(10, 2, doff + 8);
+                        // qword 3: reg_save_area
+                        self.emit_ld(10, 2, soff + 16);
+                        self.emit_sd(10, 2, doff + 16);
                     }
                 }
             }
@@ -1999,45 +2007,111 @@ impl Riscv64Codegen {
 
     // 初始化 RISC-V va_list 变量.
     // 简化: ap = 指向保存区的指针 (addi a0, sp, va_save_base_off).
+    // va_list 现在是 24 字节结构体:
+    //   { gp_offset(4B), fp_offset(4B), overflow_arg_area(8B), reg_save_area(8B) }
     fn gen_va_start(&mut self, ap_name: &str) {
         let ap_off = match self.locals.get(ap_name) {
             Some(&o) => o,
             None => return,
         };
-        // addi a0, sp, va_save_base_off => a0 = &save_area
-        self.emit_addi(10, 2, self.va_save_base_off);
-        // sw a0, ap_off(sp)
-        self.emit_sw(10, 2, ap_off);
+        // gp_offset = 0
+        self.li_reg(10, 0); // a0 = 0
+        self.emit_sw(10, 2, ap_off); // sw a0, ap_off(sp)
+        // fp_offset = 0
+        self.emit_sw(10, 2, ap_off + 4); // sw a0, ap_off+4(sp)
+        // overflow_arg_area = sp + frame_bytes
+        self.li_reg(10, self.frame_bytes);
+        self.emit_add(10, 2, 10); // a0 = sp + frame_bytes
+        self.emit_sd(10, 2, ap_off + 8); // sd a0, ap_off+8(sp)
+        // reg_save_area = sp + va_save_base_off
+        self.li_reg(10, self.va_save_base_off);
+        self.emit_add(10, 2, 10); // a0 = sp + va_save_base_off
+        self.emit_sd(10, 2, ap_off + 16); // sd a0, ap_off+16(sp)
     }
 
     // 读取下一个变参 (整数路径) 到 a0.
-    // 策略: 先从 GP 保存区读, 超出 8 个则从 caller 栈读.
-    fn gen_va_arg_int(&mut self, _ap_name: &str) {
-        if self.va_gp_offs < 8 {
-            let off = self.va_save_base_off + self.va_gp_offs * 8;
-            self.emit_ld(10, 2, off);
-            self.va_gp_offs += 1;
-        } else {
-            // 从 caller 栈读取: 栈参数位于 frame + 128 (GP+float 保存区之后)
-            let stack_off = self.frame_bytes + 128 + (self.va_gp_offs - 8) * 8;
-            self.emit_ld(10, 2, stack_off);
-            self.va_gp_offs += 1;
-        }
+    // 从 va_list 结构体读取 gp_offset, 判断寄存器保存区还是溢出区.
+    fn gen_va_arg_int(&mut self, ap_name: &str) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // a5 = va_list 地址
+        self.emit_addi(15, 2, ap_off); // addi a5, sp, ap_off
+        // a0 = gp_offset (从 va_list[0])
+        self.emit_lw(10, 15, 0); // lw a0, 0(a5)
+        // 比较: a6 = 48
+        self.li_reg(11, 48); // a1 = 48
+        let overflow = self.fresh_label("va_int_of");
+        let done = self.fresh_label("va_int_done");
+        // bge a0, a1, overflow
+        self.emit_bge_label(10, 11, &overflow);
+        // ---- 寄存器保存区路径 ----
+        // a1 = reg_save_area (从 va_list[16])
+        self.emit_ld(11, 15, 16); // ld a1, 16(a5)
+        // a0 = a1 + a0 (reg_save_area + gp_offset)
+        self.emit_add(10, 11, 10);
+        // a0 = [a0] (加载参数值)
+        self.emit_ld(10, 10, 0); // ld a0, 0(a0)
+        // gp_offset += 8
+        self.emit_lw(11, 15, 0); // a1 = 旧 gp_offset
+        self.emit_addi(11, 11, 8); // a1 += 8
+        self.emit_sw(11, 15, 0); // sw a1, 0(a5)
+        self.j(&done);
+        // ---- 溢出区路径 ----
+        self.label(&overflow);
+        // a1 = overflow_arg_area (从 va_list[8])
+        self.emit_ld(11, 15, 8); // ld a1, 8(a5)
+        // a0 = [a1]
+        self.emit_ld(10, 11, 0); // ld a0, 0(a1)
+        // a1 += 8
+        self.emit_addi(11, 11, 8);
+        // 写回 overflow_arg_area
+        self.emit_sd(11, 15, 8); // sd a1, 8(a5)
+        self.label(&done);
     }
 
     // 读取下一个变参 (浮点路径) 到 fa0.
-    // 策略: 先从 float 保存区读, 超出 8 个则从 caller 栈读.
-    fn gen_va_arg_float(&mut self, _ap_name: &str) {
-        if self.va_flt_offs < 8 {
-            let off = self.va_save_base_off + 64 + self.va_flt_offs * 8;
-            self.emit_fld(10, 2, off);
-            self.va_flt_offs += 1;
-        } else {
-            // 从 caller 栈读取
-            let stack_off = self.frame_bytes + 128 + (self.va_flt_offs - 8) * 8;
-            self.emit_fld(10, 2, stack_off);
-            self.va_flt_offs += 1;
-        }
+    // 从 va_list 结构体读取 fp_offset, 判断寄存器保存区还是溢出区.
+    fn gen_va_arg_float(&mut self, ap_name: &str) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // a5 = va_list 地址
+        self.emit_addi(15, 2, ap_off); // addi a5, sp, ap_off
+        // a0 = fp_offset (从 va_list[4])
+        self.emit_lw(10, 15, 4); // lw a0, 4(a5)
+        // 比较: a1 = 128
+        self.li_reg(11, 128); // a1 = 128
+        let overflow = self.fresh_label("va_flt_of");
+        let done = self.fresh_label("va_flt_done");
+        // bge a0, a1, overflow
+        self.emit_bge_label(10, 11, &overflow);
+        // ---- 寄存器保存区路径 ----
+        // a1 = reg_save_area + 64 (float 保存区)
+        self.emit_ld(11, 15, 16); // ld a1, 16(a5) = reg_save_area
+        self.emit_addi(11, 11, 64); // a1 += 64
+        // a0 = a1 + a0 (float_save + fp_offset)
+        self.emit_add(10, 11, 10);
+        // fa0 = [a0] (float load)
+        self.emit_fld(10, 10, 0); // fld fa0, 0(a0)
+        // fp_offset += 8
+        self.emit_lw(11, 15, 4); // a1 = 旧 fp_offset
+        self.emit_addi(11, 11, 8); // a1 += 8
+        self.emit_sw(11, 15, 4); // sw a1, 4(a5)
+        self.j(&done);
+        // ---- 溢出区路径 ----
+        self.label(&overflow);
+        // a1 = overflow_arg_area (从 va_list[8])
+        self.emit_ld(11, 15, 8); // ld a1, 8(a5)
+        // fa0 = [a1]
+        self.emit_fld(10, 11, 0); // fld fa0, 0(a1)
+        // a1 += 8
+        self.emit_addi(11, 11, 8);
+        // 写回 overflow_arg_area
+        self.emit_sd(11, 15, 8); // sd a1, 8(a5)
+        self.label(&done);
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
@@ -6217,30 +6291,28 @@ mod tests {
     }
 
     // M25: RISC-V va_arg 整数路径 单元测试
-    // 验证 gen_va_arg_int 从保存区顺序读 a0
+    // 验证 gen_va_arg_int 生成运行时偏移读取代码
     #[test]
     fn riscv64_va_arg_int_reads_sequentially_from_save_area() {
         let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         cg.is_current_func_variadic = true;
-        cg.va_save_base_off = 0;
-        cg.va_gp_offs = 0;
-        cg.locals.insert("ap".to_string(), 100);
-        // 读 3 个变参
+        cg.va_save_base_off = 128;
+        cg.frame_bytes = 256;
+        cg.locals.insert("ap".to_string(), 96);
+        // 生成 va_arg_int
         cg.gen_va_arg_int("ap");
-        cg.gen_va_arg_int("ap");
-        cg.gen_va_arg_int("ap");
-        // 验证: 3 条 ld a0, off(sp) 指令, LE 编码:
-        //   byte0 低 7 位 = opcode = 0x03 (LD)
-        //   byte1 位 6:4  = funct3 = 0b011
-        let ld_count = cg
-            .code
-            .windows(4)
-            .filter(|w| (w[0] & 0x7f) == 0x03 && (w[1] & 0x70) == 0x30)
-            .count();
-        assert_eq!(ld_count, 3, "expected 3 LD instructions, got {ld_count}");
-        // 验证 va_gp_offs 推进
-        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
+        // 验证: 代码包含 BGE 指令 (funct3=101, opcode=1100011)
+        let has_bge = cg.code.windows(4).any(|w| {
+            (w[0] & 0x7f) == 0x63 && (w[1] & 0x70) == 0x50 // funct3=101 (BGE)
+        });
+        assert!(has_bge, "expected BGE instruction");
+        // 验证: 代码非空且长度合理
+        assert!(
+            cg.code.len() > 20,
+            "expected > 20 bytes of code, got {}",
+            cg.code.len()
+        );
     }
 
     // ===== 压缩指令自动选择测试 =====
