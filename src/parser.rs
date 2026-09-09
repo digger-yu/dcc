@@ -4168,15 +4168,30 @@ impl<'a> Parser<'a> {
                 return None;
             }
             // 变量名后可能有 __attribute__((unused)) 和 __asm__("label") 等
+            // GNU 允许两者以任意顺序出现, 如:
+            //   type name __asm__("label") __attribute__((visibility("hidden")))
+            // 因此用循环解析, 直到既没有 __attribute__ 也没有 __asm__
             let var_attrs = self.parse_attributes();
             let mut attrs = Self::merge_attrs(pre_attrs, var_attrs);
-            // __asm__("label"): 可能是 asm 标签或 register asm("rN")
-            if let Some(asm_label) = self.skip_asm_label() {
-                if storage.is_register && attrs.register_name.is_none() {
-                    attrs.register_name = Some(asm_label);
-                } else {
-                    // GNU asm 标签, 覆盖 ELF 符号名
-                    attrs.asm_label = Some(asm_label);
+            loop {
+                let mut progressed = false;
+                // __asm__("label"): 可能是 asm 标签或 register asm("rN")
+                if let Some(asm_label) = self.skip_asm_label() {
+                    if storage.is_register && attrs.register_name.is_none() {
+                        attrs.register_name = Some(asm_label);
+                    } else {
+                        // GNU asm 标签, 覆盖 ELF 符号名
+                        attrs.asm_label = Some(asm_label);
+                    }
+                    progressed = true;
+                }
+                // __asm__ 后的 __attribute__: 如 var __asm__("label") __attribute__((...))
+                if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                    attrs = Self::merge_attrs(attrs, self.parse_attributes());
+                    progressed = true;
+                }
+                if !progressed {
+                    break;
                 }
             }
             if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
