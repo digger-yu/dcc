@@ -11529,11 +11529,13 @@ impl Codegen {
                     // 实部重新载入 xmm0 (结果约定)
                     self.gen_float_imm_load(*real, &inner);
                 } else {
-                    // 整数内型 (_Complex int): 实部 rax + 临时区
+                    // 整数内型 (_Complex int/short/char):
+                    // 实部/虚部按类型宽度存储, 避免 store_stack(8B)
+                    // 在 isz < 8 时覆盖相邻虚部槽.
                     self.mov_imm(0, *real as i128);
-                    self.store_stack(0, result_off);
+                    self.emit_store(0, result_off, inner_sz as usize);
                     self.mov_imm(0, *imag as i128);
-                    self.store_stack(0, result_off + inner_sz);
+                    self.emit_store(0, result_off + inner_sz, inner_sz as usize);
                     self.mov_imm(0, *real as i128);
                 }
                 // rax = 指向 complex 值 (spill_complex_operand / 整体赋值
@@ -18965,12 +18967,17 @@ impl Codegen {
                 self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
             }
             _ => {
-                // 整数内型: 分量按类型宽度读取, 布局同 ComplexLit
-                // ([real@0][imag@isz], store_stack 每槽 8B)
+                // 整数内型: 分量按类型宽度读取.
+                // 布局: 实部 @ result_off, 虚部 @ result_off + isz
+                // (与全局 result_off + inner_sz 约定一致).
+                // 使用 emit_store(isz) 而非 store_stack(8B), 避免
+                // isz < 8 时 8B 写覆盖相邻虚部槽.
+                self.push(0); // save base address (&complex_var)
                 self.emit_load_mem_typed(isz as usize, &inner);
-                self.store_stack(0, result_off);
+                self.emit_store(0, result_off, isz as usize);
+                self.pop(0); // restore base address
                 self.emit_load_mem_typed_disp(isz as usize, &inner, isz);
-                self.store_stack(0, result_off + isz);
+                self.emit_store(0, result_off + isz, isz as usize);
             }
         }
         // rax = result_off (dcc complex rvalue 约定, 供 spill/整体拷贝)
