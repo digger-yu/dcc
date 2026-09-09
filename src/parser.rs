@@ -3234,6 +3234,10 @@ impl<'a> Parser<'a> {
                 Some(decls)
             }
         } else {
+            // 将声明开头的属性 (如 __attribute__((vector_size(N))))
+            // 提前合并到 decl_attrs, 使 finish_type() 能正确应用
+            // vector_size 等类型修饰属性.
+            self.decl_attrs.merge(leading_attrs.clone());
             let ty = self.parse_decl_specifiers()?;
             // __GIMPLE: GCC 内部 IR 语法, 跳过整个函数声明
             if self.cur.kind == TokKind::Ident && self.cur.text == "__GIMPLE" {
@@ -3299,7 +3303,10 @@ impl<'a> Parser<'a> {
                 return Some(type_decl.into_iter().collect());
             }
             let storage = self.decl_storage;
-            let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
+            // leading_attrs 已在 parse_decl_specifiers 前合并到
+            // decl_attrs; finish_type 可能已消费 vector_size,
+            // 剩余属性仍保留在 decl_attrs 中.
+            let attrs = std::mem::take(&mut self.decl_attrs);
             let mut decls = vec![];
             let saved_auto = self.decl_auto_type;
             while let Some(ds) = self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
@@ -7486,7 +7493,7 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof {
                 break;
             }
-            // C23 [[attributes]]: 在块级作用域中出现，静默跳过
+            // C23 [[attributes]]: 在块级作用域出现，静默跳过
             if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                 self.parse_std_attributes();
             }
@@ -7509,26 +7516,53 @@ impl<'a> Parser<'a> {
                 }
             } else if self.cur.kind == TokKind::Ident
                 && self.cur.text == "__attribute__"
-                && self.is_attribute_stmt()
             {
-                // __attribute__((...)) 作为独立语句 (如 ATTRIBUTE_FALLTHROUGH)
-                // 必须在 is_decl_start() 之前检查
-                match self.parse_stmt() {
-                    Some(s) => items.push(BlockItem::Stmt(s)),
-                    None => { self.advance(); }
+                let is_stmt = self.is_attribute_stmt();
+                if is_stmt {
+                    // __attribute__((...)) 作为独立语句 (如 ATTRIBUTE_FALLTHROUGH)
+                    match self.parse_stmt() {
+                        Some(s) => items.push(BlockItem::Stmt(s)),
+                        None => { self.advance(); }
+                    }
+                } else if self.is_decl_start() {
+                    match self.parse_decl() {
+                        Some(ds) => {
+                            for d in ds {
+                                let (d, new_mapping) = if self.in_function {
+                                    self.rename_shadow_var(d)
+                                } else {
+                                    (d, None)
+                                };
+                                let mut d = d;
+                                if !shadow_map.is_empty() {
+                                    Self::apply_shadow_map_decl(&mut d, &shadow_map);
+                                }
+                                if let Some((old, new)) = new_mapping {
+                                    shadow_map.push((old, new));
+                                }
+                                items.push(BlockItem::Decl(d));
+                            }
+                        }
+                        None => {
+                            self.advance();
+                        }
+                    }
+                } else {
+                    // fallback: treat as statement
+                    match self.parse_stmt() {
+                        Some(s) => items.push(BlockItem::Stmt(s)),
+                        None => { self.advance(); }
+                    }
                 }
             } else if self.is_decl_start() {
                 match self.parse_decl() {
                     Some(ds) => {
                         for d in ds {
-                            // 嵌套块遮蔽: 如果声明的变量名在外层作用域已存在,
-                            // 重命名为内部唯一名以避免 codegen var_map 冲突。
                             let (d, new_mapping) = if self.in_function {
                                 self.rename_shadow_var(d)
                             } else {
                                 (d, None)
                             };
-                            // 应用已有的遮蔽映射到当前声明 (如初始化表达式引用了被遮蔽的变量)
                             let mut d = d;
                             if !shadow_map.is_empty() {
                                 Self::apply_shadow_map_decl(&mut d, &shadow_map);
@@ -7546,7 +7580,6 @@ impl<'a> Parser<'a> {
             } else {
                 match self.parse_stmt() {
                     Some(mut s) => {
-                        // 应用遮蔽映射到语句中的变量引用
                         if !shadow_map.is_empty() {
                             Self::apply_shadow_map_stmt(&mut s, &shadow_map);
                         }
@@ -7833,20 +7866,20 @@ impl<'a> Parser<'a> {
     /// 若后续是 `;` 或语句上下文, 返回 true (独立语句).
     /// 若后续是 extern/static/typedef/类型关键字等, 返回 false (声明).
     fn is_attribute_stmt(&self) -> bool {
-        // 保存状态
-        let saved_pos = self.lex.pos;
-        let _saved_line = self.lex.line;
-        let _saved_col = self.lex.col;
-        let _saved_cur = self.cur.clone();
-        let _saved_peek = self.peek.clone();
-        // 需要可变副本来前瞻; 使用 unsafe 不可取,
-        // 改为简单启发式: 检查 __attribute__ 后面的 token
-        // 如果是 __attribute__((...)); 则 RParen 深度归零后下一个是 `;`
-        // 简单方法: 扫描 token 流找到属性结束位置
-        let mut p = saved_pos;
+        // 计算当前 __attribute__ token 在源码中的字节偏移.
+        // self.cur.span.line/col 是 1-based.
         let src = &self.lex.src;
+        let target_line = self.cur.span.line as usize;
+        let mut p = 0;
+        let mut cur_line = 1;
+        while p < src.len() && cur_line < target_line {
+            if src[p] == b'\n' { cur_line += 1; }
+            p += 1;
+        }
+        // p 现在指向目标行的起始, 加上 col-1 得到 token 起始位置
+        p += (self.cur.span.col as usize).saturating_sub(1);
         // 跳过 __attribute__
-        while p < src.len() && (src[p] as char).is_ascii_alphanumeric() || (p < src.len() && src[p] == b'_') {
+        while p < src.len() && ((src[p] as char).is_ascii_alphanumeric() || src[p] == b'_') {
             p += 1;
         }
         // 跳过空白
