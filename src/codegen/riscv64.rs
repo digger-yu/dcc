@@ -1425,7 +1425,7 @@ impl Riscv64Codegen {
                 }
                 return true;
             }
-            ExprKind::VaArg { ap } => {
+            ExprKind::VaArg { ap, .. } => {
                 // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
                 self.gen_va_arg_int(ap);
                 return true;
@@ -2057,7 +2057,7 @@ impl Riscv64Codegen {
                 return true;
             }
             // M25: 浮点型 __builtin_va_arg(ap, double) — fa0..fa7 已在入口保存到 va_save_base+64
-            ExprKind::VaArg { ap } => {
+            ExprKind::VaArg { ap, .. } => {
                 self.gen_va_arg_float(ap);
                 return true;
             }

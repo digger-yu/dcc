@@ -57,8 +57,10 @@ pub enum ExprKind {
     /// M25: `__builtin_va_arg(ap, T)` 在 aarch64/riscv64 后端
     /// 需特殊处理 (走寄存器保存区, 跟普通 Call 区别开).
     /// `ap` 保留 ap 变量名便于 codegen 查 var_map.
+    /// `arg_ty` 保留要读取的类型信息, 便于 codegen 层类型分派.
     VaArg {
         ap: String,
+        arg_ty: ValueType,
     },
     Conditional,
     Aggregate,
@@ -1405,7 +1407,7 @@ impl Lowering {
                 ExprKind::ControlFlow,
                 vec![self.lower_expr(l), self.lower_expr(r)],
             ),
-            Expr::VaArg { ap, .. } => {
+            Expr::VaArg { ap, ref ty, .. } => {
                 // 支持简单标识符和结构体成员访问 (如 state->ap)
                 let ap_name = match ap.as_ref() {
                     Expr::Ident { name, .. } => name.name.clone(),
@@ -1413,7 +1415,7 @@ impl Lowering {
                     Expr::Member { field, .. } => field.name.clone(),
                     _ => String::new(),
                 };
-                (ExprKind::VaArg { ap: ap_name }, vec![self.lower_expr(ap)])
+                (ExprKind::VaArg { ap: ap_name, arg_ty: self.lower_type(ty, &span) }, vec![self.lower_expr(ap)])
             }
             Expr::SizeofTy { ty: ref sty, .. } => {
                 literal = Some(ExprLiteral::Int(sty.size() as i128));

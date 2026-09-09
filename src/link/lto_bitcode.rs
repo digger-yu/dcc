@@ -129,10 +129,11 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
         ExprKind::Unary(op) => {
             out.push(unop_to_tag(*op));
         }
-        ExprKind::VaArg { ap } => {
+        ExprKind::VaArg { ap, ref arg_ty } => {
             let n = ap.as_bytes();
             out.extend_from_slice(&(n.len() as u32).to_le_bytes());
             out.extend_from_slice(n);
+            encode_type(out, arg_ty);
         }
         _ => {}
     }
@@ -443,7 +444,7 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                 .map_err(|e| e.to_string())?
                 .to_string();
             *cur += n;
-            ExprKind::VaArg { ap }
+            ExprKind::VaArg { ap, arg_ty: decode_type(data, cur)? }
         }
         _ => return Err(format!("bad expr kind {}", kind_tag)),
     };
