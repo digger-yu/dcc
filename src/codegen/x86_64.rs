@@ -4852,13 +4852,28 @@ impl Codegen {
 
         // extern 函数声明 (无函数体 = 外部引用, 排除 alias 声明)
         // 若本 TU 内有同名函数定义 (含 asm label 匹配), 则跳过 UND 符号
-        let func_has_definition = |name: &str| -> bool {
-            prog.decls.iter().any(|d| {
-                matches!(d, Decl::Func(f) if f.body.is_some() && (
-                    f.name.name == name ||
-                    f.asm_label.as_deref() == Some(name)
-                ))
+        // 预计算有定义的函数名集合 (含 asm label 解析名), 避免 O(n²) 线性扫描.
+        let func_defined: HashSet<String> = prog
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Func(f) if f.body.is_some() => Some(f.name.name.clone()),
+                _ => None,
             })
+            .collect();
+        // 收集所有 asm label 解析名 (有定义的函数)
+        let func_defined_asm: HashSet<String> = prog
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Func(f) if f.body.is_some() && f.asm_label.is_some() => {
+                    Some(self.resolve_asm_label(&f.name.name).to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let func_has_definition = |name: &str| -> bool {
+            func_defined.contains(name) || func_defined_asm.contains(name)
         };
         let mut emitted_func_syms: std::collections::HashSet<String> =
             std::collections::HashSet::new();
