@@ -15307,6 +15307,25 @@ impl Codegen {
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
     }
 
+    /// 标量浮点精度转换: xmm0 中的标量值从 src_ty 转换到 dst_ty.
+    /// double→float: cvtsd2ss; float→double: cvtss2sd; 其他/相同: 无操作.
+    fn emit_scalar_float_convert(&mut self, src_ty: &Type, dst_ty: &Type) {
+        let src_is_double = matches!(src_ty, Type::Double | Type::LongDouble);
+        let src_is_float = matches!(src_ty, Type::Float);
+        let dst_is_float = matches!(dst_ty, Type::Float);
+        let dst_is_double = matches!(dst_ty, Type::Double);
+        if src_is_double && dst_is_float {
+            // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
+            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
+        } else if src_is_float && dst_is_double {
+            // cvtss2sd xmm0, xmm0: F3 0F 5A C0
+            self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+        }
+        // 整数→浮点: gen_expr 已将整数放入 rax, 但浮点路径期望 xmm0.
+        // 这种情况应由调用端在 gen_expr 后处理 (此处不处理).
+        let _ = src_is_float; // suppress warning
+    }
+
     // SIMD 向量运算: 128-bit 标准向量使用 XMM 打包指令, 其余回退标量逐元素
     fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, result_slot: usize) {
         // 从任一向量操作数获取元素类型; 标量操作数需广播 (broadcast)
@@ -15354,6 +15373,8 @@ impl Codegen {
                     self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
                 } else {
                     self.gen_expr(l, 0);
+                    // 标量精度转换: 匹配向量元素类型
+                    self.emit_scalar_float_convert(&l.ty(), &elem_ty);
                 }
                 self.emit_sub_rsp(8);
                 if is_float {
@@ -15366,6 +15387,8 @@ impl Codegen {
                     self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
                 } else {
                     self.gen_expr(r, 0);
+                    // 标量精度转换: 匹配向量元素类型
+                    self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                 }
                 if is_float {
                     self.emit(&[0xF3, 0x0F, 0x10, 0xC8]); // movss xmm1, xmm0
@@ -15412,10 +15435,9 @@ impl Codegen {
                 BinOp::Mul => {
                     self.emit(&[0x48, 0x0F, 0xAF, 0xC8]);
                 } // imul rcx, rax
-                BinOp::Div => {
+                BinOp::Div | BinOp::Mod => {
                     // 整数除法: xchg 后 rax=被除数, rcx=除数
-                    // (gen_scalar_vector_load 1/2 字节零扩展, 有符号小类型
-                    //  由 cwd/cbw 从低位符号扩展, 结果正确)
+                    let is_mod = matches!(op, BinOp::Mod);
                     self.emit(&[0x48, 0x91]); // xchg rax, rcx
                     let signed = matches!(
                         elem_ty,
@@ -15464,7 +15486,43 @@ impl Codegen {
                             }
                         }
                     }
-                    self.mov(1, 0); // rcx = 商 (rax), 供 emit_store 写入
+                    if is_mod {
+                        // 余数在 rdx, 移到 rcx
+                        self.emit(&[0x48, 0x89, 0xD1]); // mov rcx, rdx
+                    } else {
+                        self.mov(1, 0); // rcx = 商 (rax)
+                    }
+                }
+                BinOp::Xor => {
+                    self.emit(&[0x48, 0x31, 0xC1]); // xor rcx, rax
+                }
+                BinOp::And => {
+                    self.emit(&[0x48, 0x21, 0xC1]); // and rcx, rax
+                }
+                BinOp::Or => {
+                    self.emit(&[0x48, 0x09, 0xC1]); // or rcx, rax
+                }
+                BinOp::Shl | BinOp::Shr => {
+                    // rcx=l_val, rax=r_val. x86 shift: shl/sar r/m, cl
+                    // xchg -> rax=l, rcx=r; shift rax by cl; mov rcx,rax
+                    self.emit(&[0x48, 0x91]); // xchg rax, rcx
+                    let signed = matches!(
+                        elem_ty,
+                        Type::SChar
+                            | Type::Short
+                            | Type::Int
+                            | Type::Long
+                            | Type::LongLong
+                    );
+                    if matches!(op, BinOp::Shr) && signed {
+                        // sar rcx, cl (但我们需要 rax 为目标)
+                        // sar rax, cl: 0x48, 0xD3, 0xF8
+                        self.emit(&[0x48, 0xD3, 0xF8]);
+                    } else {
+                        // shl rax, cl: 0x48, 0xD3, 0xE0
+                        self.emit(&[0x48, 0xD3, 0xE0]);
+                    }
+                    self.mov(1, 0); // mov rcx, rax
                 }
                 _ => {
                     self.emit(&[0x48, 0x01, 0xC1]);
