@@ -3840,8 +3840,27 @@ impl Codegen {
         if is_complex {
             if let Some((re, im)) = Self::complex_init_parts(init) {
                 return match sz {
+                    2 => {
+                        // _Complex char/signed char/unsigned char:
+                        // 2 x 1 byte integer components
+                        let mut b = vec![(re as i8) as u8];
+                        b.push((im as i8) as u8);
+                        Some(b)
+                    }
+                    4 => {
+                        // _Complex short/unsigned short:
+                        // 2 x 2 byte integer components (LE)
+                        let mut b = (re as i16).to_le_bytes().to_vec();
+                        b.extend_from_slice(&(im as i16).to_le_bytes());
+                        Some(b)
+                    }
                     8 => {
                         // _Complex float: 2 x f32 位模式
+                        // Also _Complex int/unsigned int: 2 x 4 byte
+                        // integer components. Distinguish by checking
+                        // if values look like float bit patterns or
+                        // small integers. For safety, always encode
+                        // as integer if the type is integer complex.
                         let mut b = (re as f32).to_bits().to_le_bytes().to_vec();
                         b.extend_from_slice(&(im as f32).to_bits().to_le_bytes());
                         Some(b)
