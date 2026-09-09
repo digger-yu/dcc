@@ -103,6 +103,14 @@ pub struct Global {
     pub initializer: Option<TypedExpr>,
     pub span: Span,
     pub is_tls: bool,
+    /// 是否是函数内 static local (而非文件级全局变量)
+    pub is_static_local: bool,
+    /// 所属函数名 (static local 时 Some, 文件级全局变量时 None)
+    pub owner_function: Option<String>,
+    /// 对齐要求 (字节)
+    pub alignment: usize,
+    /// section 属性 (如 ".data.unlikely")
+    pub section: Option<String>,
 }
 
 /// Structured type information extracted from AST type definitions.
@@ -504,6 +512,10 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     initializer: v.init.as_ref().map(|e| cx.lower_expr(e)),
                     span: v.span.clone(),
                     is_tls: v.is_thread_local,
+                    is_static_local: false,
+                    owner_function: None,
+                    alignment: v.alignment.unwrap_or(v.ty.align()).max(1),
+                    section: v.section.clone(),
                 });
             }
             // Type definitions and global asm do not produce IR nodes
@@ -520,6 +532,22 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                 type_defs.push(decl.clone());
             }
         }
+    }
+    // 将函数内 static local 变量也纳入 IR globals,
+    // 使 IR 层能表达所有全局对象 (文件级 + static local).
+    let sl_map = crate::static_locals::analyze_static_locals(&source);
+    for info in sl_map.iter_all() {
+        globals.push(Global {
+            name: info.mangled_name.clone(),
+            ty: cx.lower_type(&info.ty, &Span::point("", 0, 0)),
+            initializer: info.init.as_ref().map(|e| cx.lower_expr(e)),
+            span: Span::point("", 0, 0),
+            is_tls: false,
+            is_static_local: true,
+            owner_function: Some(info.owner_func.clone()),
+            alignment: info.alignment,
+            section: None,
+        });
     }
     // Separate errors from warnings: only errors are fatal.
     let mut errors = Vec::new();
@@ -566,6 +594,23 @@ pub fn validate(module: &Module) -> Result<(), Vec<Diagnostic>> {
     for global in &module.globals {
         if let Some(init) = &global.initializer {
             validate_expr(init, &mut diagnostics);
+        }
+        // Storage class 约束验证: static local 必须有所属函数和 mangled 名
+        if global.is_static_local {
+            if global.owner_function.is_none() {
+                diagnostics.push(Diagnostic::err(
+                    "E1090",
+                    format!("static local '{}' has no owner function", global.name),
+                    global.span.clone(),
+                ));
+            }
+            if !global.name.starts_with(".Lsl") {
+                diagnostics.push(Diagnostic::err(
+                    "E1091",
+                    format!("static local '{}' has non-mangled name (expected .Lsl prefix)", global.name),
+                    global.span.clone(),
+                ));
+            }
         }
     }
     if diagnostics.is_empty() {

@@ -581,6 +581,10 @@ fn deserialize_global(data: &[u8], cur: &mut usize) -> Result<Global, String> {
         initializer: init,
         span: Span::point("", 0, 0),
         is_tls: false,
+        is_static_local: false,
+        owner_function: None,
+        alignment: 1,
+        section: None,
     })
 }
 
@@ -1668,6 +1672,10 @@ mod merge_tests {
             },
             span: Span::point("", 0, 0),
             is_tls: false,
+            is_static_local: false,
+            owner_function: None,
+            alignment: 1,
+            section: None,
         }
     }
 
@@ -1858,6 +1866,10 @@ mod const_prop_tests {
                 initializer: Some(make_const_expr(1024)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
+                is_static_local: false,
+                owner_function: None,
+                alignment: 1,
+                section: None,
             }],
         };
         let mut ctx = ConstPropagationCtx::new();
@@ -1880,6 +1892,10 @@ mod const_prop_tests {
                 initializer: Some(make_const_expr(42)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
+                is_static_local: false,
+                owner_function: None,
+                alignment: 1,
+                section: None,
             }],
         };
         let mut ctx = ConstPropagationCtx::new();
@@ -1910,6 +1926,10 @@ mod const_prop_tests {
                 initializer: Some(make_const_expr(256)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
+                is_static_local: false,
+                owner_function: None,
+                alignment: 1,
+                section: None,
             }],
         };
         let mut modules = vec![module];
@@ -1951,6 +1971,10 @@ mod const_prop_tests {
                 initializer: Some(make_const_expr(1)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
+                is_static_local: false,
+                owner_function: None,
+                alignment: 1,
+                section: None,
             }],
         };
         let mut modules = vec![module];
@@ -2826,6 +2850,10 @@ mod alias_tests {
             }),
             span: Span::point("", 0, 0),
             is_tls: false,
+            is_static_local: false,
+            owner_function: None,
+            alignment: 1,
+            section: None,
         };
         let module = BitcodeModule {
             source_path: "test.c".to_string(),

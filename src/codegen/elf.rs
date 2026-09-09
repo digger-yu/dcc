@@ -412,6 +412,8 @@ pub fn build_elf_exec_x86_64(
     rodata_size: u64,
     tdata_size: u64,
     tbss_size: u64,
+    data_size: u64,
+    bss_size: u64,
     symbols: &[ElfSym],
 ) -> Vec<u8> {
     let hdr = 64 + 56;
@@ -427,6 +429,12 @@ pub fn build_elf_exec_x86_64(
     }
     if tbss_size > 0 {
         names.push(".tbss");
+    }
+    if data_size > 0 {
+        names.push(".data");
+    }
+    if bss_size > 0 {
+        names.push(".bss");
     }
     names.extend_from_slice(&[".symtab", ".strtab", ".shstrtab"]);
     let mut name_off = vec![0u32];
@@ -449,6 +457,12 @@ pub fn build_elf_exec_x86_64(
             idx += 1;
         }
         if tbss_size > 0 {
+            idx += 1;
+        }
+        if data_size > 0 {
+            idx += 1;
+        }
+        if bss_size > 0 {
             idx += 1;
         }
         idx
@@ -545,6 +559,41 @@ pub fn build_elf_exec_x86_64(
         );
         ni += 1;
     }
+    if data_size > 0 {
+        write_section_header(
+            &mut out,
+            name_off[ni],
+            SHT_PROGBITS,
+            SHF_ALLOC | SHF_WRITE,
+            vaddr,
+            file_off,
+            data_size,
+            0,
+            0,
+            8,
+            0,
+        );
+        vaddr += data_size;
+        file_off += data_size;
+        ni += 1;
+    }
+    if bss_size > 0 {
+        write_section_header(
+            &mut out,
+            name_off[ni],
+            SHT_NOBITS,
+            SHF_ALLOC | SHF_WRITE,
+            vaddr,
+            0,
+            bss_size,
+            0,
+            0,
+            8,
+            0,
+        );
+        vaddr += bss_size;
+        ni += 1;
+    }
 
     write_section_header(
         &mut out,
@@ -607,7 +656,7 @@ pub fn build_elf_exec_x86_64(
     out[0x3e..0x40].copy_from_slice(&sh_shstrtab.to_le_bytes());
 
     let p_filesz = hdr as u64 + image.len() as u64;
-    let p_memsz = p_filesz + tbss_size;
+    let p_memsz = p_filesz + tbss_size + bss_size;
     out[0x40..0x44].copy_from_slice(&PT_LOAD.to_le_bytes());
     out[0x44..0x48].copy_from_slice(&7u32.to_le_bytes());
     out[0x48..0x50].copy_from_slice(&0u64.to_le_bytes());

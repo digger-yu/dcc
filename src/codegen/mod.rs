@@ -1601,6 +1601,8 @@ pub fn emit(
                     cg.rodata.len() as u64,
                     cg.tdata_section.len() as u64,
                     cg.tbss_size,
+                    cg.data_section.len() as u64,
+                    cg.bss_size,
                     &cg.symbols,
                 )
             }

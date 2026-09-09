@@ -469,8 +469,10 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
     b.items.iter().any(|item| match item {
         BlockItem::Decl(Decl::Var(v)) => {
             // 数组类型带初始化式 (复合字面量 SSA 无法表示)
-            matches!(v.ty, crate::ast::Type::Array(_, _))
-                && v.init.as_ref().is_some()
+            (matches!(v.ty, crate::ast::Type::Array(_, _))
+                && v.init.as_ref().is_some())
+            // static 局部变量跨调用持久, SSA 无法正确建模
+            || v.is_static
         }
         BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
         _ => false,

@@ -172,12 +172,9 @@ pub struct Codegen {
     nested_func_rename_counter: u32,
     current_func_name: String, // 当前正在编译的函数名
     current_func_ret_ty: Type, // 当前函数的返回类型
-    registered_static_locals: std::collections::HashSet<String>, // 本函数中成功注册为全局的 static 局部变量名
-    runtime_init_static_locals: std::collections::HashSet<String>, // 已注册但需要运行时初始化的 static 局部变量名
+    /// 静态局部变量分析 pass 的结果 (由 compile() 预计算, 后端消费)
+    static_local_map: crate::static_locals::StaticLocalMap,
     real_global_names: std::collections::HashSet<String>, // 真实全局变量名 (不含 static local), 用于避免 static local 覆盖真实全局
-    static_local_global_names: std::collections::HashSet<String>, // 已注册到 globals 的 static local mangled 名 (跨函数累积, 防 mangled 冲突)
-    static_local_rename_map: Vec<(String, String)>, // 本函数 static local 原名 → mangled globals 键名 (有序, 后注册的优先)
-    static_local_counter: u32, // 用于生成唯一的 static local mangled 名
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
     current_func_is_nested: bool, // 当前编译的函数是否是嵌套函数
@@ -1428,12 +1425,8 @@ impl Codegen {
             nested_func_rename_counter: 0,
             current_func_name: String::new(),
             current_func_ret_ty: Type::Int,
-            registered_static_locals: std::collections::HashSet::new(),
-            runtime_init_static_locals: std::collections::HashSet::new(),
+            static_local_map: crate::static_locals::StaticLocalMap::default(),
             real_global_names: std::collections::HashSet::new(),
-            static_local_global_names: std::collections::HashSet::new(),
-            static_local_rename_map: Vec::new(),
-            static_local_counter: 0,
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
             current_returns_nonnull: false,
@@ -3559,6 +3552,9 @@ impl Codegen {
         self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00]); // mov eax, 0x3c
         self.emit(&[0x0f, 0x05]); // syscall
         self.emit(&[0xeb, 0xfe]); // jmp self
+        // 静态局部变量分析 pass + 预注册到 data/bss
+        self.static_local_map = crate::static_locals::analyze_static_locals(prog);
+        self.pre_register_static_locals();
         self.emit_functions(prog);
         // 对齐 code 到 8 字节 (ELF 的 .rodata 也按 8 对齐)
         while !self.code.len().is_multiple_of(8) {
@@ -4546,6 +4542,9 @@ impl Codegen {
             }
         }
 
+        // 静态局部变量分析 pass + 预注册到 data/bss
+        self.static_local_map = crate::static_locals::analyze_static_locals(prog);
+        self.pre_register_static_locals();
         // 生成函数代码 (无 _start)
         self.emit_functions(prog);
 
@@ -6463,19 +6462,13 @@ impl Codegen {
         self.temp_slots = temp_slots;
         // KASAN 红区: 每个局部变量后追加 32 字节 (4 个 8 字节槽位)
         let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
-        // Static 局部变量: 注册到全局数据段 (.data/.bss), 不在栈上分配
-        self.registered_static_locals.clear();
-        self.runtime_init_static_locals.clear();
-        self.static_local_rename_map.clear();
-        // 真实全局变量名: 排除所有 static local 的 mangled 名
+        // Static 局部变量: 已由分析 pass 预注册到 data/bss,
+        // 此处仅需计算 real_global_names (排除 static local 的 mangled 名)
         // (mangled 名以 ".Lsl" 开头, 不会与 C 标识符冲突)
         self.real_global_names = self.globals.keys()
             .filter(|k| !k.starts_with(".Lsl"))
             .cloned()
             .collect();
-        if let Some(body) = &f.body {
-            self.registered_static_locals = self.register_static_locals_block(&body.items);
-        }
         // VLA 形参: (名字, 维度表达式, 元素大小)。`char a[2][++N]`
         // 已退化为 Ptr(Array(Char, Var(++N))), 维度表达式保留但需在
         // 序言求值 (C11 6.9.1p10: 每次调用求值, 副作用生效)
@@ -6483,7 +6476,7 @@ impl Codegen {
         if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.registered_static_locals);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.static_local_map, &f.name.name);
             }
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
@@ -6896,7 +6889,7 @@ impl Codegen {
             }
         } else {
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.registered_static_locals);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.static_local_map, &f.name.name);
             }
             // 包含 padding 条目, 每个占 8 字节
             let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
@@ -6970,8 +6963,8 @@ impl Codegen {
                 match item {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
-                        if v.is_static && self.registered_static_locals.contains(&v.name.name) {
-                            if self.runtime_init_static_locals.contains(&v.name.name) {
+                        if v.is_static && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name) {
+                            if self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name) {
                                 // static local 需要运行时初始化: 发射初始化代码到全局地址
                                 if let Some(init) = &v.init {
                                     self.gen_expr(init, 0);
@@ -8543,8 +8536,8 @@ impl Codegen {
                     // static 局部变量已在全局数据段分配,
                     // 跳过栈分配 (与函数顶层遍历 L6970 一致)
                     if v.is_static
-                        && self.registered_static_locals.contains(&v.name.name)
-                        && !self.runtime_init_static_locals.contains(&v.name.name)
+                        && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name)
+                        && !self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
                     {
                         continue;
                     }
@@ -8566,7 +8559,7 @@ impl Codegen {
                     }
                     // static local 需要运行时初始化: 发射初始化代码到全局地址
                     if v.is_static
-                        && self.runtime_init_static_locals.contains(&v.name.name)
+                        && self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
                     {
                         if let Some(init) = &v.init {
                             self.gen_expr(init, 0);
@@ -10889,14 +10882,14 @@ impl Codegen {
                         BlockItem::Decl(Decl::Var(v)) => {
                             // static 局部变量已在全局数据段分配
                             if v.is_static
-                                && self.registered_static_locals.contains(&v.name.name)
-                                && !self.runtime_init_static_locals.contains(&v.name.name)
+                                && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name)
+                                && !self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
                                 continue;
                             }
                             // static local 需要运行时初始化
                             if v.is_static
-                                && self.runtime_init_static_locals.contains(&v.name.name)
+                                && self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
                                 if let Some(init) = &v.init {
                                     self.gen_expr(init, 0);
@@ -20639,80 +20632,54 @@ impl Codegen {
         n
     }
 
-    // 递归扫描函数体, 将 static 局部变量注册到全局数据段
-    // 返回成功注册的 static 局部变量名集合
-    fn register_static_locals_block(&mut self, items: &[BlockItem]) -> std::collections::HashSet<String> {
-        let mut registered = std::collections::HashSet::new();
-        for item in items {
-            match item {
-                BlockItem::Decl(Decl::Var(v)) if v.is_static => {
-                    if self.register_one_static_local(v) {
-                        registered.insert(v.name.name.clone());
-                    }
-                }
-                BlockItem::Stmt(s) => {
-                    let sub = self.register_static_locals_stmt(s);
-                    registered.extend(sub);
-                }
-                _ => {}
+    /// 预注册所有 static local 到 data/bss 段.
+    /// 在 compile_exec/compile_rel 中全局变量处理之后、函数编译之前调用.
+    fn pre_register_static_locals(&mut self) {
+        // 收集需要注册的 static local 信息 (避免借用冲突)
+        let infos: Vec<crate::static_locals::StaticLocalInfo> =
+            self.static_local_map.iter_all().cloned().collect();
+        for info in &infos {
+            let needs_rt = self.register_static_global(info);
+            if needs_rt {
+                self.static_local_map.mark_runtime_init(
+                    &info.owner_func,
+                    &info.source_name,
+                );
             }
         }
-        registered
     }
 
-    fn register_static_locals_stmt(&mut self, s: &Stmt) -> std::collections::HashSet<String> {
-        let mut registered = std::collections::HashSet::new();
-        match s {
-            Stmt::Block { b, .. } => {
-                let sub = self.register_static_locals_block(&b.items);
-                registered.extend(sub);
-            }
-            Stmt::If { then_, else_, .. } => {
-                let sub1 = self.register_static_locals_stmt(then_);
-                registered.extend(sub1);
-                if let Some(e) = else_ {
-                    let sub2 = self.register_static_locals_stmt(e);
-                    registered.extend(sub2);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
-                let sub = self.register_static_locals_stmt(body);
-                registered.extend(sub);
-            }
-            Stmt::Switch { cases, .. } => {
-                for case in cases {
-                    let sub = self.register_static_locals_block(&case.body.items);
-                    registered.extend(sub);
-                }
-            }
-            Stmt::Label { stmt, .. } => {
-                let sub = self.register_static_locals_stmt(stmt);
-                registered.extend(sub);
-            }
-            _ => {}
-        }
-        registered
-    }
-
-    fn register_one_static_local(&mut self, v: &VarDecl) -> bool {
-        let sz = v.ty.size().max(1);
-        let align = v.alignment.unwrap_or(v.ty.align()).max(1);
-        let initialized = v.init.is_some();
+    /// 注册单个 static local 到 data/bss 段.
+    /// 返回 true 表示需要运行时初始化.
+    fn register_static_global(
+        &mut self,
+        info: &crate::static_locals::StaticLocalInfo,
+    ) -> bool {
+        let sz = info.size;
+        let align = info.alignment;
+        let initialized = info.init.is_some();
         // 检查初始化式是否可在编译时求值
         let can_static_init = if initialized {
-            match v.init.as_ref().unwrap() {
+            match info.init.as_ref().unwrap() {
                 Expr::String { .. } => true,
                 Expr::InitList { .. } => true, // 尝试, 可能失败
                 _ => {
-                    let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                    Self::global_init_bytes(v.init.as_ref().unwrap(), sz, is_float, matches!(v.ty, Type::Complex(_))).is_some()
+                    let is_float = matches!(
+                        info.ty,
+                        Type::Float | Type::Double | Type::LongDouble
+                    );
+                    Self::global_init_bytes(
+                        info.init.as_ref().unwrap(),
+                        sz,
+                        is_float,
+                        matches!(info.ty, Type::Complex(_)),
+                    )
+                    .is_some()
                 }
             }
         } else {
-            true // 无初始化式 → BSS 零初始化, 无需运行时初始化
+            true // 无初始化式 → BSS 零初始化
         };
-        // 无论是否能静态初始化, 都注册为全局对象.
-        // 不能静态求值时分配 BSS 空间, 标记为运行时初始化.
         let use_data = can_static_init && initialized;
         if use_data {
             self.data_align = self.data_align.max(align as u64);
@@ -20729,14 +20696,14 @@ impl Codegen {
             self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
             self.bss_size
         };
-        // 尝试写入初始值 (与全局变量处理逻辑一致)
+        // 尝试写入初始值
         let has_init = if use_data {
-            if let Some(init) = &v.init {
+            if let Some(init) = &info.init {
                 match init {
                     Expr::String { data, .. } => {
-                        if matches!(&v.ty, Type::Ptr(_)) {
+                        if matches!(&info.ty, Type::Ptr(_)) {
                             self.data_section.resize(self.data_section.len() + sz, 0);
-                        } else if matches!(&v.ty, Type::Array(_, _)) {
+                        } else if matches!(&info.ty, Type::Array(_, _)) {
                             let copy_len = data.len().min(sz);
                             self.data_section.extend_from_slice(&data[..copy_len]);
                             for _ in copy_len..sz {
@@ -20752,7 +20719,9 @@ impl Codegen {
                     }
                     Expr::InitList { inits, .. } => {
                         let base = self.data_section.len() as u64;
-                        if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, Some((base, None)), false) {
+                        if let Some(init_data) =
+                            self.gen_global_init_list(&info.ty, inits, Some((base, None)), false)
+                        {
                             self.data_section.extend_from_slice(&init_data);
                             for _ in init_data.len()..sz {
                                 self.data_section.push(0);
@@ -20763,8 +20732,16 @@ impl Codegen {
                         }
                     }
                     _ => {
-                        let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                        if let Some(bytes) = Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_))) {
+                        let is_float = matches!(
+                            info.ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        );
+                        if let Some(bytes) = Self::global_init_bytes(
+                            init,
+                            sz,
+                            is_float,
+                            matches!(info.ty, Type::Complex(_)),
+                        ) {
                             self.data_section.extend_from_slice(&bytes);
                             true
                         } else {
@@ -20780,90 +20757,64 @@ impl Codegen {
         };
         if !has_init {
             if use_data {
-                // 静态初始化失败, 回退到 BSS + 运行时初始化
                 self.data_section.resize(self.data_section.len() + sz, 0);
             } else if !initialized {
                 self.bss_size += sz as u64;
             }
-            // 如果 initialized && !can_static_init: BSS 空间已在上面分配
         }
-        // 生成唯一的 mangled 名称, 包含函数名避免跨函数碰撞
-        let mangled = format!(
-            ".Lsl{}.{}.{}",
-            self.static_local_counter,
-            self.current_func_name,
-            v.name.name
-        );
-        self.static_local_counter += 1;
-        // 确定 section: 成功写入 data → 3, 否则 → 4 (BSS)
         let section = if has_init { 3 } else { 4 };
-        // 如果 data 段分配了空间但初始化失败, 需要把空间还给 BSS
+        // 如果 data 段分配了空间但初始化失败, 回退到 BSS
         if use_data && !has_init {
-            // data_section 已扩展了 sz 字节, 截断回去
             let new_len = offset as usize;
             self.data_section.truncate(new_len);
-            // 改为 BSS 分配
             self.bss_align = self.bss_align.max(align as u64);
             self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
             let bss_off = self.bss_size;
             self.bss_size += sz as u64;
             self.globals.insert(
-                mangled.clone(),
+                info.mangled_name.clone(),
                 GlobalVar {
                     offset: bss_off,
                     size: sz,
-                    ty: v.ty.clone(),
+                    ty: info.ty.clone(),
                     init: None,
                     section: 4,
-                    is_tls: false, in_data_section: true,
+                    is_tls: false,
+                    in_data_section: true,
                 },
             );
         } else {
             self.globals.insert(
-                mangled.clone(),
+                info.mangled_name.clone(),
                 GlobalVar {
                     offset,
                     size: sz,
-                    ty: v.ty.clone(),
+                    ty: info.ty.clone(),
                     init: None,
                     section,
-                    is_tls: false, in_data_section: true,
+                    is_tls: false,
+                    in_data_section: true,
                 },
             );
         }
-        // 跟踪 mangled 名 (防不同 static local 的 mangled 碰撞)
-        self.static_local_global_names.insert(mangled.clone());
-        // 有序 rename map: 后注册的优先 (内层作用域覆盖外层)
-        self.static_local_rename_map.push((v.name.name.clone(), mangled));
-        // 如果需要运行时初始化, 记录到集合中
-        if initialized && !has_init {
-            self.runtime_init_static_locals.insert(v.name.name.clone());
-        }
-        true
+        // 返回是否需要运行时初始化
+        initialized && !has_init
     }
 
     /// 将变量名解析为 globals map 中的实际键.
     /// 如果 name 是当前函数的 static local, 返回 mangled 名;
-    /// 否则返回原名. 有序查找: 最后注册的匹配优先 (内层作用域).
+    /// 否则返回原名. 通过 StaticLocalMap 作用域感知解析.
     fn resolve_global_key<'a>(&'a self, name: &'a str) -> &'a str {
-        // 从后向前扫描, 最新注册的条目优先
-        for (src, mangled) in self.static_local_rename_map.iter().rev() {
-            if src == name {
-                return mangled;
-            }
-        }
-        name
+        self.static_local_map
+            .resolve(&self.current_func_name, name)
+            .unwrap_or(name)
     }
 
     /// 判断 name 是否应作为全局变量访问 (含 static local).
     fn is_global_var(&self, name: &str) -> bool {
-        // 检查 rename map (Vec, 从后向前扫描)
-        for (src, _) in self.static_local_rename_map.iter().rev() {
-            if src == name {
-                return true;
-            }
-        }
-        self.globals.contains_key(name)
+        self.static_local_map
+            .is_static_local(&self.current_func_name, name)
+            || self.globals.contains_key(name)
     }
 
     /// 判断 name 是否应作为全局变量访问且不是局部变量.
@@ -20877,7 +20828,8 @@ impl Codegen {
         items: &[BlockItem],
         temp_slots: i32,
         kasan_rz_slots: i32,
-        registered_static: &std::collections::HashSet<String>,
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
     ) {
         for item in items {
             match item {
@@ -20887,11 +20839,10 @@ impl Codegen {
                         continue;
                     }
                     if v.is_static {
-                        // 只有成功注册为全局的 static 局部变量才跳过栈分配
-                        if registered_static.contains(&v.name.name) {
+                        // 由分析 pass 预注册的 static local 跳过栈分配
+                        if static_local_map.is_static_local(func_name, &v.name.name) {
                             continue;
                         }
-                        // 未注册的 static local (名称冲突) 回退到栈分配
                     }
                     // VLA: 追加 16 字节元信息槽 (与 register_var 一致:
                     // 基址 + 运行时行大小 + 声明时总大小)。含外层常量的
@@ -20927,7 +20878,7 @@ impl Codegen {
                     }
                 }
                 BlockItem::Stmt(s) => {
-                    Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots, registered_static)
+                    Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots, static_local_map, func_name)
                 }
                 _ => {}
             }
@@ -20938,24 +20889,25 @@ impl Codegen {
         s: &Stmt,
         temp_slots: i32,
         kasan_rz_slots: i32,
-        registered_static: &std::collections::HashSet<String>,
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
     ) {
         match s {
             Stmt::Block { b, .. } => {
-                Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots, registered_static)
+                Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots, static_local_map, func_name)
             }
             Stmt::If { then_, else_, .. } => {
-                Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots, registered_static);
+                Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots, static_local_map, func_name);
                 if let Some(e) = else_ {
-                    Self::pre_register_stmt(var_map, e, temp_slots, kasan_rz_slots, registered_static);
+                    Self::pre_register_stmt(var_map, e, temp_slots, kasan_rz_slots, static_local_map, func_name);
                 }
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-                Self::pre_register_stmt(var_map, body, temp_slots, kasan_rz_slots, registered_static);
+                Self::pre_register_stmt(var_map, body, temp_slots, kasan_rz_slots, static_local_map, func_name);
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    Self::pre_register_vars(var_map, &case.body.items, temp_slots, kasan_rz_slots, registered_static);
+                    Self::pre_register_vars(var_map, &case.body.items, temp_slots, kasan_rz_slots, static_local_map, func_name);
                 }
             }
             _ => {}

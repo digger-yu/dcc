@@ -1,0 +1,77 @@
+========================================
+   DIFFERENTIAL TEST REPORT
+========================================
+
+Test: static_local
+Date: 2026-09-09T09:30:16+08:00
+
+========================================
+         SYMBOL TABLE COMPARISON
+========================================
+
+[1;33m[!] Symbols only in DCC:[0m
+  - .Lsl0.fa.x
+  - .Lsl1.fb.x
+  - .Lsl2.fc.arr
+  - .Lsl3.fd.s
+  - .Lsl4.fe.uninit
+  - .Lsl5.ff.x
+  - .Lsl6.fg.n
+
+[0;34m[i] Symbols only in GCC:[0m
+  - arr.4
+  - n.0
+  - s.3
+  - static_local.c
+  - uninit.2
+  - x.1
+  - x.5
+  - x.6
+
+[0;32m[✓] Common symbols attribute comparison:[0m
+  [0;31m✗ fa: SIZE(dcc=90 vs gcc=31)[0m
+  [0;31m✗ fb: SIZE(dcc=90 vs gcc=31)[0m
+  [0;31m✗ fc: SIZE(dcc=57 vs gcc=11)[0m
+  [0;31m✗ fd: SIZE(dcc=57 vs gcc=11)[0m
+  [0;31m✗ fe: SIZE(dcc=57 vs gcc=11)[0m
+  [0;31m✗ ff: SIZE(dcc=60 vs gcc=16)[0m
+  [0;31m✗ fg: SIZE(dcc=162 vs gcc=49)[0m
+  [0;31m✗ main: SIZE(dcc=96 vs gcc=43)[0m
+  [0;32mAll common symbols match![0m
+
+Summary:
+  DCC-only symbols: 7
+  GCC-only symbols: 8
+  Attribute mismatches: 0
+
+========================================
+       RELOCATION TABLE COMPARISON
+========================================
+
+Relocations by symbol:
+
+  [0;31m✗ .bss: count mismatch (dcc=0 vs gcc=9)[0m
+  [0;31m✗ .data: count mismatch (dcc=0 vs gcc=1)[0m
+  [0;31m✗ .Lsl0.fa.x: count mismatch (dcc=2 vs gcc=0)[0m
+  [0;31m✗ .Lsl1.fb.x: count mismatch (dcc=2 vs gcc=0)[0m
+  [0;31m✗ .Lsl2.fc.arr: count mismatch (dcc=1 vs gcc=0)[0m
+  [0;31m✗ .Lsl3.fd.s: count mismatch (dcc=1 vs gcc=0)[0m
+  [0;31m✗ .Lsl4.fe.uninit: count mismatch (dcc=1 vs gcc=0)[0m
+  [0;31m✗ .Lsl5.ff.x: count mismatch (dcc=1 vs gcc=0)[0m
+  [0;31m✗ .Lsl6.fg.n: count mismatch (dcc=3 vs gcc=0)[0m
+  [0;31m✗ .text: count mismatch (dcc=0 vs gcc=8)[0m
+
+Detailed relocation type analysis:
+
+Relocation type distribution:
+  DCC:
+    11 x R_X86_64_PC32
+    4 x R_X86_64_PLT32
+  GCC:
+    18 x R_X86_64_PC32
+    4 x R_X86_64_PLT32
+
+Summary:
+  Total DCC relocations: 15
+  Total GCC relocations: 22
+

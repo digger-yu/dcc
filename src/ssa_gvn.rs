@@ -22,10 +22,44 @@ pub fn run(module: &mut Module, level: u8) {
 fn gvn_program(prog: &mut Program, fenv_access: bool) {
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
+            // Skip GVN for functions with static locals: coalesce_block
+            // may alias pointer variables to array-typed variables, and
+            // copy propagation can confuse static-local values with their
+            // addresses (both share the same Ident key).
+            let has_static = func_has_static_local(f);
             if let Some(body) = &mut f.body {
+                if has_static {
+                    continue;
+                }
                 gvn_block(body, fenv_access);
             }
         }
+    }
+}
+
+fn func_has_static_local(f: &crate::ast::FuncDecl) -> bool {
+    f.body.as_ref().is_some_and(|b| block_has_static_local(b))
+}
+
+fn block_has_static_local(b: &crate::ast::Block) -> bool {
+    b.items.iter().any(|item| match item {
+        crate::ast::BlockItem::Decl(crate::ast::Decl::Var(v)) => v.is_static,
+        crate::ast::BlockItem::Stmt(s) => stmt_has_static_local(s),
+        _ => false,
+    })
+}
+
+fn stmt_has_static_local(s: &crate::ast::Stmt) -> bool {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::Block { b, .. } => block_has_static_local(b),
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_static_local(then_)
+                || else_.as_ref().is_some_and(|e| stmt_has_static_local(e))
+        }
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_static_local(body),
+        Stmt::For { body, .. } => stmt_has_static_local(body),
+        _ => false,
     }
 }
 
@@ -128,10 +162,28 @@ fn coalesce_block(block: &mut Block) {
     for item in &block.items {
         collect_assignments(item, &mut assigned);
     }
+    // Collect variable types for compatibility check
+    let mut var_types: HashMap<String, Type> = HashMap::new();
+    for item in &block.items {
+        if let BlockItem::Decl(Decl::Var(v)) = item {
+            var_types.insert(v.name.name.clone(), v.ty.clone());
+        }
+    }
     for item in &block.items {
         if let BlockItem::Decl(Decl::Var(v)) = item {
             if let Some(Expr::Ident { name, .. }) = &v.init {
                 if !assigned.contains(&v.name.name) {
+                    // Don't alias pointer to array/struct/union: array-to-pointer
+                    // decay computes address at each use site, but aliasing would
+                    // make codegen treat the array name as a pre-computed pointer,
+                    // skipping the LEA instruction.
+                    let src_ty = var_types.get(&name.name);
+                    let dst_ty = var_types.get(&v.name.name);
+                    if let (Some(s), Some(d)) = (src_ty, dst_ty) {
+                        if std::mem::discriminant(s) != std::mem::discriminant(d) {
+                            continue;
+                        }
+                    }
                     alias.insert(v.name.name.clone(), name.name.clone());
                 }
             }

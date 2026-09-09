@@ -38,6 +38,7 @@ pub mod sanitizer;
 pub mod ssa;
 pub mod ssa_gvn;
 pub mod ssa_passes;
+pub mod static_locals;
 pub mod target;
 pub mod tokens;
 pub mod thumb;

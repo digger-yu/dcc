@@ -91,6 +91,45 @@ pub struct VarDecl {
     pub asm_label: Option<String>,
 }
 
+/// C 存储类别 (storage-class specifier).
+/// 将分散的 is_static / is_extern / is_thread_local bool 统一为语义明确的枚举.
+/// 文件级变量没有显式 static 关键字时也具有静态存储期.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    /// 普通局部变量 (auto)
+    Auto,
+    /// 静态存储期: 文件级 static 或函数内 static
+    Static,
+    /// extern 声明
+    Extern,
+    /// register 提示
+    Register,
+    /// _Thread_local / __thread
+    ThreadLocal,
+}
+
+impl VarDecl {
+    /// 根据声明上下文和 bool 标志计算存储类别.
+    /// `is_local`: 是否在函数/块内部声明 (局部上下文).
+    pub fn storage_class(&self, is_local: bool) -> StorageClass {
+        if self.is_thread_local {
+            return StorageClass::ThreadLocal;
+        }
+        if self.is_extern {
+            return StorageClass::Extern;
+        }
+        if self.is_static {
+            return StorageClass::Static;
+        }
+        if is_local {
+            StorageClass::Auto
+        } else {
+            // 文件级变量即使没有 static 关键字也具有静态存储期
+            StorageClass::Static
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FuncDecl {
     pub ret_ty: Type,

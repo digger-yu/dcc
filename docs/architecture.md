@@ -210,29 +210,47 @@ hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 
 ## 静态局部变量存储模型
 
-函数内 `static` 声明的变量具有静态存储期，后端将其提升为内部链接的
-全局对象，与文件级 `static` 全局变量共享 `.data` / `.bss` 布局逻辑。
+函数内 `static` 声明的变量具有静态存储期，通过独立分析 pass 提升为
+内部链接的全局对象，与文件级 `static` 全局变量共享 `.data` / `.bss`
+布局逻辑。
 
 **核心不变量:** 静态存储期一旦在语义阶段确定，任何后续阶段都不得将其
 降级为自动存储期。
 
-**注册流程:**
+**架构分层:**
 
-1. 函数编译前递归扫描函数体，收集所有 `is_static` 的 `VarDecl`
-2. 对每个 static local 分配 `.data`（有编译期可求值初始化式）或 `.bss`
-   （无初始化式）空间
+```
+Parser (is_static: bool)
+  → AST (VarDecl + StorageClass 枚举)
+  → Static Local Analysis (static_locals.rs, 独立 pass)
+  → IR lowering (static local 纳入 IR Global)
+  → IR validate (storage class 约束检查)
+  → Backend (消费 StaticLocalMap, 只做代码生成)
+```
+
+**分析 pass (`static_locals.rs`):**
+
+1. 在 `compile_exec` / `compile_rel` 中全局变量处理之后、函数编译之前运行
+2. 递归扫描所有函数体，收集 `is_static` 的 `VarDecl`
 3. 生成唯一 mangled 名 `.Lsl<counter>.<func_name>.<source_name>`
-4. 加入 `globals` 表，后端代码生成通过 `resolve_global_key` 将源码名
-   映射到 mangled 名
+4. 输出 `StaticLocalMap`，提供按函数名、按 mangled 名、按源码名的多种查找
 
-**运行时初始化:** 若初始化式无法编译期求值，对象仍分配 `.bss` 空间，
-但在 `runtime_init_static_locals` 集合中标记。代码生成阶段在声明点
-发射运行时初始化代码（求值表达式 + `emit_global_store`），而非分配
-栈槽。
+**后端注册 (`register_static_global`):**
 
-**名称解析:** `static_local_rename_map` 使用有序 `Vec<(String, String)>`
-而非 `HashMap`，查找时从后向前扫描，确保同一函数内嵌套作用域的同名
-static local 能正确区分（内层声明优先）。
+后端消费 `StaticLocalMap`，对每个 static local 分配 `.data` 或 `.bss`
+空间。若初始化式无法编译期求值，分配 `.bss` 并通过
+`StaticLocalMap::mark_runtime_init` 回填运行时初始化标记。
+
+**名称解析:** `StaticLocalMap::resolve` 使用有序 Vec 从后向前扫描，
+确保同一函数内嵌套作用域的同名 static local 能正确区分（内层声明优先）。
+
+**IR 表达:** IR `Global` 包含 `is_static_local` 和 `owner_function` 字段，
+使 IR 层能表达所有全局对象（文件级 + static local）。IR verifier 检查
+static local 必须有所属函数和 `.Lsl` 前缀的 mangled 名。
+
+**StorageClass 枚举 (`ast.rs`):** 将分散的 `is_static` / `is_extern` /
+`is_thread_local` bool 统一为语义明确的枚举，通过 `VarDecl::storage_class()`
+方法计算。
 
 ## 链接与 LTO（`-r` / `-flto` / `-pie` / `-shared` / `-fbuiltin-linker`）
 
