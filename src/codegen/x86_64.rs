@@ -9009,6 +9009,8 @@ impl Codegen {
                 // (complex-2: a != 1.0+1.0i 恒为真)。
                 if !matches!(l.ty(), Type::Complex(_) | Type::Imaginary(_))
                     && !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_))
+                    && !matches!(l.ty(), Type::Vector(_, _))
+                    && !matches!(r.ty(), Type::Vector(_, _))
                     && (matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble)
                         || matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble))
                 {
@@ -9045,7 +9047,9 @@ impl Codegen {
                     return;
                 }
                 // SIMD 向量运算: 标量逐元素，结果写入帧临时区
-                if matches!(l.ty(), Type::Vector(_, _)) {
+                if matches!(l.ty(), Type::Vector(_, _))
+                    || matches!(r.ty(), Type::Vector(_, _))
+                {
                     self.gen_vector_binop(*op, l, r, 0);
                     return;
                 }
@@ -15287,12 +15291,22 @@ impl Codegen {
 
     // SIMD 向量运算: 128-bit 标准向量使用 XMM 打包指令, 其余回退标量逐元素
     fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, result_slot: usize) {
-        let (elem_ty, count) = match l.ty() {
-            Type::Vector(ref elem, n) => {
-                let et = elem.base.clone();
-                (et, n)
+        // 从任一向量操作数获取元素类型; 标量操作数需广播 (broadcast)
+        let l_is_vec = matches!(l.ty(), Type::Vector(_, _));
+        let r_is_vec = matches!(r.ty(), Type::Vector(_, _));
+        if !l_is_vec && !r_is_vec {
+            return;
+        }
+        let (elem_ty, count) = if l_is_vec {
+            match l.ty() {
+                Type::Vector(ref elem, n) => (elem.base.clone(), n),
+                _ => unreachable!(),
             }
-            _ => return,
+        } else {
+            match r.ty() {
+                Type::Vector(ref elem, n) => (elem.base.clone(), n),
+                _ => unreachable!(),
+            }
         };
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
@@ -15300,13 +15314,14 @@ impl Codegen {
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double);
 
-        // SIMD 快速路径: 128-bit 向量使用 XMM 打包指令
-        if vec_size == 16
+        // SIMD 快速路径: 128-bit 纯向量运算使用 XMM 打包指令
+        // 有标量操作数时走下方逐元素广播路径
+        if l_is_vec && r_is_vec && vec_size == 16
             && self.try_vector_binop_xmm(op, l, r, result_off, &elem_ty, count, elem_size, is_float, is_double) {
                 return;
             }
 
-        // 标量回退路径
+        // 标量回退路径 (支持标量广播: 标量操作数逐元素复用同一值)
         if is_float || is_double {
             let (prefix, opcode) = match op {
                 BinOp::Add => (if is_float { 0xF3 } else { 0xF2 }, 0x58),
@@ -15316,14 +15331,24 @@ impl Codegen {
                 _ => return,
             };
             for i in 0..count {
-                self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
+                // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
+                if l_is_vec {
+                    self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
+                } else {
+                    self.gen_expr(l, 0);
+                }
                 self.emit_sub_rsp(8);
                 if is_float {
                     self.emit(&[0xF3, 0x0F, 0x11, 0x04, 0x24]);
                 } else {
                     self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]);
                 }
-                self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
+                // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
+                if r_is_vec {
+                    self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
+                } else {
+                    self.gen_expr(r, 0);
+                }
                 if is_float {
                     self.emit(&[0xF3, 0x0F, 0x10, 0xC8]); // movss xmm1, xmm0
                 } else {
@@ -15346,9 +15371,19 @@ impl Codegen {
             return;
         }
         for i in 0..count {
-            self.gen_scalar_vector_load(l, i, elem_size);
+            // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
+            if l_is_vec {
+                self.gen_scalar_vector_load(l, i, elem_size);
+            } else {
+                self.gen_expr(l, 0);
+            }
             self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-            self.gen_scalar_vector_load(r, i, elem_size);
+            // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
+            if r_is_vec {
+                self.gen_scalar_vector_load(r, i, elem_size);
+            } else {
+                self.gen_expr(r, 0);
+            }
             match op {
                 BinOp::Add => {
                     self.emit(&[0x48, 0x01, 0xC1]);
