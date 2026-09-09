@@ -11053,9 +11053,18 @@ impl Codegen {
                             self.gen_expr(e, dst);
                             // 向量结果约定在临时槽 0, 加载到 xmm0
                             let toff = self.vector_temp_base(0, src_ty.size());
-                            // movq xmm0, [r13+toff]: 66 REX.W 0F 7E 45 off
-                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0x45]);
-                            self.emit(&[toff as u8]);
+                            // movq xmm0, [r13+toff]: F3 REX.W 0F 7E /r (load from memory)
+                            // REX.B needed for r13 base register
+                            // Use 32-bit displacement if offset doesn't fit in 8 bits
+                            if toff >= -128 && toff <= 127 {
+                                // mod=01 (8-bit disp), reg=xmm0(000), r/m=100(SIB)+base=r13
+                                self.emit(&[0xF3, 0x49, 0x0F, 0x7E, 0x44, 0x25]);
+                                self.emit(&[toff as u8]);
+                            } else {
+                                // mod=10 (32-bit disp), reg=xmm0(000), r/m=100(SIB)+base=r13
+                                self.emit(&[0xF3, 0x49, 0x0F, 0x7E, 0x84, 0x25]);
+                                self.emit(&toff.to_le_bytes());
+                            }
                             // movq rax, xmm0: 66 REX.W 0F 7E C0
                             self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
                         }
