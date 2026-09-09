@@ -53,3 +53,13 @@ double sum_double8(int n, ...) {
     __builtin_va_end(ap);
     return s;
 }
+
+/* long double: 80-bit x87 扩展精度 (SysV ABI 16 字节对齐) */
+long double sum_ld3(int n, ...) {
+    va_list ap;
+    __builtin_va_start(ap, n);
+    long double s = 0.0L;
+    for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, long double);
+    __builtin_va_end(ap);
+    return s;
+}

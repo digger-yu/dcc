@@ -7354,7 +7354,13 @@ impl Codegen {
                 || gp + need_gp > gp_regs.len()
                 || fp + need_fp > 8;
             if force_mem {
-                stack = (stack + 7) & !7;
+                // SysV ABI: long double 需要 16 字节对齐
+                let align = if matches!(effective_ty, Type::LongDouble) {
+                    (stack + 15) & !15
+                } else {
+                    (stack + 7) & !7
+                };
+                stack = align;
                 let size = effective_ty.size().max(8);
                 let chunks = size.div_ceil(8);
                 locs.push((0..chunks).map(|i| ArgLoc::Stack(stack + i * 8)).collect());
@@ -7640,15 +7646,12 @@ impl Codegen {
                     }
                 }
             } else if matches!(effective_ty, Type::LongDouble) {
-                // A2: long double (SysV Memory 类) — 16 字节整体在栈上传递.
-                // dcc 内部以 double 表示 long double: gen_expr 产生 xmm0
-                // (低 8 字节 double 位模式), 槽布局 = [double, 0].
-                // 被调方以 movsd 语义读取 (gen_float_load 同一约定).
+                // A2: long double — dcc 内部以 64-bit double (xmm0) 表示.
+                // 调用方直接写 8 字节 double 到栈上, 被调方用 fldl 读取.
+                // 16 字节槽位: 8 字节 double + 8 字节零填充.
                 self.gen_expr(arg, 0);
                 // 隐式转换到形参 long double (dcc 内部 double 语义):
                 // 整数实参 → cvtsi2sd; float 实参 → cvtss2sd。
-                // 缺失时整数位模式会被当作 double 位模式 (callconv.c
-                // bug: baz(d+1.0) 得 7 而非 18)。
                 let ld_arg_ty = arg.ty();
                 if Self::is_integer_type(&ld_arg_ty) {
                     if matches!(
@@ -7662,18 +7665,26 @@ impl Codegen {
                 } else if matches!(ld_arg_ty, Type::Float) {
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
                 }
-                self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
-                for (chunk, loc) in arg_locs.iter().enumerate() {
-                    if chunk == 1 {
-                        self.mov_imm(0, 0); // 高 8 字节写零
+                // movsd xmm0 → [rsp+first_off]: 写 8 字节 double
+                if let Some(ArgLoc::Stack(off)) = arg_locs.first() {
+                    let off = *off as i32;
+                    if off == 0 {
+                        // movsd [rsp], xmm0: F2 0F 11 04 24
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]);
+                    } else if off.abs() < 128 {
+                        // movsd [rsp+disp8], xmm0: F2 0F 11 44 24 disp8
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, off as u8]);
+                    } else {
+                        // movsd [rsp+disp32], xmm0: F2 0F 11 84 24 disp32
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x84, 0x24]);
+                        self.emit(&off.to_le_bytes());
                     }
-                    match *loc {
-                        ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
-                        loc => {
-                            self.store_rsp_qword(0, stage);
-                            staged.push((loc, stage, false));
-                            stage += 8;
-                        }
+                }
+                // 高 8 字节写零 (long double 占 16 字节, 8 字节数据 + 8 字节填充)
+                if arg_locs.len() > 1 {
+                    if let Some(ArgLoc::Stack(off)) = arg_locs.get(1) {
+                        self.mov_imm(0, 0);
+                        self.store_rsp_qword(0, *off);
                     }
                 }
             } else if matches!(effective_ty, Type::Float | Type::Double) {
@@ -20118,17 +20129,23 @@ impl Codegen {
         }
     }
 
-    /// 全局 va_list long double va_arg: 始终从 overflow_arg_area 读 16 字节
+    /// 全局 va_list long double va_arg: 从 overflow_arg_area 读取
+    /// 16 字节对齐的 80-bit x87 扩展精度值 (fldt)。
+    /// SysV ABI: long double 按 MEMORY 类传递, 16 字节对齐。
     fn gen_va_arg_long_double_global(&mut self, ap_name: &str) {
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
-        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
-        self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd xmm0, [rcx]
-        self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
-        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
-        self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp]
-        self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
+        // rcx = overflow_arg_area ([r10+8])
+        self.emit(&[0x4C, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        // r9 = (rcx + 15) & ~15 (16 字节对齐)
+        self.emit(&[0x49, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
+        self.emit(&[0x48, 0x83, 0xE1, 0xF0]); // and rcx, ~15
+        // fldt [rcx]: 加载 10 字节 80-bit 扩展精度到 st(0)
+        // DB /5 m80ext: ModRM = 00_101_000 = 0x28 (reg=5 for fldt, rm=0 for rcx)
+        self.emit(&[0xDB, 0x28]); // fldt [rcx]
+        // rcx += 16 (推进到下一个 16 字节对齐位置)
         self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-        self.emit(&[0x49, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
+        // 写回 [r10+8]
+        self.emit(&[0x4C, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
         // 结果在 st(0) (x87 栈顶)
     }
 
@@ -20358,9 +20375,10 @@ impl Codegen {
         }
     }
 
-    /// SysV va_arg long double: 始终从 overflow_arg_area 读取.
-    /// dcc 内部以 double 精度表示 long double (调用方传 8 字节 double
-    /// + 8 字节零). 因此读 8 字节 double 后转为 x87 格式.
+    /// SysV va_arg long double: 从 overflow_arg_area 读取
+    /// dcc 内部以 64-bit double 表示 long double, 用 fldl 读 8 字节.
+    /// overflow_arg_area 须对齐到 16 字节后读取 8 字节 (double),
+    /// 然后 overflow_arg_area 推进 16 字节.
     fn gen_va_arg_long_double(&mut self, ap_name: &str, _dst: u8) {
         // 全局 va_list: 直接 rip 相对访问 (r10 基址)
         if self.is_global_not_local(ap_name) {
@@ -20368,22 +20386,22 @@ impl Codegen {
             return;
         }
         let ap_off = self.var_offset(ap_name);
-        // rax = overflow_arg_area (va_list + 8)
-        self.emit(&[0x49, 0x8B, 0x85]);
+        // r8 = overflow_arg_area (va_list + 8)
+        self.emit(&[0x4D, 0x8B, 0x85]);
         self.emit(&(ap_off + 8).to_le_bytes());
-        // 保存指针到 rcx
-        self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-        // movsd [rcx], xmm0: 读 8 字节 double
-        self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
-        // 分配临时空间并转换为 x87 格式
-        self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
-        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd xmm0, [rsp]
-        self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp] (double→x87 st(0))
-        self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
-        // 推进 overflow_arg_area 16 字节
-        self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-        // mov [r13+ap_off+8], rcx (回写更新后的指针)
-        self.emit(&[0x49, 0x89, 0x8D]);
+        // r9 = (r8 + 15) & ~15 (16 字节对齐)
+        self.emit(&[0x4D, 0x8D, 0x48, 0x0F]); // lea r9, [r8+15] (REX.WB: B=1 for r8)
+        self.emit(&[0x49, 0x81, 0xE1]); // and r9d, imm32
+        self.emit(&(!15u32).to_le_bytes());
+        // movsd [r9], xmm0: 读取 8 字节 double 到 xmm0 (dcc 内部 long double = double)
+        // 循环体后续 movapd xmm0→xmm1 保存参数, movsd [rsp]→xmm0 加载 sum,
+        // addsd xmm1+xmm0 = arg+sum.
+        // REX.B + F2 0F 10 /r: ModRM=00_000_100(SIB) SIB=00_100_001(idx=none,base=r9)
+        self.emit(&[0xF2, 0x41, 0x0F, 0x10, 0x04, 0x21]); // movsd (%r9), %xmm0
+        // r9 += 16 (推进到下一个 16 字节对齐位置)
+        self.emit(&[0x49, 0x83, 0xC1, 0x10]); // add r9, 16
+        // 写回 overflow_arg_area: [r13+ap_off+8] = r9
+        self.emit(&[0x4D, 0x89, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
         // 结果在 st(0) (x87 栈顶), 与 long double 常规约定一致
     }
@@ -20520,18 +20538,21 @@ impl Codegen {
             self.gen_va_arg_ptr_fp(arg_ty, dst);
             return;
         }
-        // Long double: SysV MEMORY 类, 始终从 overflow_arg_area 读 8 字节
-        // double → st(0) (与 gen_va_arg_long_double 约定一致), 推进后回写。
+        // Long double: SysV MEMORY 类, 从 overflow_arg_area 读取
+        // 16 字节对齐的 80-bit x87 扩展精度值 (fldt)。
         if matches!(arg_ty, Type::LongDouble) {
             self.emit(&[0x49, 0x89, 0xCB]); // mov r11, rcx (回写基址)
             self.emit(&[0x48, 0x8B, 0x49, 0x08]); // mov rcx, [rcx+8] (overflow)
-            self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd xmm0, [rcx]
-            self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
-            self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
-            self.emit(&[0xDD, 0x04, 0x24]); // fldl [rsp] → st(0)
-            self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
+            // rcx = (rcx + 15) & ~15 (16 字节对齐)
+            self.emit(&[0x48, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
+            self.emit(&[0x48, 0x83, 0xE1, 0xF0]); // and rcx, ~15
+            // fldt [rcx]: 加载 10 字节 80-bit 扩展精度到 st(0)
+            // DB /5 m80ext: ModRM = 00_101_000 = 0x28
+            self.emit(&[0xDB, 0x28]); // fldt [rcx]
+            // rcx += 16
             self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-            self.emit(&[0x49, 0x89, 0x4B, 0x08]); // mov [r11+8], rcx (回写)
+            // 写回 [r11+8]
+            self.emit(&[0x4C, 0x89, 0x4B, 0x08]); // mov [r11+8], rcx
             return;
         }
         let step = (arg_ty.size().div_ceil(8) * 8) as i32;

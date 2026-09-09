@@ -10296,6 +10296,7 @@ fn va_arg_x86_64_fixture_compiles() {
         "sum_long5",
         "sum_double5",
         "sum_double8",
+        "sum_ld3",
     ] {
         let needle = fname.as_bytes();
         assert!(
@@ -10304,6 +10305,38 @@ fn va_arg_x86_64_fixture_compiles() {
         );
     }
 }
+
+/// x86_64 va_arg long double: 80-bit x87 扩展精度,
+/// SysV ABI 要求 16 字节对齐 + fldt/fstpt 读写。
+/// 验证调用方以 80-bit 格式传递, 被调方以 fldt 读取。
+#[test]
+fn va_arg_x86_64_long_double() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "long double sum_ld3(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           long double s = 0.0L;\n\
+           for (int i = 0; i < n; i++)\n\
+               s += __builtin_va_arg(ap, long double);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) {\n\
+           long double r = sum_ld3(3, 1.0L, 2.0L, 3.0L);\n\
+           long long v = (long long)(r + 0.5L);\n\
+           return (int)(v - 6);\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-arg-long-double", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "expected sum_ld3(3, 1.0L, 2.0L, 3.0L) == 6.0");
+}
+
 /// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
 #[test]
 fn setjmp_x86_64_fixture_compiles() {
