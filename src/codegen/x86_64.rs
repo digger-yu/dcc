@@ -15307,23 +15307,34 @@ impl Codegen {
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
     }
 
-    /// 标量浮点精度转换: xmm0 中的标量值从 src_ty 转换到 dst_ty.
-    /// double→float: cvtsd2ss; float→double: cvtss2sd; 其他/相同: 无操作.
+    /// 标量浮点精度转换: xmm0/rax 中的标量值从 src_ty 转换到 dst_ty.
+    /// double→float: cvtsd2ss; float→double: cvtss2sd;
+    /// int→float: cvtsi2ss; int→double: cvtsi2sd.
     fn emit_scalar_float_convert(&mut self, src_ty: &Type, dst_ty: &Type) {
+        let dst_is_float = matches!(dst_ty, Type::Float | Type::Double);
+        if !dst_is_float {
+            return;
+        }
         let src_is_double = matches!(src_ty, Type::Double | Type::LongDouble);
         let src_is_float = matches!(src_ty, Type::Float);
-        let dst_is_float = matches!(dst_ty, Type::Float);
-        let dst_is_double = matches!(dst_ty, Type::Double);
-        if src_is_double && dst_is_float {
+        let src_is_int = Self::is_integer_type(src_ty);
+        if src_is_double && matches!(dst_ty, Type::Float) {
             // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
             self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
-        } else if src_is_float && dst_is_double {
+        } else if src_is_float && matches!(dst_ty, Type::Double) {
             // cvtss2sd xmm0, xmm0: F3 0F 5A C0
             self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
+        } else if src_is_int {
+            // rax = integer value, convert to float/double in xmm0
+            // cvtsi2ss/cvtsi2sd xmm0, rax
+            if matches!(dst_ty, Type::Float) {
+                // cvtsi2ss xmm0, rax: F3 48 0F 2A C0
+                self.emit(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0]);
+            } else {
+                // cvtsi2sd xmm0, rax: F2 48 0F 2A C0
+                self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
+            }
         }
-        // 整数→浮点: gen_expr 已将整数放入 rax, 但浮点路径期望 xmm0.
-        // 这种情况应由调用端在 gen_expr 后处理 (此处不处理).
-        let _ = src_is_float; // suppress warning
     }
 
     // SIMD 向量运算: 128-bit 标准向量使用 XMM 打包指令, 其余回退标量逐元素
