@@ -1989,4 +1989,103 @@ mod tests {
         let info2 = module.type_info().len();
         assert_eq!(info1, info2, "type_info count should match after resync");
     }
+
+    #[test]
+    fn static_locals_appear_in_ir_globals_with_correct_fields() {
+        let src = b"\
+int fa(void) { static int x; return ++x; }
+int fb(void) { static int x = 42; return x; }
+int main(void) { return fa() + fb(); }
+";
+        let (program, diag) = crate::parser::parse(src, "static-local-ir.c");
+        assert!(diag.is_empty(), "{diag:?}");
+        let (module, _) = lower(program).expect("lowering should succeed");
+        validate(&module).expect("validation should succeed");
+        // File-level globals: none in this test
+        // Static locals: 2 (fa::x and fb::x)
+        let static_globals: Vec<&Global> = module
+            .globals
+            .iter()
+            .filter(|g| g.is_static_local)
+            .collect();
+        assert_eq!(static_globals.len(), 2, "expected 2 static locals in IR globals");
+        // Verify first static local (fa::x)
+        let fa_x = static_globals
+            .iter()
+            .find(|g| g.owner_function.as_deref() == Some("fa"))
+            .expect("fa should own a static local");
+        assert!(fa_x.name.starts_with(".Lsl"), "mangled name should have .Lsl prefix");
+        assert!(fa_x.name.contains("fa"), "mangled name should contain func name");
+        assert!(!fa_x.is_tls);
+        // Verify second static local (fb::x)
+        let fb_x = static_globals
+            .iter()
+            .find(|g| g.owner_function.as_deref() == Some("fb"))
+            .expect("fb should own a static local");
+        assert!(fb_x.name.starts_with(".Lsl"));
+        assert!(fb_x.name.contains("fb"));
+        // fb::x has initializer (42), so it should have an IR initializer
+        assert!(fb_x.initializer.is_some(), "initialized static local should have IR initializer");
+        // fa::x is uninitialized, so no IR initializer
+        assert!(fa_x.initializer.is_none(), "uninitialized static local should have no IR initializer");
+    }
+
+    #[test]
+    fn static_locals_validation_rejects_missing_owner() {
+        // Construct a Global with is_static_local but no owner_function
+        let bad_global = Global {
+            name: ".Lsl0.bad.x".to_string(),
+            ty: ValueType::Integer { bits: 32, signed: true },
+            initializer: None,
+            span: crate::diagnostics::Span::point("", 0, 0),
+            is_tls: false,
+            is_static_local: true,
+            owner_function: None, // should be Some for static local
+            alignment: 4,
+            section: None,
+        };
+        let module = Module {
+            functions: vec![],
+            globals: vec![bad_global],
+            type_defs: vec![],
+            type_info_cache: Vec::new(),
+            source: crate::ast::Program {
+                decls: vec![],
+                fenv_access: false,
+                fp_contract: false,
+                cx_limited_range: false,
+            },
+        };
+        let err = validate(&module).expect_err("should reject static local without owner");
+        assert!(err.iter().any(|d| d.code == "E1090"), "expected E1090, got: {err:?}");
+    }
+
+    #[test]
+    fn static_locals_validation_rejects_non_mangled_name() {
+        let bad_global = Global {
+            name: "plain_name".to_string(), // should start with .Lsl
+            ty: ValueType::Integer { bits: 32, signed: true },
+            initializer: None,
+            span: crate::diagnostics::Span::point("", 0, 0),
+            is_tls: false,
+            is_static_local: true,
+            owner_function: Some("func".to_string()),
+            alignment: 4,
+            section: None,
+        };
+        let module = Module {
+            functions: vec![],
+            globals: vec![bad_global],
+            type_defs: vec![],
+            type_info_cache: Vec::new(),
+            source: crate::ast::Program {
+                decls: vec![],
+                fenv_access: false,
+                fp_contract: false,
+                cx_limited_range: false,
+            },
+        };
+        let err = validate(&module).expect_err("should reject non-mangled static local");
+        assert!(err.iter().any(|d| d.code == "E1091"), "expected E1091, got: {err:?}");
+    }
 }
