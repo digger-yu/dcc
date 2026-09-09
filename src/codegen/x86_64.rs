@@ -8016,6 +8016,17 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // Small vector (<=8B) return: gen_expr puts the
+                            // vector data in temp slot 0 on the stack.  SysV
+                            // ABI classifies <=16B vectors as SSE, so the
+                            // return value must be in xmm0 (xmm1 for the
+                            // upper 8B of 16B vectors, handled by is_agg_ret
+                            // path above).  Load from temp slot 0 into xmm0.
+                            if matches!(&ret_ty, Type::Vector(_, _)) && ret_sz <= 8 {
+                                let toff = self.vector_temp_base(0, ret_sz);
+                                // movsd xmm0, [r13 + toff]  (loads 8 bytes)
+                                self.load_stack_xmm(0, toff, ret_sz, false);
+                            }
                             // __int128 返回值: 若函数返回 __int128 但表达式非 __int128, rdx 未设置
                             let func_ret_ty_for_128 = self.current_func_ret_ty.clone();
                             if matches!(&func_ret_ty_for_128, Type::Int128 | Type::UInt128)
@@ -10678,11 +10689,18 @@ impl Codegen {
                         self.emit(&[0xF2, 0x0F, 0x10, 0x00]); // movsd xmm0, [rax]
                     }
                 }
-                // vector 返回值: 被调方按 rax:rdx 返回, 存入向量临时槽 0
-                if matches!(ty, Type::Vector(_, _)) && ty.size() > 8 && sret_off.is_none() {
+                // vector 返回值: 存入向量临时槽 0
+                // <=8B: SSE 类, 被调方在 xmm0 返回, 需存入临时槽
+                // >8B (<=16B): 被调方按 rax:rdx 返回
+                if matches!(ty, Type::Vector(_, _)) && sret_off.is_none() {
                     let toff = self.vector_temp_base(0, ty.size());
-                    self.store_stack(0, toff);
-                    self.store_stack(2, toff + 8);
+                    if ty.size() <= 8 {
+                        // xmm0 → 临时槽 0
+                        self.store_xmm64_stack(0, toff);
+                    } else {
+                        self.store_stack(0, toff);
+                        self.store_stack(2, toff + 8);
+                    }
                 }
                 // _Complex 返回值统一物化: 返回端按 SysV ABI 传值
                 // (SSE 类: xmm0=实部/xmm1=虚部; 整数类: rax[:rdx];
