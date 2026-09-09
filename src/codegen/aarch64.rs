@@ -2433,6 +2433,50 @@ impl Aarch64Codegen {
         self.emit_label_raw(&done);
     }
 
+    /// 双精度浮点 va_arg: 与 gen_va_arg_float 对称, 但使用 ldr d0 (64-bit)
+    /// 而非 ldr s0 (32-bit). 修复 va_arg(ap, double) 截断为 float 的 bug.
+    fn gen_va_arg_double(&mut self, ap_name: &str) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // x9 = va_list 地址
+        self.mov_x_reg_sp_off(9, ap_off);
+        // w0 = fp_offset (从 va_list[4])
+        self.emit_ldr_x(0, 9, 4, 4);
+        // cmp w0, #128
+        self.emit_cmp_imm_w(0, 128);
+        let overflow = self.fresh_label("va_dbl_of");
+        let done = self.fresh_label("va_dbl_done");
+        // bge overflow
+        self.emit_bcond(&overflow, 0xa); // GE = 0xa
+        // ---- 寄存器保存区路径 ----
+        // x1 = reg_save_area + 64 (float 保存区起始)
+        self.emit_ldr_x(1, 9, 16, 8); // x1 = reg_save_area
+        self.emit_add_imm_x(1, 1, 64); // x1 += 64
+        // x0 = x1 + x0 (float_save + fp_offset)
+        self.emit_add_x_reg(0, 1, 0);
+        // d0 = [x0] (双精度加载)
+        // ldr d0, [x0]: 0xFD400000
+        self.emit(&0xFD400000u32.to_le_bytes());
+        // fp_offset += 8
+        self.emit_ldr_x(1, 9, 4, 4); // w1 = 旧 fp_offset
+        self.emit_add_imm_w(1, 1, 8);
+        self.emit_str_x(1, 9, 4, 4); // str w1, [x9, #4]
+        self.b(&done);
+        // ---- 溢出区路径 ----
+        self.emit_label_raw(&overflow);
+        // x1 = overflow_arg_area (从 va_list[8])
+        self.emit_ldr_x(1, 9, 8, 8);
+        // d0 = [x1]
+        self.emit(&0xFD400020u32.to_le_bytes()); // ldr d0, [x1]
+        // x1 += 8
+        self.emit_add_imm_x(1, 1, 8);
+        // 写回 overflow_arg_area
+        self.emit_str_x(1, 9, 8, 8);
+        self.emit_label_raw(&done);
+    }
+
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
         match &expr.kind {
             ExprKind::Constant => {
@@ -2496,9 +2540,13 @@ impl Aarch64Codegen {
                 }
                 return true;
             }
-            // M25: 浮点型 __builtin_va_arg(ap, double) — v0..v7 已在入口保存到 va_save_base+64
-            ExprKind::VaArg { ap, .. } => {
-                self.gen_va_arg_float(ap);
+            // M25: 浮点型 __builtin_va_arg(ap, T) — v0..v7 已在入口保存到 va_save_base+64
+            // 按类型分派: double 用 ldr d0 (64-bit), float 用 ldr s0 (32-bit)
+            ExprKind::VaArg { ap, ref arg_ty, .. } => {
+                match arg_ty {
+                    ValueType::Float { bits: 64 } => self.gen_va_arg_double(ap),
+                    _ => self.gen_va_arg_float(ap),
+                }
                 return true;
             }
             // 浮点返回值沿用普通调用路径；AAPCS64 约定结果留在 s0/d0。
