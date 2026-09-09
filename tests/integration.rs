@@ -10486,6 +10486,65 @@ fn va_arg_list_param_fixture() {
     assert_eq!(code, 0, "va_list param fixture failed");
 }
 
+/// va_arg(ap, struct S) 直接聚合读取
+#[test]
+fn va_arg_aggregate_direct() {
+    let src = include_str!("fixtures/c/va_arg/aggregate_va_arg.c");
+    let (output, exe) = run_compile_and_run("va-agg-direct", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "aggregate va_arg fixture failed");
+}
+
+/// va_copy 高级形式: 结构体成员 + 指针解引用
+#[test]
+fn va_copy_advanced_forms() {
+    let src = include_str!("fixtures/c/va_arg/va_copy_advanced.c");
+    let (output, exe) = run_compile_and_run("va-copy-adv", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_copy advanced forms fixture failed");
+}
+
+/// double 精度验证: va_arg(ap, double) 不被截断为 float
+#[test]
+fn va_arg_double_precision() {
+    let source = r#"
+typedef __builtin_va_list va_list;
+double sum_d(int n, ...) {
+    va_list ap;
+    __builtin_va_start(ap, n);
+    double s = 0.0;
+    for (int i = 0; i < n; i++)
+        s += __builtin_va_arg(ap, double);
+    __builtin_va_end(ap);
+    return s;
+}
+int main(void) {
+    /* 验证精度: 1.1 + 2.2 + 3.3 = 6.6 */
+    double r = sum_d(3, 1.1, 2.2, 3.3);
+    int err = (int)(r * 1000.0) - 6600;
+    if (err < 0) err = -err;
+    return err > 1 ? 1 : 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("va-dbl-prec", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(rc, 0, "double precision should return 0, got {rc}");
+}
+
 /// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
 #[test]
 fn setjmp_x86_64_fixture_compiles() {
