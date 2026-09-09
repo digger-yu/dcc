@@ -208,6 +208,32 @@ hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
 未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。
 
+## 静态局部变量存储模型
+
+函数内 `static` 声明的变量具有静态存储期，后端将其提升为内部链接的
+全局对象，与文件级 `static` 全局变量共享 `.data` / `.bss` 布局逻辑。
+
+**核心不变量:** 静态存储期一旦在语义阶段确定，任何后续阶段都不得将其
+降级为自动存储期。
+
+**注册流程:**
+
+1. 函数编译前递归扫描函数体，收集所有 `is_static` 的 `VarDecl`
+2. 对每个 static local 分配 `.data`（有编译期可求值初始化式）或 `.bss`
+   （无初始化式）空间
+3. 生成唯一 mangled 名 `.Lsl<counter>.<func_name>.<source_name>`
+4. 加入 `globals` 表，后端代码生成通过 `resolve_global_key` 将源码名
+   映射到 mangled 名
+
+**运行时初始化:** 若初始化式无法编译期求值，对象仍分配 `.bss` 空间，
+但在 `runtime_init_static_locals` 集合中标记。代码生成阶段在声明点
+发射运行时初始化代码（求值表达式 + `emit_global_store`），而非分配
+栈槽。
+
+**名称解析:** `static_local_rename_map` 使用有序 `Vec<(String, String)>`
+而非 `HashMap`，查找时从后向前扫描，确保同一函数内嵌套作用域的同名
+static local 能正确区分（内层声明优先）。
+
 ## 链接与 LTO（`-r` / `-flto` / `-pie` / `-shared` / `-fbuiltin-linker`）
 
 DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch64/RISC-V64/MIPS64/ARM），对标 mold/lld 行为：

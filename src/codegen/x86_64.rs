@@ -173,9 +173,10 @@ pub struct Codegen {
     current_func_name: String, // 当前正在编译的函数名
     current_func_ret_ty: Type, // 当前函数的返回类型
     registered_static_locals: std::collections::HashSet<String>, // 本函数中成功注册为全局的 static 局部变量名
+    runtime_init_static_locals: std::collections::HashSet<String>, // 已注册但需要运行时初始化的 static 局部变量名
     real_global_names: std::collections::HashSet<String>, // 真实全局变量名 (不含 static local), 用于避免 static local 覆盖真实全局
-    static_local_global_names: std::collections::HashSet<String>, // 已注册到 globals 的 static local 原名 (跨函数累积)
-    static_local_rename_map: HashMap<String, String>, // 本函数 static local 原名 → mangled globals 键名
+    static_local_global_names: std::collections::HashSet<String>, // 已注册到 globals 的 static local mangled 名 (跨函数累积, 防 mangled 冲突)
+    static_local_rename_map: Vec<(String, String)>, // 本函数 static local 原名 → mangled globals 键名 (有序, 后注册的优先)
     static_local_counter: u32, // 用于生成唯一的 static local mangled 名
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
@@ -331,6 +332,7 @@ struct GlobalVar {
     init: Option<Vec<u8>>,
     section: u16,
     is_tls: bool,
+    in_data_section: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1427,9 +1429,10 @@ impl Codegen {
             current_func_name: String::new(),
             current_func_ret_ty: Type::Int,
             registered_static_locals: std::collections::HashSet::new(),
+            runtime_init_static_locals: std::collections::HashSet::new(),
             real_global_names: std::collections::HashSet::new(),
             static_local_global_names: std::collections::HashSet::new(),
-            static_local_rename_map: HashMap::new(),
+            static_local_rename_map: Vec::new(),
             static_local_counter: 0,
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
@@ -2981,7 +2984,7 @@ impl Codegen {
         });
     }
 
-    pub fn resolve(&mut self, rodata_start: u64) {
+    pub fn resolve(&mut self, rodata_start: u64, data_start: u64) {
         for (p, name) in &self.pending_data_rels {
             self.disasm_data.insert(*p, name.clone());
         }
@@ -3076,7 +3079,11 @@ impl Codegen {
                 if g.is_tls {
                     continue;
                 }
-                let var_vaddr = rodata_start + g.offset;
+                let var_vaddr = if g.in_data_section {
+                    data_start + g.offset
+                } else {
+                    rodata_start + g.offset
+                };
                 let rip = self.entry + disp32_pos + 4;
                 let rel = (var_vaddr as i64) - (rip as i64);
                 let p = disp32_pos as usize;
@@ -3086,7 +3093,11 @@ impl Codegen {
         // 修补 SIB base=101 全局访问 (disp32 绝对寻址) - 直接写符号绝对地址
         for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
             if let Some(g) = self.globals.get(&var_name) {
-                let var_vaddr = rodata_start + g.offset;
+                let var_vaddr = if g.in_data_section {
+                    data_start + g.offset
+                } else {
+                    rodata_start + g.offset
+                };
                 let p = disp32_pos as usize;
                 self.code[p..p + 4].copy_from_slice(&(var_vaddr as u32).to_le_bytes());
             }
@@ -3410,7 +3421,7 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: init_data,
                             section: sec,
-                            is_tls: true,
+                            is_tls: true, in_data_section: false,
                         },
                     );
                     continue;
@@ -3447,7 +3458,7 @@ impl Codegen {
                                 ty: v.ty.clone(),
                                 init: None,
                                 section: 1,
-                                is_tls: false,
+                                is_tls: false, in_data_section: false,
                             },
                         );
                         continue;
@@ -3472,7 +3483,7 @@ impl Codegen {
                         ty: v.ty.clone(),
                         init: init_data,
                         section: 1,
-                        is_tls: false,
+                        is_tls: false, in_data_section: false,
                     },
                 );
                 // KASAN 全局变量红区: 追加 32 字节零填充
@@ -3557,8 +3568,18 @@ impl Codegen {
         let rodata_start = self.entry + self.exec_text_size;
         self.code.extend_from_slice(&self.rodata);
         self.code.extend_from_slice(&self.tdata_section);
+        // Static 局部变量: 注册到 data_section, 需追加到可执行文件
+        // 对齐 data_section 到 8 字节边界
+        while !self.data_section.len().is_multiple_of(8) {
+            self.data_section.push(0);
+        }
+        let data_start = self.entry + self.exec_text_size + self.rodata.len() as u64 + self.tdata_section.len() as u64;
+        self.code.extend_from_slice(&self.data_section);
+        // BSS: 仅记录大小, 不写入文件内容
+        self.code.extend_from_slice(&vec![0u8; self.bss_size as usize]);
         self.collect_exec_symbols(prog);
-        self.resolve(rodata_start);
+        let data_start = data_start;
+        self.resolve(rodata_start, data_start);
     }
 
     /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
@@ -3684,6 +3705,37 @@ impl Codegen {
                     });
                 }
             }
+        }
+        // Static 局部变量符号: 在 self.globals 中但不在 prog.decls 中
+        // 收集已处理的变量名, 避免重复
+        let mut emitted_var_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                emitted_var_syms.insert(self.resolve_asm_label(&v.name.name).to_string());
+            }
+        }
+        for (name, g) in &self.globals {
+            if emitted_var_syms.contains(name.as_str()) {
+                continue;
+            }
+            if self.defined_funcs.contains(name.as_str()) {
+                continue;
+            }
+            if name.is_empty() || g.section == SHN_UNDEF {
+                continue;
+            }
+            // Static local 的 section: 3=.data, 4=.bss
+            // 在 ET_EXEC 中, data_section 紧跟在 rodata+tdata 之后
+            self.symbols.push(ElfSym {
+                name: name.clone(),
+                section: g.section,
+                value: g.offset,
+                size: g.size as u64,
+                bind: STB_LOCAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            });
+            emitted_var_syms.insert(name.clone());
         }
         // ELF 规范要求: 所有 LOCAL 符号必须出现在 GLOBAL/WEAK 符号之前
         // 按 bind 排序: STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
@@ -4000,7 +4052,7 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: SHN_UNDEF,
-                            is_tls: false,
+                            is_tls: false, in_data_section: false,
                         },
                     );
                     continue;
@@ -4042,7 +4094,7 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: if initialized { 5 } else { 6 },
-                            is_tls: true,
+                            is_tls: true, in_data_section: false,
                         },
                     );
                     continue;
@@ -4095,7 +4147,7 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: (sec_idx + 7) as u16,
-                            is_tls: false,
+                            is_tls: false, in_data_section: false,
                         },
                     );
                     continue;
@@ -4244,7 +4296,7 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: (sec_idx + 7) as u16,
-                            is_tls: false,
+                            is_tls: false, in_data_section: false,
                         },
                     );
                     continue;
@@ -4461,7 +4513,7 @@ impl Codegen {
                         ty: v.ty.clone(),
                         init: None,
                         section: if initialized { 3 } else { 4 },
-                        is_tls: false,
+                        is_tls: false, in_data_section: false,
                     },
                 );
             }
@@ -5956,6 +6008,7 @@ impl Codegen {
                     init: None,
                     section: snap.section,
                     is_tls: snap.is_tls,
+                    in_data_section: false,
                 },
             );
         }
@@ -6412,11 +6465,12 @@ impl Codegen {
         let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
         // Static 局部变量: 注册到全局数据段 (.data/.bss), 不在栈上分配
         self.registered_static_locals.clear();
+        self.runtime_init_static_locals.clear();
         self.static_local_rename_map.clear();
-        // 保存当前 globals 键集合作为 "真实全局变量名",
-        // 排除已注册的 static local 名称.
+        // 真实全局变量名: 排除所有 static local 的 mangled 名
+        // (mangled 名以 ".Lsl" 开头, 不会与 C 标识符冲突)
         self.real_global_names = self.globals.keys()
-            .filter(|k| !self.static_local_global_names.contains(k.as_str()))
+            .filter(|k| !k.starts_with(".Lsl"))
             .cloned()
             .collect();
         if let Some(body) = &f.body {
@@ -6917,6 +6971,14 @@ impl Codegen {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
                         if v.is_static && self.registered_static_locals.contains(&v.name.name) {
+                            if self.runtime_init_static_locals.contains(&v.name.name) {
+                                // static local 需要运行时初始化: 发射初始化代码到全局地址
+                                if let Some(init) = &v.init {
+                                    self.gen_expr(init, 0);
+                                    self.emit_global_store(0, &v.name.name);
+                                }
+                                continue;
+                            }
                             continue; // static 局部变量已在全局数据段分配
                         }
                         if let Some(ref reg_name) = v.register_name {
@@ -8478,6 +8540,14 @@ impl Codegen {
                     if v.is_extern && v.init.is_none() {
                         continue;
                     }
+                    // static 局部变量已在全局数据段分配,
+                    // 跳过栈分配 (与函数顶层遍历 L6970 一致)
+                    if v.is_static
+                        && self.registered_static_locals.contains(&v.name.name)
+                        && !self.runtime_init_static_locals.contains(&v.name.name)
+                    {
+                        continue;
+                    }
                     if let Some(ref reg_name) = v.register_name {
                         if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
                             self.reg_bindings.insert(v.name.name.clone(), reg_idx);
@@ -8493,6 +8563,16 @@ impl Codegen {
                     // StructDef BlockItem)
                     if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
                         self.gen_vm_type_bind(&v.ty);
+                    }
+                    // static local 需要运行时初始化: 发射初始化代码到全局地址
+                    if v.is_static
+                        && self.runtime_init_static_locals.contains(&v.name.name)
+                    {
+                        if let Some(init) = &v.init {
+                            self.gen_expr(init, 0);
+                            self.emit_global_store(0, &v.name.name);
+                        }
+                        continue;
                     }
                     self.register_var(&v.name.name, &v.ty);
                     if Self::type_has_vla(&v.ty) {
@@ -10807,6 +10887,23 @@ impl Codegen {
                         }
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
+                            // static 局部变量已在全局数据段分配
+                            if v.is_static
+                                && self.registered_static_locals.contains(&v.name.name)
+                                && !self.runtime_init_static_locals.contains(&v.name.name)
+                            {
+                                continue;
+                            }
+                            // static local 需要运行时初始化
+                            if v.is_static
+                                && self.runtime_init_static_locals.contains(&v.name.name)
+                            {
+                                if let Some(init) = &v.init {
+                                    self.gen_expr(init, 0);
+                                    self.emit_global_store(0, &v.name.name);
+                                }
+                                continue;
+                            }
                             self.register_var(&v.name.name, &v.ty);
                             // 定义+声明一体的 struct/union 类型绑定 +
                             // VLA/VM struct 变量动态分配 (语句表达式内)
@@ -14478,7 +14575,12 @@ impl Codegen {
             if self.is_global_not_local(&name.name)
             {
                 // 全局变量 inc/dec: 读-改-写 via RIP-relative
-                // 1. 加载当前值到 rax
+                // 注意: mov eax, [rax] 会零扩展到 rax, 销毁 rax 中的地址.
+                // 策略: 先 push 地址, 再 load 值, 从栈恢复地址后递增写回.
+                // 1. 保存地址到栈
+                self.emit_global_addr(0, &name.name); // rax = &c
+                self.push(0); // push 地址 → [rsp]
+                // 2. 加载当前值到 rax
                 self.emit_global_addr(0, &name.name); // rax = &c
                 match inner_ty.size() {
                     1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
@@ -14486,37 +14588,36 @@ impl Codegen {
                     4 => self.emit(&[0x8B, 0x00]),
                     _ => self.emit(&[0x48, 0x8B, 0x00]),
                 }
+                // rax = 值 (零扩展), 地址在 [rsp]
                 if !is_pre {
-                    self.push(0); // 保存旧值 (后缀返回)
+                    // 后缀: 保存旧值到 rcx (返回用)
+                    self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
                 }
-                // 2. 保存地址, 递增, 写回
-                self.emit_global_addr(0, &name.name); // rax = &c (重载)
-                self.push(0); // 保存地址
-                if !is_pre {
-                    // 后缀: 从栈取旧值来递增 (跳过栈顶地址)
-                    self.emit(&[0x48, 0x8B, 0x44, 0x24, 0x08]); // mov rax, [rsp+8]
-                } else {
-                    // 前缀: 重新加载当前值来递增
-                    self.emit_global_addr(0, &name.name); // rax = &c
-                    match inner_ty.size() {
-                        1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
-                        2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
-                        4 => self.emit(&[0x8B, 0x00]),
-                        _ => self.emit(&[0x48, 0x8B, 0x00]),
-                    }
-                }
-                self.emit_inc_dec_reg(0, is_inc, step); // rax = 新值
-                self.pop(1); // rcx = 地址
+                // 3. 从栈恢复地址到 rax
+                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+                // rax = 地址, 加载值并递增
                 match inner_ty.size() {
-                    1 => self.emit(&[0x88, 0x01]),
-                    2 => self.emit(&[0x66, 0x89, 0x01]),
-                    4 => self.emit(&[0x89, 0x01]),
-                    _ => self.emit(&[0x48, 0x89, 0x01]),
+                    1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
+                    2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
+                    4 => self.emit(&[0x8B, 0x00]),
+                    _ => self.emit(&[0x48, 0x8B, 0x00]),
                 }
-                // 3. 设置返回值
+                // rax = 值 (零扩展)
+                self.emit_inc_dec_reg(0, is_inc, step); // rax = 新值
+                // 写回: 地址仍在 [rsp], 用 rdx 暂存地址
+                self.emit(&[0x48, 0x8B, 0x14, 0x24]); // mov rdx, [rsp]
+                match inner_ty.size() {
+                    1 => self.emit(&[0x88, 0x02]),    // mov [rdx], al
+                    2 => self.emit(&[0x66, 0x89, 0x02]), // mov [rdx], ax
+                    4 => self.emit(&[0x89, 0x02]),    // mov [rdx], eax
+                    _ => self.emit(&[0x48, 0x89, 0x02]), // mov [rdx], rax
+                }
+                // 4. 清理栈并设置返回值
+                self.pop(2); // 弹出地址 (丢弃)
                 if !is_pre {
-                    self.pop(0); // rax = 旧值
-                    if dst != 0 { self.mov(dst, 0); }
+                    // 后缀: 返回旧值 (在 rcx)
+                    self.emit(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+                    if dst != 0 && dst != 1 { self.mov(dst, 1); } // dst = rcx
                 } else {
                     // 前缀: 返回新值 (已在 rax)
                     if dst != 0 { self.mov(dst, 0); }
@@ -20594,37 +20695,31 @@ impl Codegen {
     }
 
     fn register_one_static_local(&mut self, v: &VarDecl) -> bool {
-        // 如果名称被真实全局变量 (非 static local) 占用, 跳过
-        if self.real_global_names.contains(&v.name.name) {
-            return false; // 名称是真实全局变量, 不能覆盖
-        }
-        // 如果名称已被另一个函数的 static local 占用,
-        // 仍然分配新空间并覆盖 globals 条目.
-        // 旧函数的代码已编译完成, 其中引用的偏移量
-        // 仍指向 data section 中的旧位置, 不受影响.
         let sz = v.ty.size().max(1);
         let align = v.alignment.unwrap_or(v.ty.align()).max(1);
         let initialized = v.init.is_some();
-        // 如果有初始化式但无法在编译时求值, 跳过注册 (回退到栈分配)
-        if initialized {
-            let can_init = match v.init.as_ref().unwrap() {
+        // 检查初始化式是否可在编译时求值
+        let can_static_init = if initialized {
+            match v.init.as_ref().unwrap() {
                 Expr::String { .. } => true,
                 Expr::InitList { .. } => true, // 尝试, 可能失败
                 _ => {
                     let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
                     Self::global_init_bytes(v.init.as_ref().unwrap(), sz, is_float, matches!(v.ty, Type::Complex(_))).is_some()
                 }
-            };
-            if !can_init {
-                return false;
             }
-        }
-        if initialized {
+        } else {
+            true // 无初始化式 → BSS 零初始化, 无需运行时初始化
+        };
+        // 无论是否能静态初始化, 都注册为全局对象.
+        // 不能静态求值时分配 BSS 空间, 标记为运行时初始化.
+        let use_data = can_static_init && initialized;
+        if use_data {
             self.data_align = self.data_align.max(align as u64);
         } else {
             self.bss_align = self.bss_align.max(align as u64);
         }
-        let offset = if initialized {
+        let offset = if use_data {
             let off = (self.data_section.len() + align - 1) & !(align - 1);
             while self.data_section.len() < off {
                 self.data_section.push(0);
@@ -20635,98 +20730,138 @@ impl Codegen {
             self.bss_size
         };
         // 尝试写入初始值 (与全局变量处理逻辑一致)
-        let has_init = if let Some(init) = &v.init {
-            match init {
-                Expr::String { data, .. } => {
-                    if matches!(&v.ty, Type::Ptr(_)) {
-                        // 指针: 字符串进 rodata, data 段写偏移
-                        // 简化: 直接将字符串地址写入 (需要在 resolve 时修补)
-                        // 这里先写零, 后续通过重定位修补
-                        self.data_section.resize(self.data_section.len() + sz, 0);
-                    } else if matches!(&v.ty, Type::Array(_, _)) {
-                        // 字符数组: 复制字符串内容, 剩余零填充
-                        let copy_len = data.len().min(sz);
-                        self.data_section.extend_from_slice(&data[..copy_len]);
-                        for _ in copy_len..sz {
-                            self.data_section.push(0);
-                        }
-                    } else {
-                        self.data_section.extend_from_slice(data);
-                        for _ in data.len()..sz {
-                            self.data_section.push(0);
-                        }
-                    }
-                    true
-                }
-                Expr::InitList { inits, .. } => {
-                    // struct/array 初始化: 使用 gen_global_init_list
-                    let base = self.data_section.len() as u64;
-                    if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, Some((base, None)), false) {
-                        self.data_section.extend_from_slice(&init_data);
-                        for _ in init_data.len()..sz {
-                            self.data_section.push(0);
+        let has_init = if use_data {
+            if let Some(init) = &v.init {
+                match init {
+                    Expr::String { data, .. } => {
+                        if matches!(&v.ty, Type::Ptr(_)) {
+                            self.data_section.resize(self.data_section.len() + sz, 0);
+                        } else if matches!(&v.ty, Type::Array(_, _)) {
+                            let copy_len = data.len().min(sz);
+                            self.data_section.extend_from_slice(&data[..copy_len]);
+                            for _ in copy_len..sz {
+                                self.data_section.push(0);
+                            }
+                        } else {
+                            self.data_section.extend_from_slice(data);
+                            for _ in data.len()..sz {
+                                self.data_section.push(0);
+                            }
                         }
                         true
-                    } else {
-                        false
+                    }
+                    Expr::InitList { inits, .. } => {
+                        let base = self.data_section.len() as u64;
+                        if let Some(init_data) = self.gen_global_init_list(&v.ty, inits, Some((base, None)), false) {
+                            self.data_section.extend_from_slice(&init_data);
+                            for _ in init_data.len()..sz {
+                                self.data_section.push(0);
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => {
+                        let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if let Some(bytes) = Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_))) {
+                            self.data_section.extend_from_slice(&bytes);
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
-                _ => {
-                    let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                    if let Some(bytes) = Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_))) {
-                        self.data_section.extend_from_slice(&bytes);
-                        true
-                    } else {
-                        false
-                    }
-                }
+            } else {
+                false
             }
         } else {
             false
         };
         if !has_init {
-            if initialized {
+            if use_data {
+                // 静态初始化失败, 回退到 BSS + 运行时初始化
                 self.data_section.resize(self.data_section.len() + sz, 0);
-            } else {
+            } else if !initialized {
                 self.bss_size += sz as u64;
             }
+            // 如果 initialized && !can_static_init: BSS 空间已在上面分配
         }
-        // 生成唯一的 mangled 名称, 避免不同函数的同名
-        // static local 在 globals 中冲突.
+        // 生成唯一的 mangled 名称, 包含函数名避免跨函数碰撞
         let mangled = format!(
-            ".Lsl{}.{}", self.static_local_counter, v.name.name
+            ".Lsl{}.{}.{}",
+            self.static_local_counter,
+            self.current_func_name,
+            v.name.name
         );
         self.static_local_counter += 1;
-        self.globals.insert(
-            mangled.clone(),
-            GlobalVar {
-                offset,
-                size: sz,
-                ty: v.ty.clone(),
-                init: None,
-                section: if initialized { 3 } else { 4 },
-                is_tls: false,
-            },
-        );
-        self.static_local_global_names.insert(v.name.name.clone());
-        self.static_local_rename_map.insert(v.name.name.clone(), mangled);
+        // 确定 section: 成功写入 data → 3, 否则 → 4 (BSS)
+        let section = if has_init { 3 } else { 4 };
+        // 如果 data 段分配了空间但初始化失败, 需要把空间还给 BSS
+        if use_data && !has_init {
+            // data_section 已扩展了 sz 字节, 截断回去
+            let new_len = offset as usize;
+            self.data_section.truncate(new_len);
+            // 改为 BSS 分配
+            self.bss_align = self.bss_align.max(align as u64);
+            self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
+            let bss_off = self.bss_size;
+            self.bss_size += sz as u64;
+            self.globals.insert(
+                mangled.clone(),
+                GlobalVar {
+                    offset: bss_off,
+                    size: sz,
+                    ty: v.ty.clone(),
+                    init: None,
+                    section: 4,
+                    is_tls: false, in_data_section: true,
+                },
+            );
+        } else {
+            self.globals.insert(
+                mangled.clone(),
+                GlobalVar {
+                    offset,
+                    size: sz,
+                    ty: v.ty.clone(),
+                    init: None,
+                    section,
+                    is_tls: false, in_data_section: true,
+                },
+            );
+        }
+        // 跟踪 mangled 名 (防不同 static local 的 mangled 碰撞)
+        self.static_local_global_names.insert(mangled.clone());
+        // 有序 rename map: 后注册的优先 (内层作用域覆盖外层)
+        self.static_local_rename_map.push((v.name.name.clone(), mangled));
+        // 如果需要运行时初始化, 记录到集合中
+        if initialized && !has_init {
+            self.runtime_init_static_locals.insert(v.name.name.clone());
+        }
         true
     }
 
     /// 将变量名解析为 globals map 中的实际键.
     /// 如果 name 是当前函数的 static local, 返回 mangled 名;
-    /// 否则返回原名.
+    /// 否则返回原名. 有序查找: 最后注册的匹配优先 (内层作用域).
     fn resolve_global_key<'a>(&'a self, name: &'a str) -> &'a str {
-        self.static_local_rename_map
-            .get(name)
-            .map(|s| s.as_str())
-            .unwrap_or(name)
+        // 从后向前扫描, 最新注册的条目优先
+        for (src, mangled) in self.static_local_rename_map.iter().rev() {
+            if src == name {
+                return mangled;
+            }
+        }
+        name
     }
 
     /// 判断 name 是否应作为全局变量访问 (含 static local).
     fn is_global_var(&self, name: &str) -> bool {
-        if self.static_local_rename_map.contains_key(name) {
-            return true;
+        // 检查 rename map (Vec, 从后向前扫描)
+        for (src, _) in self.static_local_rename_map.iter().rev() {
+            if src == name {
+                return true;
+            }
         }
         self.globals.contains_key(name)
     }

@@ -22086,3 +22086,209 @@ int main(void) {
         stdout.trim()
     );
 }
+
+// =================== static local variable storage ===================
+
+/// static local 标量跨调用持久性
+#[test]
+fn static_local_scalar_persistence() {
+    let source = r#"
+int counter(void) { static int n; return ++n; }
+int main(void) {
+    if (counter() != 1) return 1;
+    if (counter() != 2) return 2;
+    if (counter() != 3) return 3;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-scalar", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_scalar should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 未初始化数组 → .bss, 跨调用持久
+#[test]
+fn static_local_uninit_array() {
+    let source = r#"
+void f(int *p) { static int a[4]; a[0]++; *p = a[0]; }
+int main(void) {
+    int v;
+    f(&v); if (v != 1) return 1;
+    f(&v); if (v != 2) return 2;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-uninit-array", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_uninit_array should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 常量初始化列表数组
+#[test]
+fn static_local_init_list_array() {
+    let source = r#"
+int sum(void) {
+    static int a[4] = {1, 2, 3, 4};
+    int s = 0;
+    for (int i = 0; i < 4; i++) s += a[i];
+    return s;
+}
+int main(void) {
+    if (sum() != 10) return 1;
+    if (sum() != 10) return 2;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-init-list", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_init_list should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 字符串初始化数组
+#[test]
+fn static_local_string_init_array() {
+    let source = r#"
+const char *get(void) {
+    static char s[8] = "abc";
+    return s;
+}
+int main(void) {
+    const char *p = get();
+    if (p[0] != 'a' || p[1] != 'b' || p[2] != 'c' || p[3] != '\0')
+        return 1;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-string-init", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_string_init should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 在嵌套块 (if body) 中声明
+#[test]
+fn static_local_in_nested_block() {
+    let source = r#"
+int f(int x) {
+    if (x > 0) {
+        static int n;
+        n += x;
+        return n;
+    }
+    return 0;
+}
+int main(void) {
+    if (f(1) != 1) return 1;
+    if (f(2) != 3) return 2;
+    if (f(3) != 6) return 3;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-nested-block", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_nested_block should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 不同函数中同名 static local 必须独立
+#[test]
+fn static_local_cross_function_independence() {
+    let source = r#"
+int fa(void) { static int x; return ++x; }
+int fb(void) { static int x; return ++x; }
+int main(void) {
+    if (fa() != 1) return 1;
+    if (fa() != 2) return 2;
+    if (fb() != 1) return 3;
+    if (fa() != 3) return 4;
+    if (fb() != 2) return 5;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-cross-func", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_cross_func should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 取地址跨调用一致性
+#[test]
+fn static_local_address_of() {
+    let source = r#"
+int *get_addr(void) { static int x = 42; return &x; }
+int main(void) {
+    int *p = get_addr();
+    if (*p != 42) return 1;
+    *p = 99;
+    int *q = get_addr();
+    if (*q != 99) return 2;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-addr", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_addr should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// static local 部分初始化数组 (尾部补零)
+#[test]
+fn static_local_partial_init_array() {
+    let source = r#"
+int f(void) {
+    static int a[4] = {1};
+    return a[0] + a[1] + a[2] + a[3];
+}
+int main(void) {
+    if (f() != 1) return 1;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-partial-init", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_partial_init should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
