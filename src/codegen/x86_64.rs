@@ -20239,7 +20239,7 @@ impl Codegen {
     }
 
     /// 全局 va_list long double va_arg: 从 overflow_arg_area 读取
-    /// 16 字节对齐的 80-bit x87 扩展精度值 (fldt)。
+    /// dcc 内部以 64-bit double 表示 long double (xmm0-double 约定).
     /// SysV ABI: long double 按 MEMORY 类传递, 16 字节对齐。
     fn gen_va_arg_long_double_global(&mut self, ap_name: &str) {
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
@@ -20248,14 +20248,14 @@ impl Codegen {
         // r9 = (rcx + 15) & ~15 (16 字节对齐)
         self.emit(&[0x49, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
         self.emit(&[0x48, 0x83, 0xE1, 0xF0]); // and rcx, ~15
-        // fldt [rcx]: 加载 10 字节 80-bit 扩展精度到 st(0)
-        // DB /5 m80ext: ModRM = 00_101_000 = 0x28 (reg=5 for fldt, rm=0 for rcx)
-        self.emit(&[0xDB, 0x28]); // fldt [rcx]
+        // movsd (%rcx), %xmm0: 读取 8 字节 double (dcc 内部 long double = double)
+        // F2 0F 10 /r: ModRM = 00_000_001 = 0x01 (reg=xmm0, rm=rcx)
+        self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd (%rcx), %xmm0
         // rcx += 16 (推进到下一个 16 字节对齐位置)
         self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
         // 写回 [r10+8]
         self.emit(&[0x4C, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
-        // 结果在 st(0) (x87 栈顶)
+        // 结果在 xmm0 (dcc 内部 long double = double 约定)
     }
 
     /// 全局 va_list 聚合 va_arg: 逻辑与 gen_va_arg_struct 相同,
@@ -20512,7 +20512,7 @@ impl Codegen {
         // 写回 overflow_arg_area: [r13+ap_off+8] = r9
         self.emit(&[0x4D, 0x89, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
-        // 结果在 st(0) (x87 栈顶), 与 long double 常规约定一致
+        // 结果在 xmm0 (dcc 内部 long double = double 约定)
     }
 
     /// SysV va_arg 聚合读取: 按 abi 分类从寄存器保存区或溢出区读取
@@ -20765,16 +20765,15 @@ impl Codegen {
             return;
         }
         // Long double: SysV MEMORY 类, 从 overflow_arg_area 读取
-        // 16 字节对齐的 80-bit x87 扩展精度值 (fldt)。
+        // dcc 内部以 64-bit double 表示 long double (xmm0-double 约定).
         if matches!(arg_ty, Type::LongDouble) {
             self.emit(&[0x49, 0x89, 0xCB]); // mov r11, rcx (回写基址)
             self.emit(&[0x48, 0x8B, 0x49, 0x08]); // mov rcx, [rcx+8] (overflow)
             // rcx = (rcx + 15) & ~15 (16 字节对齐)
             self.emit(&[0x48, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
             self.emit(&[0x48, 0x83, 0xE1, 0xF0]); // and rcx, ~15
-            // fldt [rcx]: 加载 10 字节 80-bit 扩展精度到 st(0)
-            // DB /5 m80ext: ModRM = 00_101_000 = 0x28
-            self.emit(&[0xDB, 0x28]); // fldt [rcx]
+            // movsd (%rcx), %xmm0: 读取 8 字节 double (dcc 内部 long double = double)
+            self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd (%rcx), %xmm0
             // rcx += 16
             self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
             // 写回 [r11+8]
