@@ -174,6 +174,7 @@ pub struct Codegen {
     custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
     pub func_sizes: HashMap<String, u64>,     // 函数名 → 代码大小 (用于符号 size)
     variadic_funcs: HashMap<String, bool>,    // 函数名 → 是否可变参数
+    old_style_funcs: std::collections::HashSet<String>, // K&R 风格定义函数名
     variadic_named_params: i32,               // 当前可变参数函数的命名参数数量
     variadic_named_gp: i32,
     variadic_named_fp: i32,
@@ -1341,6 +1342,7 @@ struct ParallelEmitCtx {
     line_map: Vec<LineSpan>,
     globals: HashMap<String, ParallelGlobalSnap>,
     variadic_funcs: HashMap<String, bool>,
+    old_style_funcs: std::collections::HashSet<String>,
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
     nested_func_renames: HashMap<String, HashMap<String, String>>,
     nested_func_rename_counter: u32,
@@ -1441,6 +1443,7 @@ impl Codegen {
             custom_sec_indices: HashMap::new(),
             func_sizes: HashMap::new(),
             variadic_funcs: HashMap::new(),
+            old_style_funcs: std::collections::HashSet::new(),
             variadic_named_params: 0,
             variadic_named_gp: 0,
             variadic_named_fp: 0,
@@ -3354,6 +3357,9 @@ impl Codegen {
                 if f.is_variadic {
                     self.variadic_funcs.insert(f.name.name.clone(), true);
                 }
+                if f.is_old_style {
+                    self.old_style_funcs.insert(f.name.name.clone());
+                }
                 if let Some(body) = &f.body {
                     let mut nested = Vec::new();
                     Self::collect_nested_funcs(&body.items, &mut nested);
@@ -3361,6 +3367,9 @@ impl Codegen {
                         Self::register_func_sig(&nf, &mut self.func_param_types);
                         self.nested_funcs
                             .insert(nf.name.name.clone(), nf.upvars.clone());
+                        if nf.is_old_style {
+                            self.old_style_funcs.insert(nf.name.name.clone());
+                        }
                     }
                 }
             }
@@ -6011,6 +6020,7 @@ impl Codegen {
                 })
                 .collect(),
             variadic_funcs: self.variadic_funcs.clone(),
+            old_style_funcs: self.old_style_funcs.clone(),
             nested_funcs: self.nested_funcs.clone(),
             nested_func_renames: self.nested_func_renames.clone(),
             nested_func_rename_counter: self.nested_func_rename_counter,
@@ -6048,6 +6058,7 @@ impl Codegen {
             );
         }
         cg.variadic_funcs = ctx.variadic_funcs;
+        cg.old_style_funcs = ctx.old_style_funcs;
         cg.nested_funcs = ctx.nested_funcs;
         cg.nested_func_renames = ctx.nested_func_renames;
         cg.nested_func_rename_counter = ctx.nested_func_rename_counter;
@@ -6313,13 +6324,15 @@ impl Codegen {
             .max(1)
     }
 
-    /// 递归收集块中的嵌套函数声明
+    /// 递归收集块中的嵌套函数声明 (仅收集有函数体的定义, 跳过纯声明)
     fn collect_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
         for item in items {
             if let BlockItem::Decl(Decl::Func(f)) = item {
-                out.push(f.clone());
-                if let Some(body) = &f.body {
-                    Self::collect_nested_funcs(&body.items, out);
+                if f.body.is_some() {
+                    out.push(f.clone());
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_funcs(&body.items, out);
+                    }
                 }
             }
             // 也扫描嵌套块 (if/for/while 等)
@@ -6350,11 +6363,11 @@ impl Codegen {
         }
     }
 
-    /// 只收集当前函数直接包含的嵌套函数；不进入这些函数自己的函数体。
+    /// 只收集当前函数直接包含的嵌套函数定义 (有函数体); 不进入这些函数自己的函数体.
     fn collect_direct_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
         for item in items {
             match item {
-                BlockItem::Decl(Decl::Func(f)) => out.push(f.clone()),
+                BlockItem::Decl(Decl::Func(f)) if f.body.is_some() => out.push(f.clone()),
                 BlockItem::Stmt(s) => Self::collect_direct_nested_funcs_stmt(s, out),
                 _ => {}
             }
@@ -7380,10 +7393,16 @@ impl Codegen {
             // 路径会把整个数组按值拷贝到参数暂存区, 导致
             // printf("%s", buf) 这类调用读到垃圾. 衰减为指针后
             // 走标量路径 gen_expr_decay 传地址.
-            let effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
+            let mut effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
                 Type::Array(elem, _) => Type::Ptr(elem),
                 t => t,
             };
+            // C 默认参数提升: K&R (无原型) 函数的 float 参数以 double 传递
+            if direct.map(|n| self.old_style_funcs.contains(n)).unwrap_or(false)
+                && matches!(effective_ty, Type::Float)
+            {
+                effective_ty = Type::Double;
+            }
             let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
             let need_fp = classes
@@ -7476,10 +7495,16 @@ impl Codegen {
                     None
                 });
             // 与上方分类循环一致: 数组实参衰减为指针
-            let effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
+            let mut effective_ty = match param_ty.unwrap_or_else(|| arg.ty()) {
                 Type::Array(elem, _) => Type::Ptr(elem),
                 t => t,
             };
+            // K&R 默认参数提升: float → double
+            if direct.map(|n| self.old_style_funcs.contains(n)).unwrap_or(false)
+                && matches!(effective_ty, Type::Float)
+            {
+                effective_ty = Type::Double;
+            }
             let aggregate = matches!(
                 effective_ty,
                 Type::Int128 | Type::UInt128 | Type::Complex(_)
@@ -7744,11 +7769,15 @@ impl Codegen {
                 }
                 // C 语义: 可变参数函数的 float 参数默认提升为 double
                 // printf("%f", 1.0f) 实际传递的是 double 1.0
+                // K&R (无原型) 函数同样适用默认参数提升: float → double
                 let is_variadic = direct
                     .and_then(|name| self.variadic_funcs.get(name))
                     .copied()
                     .unwrap_or(false);
-                let promoted = is_variadic && matches!(effective_ty, Type::Float);
+                let is_old_style = direct
+                    .map(|name| self.old_style_funcs.contains(name))
+                    .unwrap_or(false);
+                let promoted = (is_variadic || is_old_style) && matches!(effective_ty, Type::Float);
                 if promoted {
                     // cvtss2sd xmm0, xmm0: float → double
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
