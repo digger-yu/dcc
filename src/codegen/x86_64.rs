@@ -13576,10 +13576,10 @@ impl Codegen {
                                 if let Expr::String { data, .. } = value {
                                     self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                                 } else {
-                                    self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                                    self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                                 }
                             } else {
-                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                             };
                             data.extend_from_slice(&elem_data);
                             k += 1;
@@ -13636,10 +13636,10 @@ impl Codegen {
                             if let Expr::String { data, .. } = value {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
-                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                             }
                         } else {
-                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                         };
                         data.extend_from_slice(&elem_data);
                     }
@@ -13777,10 +13777,10 @@ impl Codegen {
                                     if let Expr::String { data, .. } = value {
                                         self.emit_string_ptr_slot(field_rel, data, rodata_slots)
                                     } else {
-                                        self.eval_const_expr(value, field_rel, sz, is_float_field)
+                                        self.eval_const_expr(value, field_rel, sz, is_float_field, rodata_slots)
                                     }
                                 } else {
-                                    self.eval_const_expr(value, field_rel, sz, is_float_field)
+                                    self.eval_const_expr(value, field_rel, sz, is_float_field, rodata_slots)
                                 }
                             }
                         }
@@ -13843,10 +13843,10 @@ impl Codegen {
                         if let Expr::String { data, .. } = value {
                             self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                         } else {
-                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                         }
                     } else {
-                        self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                        self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
                     };
                     let off = i * elem_size;
                     for (j, &b) in elem_data.iter().enumerate() {
@@ -13880,7 +13880,7 @@ impl Codegen {
                 
                 // 处理实部
                 if let Some(real_e) = real_expr {
-                    let real_data = self.eval_const_expr(real_e, rel, inner_size, is_float_inner);
+                    let real_data = self.eval_const_expr(real_e, rel, inner_size, is_float_inner, rodata_slots);
                     for (j, &b) in real_data.iter().enumerate() {
                         if j < inner_size {
                             data[j] = b;
@@ -13891,7 +13891,7 @@ impl Codegen {
                 // 处理虚部
                 if let Some(imag_e) = imag_expr {
                     let imag_rel = rel.map(|(base, sec)| (base + inner_size as u64, sec));
-                    let imag_data = self.eval_const_expr(imag_e, imag_rel, inner_size, is_float_inner);
+                    let imag_data = self.eval_const_expr(imag_e, imag_rel, inner_size, is_float_inner, rodata_slots);
                     for (j, &b) in imag_data.iter().enumerate() {
                         if inner_size + j < total_size {
                             data[inner_size + j] = b;
@@ -13907,7 +13907,7 @@ impl Codegen {
                             return Some(self.emit_string_ptr_slot(rel, data, rodata_slots));
                         }
                     }
-                    data = self.eval_const_expr(e, rel, ty.size(), is_float_ty);
+                    data = self.eval_const_expr(e, rel, ty.size(), is_float_ty, rodata_slots);
                 }
             }
         }
@@ -13918,6 +13918,52 @@ impl Codegen {
         }
     }
 
+    /// Helper for string pointer arithmetic in constant expressions.
+    /// Handles patterns like `"str" + n`, `n + "str"`, with optional
+    /// Cast wrappers. Uses the string pool to ensure the string is in
+    /// rodata and the pointer slot is correctly resolved.
+    fn eval_string_ptr_arith(
+        &mut self,
+        l: &Expr,
+        r: &Expr,
+        rel: Option<(u64, Option<usize>)>,
+        width: usize,
+        rodata_slots: bool,
+    ) -> Vec<u8> {
+        // Strip casts to find the underlying expressions
+        let l_inner = Self::strip_casts(l);
+        let r_inner = Self::strip_casts(r);
+        // Try to find (String, Int) or (Int, String) pattern
+        let (data, offset) = match (l_inner, r_inner) {
+            (Expr::String { data, .. }, _) => {
+                if let Ok(n) = const_eval::eval(r) {
+                    (data, n as usize)
+                } else {
+                    return vec![0u8; width.max(8)];
+                }
+            }
+            (_, Expr::String { data, .. }) => {
+                if let Ok(n) = const_eval::eval(l) {
+                    (data, n as usize)
+                } else {
+                    return vec![0u8; width.max(8)];
+                }
+            }
+            _ => return vec![0u8; width.max(8)],
+        };
+        let byte_off = offset.min(data.len());
+        self.emit_string_ptr_slot(rel, &data[byte_off..], rodata_slots)
+    }
+
+    /// Strip Cast wrappers from an expression.
+    fn strip_casts(e: &Expr) -> &Expr {
+        let mut cur = e;
+        while let Expr::Cast { e: inner, .. } = cur {
+            cur = inner;
+        }
+        cur
+    }
+
     // 计算常量表达式的字节表示；符号引用写入 pending_data64_rels。
     fn eval_const_expr(
         &mut self,
@@ -13925,6 +13971,7 @@ impl Codegen {
         rel: Option<(u64, Option<usize>)>,
         width: usize,
         is_float: bool,
+        rodata_slots: bool,
     ) -> Vec<u8> {
         // 字符串字面量: 不能走 eval_full —— 它返回 ConstValue::Str, 落到
         // 下方 _ 分支会被 0 填充 (char buf[][8] = {"hello"} 元素全为 0)。
@@ -14048,7 +14095,7 @@ impl Codegen {
                     vec![0u8; width.max(8)]
                 }
                 Expr::AddrOf { e: inner, .. } => match inner.as_ref() {
-                    Expr::Ident { .. } => self.eval_const_expr(inner, rel, width, is_float),
+                    Expr::Ident { .. } => self.eval_const_expr(inner, rel, width, is_float, rodata_slots),
                     Expr::Index {
                         arr,
                         idx,
@@ -14070,12 +14117,35 @@ impl Codegen {
                                 ));
                             }
                             vec![0u8; width.max(8)]
+                        } else if let (Expr::String { data, .. }, Ok(i)) =
+                            (arr.as_ref(), const_eval::eval(idx))
+                        {
+                            // &"str"[i]: string literal element address.
+                            // Use string pool to ensure the string is in
+                            // rodata and the pointer slot is patched to
+                            // the absolute address (ET_EXEC) or has a
+                            // proper relocation (ET_REL).
+                            let byte_off = (i as usize).min(data.len());
+                            self.emit_string_ptr_slot(rel, &data[byte_off..], rodata_slots)
                         } else {
                             vec![0u8; width.max(e.ty().size())]
                         }
                     }
                     _ => vec![0u8; width.max(e.ty().size())],
                 },
+                // Strip casts to handle (void *)&"str"[0],
+                // (char *)&"hello"[1], etc.
+                Expr::Cast { e: inner, .. } => {
+                    self.eval_const_expr(inner, rel, width, is_float, rodata_slots)
+                }
+                // String pointer arithmetic: "str" + n, n + "str",
+                // with optional Cast wrappers.
+                Expr::Binop { op: crate::ast::BinOp::Add, l, r, .. }
+                    if matches!(l.ty(), Type::Array(_, _) | Type::Ptr(_))
+                        || matches!(r.ty(), Type::Array(_, _) | Type::Ptr(_)) =>
+                {
+                    self.eval_string_ptr_arith(l, r, rel, width, rodata_slots)
+                }
                 Expr::LabelAddr { label, .. } => {
                     // &&label in data section: record for later patching
                     // Prefix label name to avoid collision with function symbols
