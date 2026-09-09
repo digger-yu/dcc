@@ -10337,6 +10337,95 @@ fn va_arg_x86_64_long_double() {
     assert_eq!(code, 0, "expected sum_ld3(3, 1.0L, 2.0L, 3.0L) == 6.0");
 }
 
+/// va_list 作为函数参数传递 (指针退化): 辅助函数通过
+/// va_list 形参读取可变参数.
+#[test]
+fn va_list_as_function_param() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "int sum_via_ap(int n, va_list ap) {\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++)\n\
+               s += __builtin_va_arg(ap, int);\n\
+           return s;\n\
+           }\n\
+           int caller(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           int r = sum_via_ap(n, ap);\n\
+           __builtin_va_end(ap);\n\
+           return r;\n\
+           }\n\
+           int main(void) {\n\
+           return caller(4, 1, 2, 3, 4) - 10;\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-list-param", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_list as function param failed");
+}
+
+/// va_list 指针解引用 (*pap): 通过指向 va_list 的指针访问.
+#[test]
+fn va_list_pointer_deref() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "int caller(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           va_list *pap = &ap;\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++)\n\
+               s += __builtin_va_arg(*pap, int);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) {\n\
+           return caller(3, 1, 2, 3) - 6;\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-list-ptr-deref", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_list pointer deref failed");
+}
+
+/// va_list 结构体成员 (obj.ap): va_list 作为结构体字段.
+#[test]
+fn va_list_struct_member() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "struct S { int x; va_list ap; };\n\
+           int caller(int n, ...) {\n\
+           struct S obj;\n\
+           obj.x = 0;\n\
+           __builtin_va_start(obj.ap, n);\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++)\n\
+               s += __builtin_va_arg(obj.ap, int);\n\
+           __builtin_va_end(obj.ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) {\n\
+           return caller(3, 1, 2, 3) - 6;\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-list-member", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_list struct member failed");
+}
+
 /// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
 #[test]
 fn setjmp_x86_64_fixture_compiles() {

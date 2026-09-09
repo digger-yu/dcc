@@ -351,6 +351,18 @@ enum ArgLoc {
     Stack(usize),
 }
 
+/// va_list 寻址模式: 统一表示 va_arg 的各种 va_list 来源.
+/// 简化 gen_va_arg_* 函数族的重载分发.
+#[derive(Clone, Debug)]
+enum VaListAddress {
+    /// 命名变量 (局部或全局). codegen 内部按 is_global_not_local 分派.
+    Named(String),
+    /// va_list 地址已在寄存器 rcx 中 (来自指针解引用或参数退化).
+    InReg,
+    /// va_list 地址在 [r13 + offset] (来自结构体成员或数组下标).
+    Lvalue(i32),
+}
+
 /// 内联汇编操作数
 #[derive(Clone, Debug)]
 enum AsmOperand {
@@ -12125,42 +12137,28 @@ impl Codegen {
                     && arg_ty.size() > 8
                 {
                     let slot = self.alloc_sret_slot(arg_ty.size());
-                    if let Expr::Ident { name, .. } = ap.as_ref() {
+                    let va_addr = self.resolve_va_list_addr(ap);
+                    if let VaListAddress::Named(ref name) = va_addr {
                         self.emit_lea_r13(7, slot); // rdi = 临时槽
-                        self.gen_va_arg_struct(&name.name, arg_ty);
+                        self.gen_va_arg_struct(name, arg_ty);
                     } else {
-                        self.mov_imm(7, 0);
+                        // Reg/Lvalue: rcx 已有 va_list 指针, 用指针版 struct 读取
+                        self.emit_lea_r13(7, slot); // rdi = 临时槽
+                        self.gen_va_arg_ptr_struct(arg_ty);
                     }
                     self.emit_lea_r13(0, slot); // rax = 槽地址
                     return;
                 }
-                // 检查 ap 的类型：如果是指向 va_list 结构的指针（函数参数退化），使用指针版本
-                let ap_is_ptr = matches!(ap.ty(), Type::Ptr(_));
-                if let Expr::Ident { name, .. } = ap.as_ref() {
-                    if ap_is_ptr {
-                        // va_list 作为函数参数时退化为指针，需要加载指针值
-                        self.gen_expr(ap, 0); // 加载指针值到 rax
-                        self.mov(1, 0); // rcx = rax
-                        self.gen_va_arg_ptr(arg_ty, dst);
-                    } else {
-                        self.gen_va_arg(&name.name, arg_ty, dst);
+                // 统一分发: 构造 VaListAddress 后按变体分派
+                let va_addr = self.resolve_va_list_addr(ap);
+                match va_addr {
+                    VaListAddress::Named(name) => {
+                        self.gen_va_arg(&name, arg_ty, dst);
                     }
-                } else if let Expr::Deref { e, .. } = ap.as_ref() {
-                    // va_arg(*ptr, type): 加载指针值到 rcx，然后使用基于寄存器的 va_arg
-                    self.gen_expr(e, 0); // 将指针值加载到 rax
-                    self.mov(1, 0); // rcx = rax (va_list 指针)
-                    self.gen_va_arg_ptr(arg_ty, dst);
-                } else if matches!(ap.ty(), Type::Ptr(_)) {
-                    // 指针类型 ap 表达式 (如 va_list* 数组元素): 加载指针值
-                    self.gen_expr(ap, 0);
-                    self.mov(1, 0);
-                    self.gen_va_arg_ptr(arg_ty, dst);
-                } else if self.gen_lvalue_addr(ap, 1) {
-                    // 数组类型 lvalue (成员 a.g / 下标 aps[4]): va_list 是
-                    // 单元素数组, lvalue 地址即 va_list 指针
-                    self.gen_va_arg_ptr(arg_ty, dst);
-                } else {
-                    self.mov_imm(dst, 0);
+                    VaListAddress::InReg | VaListAddress::Lvalue(_) => {
+                        // rcx 已有 va_list 指针地址
+                        self.gen_va_arg_ptr(arg_ty, dst);
+                    }
                 }
             }
             Expr::InitList { inits, .. } => {
@@ -19172,13 +19170,23 @@ impl Codegen {
         // 直接写入目标变量缓冲 (rdi)。通用 rax/rdx 物化路径只覆盖 16 字节,
         // >16B 聚合会截断/污染, 必须绕开。
         if let Expr::VaArg { ap, ty: arg_ty, .. } = r {
-            if let Expr::Ident { name, .. } = ap.as_ref() {
+            if matches!(arg_ty, Type::Struct { .. } | Type::Union { .. })
+                && arg_ty.size() > 8
+            {
+                let va_addr = self.resolve_va_list_addr(ap);
+                // 设置 rdi = 目标地址 (resolve 之后, 避免被 scratch 覆盖)
                 if is_global_dst {
                     self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
                 } else {
                     self.emit_lea_r13(7, dst_off); // rdi = 目标地址
                 }
-                self.gen_va_arg_struct(&name.name, arg_ty);
+                if let VaListAddress::Named(ref name) = va_addr {
+                    self.gen_va_arg_struct(name, arg_ty);
+                } else {
+                    // rcx 仍有 va_list 指针 (emit_lea_r13/emit_global_addr
+                    // 只写 rdi, 不覆盖 rcx)
+                    self.gen_va_arg_ptr_struct(arg_ty);
+                }
                 return;
             }
         }
@@ -19998,6 +20006,39 @@ impl Codegen {
         Type::Array(Box::new(Type::ULong.into()), ArraySize::Const(3))
     }
 
+    /// 解析 va_arg 的 ap 表达式为 VaListAddress.
+    /// 统一处理 Ident/Deref/Member/Index/Ptr 等各种寻址模式.
+    fn resolve_va_list_addr(&mut self, ap: &Expr) -> VaListAddress {
+        let ap_is_ptr = matches!(ap.ty(), Type::Ptr(_));
+        if let Expr::Ident { name, .. } = ap {
+            if ap_is_ptr {
+                // va_list 作为函数参数时退化为指针，加载指针值到 rcx
+                self.gen_expr(ap, 0);
+                self.mov(1, 0); // rcx = rax
+                VaListAddress::InReg
+            } else {
+                VaListAddress::Named(name.name.clone())
+            }
+        } else if let Expr::Deref { ref e, .. } = ap {
+            // *ptr: 加载指针值到 rcx
+            self.gen_expr(e, 0);
+            self.mov(1, 0); // rcx = rax
+            VaListAddress::InReg
+        } else if ap_is_ptr {
+            // 指针类型表达式 (如数组元素): 加载指针值到 rcx
+            self.gen_expr(ap, 0);
+            self.mov(1, 0);
+            VaListAddress::InReg
+        } else if self.gen_lvalue_addr(ap, 1) {
+            // lvalue (成员/下标): gen_lvalue_addr 已将地址放入 rcx
+            VaListAddress::InReg
+        } else {
+            // 无法解析: 返回零地址
+            self.mov_imm(1, 0);
+            VaListAddress::InReg
+        }
+    }
+
     /// 初始化 SysV AMD64 va_list 结构 (24 字节)。
     fn emit_va_start(&mut self, ap_name: &str) {
         if self.is_global_not_local(ap_name) {
@@ -20528,6 +20569,123 @@ impl Codegen {
         self.emit(&[0x41, 0x89, 0x95]); // mov [r13+ap_off+4], edx
         self.emit(&(ap_off + 4).to_le_bytes());
         self.label(&done);
+    }
+
+    /// SysV va_arg 聚合读取 (指针版本): rcx = va_list 指针.
+    /// 逻辑与 gen_va_arg_struct 相同, 但从 [rcx] 读取 va_list 字段.
+    /// rdi = 目标缓冲区, 由调用方设置.
+    /// 使用 r11 暂存 va_list 指针 (rep movsb 会覆盖 rcx).
+    fn gen_va_arg_ptr_struct(&mut self, arg_ty: &Type) {
+        let sz = arg_ty.size();
+        let align = (arg_ty.align() as i32).max(8);
+        let step = ((sz + 7) & !7) as i32;
+        let classes = Self::abi_classes(arg_ty);
+        let has_memory = classes.iter().any(|c| {
+            matches!(
+                c,
+                AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87
+            )
+        });
+        let n_gp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Integer))
+            .count() as i32;
+        let n_fp = classes
+            .iter()
+            .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+            .count() as i32;
+
+        // 从 va_list 结构体 [rcx] 加载字段:
+        //   rax = gp_offset, rdx = fp_offset,
+        //   r8 = overflow_arg_area, r9 = reg_save_area
+        self.emit(&[0x8B, 0x01]); // mov eax, [rcx]
+        self.emit(&[0x8B, 0x51, 0x04]); // mov edx, [rcx+4]
+        self.emit(&[0x4C, 0x8B, 0x41, 0x08]); // mov r8, [rcx+8]
+        self.emit(&[0x4C, 0x8B, 0x49, 0x10]); // mov r9, [rcx+16]
+
+        // 保存 va_list 指针到栈 (rep movsb 会覆盖 rcx)
+        self.push(3); // push r11
+        self.emit(&[0x49, 0x89, 0xCB]); // mov r11, rcx (保存 va_list 指针)
+
+        let overflow = self.fresh_label();
+        let regs = self.fresh_label();
+        let done = self.fresh_label();
+        if has_memory {
+            self.jmp_rel32(&overflow, JumpKind::Jmp);
+        } else {
+            self.emit(&[0x3D]); // cmp eax, imm32
+            self.emit(&(48 - 8 * n_gp).to_le_bytes());
+            self.jmp_rel32(&overflow, JumpKind::Jg);
+            if n_fp > 0 {
+                self.emit(&[0x81, 0xFA]); // cmp edx, imm32
+                self.emit(&(176 - 16 * n_fp).to_le_bytes());
+                self.jmp_rel32(&overflow, JumpKind::Jg);
+            }
+            self.jmp_rel32(&regs, JumpKind::Jmp);
+        }
+
+        // ---- 溢出区路径 ----
+        self.label(&overflow);
+        if align > 8 {
+            // r8 = (r8 + align-1) & ~(align-1)
+            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
+            self.emit(&(align - 1).to_le_bytes());
+            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
+            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
+            self.emit(&(!(align - 1)).to_le_bytes());
+        }
+        self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
+        self.emit(&[0xFC]); // cld
+        self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
+        self.emit(&(sz as u32).to_le_bytes());
+        self.emit(&[0xF3, 0xA4]); // rep movsb
+        self.emit(&[0x49, 0x81, 0xC0]); // add r8, step
+        self.emit(&step.to_le_bytes());
+        // 写回 overflow_arg_area 到 va_list 结构体
+        self.emit(&[0x4D, 0x89, 0x43, 0x08]); // mov [r11+8], r8
+        self.jmp_rel32(&done, JumpKind::Jmp);
+
+        // ---- 寄存器保存区路径 ----
+        self.label(&regs);
+        for (c, cls) in classes.iter().enumerate() {
+            let off8 = (c as i32) * 8;
+            match cls {
+                AbiClass::Integer => {
+                    self.emit(&[0x4C, 0x8B, 0x0C, 0x01]); // mov r9, [r9+rax]
+                    if off8 == 0 {
+                        self.emit(&[0x4C, 0x89, 0x0F]); // mov [rdi], r9
+                    } else if off8 < 128 {
+                        self.emit(&[0x4C, 0x89, 0x4F]); // mov [rdi+disp8], r9
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x4C, 0x89, 0x8F]); // mov [rdi+disp32], r9
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC0, 0x08]); // add rax, 8
+                }
+                AbiClass::Sse | AbiClass::SseUp => {
+                    self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x11]); // movsd xmm0, [r9+rdx]
+                    if off8 == 0 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x07]); // movq [rdi], xmm0
+                    } else if off8 < 128 {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x47]); // movq [rdi+disp8], xmm0
+                        self.emit(&[off8 as u8]);
+                    } else {
+                        self.emit(&[0x66, 0x0F, 0xD6, 0x87]); // movq [rdi+disp32], xmm0
+                        self.emit(&off8.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x83, 0xC2, 0x10]); // add rdx, 16
+                }
+                _ => {}
+            }
+        }
+        // 回写推进后的偏移到 va_list 结构体
+        self.emit(&[0x41, 0x89, 0x03]); // mov [r11], eax
+        self.emit(&[0x41, 0x89, 0x53, 0x04]); // mov [r11+4], edx
+
+        // 恢复 va_list 指针
+        self.label(&done);
+        self.pop(3); // pop r11
     }
 
     /// SysV va_arg (指针版本): rcx = va_list 指针，按 gp_offset/fp_offset 读取参数。
