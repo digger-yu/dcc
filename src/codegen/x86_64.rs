@@ -19539,6 +19539,9 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, 0);
                             if dst_float {
+                                // Convert integer RHS to float if needed
+                                // (e.g., c = 0 where c is _Complex double)
+                                self.emit_scalar_to_xmm0_if_needed(r, &inner.base);
                                 // 实部宽度适配: 产出端 (binop 等) 按运算 inner
                                 // 重载 xmm0 实部 (Complex Double 结果 = double
                                 // 位模式), dst inner 更窄 (Float) 时直接 movss
