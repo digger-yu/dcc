@@ -1917,6 +1917,14 @@ impl Codegen {
         self.labels.insert(name.to_string(), self.pos());
     }
 
+    /// Prefix C goto labels to avoid collision with function symbol names.
+    /// C allows a label and a function to share the same name (e.g., label `x`
+    /// inside function `x`), but in our codegen both share the `labels` map.
+    /// Prefixing with `.Ll_` makes labels local and prevents the collision.
+    fn c_label_to_asm(name: &str) -> String {
+        format!(".Ll_{}", name)
+    }
+
     /// 发射 NOP 填充到对齐边界 (x86_64: 0x90 = NOP)
     fn emit_align_padding(&mut self, alignment: u32) {
         if alignment <= 1 { return; }
@@ -7201,15 +7209,19 @@ impl Codegen {
                         let mut resolved_asm = asm_str.clone();
                         let label_base = outputs.len() + inputs.len();
                         for (i, label) in goto_labels.iter().enumerate().rev() {
+                            let prefixed = Self::c_label_to_asm(&label.name);
                             resolved_asm =
-                                Self::asm_replace_label_idx(&resolved_asm, i, &label.name);
+                                Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                             resolved_asm = Self::asm_replace_label_idx(
                                 &resolved_asm,
                                 label_base + i,
-                                &label.name,
+                                &prefixed,
                             );
                             resolved_asm = resolved_asm
-                                .replace(&format!("%l[{}]", label.name), &label.name);
+                                .replace(&format!("%l[{}]", label.name), &prefixed);
+                            // Also replace literal label definitions in asm text
+                            resolved_asm = resolved_asm
+                                .replace(&format!("{}:", label.name), &format!("{}:", prefixed));
                         }
                         self.emit_asm_text_lines(&resolved_asm, span);
                     }
@@ -8342,10 +8354,12 @@ impl Codegen {
                 // goto 可能跳出含 VLA 的块或回跳到声明前, 跳转前统一
                 // 恢复动态栈基, 防止回跳循环累积泄漏 (栈耗尽段错误)
                 self.emit_vla_restore();
-                self.jmp_rel32(&target.name, JumpKind::Jmp);
+                let lbl = Self::c_label_to_asm(&target.name);
+                self.jmp_rel32(&lbl, JumpKind::Jmp);
             }
             Stmt::Label { name, stmt, .. } => {
-                self.label(&name.name);
+                let lbl = Self::c_label_to_asm(&name.name);
+                self.label(&lbl);
                 self.gen_stmt(stmt);
             }
             Stmt::Switch { expr, cases, .. } => {
@@ -8520,17 +8534,24 @@ impl Codegen {
                 self.current_asm_src_line = span.line;
                 // 将 GCC 的 %lN / %l[name] / %c[label] 占位符解析为 C 标签名。
                 // 使用数字边界检查防止 %l1 错误匹配 %l10 等多位索引。
+                // 标签名前缀 .Ll_ 以避免与函数符号名冲突。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
-                    resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &label.name);
+                    let prefixed = Self::c_label_to_asm(&label.name);
+                    resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                     resolved_asm =
-                        Self::asm_replace_label_idx(&resolved_asm, label_base + i, &label.name);
+                        Self::asm_replace_label_idx(&resolved_asm, label_base + i, &prefixed);
                     resolved_asm =
-                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                        resolved_asm.replace(&format!("%l[{}]", label.name), &prefixed);
                     // %c[label]: strip immediate prefix, resolve to label
                     resolved_asm =
-                        resolved_asm.replace(&format!("%c[{}]", label.name), &label.name);
+                        resolved_asm.replace(&format!("%c[{}]", label.name), &prefixed);
+                    // Also replace literal label definitions in asm text:
+                    // "labelname:" -> ".Ll_labelname:" so they match the
+                    // prefixed label names used by the codegen.
+                    resolved_asm =
+                        resolved_asm.replace(&format!("{}:", label.name), &format!("{}:", prefixed));
                 }
                 // 跨函数标签地址 + asm goto 混用警告:
                 // &&label 产生的地址仅在当前函数内有效; 若作为输入操作数
@@ -10827,7 +10848,8 @@ impl Codegen {
             Expr::LabelAddr { label, .. } => {
                 // &&label: 加载标签地址到 dst (GNU 扩展)
                 // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
-                let label_name = label.name.clone();
+                // 前缀标签名以避免与函数符号名冲突
+                let label_name = Self::c_label_to_asm(&label.name);
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 let modrm = 0x05 | ((dst & 7) << 3);
                 self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
@@ -13890,6 +13912,18 @@ impl Codegen {
             return data;
         }
         // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
+        // &&label: 提前处理, 前缀标签名以避免与函数符号名冲突
+        if let Expr::LabelAddr { label, .. } = e {
+            let size = width.max(8);
+            if let Some((off, sec)) = rel {
+                let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                let prefixed = Self::c_label_to_asm(&label.name);
+                self.pending_data64_rels.push(
+                    (off, prefixed, sec, rel_type, 0),
+                );
+            }
+            return vec![0u8; size];
+        }
         if let Ok(cv) = const_eval::eval_full(e) {
             match cv {
                 const_eval::ConstValue::Float(f) => {
@@ -13920,6 +13954,8 @@ impl Codegen {
                 }
                 const_eval::ConstValue::Addr { name, offset } => {
                     // &&label or &global: emit data relocation
+                    // &&label names are prefixed with .Ll_ to avoid collision
+                    // with function symbol names
                     let size = width.max(8);
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 {
@@ -13984,10 +14020,12 @@ impl Codegen {
                 },
                 Expr::LabelAddr { label, .. } => {
                     // &&label in data section: record for later patching
+                    // Prefix label name to avoid collision with function symbols
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                        let prefixed = Self::c_label_to_asm(&label.name);
                         self.pending_data64_rels.push(
-                            (off, label.name.clone(), sec, rel_type, 0),
+                            (off, prefixed, sec, rel_type, 0),
                         );
                     }
                     vec![0u8; width.max(8)]
