@@ -9724,11 +9724,19 @@ impl Codegen {
                         );
                         let rhs_is_ident = matches!(&**r, Expr::Ident { .. });
                         let rhs_is_compound = matches!(&**r, Expr::CompoundLit { .. });
+                        let rhs_is_call = matches!(&**r, Expr::Call { ty: ref cty, .. }
+                            if Self::needs_memory_return(cty));
                         if rhs_is_compound {
                             // CompoundLit: gen_expr builds on stack,
                             // returns address in rax
                             self.gen_expr(r, 0);
                             self.mov(6, 0); // rsi = rax
+                        } else if rhs_is_call {
+                            // Call returning aggregate: gen_expr leaves
+                            // rax = &sret buffer (or &temp for reg return).
+                            // Use rax directly as source address.
+                            self.gen_expr(r, 0);
+                            self.mov(6, 0); // rsi = rax (source addr)
                         } else if rhs_is_ident {
                             if let Expr::Ident { name, .. } = &**r {
                                 if self.is_global_not_local(&name.name) {
