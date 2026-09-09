@@ -1723,20 +1723,32 @@ impl Riscv64Codegen {
         }
         if callee == "__builtin_va_copy" {
             if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
-                if let (ExprKind::Local(d), ExprKind::Local(s)) = (&dst.kind, &src.kind) {
-                    if let (Some(&doff), Some(&soff)) = (self.locals.get(d), self.locals.get(s)) {
-                        // 24 字节结构体拷贝: 3 个 doubleword
-                        // qword 1: gp_offset(4B) + fp_offset(4B)
-                        self.emit_ld(10, 2, soff);
-                        self.emit_sd(10, 2, doff);
-                        // qword 2: overflow_arg_area
-                        self.emit_ld(10, 2, soff + 8);
-                        self.emit_sd(10, 2, doff + 8);
-                        // qword 3: reg_save_area
-                        self.emit_ld(10, 2, soff + 16);
-                        self.emit_sd(10, 2, doff + 16);
-                    }
+                // 解析 dst 地址到 a0, 移动到 t0 (x5)
+                let dst_is_ptr = matches!(dst.ty, ValueType::Pointer(_));
+                if dst_is_ptr {
+                    self.gen_expr(dst);
+                } else {
+                    self.gen_lvalue_addr(dst);
                 }
+                self.emit_mv(5, 10); // t0 = a0 = dst va_list 地址
+                // 解析 src 地址到 a0, 移动到 t1 (x6)
+                let src_is_ptr = matches!(src.ty, ValueType::Pointer(_));
+                if src_is_ptr {
+                    self.gen_expr(src);
+                } else {
+                    self.gen_lvalue_addr(src);
+                }
+                self.emit_mv(6, 10); // t1 = a0 = src va_list 地址
+                // 24 字节结构体拷贝: 3 个 doubleword (寄存器间接寻址)
+                // qword 1: gp_offset(4B) + fp_offset(4B)
+                self.emit_ld(10, 6, 0);  // ld a0, [t1]
+                self.emit_sd(10, 5, 0);  // sd a0, [t0]
+                // qword 2: overflow_arg_area
+                self.emit_ld(10, 6, 8);  // ld a0, [t1+8]
+                self.emit_sd(10, 5, 8);  // sd a0, [t0+8]
+                // qword 3: reg_save_area
+                self.emit_ld(10, 6, 16); // ld a0, [t1+16]
+                self.emit_sd(10, 5, 16); // sd a0, [t0+16]
             }
             self.li_a0(0);
             return;

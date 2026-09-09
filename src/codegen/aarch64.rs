@@ -2023,20 +2023,32 @@ impl Aarch64Codegen {
         }
         if callee == "__builtin_va_copy" {
             if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
-                if let (ExprKind::Local(d), ExprKind::Local(s)) = (&dst.kind, &src.kind) {
-                    if let (Some(&doff), Some(&soff)) = (self.locals.get(d), self.locals.get(s)) {
-                        // 24 字节结构体拷贝: 3 个 qword
-                        // qword 1: gp_offset(4B) + fp_offset(4B)
-                        self.ldr_xt_sp(0, soff);
-                        self.str_xt_sp(0, doff);
-                        // qword 2: overflow_arg_area
-                        self.ldr_xt_sp(0, soff + 8);
-                        self.str_xt_sp(0, doff + 8);
-                        // qword 3: reg_save_area
-                        self.ldr_xt_sp(0, soff + 16);
-                        self.str_xt_sp(0, doff + 16);
-                    }
+                // 解析 dst 地址到 x9
+                let dst_is_ptr = matches!(dst.ty, ValueType::Pointer(_));
+                if dst_is_ptr {
+                    self.gen_expr(dst);
+                } else {
+                    self.gen_lvalue_addr(dst);
                 }
+                self.mov_x_reg(9, 0); // x9 = dst va_list 地址
+                // 解析 src 地址到 x10
+                let src_is_ptr = matches!(src.ty, ValueType::Pointer(_));
+                if src_is_ptr {
+                    self.gen_expr(src);
+                } else {
+                    self.gen_lvalue_addr(src);
+                }
+                self.mov_x_reg(10, 0); // x10 = src va_list 地址
+                // 24 字节结构体拷贝: 3 个 qword (寄存器间接寻址)
+                // qword 1: gp_offset(4B) + fp_offset(4B)
+                self.ldr_xt_indirect(0, 10, 0);
+                self.str_xt_indirect(0, 9, 0);
+                // qword 2: overflow_arg_area
+                self.ldr_xt_indirect(0, 10, 8);
+                self.str_xt_indirect(0, 9, 8);
+                // qword 3: reg_save_area
+                self.ldr_xt_indirect(0, 10, 16);
+                self.str_xt_indirect(0, 9, 16);
             }
             self.mov_w0_imm(0);
             return;
@@ -3668,6 +3680,35 @@ impl Aarch64Codegen {
         );
         let imm12 = ((off / 8) as u32) & 0xfff;
         let insn = 0xf940_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// `LDR Xt, [Xn, #imm]` — 寄存器间接 + 无符号偏移 (64-bit, scale=8)
+    /// imm 必须为非负 8 字节对齐, 范围 0..32760.
+    fn ldr_xt_indirect(&mut self, rt: u8, rn: u8, imm: i32) {
+        debug_assert!(
+            imm >= 0 && imm % 8 == 0 && imm <= 32760,
+            "ldr_xt_indirect: imm must be non-neg 8-byte aligned, got {imm}"
+        );
+        let imm12 = ((imm / 8) as u32) & 0xfff;
+        let insn = 0xf940_0000u32
+            | (imm12 << 10)
+            | ((rn as u32 & 0x1f) << 5)
+            | (rt as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// `STR Xt, [Xn, #imm]` — 寄存器间接 + 无符号偏移 (64-bit, scale=8)
+    fn str_xt_indirect(&mut self, rt: u8, rn: u8, imm: i32) {
+        debug_assert!(
+            imm >= 0 && imm % 8 == 0 && imm <= 32760,
+            "str_xt_indirect: imm must be non-neg 8-byte aligned, got {imm}"
+        );
+        let imm12 = ((imm / 8) as u32) & 0xfff;
+        let insn = 0xf900_0000u32
+            | (imm12 << 10)
+            | ((rn as u32 & 0x1f) << 5)
+            | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
