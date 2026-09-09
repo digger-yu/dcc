@@ -10426,6 +10426,66 @@ fn va_list_struct_member() {
     assert_eq!(code, 0, "va_list struct member failed");
 }
 
+/// va_copy 独立性: 复制后两个 va_list 应独立推进.
+#[test]
+fn va_arg_va_copy_independence() {
+    let src = include_str!("fixtures/c/va_arg/va_copy.c");
+    let (output, exe) = run_compile_and_run("va-copy-indep", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_copy independence failed");
+}
+
+/// 含 int+double 的结构体 va_arg.
+#[test]
+fn va_arg_struct_mixed() {
+    let src = include_str!("fixtures/c/va_arg/struct_mixed.c");
+    let (output, exe) = run_compile_and_run("va-struct-mixed", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "struct mixed va_arg failed");
+}
+
+/// long double va_arg + 含 long double 的结构体.
+#[test]
+fn va_arg_long_double_struct() {
+    let src = include_str!("fixtures/c/va_arg/long_double.c");
+    let (output, exe) = run_compile_and_run("va-long-double-struct", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "long double struct va_arg failed");
+}
+
+/// va_list 作为函数参数传递.
+#[test]
+fn va_arg_list_param_fixture() {
+    let src = include_str!("fixtures/c/va_arg/va_list_param.c");
+    let (output, exe) = run_compile_and_run("va-list-param-fix", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "va_list param fixture failed");
+}
+
 /// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
 #[test]
 fn setjmp_x86_64_fixture_compiles() {
