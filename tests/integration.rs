@@ -22474,3 +22474,172 @@ int main(void) {
     assert_eq!(rc, 0, "static_local_partial_init should return 0, got {rc}");
     let _ = fs::remove_file(exe);
 }
+
+// =================== 数组下标寻址语义层测试矩阵 ===================
+
+/// Layer 1: static local 数组与文件级全局数组同名
+#[test]
+fn semantic_layer_static_local_name_conflict() {
+    let source = r#"
+int x[8] = {100, 200, 300, 400, 500, 600, 700, 800};
+int test_const(void) {
+    static int x[4] = {10, 20, 30, 40};
+    return x[0] + x[1] + x[2] + x[3];
+}
+int test_runtime(int i) {
+    static int x[4] = {10, 20, 30, 40};
+    return x[i];
+}
+int test_global(void) { return x[0] + x[7]; }
+int main(void) {
+    if (test_const() != 100) return 1;
+    if (test_runtime(0) != 10) return 2;
+    if (test_runtime(3) != 40) return 3;
+    if (test_global() != 900) return 4;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-sl-conflict", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_name_conflict should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// Layer 2: 多维数组中间层衰减 a[i][j]
+#[test]
+fn semantic_layer_multidim_array() {
+    let source = r#"
+int a[3][4] = {
+    {1, 2, 3, 4},
+    {5, 6, 7, 8},
+    {9, 10, 11, 12}
+};
+int main(void) {
+    if (a[0][0] != 1) return 1;
+    if (a[1][2] != 7) return 2;
+    if (a[2][3] != 12) return 3;
+    int i = 1, j = 3;
+    if (a[i][j] != 8) return 4;
+    /* 中间层衰减: a[i] 是 int[4], 衰减为 int* */
+    int *p = a[1];
+    if (p[2] != 7) return 5;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-multidim", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "multidim_array should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// Layer 2: VLA 运行时 stride
+#[test]
+fn semantic_layer_vla_runtime() {
+    let source = r#"
+int test_vla(int n) {
+    int a[n];
+    int i;
+    for (i = 0; i < n; i++) a[i] = i * 10;
+    return a[n - 1];
+}
+int main(void) {
+    if (test_vla(5) != 40) return 1;
+    if (test_vla(1) != 0) return 2;
+    if (test_vla(10) != 90) return 3;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-vla", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "vla_runtime should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// Layer 3: &arr[i] (TakeAddress) vs arr[i] (LoadScalar)
+#[test]
+fn semantic_layer_addr_vs_load() {
+    let source = r#"
+int arr[5] = {10, 20, 30, 40, 50};
+int main(void) {
+    /* LoadScalar: 直接读取值 */
+    int v = arr[2];
+    if (v != 30) return 1;
+    /* TakeAddress: 取元素地址, 再通过指针间接访问 */
+    int *p = &arr[3];
+    if (*p != 40) return 2;
+    /* 通过指针修改 */
+    *p = 99;
+    if (arr[3] != 99) return 3;
+    /* 地址算术 */
+    int *q = &arr[0] + 4;
+    if (*q != 50) return 4;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-addr-vs-load", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "addr_vs_load should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// Layer 3: 聚合元素数组 struct S s[4]; s[i]
+#[test]
+fn semantic_layer_aggregate_array() {
+    let source = r#"
+struct Point { int x; int y; };
+struct Point pts[3] = {{1, 2}, {3, 4}, {5, 6}};
+int main(void) {
+    if (pts[0].x != 1) return 1;
+    if (pts[1].y != 4) return 2;
+    if (pts[2].x != 5) return 3;
+    /* 运行时索引 */
+    int i = 1;
+    if (pts[i].x != 3) return 4;
+    /* 聚合赋值 */
+    struct Point p2 = {10, 20};
+    pts[i] = p2;
+    if (pts[1].x != 10) return 5;
+    if (pts[1].y != 20) return 6;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-agg-array", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "aggregate_array should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// Layer 1+2: static local 数组取地址 + 运行时索引组合
+#[test]
+fn semantic_layer_static_local_addr_and_index() {
+    let source = r#"
+int x[4] = {100, 200, 300, 400};
+int test(void) {
+    static int x[4] = {1, 2, 3, 4};
+    int *p = &x[1];
+    int sum = *p + x[0];
+    /* 通过指针访问 static local 数组 */
+    p = &x[0];
+    sum += p[3];
+    return sum; /* 2 + 1 + 4 = 7 */
+}
+int test_global(void) {
+    return x[0] + x[3]; /* 100 + 400 = 500 */
+}
+int main(void) {
+    if (test() != 7) return 1;
+    if (test_global() != 500) return 2;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("semantic-sl-addr-idx", source);
+    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_addr_index should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}

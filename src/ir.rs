@@ -470,9 +470,13 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
             _ => {}
         }
     }
+    // 预分析 static local 变量, 用于 IR 层名字解析
+    let sl_map = crate::static_locals::analyze_static_locals(&source);
     let mut cx = Lowering {
         diagnostics: Vec::new(),
         type_defs: type_map,
+        sl_map,
+        current_func: None,
     };
     let mut functions = Vec::new();
     let mut globals = Vec::new();
@@ -480,6 +484,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
     for decl in &source.decls {
         match decl {
             Decl::Func(f) => {
+                cx.current_func = Some(f.name.name.clone());
                 let body = f.body.as_ref().map_or_else(Vec::new, |b| {
                     b.items
                         .iter()
@@ -535,10 +540,10 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
             }
         }
     }
-    // 将函数内 static local 变量也纳入 IR globals,
-    // 使 IR 层能表达所有全局对象 (文件级 + static local).
-    let sl_map = crate::static_locals::analyze_static_locals(&source);
-    for info in sl_map.iter_all() {
+    // static local 变量已在上方预分析并添加到 globals
+    // (sl_map 在 Lowering 初始化时创建, 函数体降低时已用于名字解析)
+    let sl_infos: Vec<_> = cx.sl_map.iter_all().cloned().collect();
+    for info in sl_infos {
         globals.push(Global {
             name: info.mangled_name.clone(),
             ty: cx.lower_type(&info.ty, &Span::point("", 0, 0)),
@@ -1002,6 +1007,10 @@ struct Lowering {
     /// Pre-scanned type definition map: name → resolved Type.
     /// Covers typedefs, struct/union/enum tags for Type::Named resolution.
     type_defs: HashMap<String, Type>,
+    /// Static local 变量映射 (源名 -> mangled 名), 用于 Ident 解析。
+    sl_map: crate::static_locals::StaticLocalMap,
+    /// 当前正在降低的函数名 (用于 static local 解析)。
+    current_func: Option<String>,
 }
 
 impl Lowering {
@@ -1261,7 +1270,17 @@ impl Lowering {
                 (ExprKind::Unary(UnOp::Plus), vec![self.lower_expr(e)])
             }
             Expr::String { .. } => (ExprKind::Constant, Vec::new()),
-            Expr::Ident { name, .. } => (ExprKind::Local(name.name.clone()), Vec::new()),
+            Expr::Ident { name, .. } => {
+                // Static local 名字解析: 源名 -> mangled 名
+                let resolved_name = if let Some(ref func) = self.current_func {
+                    self.sl_map.resolve(func, &name.name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| name.name.clone())
+                } else {
+                    name.name.clone()
+                };
+                (ExprKind::Local(resolved_name), Vec::new())
+            }
             Expr::Binop { op, l, r, .. } => (
                 ExprKind::Binary(*op),
                 vec![self.lower_expr(l), self.lower_expr(r)],

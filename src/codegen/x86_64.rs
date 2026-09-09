@@ -18,6 +18,10 @@ use crate::const_eval::{self, ConstValue};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::preproc::LineSpan;
 use crate::target::Target;
+use crate::semantics::{
+    ObjectIdentity, ObjectResolver, StorageClass, StorageInfo, StorageType,
+    storage_type_from_ast,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,6 +76,18 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
     }
 }
 
+/// 从表达式树中提取索引表达式。
+/// 用于 AddressDescriptor 的 ByteOffset::Runtime 物化时获取需要求值的索引。
+/// 处理: Index (arr[i]), Member-of-Index (s.arr[i]), Cast-of-Index 等。
+fn extract_index_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Index { idx, .. } => Some(idx),
+        Expr::Member { expr: base, .. } => extract_index_expr(base),
+        Expr::Cast { e, .. } => extract_index_expr(e),
+        _ => None,
+    }
+}
+
 /// 检查 __attribute__((error/warning/deprecated)) 函数的诊断元组:
 /// (函数名, error msg, warning msg, deprecated msg)
 type AttrDiagFn<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
@@ -110,8 +126,8 @@ pub struct Codegen {
     /// TypeDescriptor / 文件名字符串。ET_EXEC: resolve() 补绝对地址;
     /// ET_REL: 生成 R_X86_64_64 重定位 (.rodata 节符号)。
     ubsan_ptr_refs: Vec<(u64, u64, u64)>,
-    // 全局变量
-    globals: HashMap<String, GlobalVar>,
+    // 全局变量 (通过 lookup_global_info / lookup_global_by_key 受控访问)
+    globals_raw: HashMap<String, GlobalVar>,
     frame_size: i32,
     expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
     max_expr_depth: u32, // 最大表达式嵌套深度
@@ -1386,7 +1402,7 @@ impl Codegen {
             x87_float_refs: vec![],
             ubsan_lea_refs: vec![],
             ubsan_ptr_refs: vec![],
-            globals: HashMap::new(),
+            globals_raw: HashMap::new(),
             frame_size: 0,
             expr_depth: 0,
             max_expr_depth: 0,
@@ -3080,7 +3096,7 @@ impl Codegen {
         }
         // 修补 RIP-relative 全局变量引用 (mov/lea reg, [RIP+disp32])
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
-            if let Some(g) = self.globals.get(&var_name) {
+            if let Some(g) = self.globals_raw.get(&var_name) {
                 if g.is_tls {
                     continue;
                 }
@@ -3097,7 +3113,7 @@ impl Codegen {
         }
         // 修补 SIB base=101 全局访问 (disp32 绝对寻址) - 直接写符号绝对地址
         for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
-            if let Some(g) = self.globals.get(&var_name) {
+            if let Some(g) = self.globals_raw.get(&var_name) {
                 let var_vaddr = if g.in_data_section {
                     data_start + g.offset
                 } else {
@@ -3118,7 +3134,7 @@ impl Codegen {
                 self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
                 continue;
             }
-            if let Some(g) = self.globals.get(&var_name) {
+            if let Some(g) = self.globals_raw.get(&var_name) {
                 let var_vaddr = tdata_start + g.offset;
                 let rip = self.entry + disp32_pos + 4;
                 let rel = (var_vaddr as i64) - (rip as i64);
@@ -3129,7 +3145,7 @@ impl Codegen {
         // 修补字符串初始化指针 (char *s = "hello"): 指针槽里的 rodata 偏移
         // 替换为绝对地址 (rodata 已拼接到 self.code 的 exec_text_size 之后)。
         for name in &self.rodata_string_init_globals {
-            if let Some(g) = self.globals.get(name) {
+            if let Some(g) = self.globals_raw.get(name) {
                 let code_off = (self.exec_text_size + g.offset) as usize;
                 if code_off + 8 <= self.code.len() {
                     let str_off =
@@ -3418,7 +3434,7 @@ impl Codegen {
                     if v.init.is_none() {
                         self.tbss_size = self.tbss_size.max(offset + sz as u64);
                     }
-                    self.globals.insert(
+                    self.globals_raw.insert(
                         v.name.name.clone(),
                         GlobalVar {
                             offset,
@@ -3455,7 +3471,7 @@ impl Codegen {
                         self.rodata[slot..slot + 8].copy_from_slice(&str_off.to_le_bytes());
                         // 4. 记录待修补变量
                         self.rodata_string_init_globals.push(v.name.name.clone());
-                        self.globals.insert(
+                        self.globals_raw.insert(
                             v.name.name.clone(),
                             GlobalVar {
                                 offset,
@@ -3480,7 +3496,7 @@ impl Codegen {
                         self.rodata.push(0);
                     }
                 }
-                self.globals.insert(
+                self.globals_raw.insert(
                     v.name.name.clone(),
                     GlobalVar {
                         offset,
@@ -3633,7 +3649,7 @@ impl Codegen {
                 if v.is_extern && v.init.is_none() {
                     continue;
                 }
-                let Some(g) = self.globals.get(&v.name.name) else {
+                let Some(g) = self.globals_raw.get(&v.name.name) else {
                     continue;
                 };
                 let ty = if g.is_tls { STT_TLS } else { STT_OBJECT };
@@ -3714,7 +3730,7 @@ impl Codegen {
                 }
             }
         }
-        // Static 局部变量符号: 在 self.globals 中但不在 prog.decls 中
+        // Static 局部变量符号: 在 self.globals_raw 中但不在 prog.decls 中
         // 收集已处理的变量名, 避免重复
         let mut emitted_var_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
         for decl in &prog.decls {
@@ -3722,7 +3738,7 @@ impl Codegen {
                 emitted_var_syms.insert(self.resolve_asm_label(&v.name.name).to_string());
             }
         }
-        for (name, g) in &self.globals {
+        for (name, g) in &self.globals_raw {
             if emitted_var_syms.contains(name.as_str()) {
                 continue;
             }
@@ -3970,7 +3986,7 @@ impl Codegen {
         // 静态地址常量统一拦截 (含 cast 包裹与指针算术基址):
         // globals 中的符号按 data 偏移直算虚地址。
         if let Some((name, addend)) = Self::static_addr_parts(init) {
-            if let Some(g) = self.globals.get(&name) {
+            if let Some(g) = self.globals_raw.get(&name) {
                 let vaddr = self.entry + g.offset + addend as u64;
                 return Some(vaddr.to_le_bytes().to_vec());
             }
@@ -4000,9 +4016,9 @@ impl Codegen {
                 // Compute base global + byte offset for address expressions
                 // like &a[3][5], &s.field, &a[i].field, etc.
                 if let Some((base_name, byte_off)) =
-                    Self::eval_global_lvalue_offset(e, &self.globals)
+                    Self::eval_global_lvalue_offset(e, &self.globals_raw)
                 {
-                    if let Some(g) = self.globals.get(&base_name) {
+                    if let Some(g) = self.globals_raw.get(&base_name) {
                         let vaddr = self.entry + g.offset + byte_off as u64;
                         Some(vaddr.to_le_bytes().to_vec())
                     } else {
@@ -4052,7 +4068,7 @@ impl Codegen {
                 let sz = sz_raw;
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
                 if v.is_extern && v.init.is_none() {
-                    self.globals.insert(
+                    self.globals_raw.insert(
                         v.name.name.clone(),
                         GlobalVar {
                             offset: 0,
@@ -4094,7 +4110,7 @@ impl Codegen {
                             self.tdata_section.extend_from_slice(&bytes);
                         }
                     }
-                    self.globals.insert(
+                    self.globals_raw.insert(
                         v.name.name.clone(),
                         GlobalVar {
                             offset,
@@ -4147,7 +4163,7 @@ impl Codegen {
                             self.extra_sections[sec_idx].data.push(0);
                         }
                     }
-                    self.globals.insert(
+                    self.globals_raw.insert(
                         v.name.name.clone(),
                         GlobalVar {
                             offset,
@@ -4296,7 +4312,7 @@ impl Codegen {
                             self.extra_sections[sec_idx].data.push(0);
                         }
                     }
-                    self.globals.insert(
+                    self.globals_raw.insert(
                         v.name.name.clone(),
                         GlobalVar {
                             offset,
@@ -4390,7 +4406,7 @@ impl Codegen {
                             // P1-6: .data 节中的符号引用
                             // Handle &ident, &a[i], &a[i][j], &s.field, etc.
                             if let Some((base_name, byte_off)) =
-                                Self::eval_global_lvalue_offset(e, &self.globals)
+                                Self::eval_global_lvalue_offset(e, &self.globals_raw)
                             {
                                 let ref_off = self.data_section.len() as u64;
                                 let width = if sz <= 4 { 4 } else { 8 };
@@ -4435,7 +4451,7 @@ impl Codegen {
                             match inner_init {
                                 Expr::AddrOf { e: ref ae, .. } => {
                                     if let Some((base_name, byte_off)) =
-                                        Self::eval_global_lvalue_offset(ae, &self.globals)
+                                        Self::eval_global_lvalue_offset(ae, &self.globals_raw)
                                     {
                                         let ref_off = self.data_section.len() as u64;
                                         let width = if sz <= 4 { 4 } else { 8 };
@@ -4513,7 +4529,7 @@ impl Codegen {
                         self.bss_size += sz as u64;
                     }
                 }
-                self.globals.insert(
+                self.globals_raw.insert(
                     v.name.name.clone(),
                     GlobalVar {
                         offset,
@@ -4760,7 +4776,7 @@ impl Codegen {
                 if !emitted_var_syms.insert(v.name.name.clone()) {
                     continue;
                 }
-                let g = self.globals[&v.name.name].clone();
+                let g = self.globals_raw[&v.name.name].clone();
                 let (section, bind) = if v.is_extern && v.init.is_none() && g.section == SHN_UNDEF {
                     (SHN_UNDEF, if v.is_weak { STB_WEAK } else { STB_GLOBAL })
                 } else {
@@ -4792,8 +4808,8 @@ impl Codegen {
             }
         }
 
-        // Static 局部变量符号: 在 self.globals 中但不在 prog.decls 中
-        for (name, g) in &self.globals {
+        // Static 局部变量符号: 在 self.globals_raw 中但不在 prog.decls 中
+        for (name, g) in &self.globals_raw {
             if emitted_var_syms.contains(name.as_str()) {
                 continue;
             }
@@ -5972,7 +5988,7 @@ impl Codegen {
             source_name: self.source_name.clone(),
             line_map: self.line_map.clone(),
             globals: self
-                .globals
+                .globals_raw
                 .iter()
                 .map(|(k, v)| {
                     (
@@ -6010,7 +6026,7 @@ impl Codegen {
         cg.source_name = ctx.source_name;
         cg.line_map = ctx.line_map;
         for (name, snap) in ctx.globals {
-            cg.globals.insert(
+            cg.globals_raw.insert(
                 name,
                 GlobalVar {
                     offset: snap.offset,
@@ -6477,7 +6493,7 @@ impl Codegen {
         // Static 局部变量: 已由分析 pass 预注册到 data/bss,
         // 此处仅需计算 real_global_names (排除 static local 的 mangled 名)
         // (mangled 名以 ".Lsl" 开头, 不会与 C 标识符冲突)
-        self.real_global_names = self.globals.keys()
+        self.real_global_names = self.globals_raw.keys()
             .filter(|k| !k.starts_with(".Lsl"))
             .cloned()
             .collect();
@@ -9513,44 +9529,8 @@ impl Codegen {
                         ..
                     } = arr.as_ref()
                     {
-                        if self.vla_offsets.contains_key(&arr_name.name) {
-                            // VLA: 基址存储在变量栈槽中
-                            let off = self.var_offset(&arr_name.name);
-                            self.load_stack(0, off); // rax = VLA 基址
-                        } else if matches!(arr_ty, Type::Vector(_, _)) {
-                            if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.emit_lea_r13(0, off);
-                            }
-                        } else if matches!(arr_ty, Type::Array(_, _)) {
-                            // 静态数组: LEA 取基址
-                            if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.emit_lea_r13(0, off);
-                            }
-                        } else {
-                            // 指针: 加载指针值 (但全局数组衰减需用 LEA)
-                            if self
-                                .globals
-                                .get(&arr_name.name)
-                                .is_some_and(|g| matches!(g.ty, Type::Array(_, _)))
-                                && !self.is_local_name(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_load(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.load_stack(0, off);
-                            }
-                        }
+                        // 统一基址计算 (修复 BUG-C: 使用 resolve_global_key 解析 static local)
+                        self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
                         self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                         self.gen_expr(idx, 1); // rcx = index
                         self.pop(0); // 恢复基址到 rax
@@ -11492,54 +11472,27 @@ impl Codegen {
                 {
                     // 仅全局数组走 SIB 索引快速路径; 全局指针 (char *s = "hello")
                     // 的下标访问必须先加载指针值再解引用, 不能对符号本身绝对寻址。
-                    let is_global_array = self
-                        .globals
-                        .get(&arr_name.name)
-                        .is_some_and(|g| matches!(g.ty, Type::Array(_, _)));
+                    // 修复: 使用 resolve_global_key 解析 static local -> mangled 名,
+                    // 避免源名称与文件级全局同名时的错误路由 (BUG-A)。
+                    // 注意: SIB 快速路径仅用于文件级全局数组 (RIP-relative 寻址)。
+                    // Static local 虽然注册在 globals 中, 但不能用 RIP-relative,
+                    // 必须走慢路径 (emit_ident_base_addr) 从栈帧访问。
+                    let is_static_local = self.static_local_map
+                        .is_static_local(&self.current_func_name, &arr_name.name);
+                    let resolved_key = self.resolve_global_key(&arr_name.name).to_string();
+                    let is_global_array = !is_static_local
+                        && self
+                            .globals_raw
+                            .get(&resolved_key)
+                            .is_some_and(|g| matches!(g.ty, Type::Array(_, _)));
                     if is_global_array {
                         // 全局数组: 单条 [disp32+idx*scale] 加载, 避免 LEA+ADD 两步。
                         // 注: 不在前面 imul rcx, rcx, es - emit_load_global_indexed 已用 SIB scale 体现 es。
                         self.gen_expr(idx, 1);
-                        self.emit_load_global_indexed(dst, 1, &arr_name.name, es as u8, elem_ty);
+                        self.emit_load_global_indexed(dst, 1, &resolved_key, es as u8, elem_ty);
                     } else {
-                        if self.vla_offsets.contains_key(&arr_name.name) {
-                            // VLA: 基址存储在变量栈槽中
-                            let off = self.var_offset(&arr_name.name);
-                            self.load_stack(0, off); // rax = VLA 基址
-                        } else if matches!(arr_ty, Type::Vector(_, _)) {
-                            if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.emit_lea_r13(0, off);
-                            }
-                        } else if matches!(arr_ty, Type::Array(_, _)) {
-                            // 静态数组: LEA 取基址
-                            if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.emit_lea_r13(0, off);
-                            }
-                        } else {
-                            // 指针: 加载指针值 (但全局数组衰减需用 LEA)
-                            if self
-                                .globals
-                                .get(&arr_name.name)
-                                .is_some_and(|g| matches!(g.ty, Type::Array(_, _)))
-                                && !self.is_local_name(&arr_name.name)
-                            {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else if self.is_global_not_local(&arr_name.name)
-                            {
-                                self.emit_global_load(0, &arr_name.name);
-                            } else {
-                                let off = self.var_offset(&arr_name.name);
-                                self.load_stack(0, off);
-                            }
-                        }
+                        // 统一基址计算 (修复 BUG-B: 使用 resolve_global_key 解析 static local)
+                        self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
                         self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                         self.gen_expr(idx, 1); // rcx = index
                         self.pop(0); // 恢复基址到 rax
@@ -15877,7 +15830,7 @@ impl Codegen {
             .var_map
             .get(name)
             .map(|(_, ty)| ty.clone())
-            .or_else(|| self.globals.get(name).map(|g| g.ty.clone()))
+            .or_else(|| self.lookup_global_info(name).map(|g| g.ty.clone()))
             .unwrap_or(Type::Int);
         let (elem_ty, count) = match ty {
             Type::Vector(ref elem, n) => {
@@ -16671,6 +16624,51 @@ impl Codegen {
             || (self.current_func_is_nested && self.upvar_offsets.contains_key(name))
     }
 
+    /// 统一基址计算: 根据 Ident 的类型和存储类别, 将对象基址放入 dst 寄存器。
+    ///
+    /// 替代原先分散在 gen_expr/gen_assign/gen_lvalue_addr 中的重复条件链:
+    /// - VLA: 从栈槽加载基址
+    /// - 数组/向量: LEA 取地址 (栈上) 或 emit_global_addr (全局)
+    /// - 指针: 加载指针值 (但全局数组衰减需用 LEA)
+    /// - Upvar: 从父帧偏移加载
+    ///
+    /// 关键修复: 全局判定使用 resolve_global_key 解析 static local -> mangled 名,
+    /// 避免源名称与文件级全局同名时的错误路由。
+    fn emit_ident_base_addr(&mut self, name: &str, arr_ty: &Type, dst: u8) {
+        if self.vla_offsets.contains_key(name) {
+            // VLA: 基址存储在变量栈槽中
+            let off = self.var_offset(name);
+            self.load_stack(dst, off);
+        } else if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+            // 数组/向量: 取地址 (不加载)
+            let resolved_key = self.resolve_global_key(name).to_string();
+            if self.globals_raw.contains_key(&resolved_key) && !self.is_local_name(name) {
+                self.emit_global_addr(dst, &resolved_key);
+            } else {
+                let off = self.var_offset(name);
+                self.emit_lea_r13(dst, off);
+            }
+        } else {
+            // 指针/标量: 加载值 (但全局数组衰减需用 LEA)
+            let resolved_key = self.resolve_global_key(name).to_string();
+            let is_global_array = self
+                .globals_raw
+                .get(&resolved_key)
+                .is_some_and(|g| matches!(g.ty, Type::Array(_, _) | Type::Vector(_, _)));
+            if is_global_array && !self.is_local_name(name) {
+                // 全局数组衰减: 取地址而非加载
+                self.emit_global_addr(dst, &resolved_key);
+            } else if self.is_global_not_local(name) {
+                // 全局指针/标量: 加载值
+                self.emit_global_load(dst, &resolved_key);
+            } else {
+                // 局部变量: 从栈加载
+                let off = self.var_offset(name);
+                self.load_stack(dst, off);
+            }
+        }
+    }
+
     fn var_offset(&mut self, name: &str) -> i32 {
         if let Some(&(off, _)) = self.var_map.get(name) {
             return off;
@@ -16679,12 +16677,86 @@ impl Codegen {
         self.register_var(name, &Type::Int)
     }
 
+    /// 使用语义层 (compute_lvalue_address) 计算 lvalue 表达式的地址。
+    /// 这是 Layer 2 + Layer 3 (TakeAddress) 的 x86_64 物化入口。
+    ///
+    /// 返回 true 表示成功计算地址到 dst 寄存器。
+    /// 返回 false 表示无法处理, 调用方应退回原始路径。
+    fn emit_lvalue_addr_semantic(&mut self, expr: &Expr, dst: u8) -> bool {
+        use crate::semantics::{compute_lvalue_address, AddressContext};
+
+        let ctx = AddressContext {
+            is_nested: self.current_func_is_nested,
+        };
+        let desc = compute_lvalue_address(self, expr, &ctx);
+        self.emit_address_descriptor(&desc, expr, dst)
+    }
+
+    /// 将 AddressDescriptor 物化为 x86_64 地址计算指令序列。
+    /// 辅助函数: 被 emit_lvalue_addr_semantic 和其他物化入口调用。
+    /// 返回 false 时不发射任何指令 (原子性失败)。
+    fn emit_address_descriptor(
+        &mut self,
+        desc: &crate::semantics::AddressDescriptor,
+        original_expr: &Expr,
+        dst: u8,
+    ) -> bool {
+        use crate::semantics::{AddressBase, ByteOffset};
+
+        // 先检查是否能完整处理: 运行时偏移无法物化, 必须整体退回
+        if matches!(&desc.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }) {
+            return false;
+        }
+        // Upvar 暂未实现
+        if matches!(&desc.base, AddressBase::UpvarLoad { .. }) {
+            return false;
+        }
+
+        // Step 1: 发射基址计算指令
+        match &desc.base {
+            AddressBase::StackFrame { offset } => {
+                self.emit_lea_r13(dst, *offset);
+            }
+            AddressBase::StackSlotLoad { offset } => {
+                self.load_stack(dst, *offset);
+            }
+            AddressBase::GlobalSymbolAddr { symbol_key } => {
+                self.emit_global_addr(dst, symbol_key);
+            }
+            AddressBase::GlobalSymbolLoad { symbol_key } => {
+                self.emit_global_load(dst, symbol_key);
+            }
+            AddressBase::UpvarLoad { .. } => {
+                return false;
+            }
+            AddressBase::ExprAddr { sub } => {
+                return self.emit_address_descriptor(sub, original_expr, dst);
+            }
+        }
+
+        // Step 2: 发射常量偏移
+        if let ByteOffset::Constant(off) = &desc.offset {
+            if *off != 0 {
+                if dst != 0 {
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                } else {
+                    self.emit(&[0x48, 0x81, 0xC0]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                }
+            }
+        }
+
+        true
+    }
+
     /// 全局变量 RIP-relative 加载: reg = [global_var]
     /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_load(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
         let (sz, is_tls, _off, is_signed) = self
-            .globals
+            .globals_raw
             .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset, Self::is_signed_int(&g.ty)))
             .unwrap_or((8, false, 0, false));
@@ -16764,7 +16836,7 @@ impl Codegen {
     fn emit_global_float_store(&mut self, name: &str, ty: &Type) {
         let resolved = self.resolve_global_key(name).to_string();
         let (_, is_tls, _off) = self
-            .globals
+            .globals_raw
             .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset))
             .unwrap_or((8, false, 0));
@@ -16790,7 +16862,7 @@ impl Codegen {
     fn emit_global_store(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
         let (sz, is_tls, _off) = self
-            .globals
+            .globals_raw
             .get(&resolved)
             .map(|g| (g.size, g.is_tls, g.offset))
             .unwrap_or((8, false, 0));
@@ -17630,7 +17702,7 @@ impl Codegen {
         let resolved = self.resolve_global_key(name).to_string();
         // TLS 全局变量: ET_EXEC 走 pending_tls_rels 由 resolve() 修补,
         // ET_REL 走 pending_data_rels + R_X86_64_PC32 (与整数路径一致)
-        let is_tls = self.globals.get(&resolved).map(|g| g.is_tls).unwrap_or(false);
+        let is_tls = self.globals_raw.get(&resolved).map(|g| g.is_tls).unwrap_or(false);
         if is_tls && !self.relocatable {
             self.pending_tls_rels.push((disp_pos, resolved.clone()));
         } else {
@@ -18996,15 +19068,11 @@ impl Codegen {
                 ty: elem_ty,
                 ..
             } => {
+                // Phase 3-4: 语义层通过 emit_ident_base_addr 在 gen_expr/gen_assign
+                // 的 Index 处理中已集成。gen_lvalue_addr 保持原始路径。
                 let es = elem_ty.size().max(1) as i32;
-                // 数组/向量 lvalue: 取其地址; 指针: 求值指针本身
                 let arr_ty = arr.ty();
                 if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                    // 数组 rvalue (如指针索引 a[i] 或解引用 (*p)[i])
-                    // 衰减为首元素指针, 需加载值而非取地址。
-                    // Ident/Index 可能是指针变量或指针索引结果,
-                    // 先尝试 gen_lvalue_addr, 失败则回退到 gen_expr。
-                    // Deref/Member 等非纯 lvalue 形式直接用 gen_expr。
                     match &**arr {
                         Expr::Ident { .. } | Expr::Index { .. } => {
                             if !self.gen_lvalue_addr(arr, 0) {
@@ -20950,7 +21018,7 @@ impl Codegen {
             self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
             let bss_off = self.bss_size;
             self.bss_size += sz as u64;
-            self.globals.insert(
+            self.globals_raw.insert(
                 info.mangled_name.clone(),
                 GlobalVar {
                     offset: bss_off,
@@ -20963,7 +21031,7 @@ impl Codegen {
                 },
             );
         } else {
-            self.globals.insert(
+            self.globals_raw.insert(
                 info.mangled_name.clone(),
                 GlobalVar {
                     offset,
@@ -20989,16 +21057,113 @@ impl Codegen {
             .unwrap_or(name)
     }
 
+    /// 查询全局对象的存储信息 (唯一合法的外部查询接口)。
+    /// 自动处理 static local -> mangled 名解析。
+    /// 替代所有 self.globals_raw.get(source_name) 调用。
+    fn lookup_global_info(&self, source_name: &str) -> Option<&GlobalVar> {
+        let key = self.resolve_global_key(source_name);
+        self.globals_raw.get(key)
+    }
+
+    /// 按已解析的 key 查询 (用于重定位修补等已持有 key 的场景)。
+    fn lookup_global_by_key(&self, resolved_key: &str) -> Option<&GlobalVar> {
+        self.globals_raw.get(resolved_key)
+    }
+
+    /// 判断源名称是否指向已注册的全局对象 (含 static local)。
+    /// 替代 is_global_var 的 OR 模式。
+    fn is_global_object(&self, source_name: &str) -> bool {
+        self.lookup_global_info(source_name).is_some()
+            || self.static_local_map.is_static_local(&self.current_func_name, source_name)
+    }
+
     /// 判断 name 是否应作为全局变量访问 (含 static local).
     fn is_global_var(&self, name: &str) -> bool {
-        self.static_local_map
-            .is_static_local(&self.current_func_name, name)
-            || self.globals.contains_key(name)
+        self.is_global_object(name)
     }
 
     /// 判断 name 是否应作为全局变量访问且不是局部变量.
     fn is_global_not_local(&self, name: &str) -> bool {
         !self.is_local_name(name) && self.is_global_var(name)
+    }
+
+    // ========================================================================
+    // Layer 1: ObjectResolver trait 实现
+    // ========================================================================
+
+    /// 解析源名称的对象身份 (纯名字查找, 不查类型)。
+    /// 优先级: var_map > vla_offsets > upvar_offsets > globals (含 static local)。
+    fn resolve_identity_semantic(&self, name: &str) -> ObjectIdentity {
+        if self.var_map.contains_key(name) {
+            return ObjectIdentity::Local;
+        }
+        if self.vla_offsets.contains_key(name) {
+            return ObjectIdentity::Vla;
+        }
+        if self.current_func_is_nested && self.upvar_offsets.contains_key(name) {
+            return ObjectIdentity::Upvar;
+        }
+        let key = self.resolve_global_key(name);
+        if self.globals_raw.contains_key(key) {
+            return ObjectIdentity::Global {
+                resolved_key: key.to_string(),
+            };
+        }
+        // 兜底: 懒分配路径 (与 var_offset 行为一致)
+        ObjectIdentity::Local
+    }
+
+    /// 根据对象身份获取存储信息。
+    fn resolve_storage_semantic(&self, id: &ObjectIdentity, name: &str) -> StorageInfo {
+        match id {
+            ObjectIdentity::Local => {
+                let (offset, ty) = self.var_map.get(name).cloned().unwrap_or((0, Type::Int));
+                StorageInfo {
+                    class: StorageClass::Stack,
+                    obj_type: storage_type_from_ast(&ty),
+                    symbol_key: None,
+                    stack_offset: Some(offset),
+                    is_tls: false,
+                }
+            }
+            ObjectIdentity::Vla => {
+                let offset = self.vla_offsets.get(name).copied().unwrap_or(0);
+                StorageInfo {
+                    class: StorageClass::Stack,
+                    obj_type: StorageType::Vla { elem_size: 1 },
+                    symbol_key: None,
+                    stack_offset: Some(offset),
+                    is_tls: false,
+                }
+            }
+            ObjectIdentity::Global { resolved_key } => {
+                let g = self.globals_raw.get(resolved_key);
+                let ty = g.map(|g| g.ty.clone()).unwrap_or(Type::Int);
+                let is_tls = g.map(|g| g.is_tls).unwrap_or(false);
+                let class = if is_tls {
+                    StorageClass::GlobalTLS
+                } else {
+                    StorageClass::GlobalData
+                };
+                StorageInfo {
+                    class,
+                    obj_type: storage_type_from_ast(&ty),
+                    symbol_key: Some(resolved_key.clone()),
+                    stack_offset: None,
+                    is_tls,
+                }
+            }
+            ObjectIdentity::Upvar => {
+                let offset = self.upvar_offsets.get(name).copied().unwrap_or(0);
+                StorageInfo {
+                    class: StorageClass::Upvar,
+                    obj_type: StorageType::Pointer { pointee_size: 8 },
+                    symbol_key: None,
+                    stack_offset: Some(offset),
+                    is_tls: false,
+                }
+            }
+        }
     }
 
     // 预注册所有局部变量到 var_map (数组分配多槽, 保证帧大小计算正确)
@@ -37076,6 +37241,26 @@ fn f64_to_x87_80(v: f64) -> Vec<u8> {
     result[8] = (exp_x87 & 0xFF) as u8;
     result[9] = ((sign as u8) << 7) | ((exp_x87 >> 8) as u8);
     result
+}
+
+// ============================================================================
+// Layer 1: ObjectResolver trait 实现
+// ============================================================================
+
+impl ObjectResolver for Codegen {
+    fn resolve_identity(&self, name: &str) -> ObjectIdentity {
+        self.resolve_identity_semantic(name)
+    }
+
+    fn resolve_storage(&self, id: &ObjectIdentity, name: &str) -> StorageInfo {
+        self.resolve_storage_semantic(id, name)
+    }
+
+    fn is_local_name(&self, name: &str) -> bool {
+        self.var_map.contains_key(name)
+            || self.vla_offsets.contains_key(name)
+            || (self.current_func_is_nested && self.upvar_offsets.contains_key(name))
+    }
 }
 
 #[cfg(test)]
