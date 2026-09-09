@@ -24025,6 +24025,52 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_copysignl: long double 版本
+            // SysV ABI: long double 参数在 xmm0 (实际走 x87 栈), 但 libc
+            // copysignl 接受 xmm0/xmm1 传递, 结果在 xmm0
+            "__builtin_copysignl" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // xmm0 = magnitude (long double)
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0 (backup)
+                self.gen_expr(&args[1], 0); // xmm0 = sign (long double)
+                self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
+                self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
+                self.emit(&[0x54]); // push rsp
+                self.call_label("copysignl");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_modf/modff/modfl: 分解浮点数为整数和小数部分
+            // 签名: double modf(double x, double *iptr)
+            // 返回值: 小数部分 (fractional part)
+            // 副作用: *iptr = 整数部分 (integer part)
+            // SysV ABI: xmm0 = x, rdi = iptr, 返回值在 xmm0
+            "__builtin_modf" | "__builtin_modff" | "__builtin_modfl" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 第一个参数: x, 放到 xmm0
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                // 第二个参数: iptr (指针), 放到 rdi
+                self.gen_expr(&args[1], 7); // rdi = iptr
+                // 调用 libc modf/modff/modfl
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                // 返回值在 xmm0 (小数部分), 如需则移动到 dst
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             // __builtin_bcopy(src, dst, len): 等价于 memmove(dst, src, len)
             // SysV: rdi=src, rsi=dst, rdx=len → 需要交换 rdi/rsi
             "__builtin_bcopy" => {

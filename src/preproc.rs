@@ -7201,7 +7201,14 @@ impl Preprocessor {
                 | "__builtin_exit"
                 | "__builtin_copysign"
                 | "__builtin_copysignf"
+                | "__builtin_copysignl"
                 | "__builtin_va_arg_pack"
+                // modf/fmod family (GCC torture test pr48641)
+                | "__builtin_modf"
+                | "__builtin_modff"
+                | "__builtin_modfl"
+                | "__builtin_fmodf"
+                | "__builtin_fmodl"
                 // fabs/bcopy/bzero/stpncpy/fputs/uabs (GCC torture test)
                 | "__builtin_fabs"
                 | "__builtin_fabsf"

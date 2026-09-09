@@ -2044,6 +2044,11 @@ impl<'a> Parser<'a> {
                 "__builtin_copysign" | "__builtin_modf" => {
                     return Type::Double
                 }
+                // 返回 long double 的 builtin
+                "__builtin_modfl" | "__builtin_fmodl" |
+                "__builtin_copysignl" => {
+                    return Type::LongDouble
+                }
                 // 返回 void* 的 builtin
                 "__builtin_memcpy" | "__builtin_memset" | "__builtin_memmove" |
                 "__builtin_mempcpy" |
@@ -10204,7 +10209,9 @@ impl<'a> Parser<'a> {
                                     | "__builtin_strncmp" | "__builtin_strncasecmp"
                                     | "__builtin_object_size"
                                     | "__builtin_modff" | "__builtin_fmodf"
+                                    | "__builtin_modfl" | "__builtin_fmodl"
                                     | "__builtin_copysignf" | "__builtin_copysign"
+                                    | "__builtin_copysignl"
                                     | "__builtin_memcpy" | "__builtin_memset" | "__builtin_memmove"
                                     | "__builtin_mempcpy"
                                     | "__builtin_strdup" | "__builtin_strndup"
