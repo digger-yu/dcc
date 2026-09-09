@@ -1684,9 +1684,14 @@ impl Aarch64Codegen {
                 }
                 return true;
             }
-            ExprKind::VaArg { ap, .. } => {
-                // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
-                self.gen_va_arg_int(ap);
+            ExprKind::VaArg { ap, ref arg_ty, .. } => {
+                // M25: __builtin_va_arg(ap, T)
+                // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
+                if is_aggregate(arg_ty) {
+                    self.gen_va_arg_struct(ap, arg_ty);
+                } else {
+                    self.gen_va_arg_int(ap);
+                }
                 return true;
             }
             ExprKind::Call => {
@@ -2487,6 +2492,123 @@ impl Aarch64Codegen {
         // 写回 overflow_arg_area
         self.emit_str_x(1, 9, 8, 8);
         self.emit_label_raw(&done);
+    }
+
+    /// 聚合类型 va_arg: va_arg(ap, struct S)
+    /// AAPCS64 变参规则:
+    /// - HFA (齐次浮点聚合): 从 FP 保存区读取, fp_offset 预算 64 字节
+    /// - 非 HFA 且整体适合 GP: 从 GP 保存区读取, gp_offset 预算 64 字节
+    /// - 超出预算或 > 16 字节: 从 overflow_arg_area 读取
+    /// 结果在 x0 = 栈槽地址 (与 sret 调用约定一致)
+    fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &ValueType) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        let size = aggregate_size(arg_ty).unwrap_or(8);
+        let hfa = classify_hfa(arg_ty, &self.aggregate_fields);
+        let slot_size = ((size + 7) / 8 * 8).max(8) as i32;
+        let slot = self.alloc_local("<va_aggr>", slot_size);
+
+        if let Some(ref hfa_info) = hfa {
+            // HFA 路径: 从 FP 保存区读取, fp_offset 预算 64 字节
+            let total = hfa_info.count as i32 * 8; // 每元素占 8B 槽位
+            let budget = 64 - total;
+
+            // x9 = va_list 地址
+            self.mov_x_reg_sp_off(9, ap_off);
+            // x2 = fp_offset
+            self.emit_ldr_x(2, 9, 4, 4); // ldr w2, [x9, #4]
+            let lbl_overflow = self.fresh_label("va_hfa_of");
+            let lbl_done = self.fresh_label("va_hfa_done");
+            // cmp w2, #budget
+            self.emit_cmp_imm_w(2, budget as u32);
+            self.emit_bcond(&lbl_overflow, 0xa); // bge overflow
+
+            // 寄存器路径: x3 = reg_save_area + 64 + fp_offset
+            self.emit_ldr_x(3, 9, 16, 8); // ldr x3, [x9, #16] (reg_save_area)
+            self.emit_add_imm_x(3, 3, 64); // add x3, x3, #64 (FP 区起始)
+            self.emit_add_x_reg(3, 3, 2); // add x3, x3, x2 (+ fp_offset)
+            // x4 = slot 地址
+            self.mov_x_reg_sp_off(4, slot);
+            // 逐元素复制
+            for i in 0..hfa_info.count as i32 {
+                let off = (i * 8) as u32;
+                self.ldr_xt_indirect(1, 3, off as i32); // ldr x1, [x3, #off]
+                self.str_xt_indirect(1, 4, off as i32); // str x1, [x4, #off]
+            }
+            // fp_offset += total
+            self.emit_add_imm_w(2, 2, total as u32);
+            self.emit_str_x(2, 9, 4, 4); // str w2, [x9, #4]
+            self.b(&lbl_done);
+
+            // 溢出路径: overflow_arg_area -> slot
+            self.emit_label_raw(&lbl_overflow);
+            self.emit_ldr_x(3, 9, 8, 8); // ldr x3, [x9, #8] (overflow_arg_area)
+            self.mov_x_reg_sp_off(4, slot);
+            for i in 0..(slot_size / 8) {
+                let off = (i * 8) as u32;
+                self.ldr_xt_indirect(1, 3, off as i32);
+                self.str_xt_indirect(1, 4, off as i32);
+            }
+            // overflow_arg_area += slot_size
+            self.emit_add_imm_x(3, 3, slot_size as u32);
+            self.emit_str_x(3, 9, 8, 8); // str x3, [x9, #8]
+            self.emit_label_raw(&lbl_done);
+        } else if size <= 16 {
+            // GP 路径: 整体检查 gp_offset 预算
+            let aligned = ((size + 7) / 8 * 8) as i32;
+            let budget = 64 - aligned;
+
+            self.mov_x_reg_sp_off(9, ap_off);
+            self.emit_ldr_x(2, 9, 0, 4); // ldr w2, [x9, #0] (gp_offset)
+            let lbl_overflow = self.fresh_label("va_gp_of");
+            let lbl_done = self.fresh_label("va_gp_done");
+            self.emit_cmp_imm_w(2, budget as u32);
+            self.emit_bcond(&lbl_overflow, 0xa); // bge overflow
+
+            // 寄存器路径: x3 = reg_save_area + gp_offset
+            self.emit_ldr_x(3, 9, 16, 8); // ldr x3, [x9, #16]
+            self.emit_add_x_reg(3, 3, 2); // add x3, x3, x2
+            self.mov_x_reg_sp_off(4, slot);
+            for i in 0..(aligned / 8) {
+                let off = (i * 8) as i32;
+                self.ldr_xt_indirect(1, 3, off);
+                self.str_xt_indirect(1, 4, off);
+            }
+            // gp_offset += aligned
+            self.emit_add_imm_w(2, 2, aligned as u32);
+            self.emit_str_x(2, 9, 0, 4); // str w2, [x9, #0]
+            self.b(&lbl_done);
+
+            // 溢出路径
+            self.emit_label_raw(&lbl_overflow);
+            self.emit_ldr_x(3, 9, 8, 8); // ldr x3, [x9, #8]
+            self.mov_x_reg_sp_off(4, slot);
+            for i in 0..(slot_size / 8) {
+                let off = (i * 8) as i32;
+                self.ldr_xt_indirect(1, 3, off);
+                self.str_xt_indirect(1, 4, off);
+            }
+            self.emit_add_imm_x(3, 3, slot_size as u32);
+            self.emit_str_x(3, 9, 8, 8);
+            self.emit_label_raw(&lbl_done);
+        } else {
+            // 大结构体 (> 16 字节): 直接从 overflow_arg_area 读取
+            self.mov_x_reg_sp_off(9, ap_off);
+            self.emit_ldr_x(3, 9, 8, 8); // ldr x3, [x9, #8]
+            self.mov_x_reg_sp_off(4, slot);
+            for i in 0..(slot_size / 8) {
+                let off = (i * 8) as i32;
+                self.ldr_xt_indirect(1, 3, off);
+                self.str_xt_indirect(1, 4, off);
+            }
+            self.emit_add_imm_x(3, 3, slot_size as u32);
+            self.emit_str_x(3, 9, 8, 8);
+        }
+
+        // x0 = slot 地址 (与 sret 调用约定一致)
+        self.mov_x_reg_sp_off(0, slot);
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {

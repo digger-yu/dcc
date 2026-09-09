@@ -1425,9 +1425,14 @@ impl Riscv64Codegen {
                 }
                 return true;
             }
-            ExprKind::VaArg { ap, .. } => {
-                // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
-                self.gen_va_arg_int(ap);
+            ExprKind::VaArg { ap, ref arg_ty, .. } => {
+                // M25: __builtin_va_arg(ap, T)
+                // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
+                if is_aggregate(arg_ty) {
+                    self.gen_va_arg_struct(ap, arg_ty);
+                } else {
+                    self.gen_va_arg_int(ap);
+                }
                 return true;
             }
             ExprKind::Call if !expr.children.is_empty() => {
@@ -2124,6 +2129,81 @@ impl Riscv64Codegen {
         // 写回 overflow_arg_area
         self.emit_sd(11, 15, 8); // sd a1, 8(a5)
         self.label(&done);
+    }
+
+    /// 聚合类型 va_arg: va_arg(ap, struct S)
+    /// RISC-V 变参规则:
+    /// - size <= 16: 尝试 GP 保存区 (gp_offset 预算 64 字节), 超出走 overflow
+    /// - size > 16: 直接从 overflow_arg_area 读取
+    /// 结果在 a0 = 栈槽地址 (与 sret 调用约定一致)
+    fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &ValueType) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        let size = aggregate_size(arg_ty).unwrap_or(8);
+        let slot_size = ((size + 7) / 8 * 8).max(8) as i32;
+        let slot = self.alloc_local("<va_aggr>", slot_size);
+
+        if size <= 16 {
+            let aligned = ((size + 7) / 8 * 8) as i32;
+            let budget = 64 - aligned;
+
+            // a5 = va_list 地址
+            self.mov_a_reg_sp_off(15, ap_off);
+            // a2 = gp_offset
+            self.emit_lw(12, 15, 0); // lw a2, 0(a5)
+            let lbl_overflow = self.fresh_label("va_gp_of");
+            let lbl_done = self.fresh_label("va_gp_done");
+            // bge a2, budget, overflow
+            self.li_reg(11, budget);
+            self.emit_bge_label(12, 11, &lbl_overflow);
+
+            // 寄存器路径: a3 = reg_save_area + gp_offset
+            self.emit_ld(13, 15, 16); // ld a3, 16(a5) (reg_save_area)
+            self.emit_add(13, 13, 12); // add a3, a3, a2
+            // a4 = slot 地址
+            self.mov_a_reg_sp_off(14, slot);
+            // 逐字复制
+            for i in 0..(aligned / 8) {
+                let off = i * 8;
+                self.emit_ld(10, 13, off);  // ld a0, off(a3)
+                self.emit_sd(10, 14, off);  // sd a0, off(a4)
+            }
+            // gp_offset += aligned
+            self.emit_addi(12, 12, aligned);
+            self.emit_sw(12, 15, 0); // sw a2, 0(a5)
+            self.j(&lbl_done);
+
+            // 溢出路径
+            self.label(&lbl_overflow);
+            self.emit_ld(13, 15, 8); // ld a3, 8(a5) (overflow_arg_area)
+            self.mov_a_reg_sp_off(14, slot);
+            for i in 0..(slot_size / 8) {
+                let off = i * 8;
+                self.emit_ld(10, 13, off);
+                self.emit_sd(10, 14, off);
+            }
+            // overflow_arg_area += slot_size
+            self.emit_addi(13, 13, slot_size);
+            self.emit_sd(13, 15, 8); // sd a3, 8(a5)
+            self.label(&lbl_done);
+        } else {
+            // 大结构体 (> 16 字节): 直接从 overflow_arg_area 读取
+            self.mov_a_reg_sp_off(15, ap_off);
+            self.emit_ld(13, 15, 8); // ld a3, 8(a5)
+            self.mov_a_reg_sp_off(14, slot);
+            for i in 0..(slot_size / 8) {
+                let off = i * 8;
+                self.emit_ld(10, 13, off);
+                self.emit_sd(10, 14, off);
+            }
+            self.emit_addi(13, 13, slot_size);
+            self.emit_sd(13, 15, 8);
+        }
+
+        // a0 = slot 地址 (与 sret 调用约定一致)
+        self.mov_a_reg_sp_off(10, slot);
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
