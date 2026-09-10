@@ -302,139 +302,12 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             }
             let lv = eval_full(l)?;
             let rv = eval_full(r)?;
-            // Helper: mask i128 to the bit width of the expression type.
-            // C shift/mul operations are defined modulo the type width,
-            // but we compute in i128 which may be wider.
-            let mask_to_ty = |v: i128| -> i128 {
-                if let Some(bits) = int_type_bits(binop_ty) {
-                    if bits < 128 {
-                        let mask = if bits == 64 {
-                            // Avoid overflow: (1i128 << 64) - 1 works,
-                            // but be explicit for clarity.
-                            u64::MAX as i128
-                        } else {
-                            (1i128 << bits) - 1
-                        };
-                        v & mask
-                    } else {
-                        v
-                    }
-                } else {
-                    v
-                }
-            };
-            let is_signed = !is_unsigned_int_ty(binop_ty);
-            // Helper: convert i128 value to the binop type width.
-            // For unsigned: mask to type width (zero-extend).
-            // For signed: mask then sign-extend from type width.
-            let convert_to_binop_ty = |v: i128| -> i128 {
-                if let Some(bits) = int_type_bits(binop_ty) {
-                    if bits < 128 {
-                        let mask = if bits == 64 {
-                            u64::MAX as i128
-                        } else {
-                            (1i128 << bits) - 1
-                        };
-                        let truncated = v & mask;
-                        if is_signed {
-                            let sign_bit = 1i128 << (bits - 1);
-                            if (truncated & sign_bit) != 0 {
-                                truncated | !mask
-                            } else {
-                                truncated
-                            }
-                        } else {
-                            truncated
-                        }
-                    } else {
-                        v
-                    }
-                } else {
-                    v
-                }
-            };
+            // 整数算术/比较统一走类型感知路径 (arith_binop_values):
+            // 按 binop_ty 做无符号重解释/规范化, 比较按操作数自身
+            // 类型宽度与符号性 (C99 6.3.1.8)。
             match op {
-                // 算术运算
-                BinOp::Add => add_values(lv, rv),
-                BinOp::Sub => sub_values(lv, rv),
-                BinOp::Mul => mul_values(lv, rv),
-                BinOp::Div => div_values(lv, rv),
-                BinOp::Mod => mod_values(lv, rv),
-                BinOp::And => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        let a = convert_to_binop_ty(a);
-                        let b = convert_to_binop_ty(b);
-                        Ok(ConstValue::Int(mask_to_ty(a & b)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Or => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        let a = convert_to_binop_ty(a);
-                        let b = convert_to_binop_ty(b);
-                        Ok(ConstValue::Int(mask_to_ty(a | b)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Xor => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        let a = convert_to_binop_ty(a);
-                        let b = convert_to_binop_ty(b);
-                        Ok(ConstValue::Int(mask_to_ty(a ^ b)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv.as_int().unwrap_or(-1)) => {
-                    Err(ConstEvalError::InvalidShift(rv.as_int().unwrap_or(0)))
-                }
-                BinOp::Shl => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        // Mask input to type width, shift, mask output.
-                        let masked_a = mask_to_ty(a);
-                        let result = masked_a.wrapping_shl(b as u32);
-                        Ok(ConstValue::Int(mask_to_ty(result)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Shr => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        let shift = b as u32;
-                        if is_signed {
-                            // Arithmetic right shift: sign-extend from
-                            // type width, then shift.
-                            if let Some(bits) = int_type_bits(binop_ty) {
-                                if bits < 128 {
-                                    let sign_bit = 1i128 << (bits - 1);
-                                    let masked = a & ((1i128 << bits) - 1);
-                                    let extended = if masked & sign_bit != 0 {
-                                        // Sign-extend: set all bits above type width
-                                        masked | !((1i128 << bits) - 1)
-                                    } else {
-                                        masked
-                                    };
-                                    Ok(ConstValue::Int(extended >> shift))
-                                } else {
-                                    Ok(ConstValue::Int(a.wrapping_shr(shift)))
-                                }
-                            } else {
-                                Ok(ConstValue::Int(a.wrapping_shr(shift)))
-                            }
-                        } else {
-                            // Logical right shift: mask input, shift.
-                            let masked_a = mask_to_ty(a);
-                            Ok(ConstValue::Int(mask_to_ty(masked_a.wrapping_shr(shift))))
-                        }
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                // 比较
-                BinOp::Lt => cmp_values(lv, rv, |a, b| (a < b) as i128),
-                BinOp::Gt => cmp_values(lv, rv, |a, b| (a > b) as i128),
-                BinOp::Le => cmp_values(lv, rv, |a, b| (a <= b) as i128),
-                BinOp::Ge => cmp_values(lv, rv, |a, b| (a >= b) as i128),
-                BinOp::EqEq => cmp_values(lv, rv, |a, b| (a == b) as i128),
-                BinOp::Ne => cmp_values(lv, rv, |a, b| (a != b) as i128),
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
+                _ => arith_binop_values(*op, binop_ty, l, r, lv, rv),
             }
         }
         Expr::Cast { ty, e, .. } => {
@@ -750,45 +623,10 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
     // For binary/unary ops, recursively evaluate children with env
     // then apply the same operation logic as eval_full
     match expr {
-        Expr::Binop { op, l, r, .. } => {
+        Expr::Binop { op, l, r, ty, .. } => {
             let lv = eval_with_env(l, env)?;
             let rv = eval_with_env(r, env)?;
             match op {
-                BinOp::Add => add_values(lv, rv),
-                BinOp::Sub => sub_values(lv, rv),
-                BinOp::Mul => mul_values(lv, rv),
-                BinOp::Div => div_values(lv, rv),
-                BinOp::Mod => mod_values(lv, rv),
-                BinOp::And => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a & b)),
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Or => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a | b)),
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Xor => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a ^ b)),
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Shl => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_shl(b as u32)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Shr => match (lv, rv) {
-                    (ConstValue::Int(a), ConstValue::Int(b)) => {
-                        Ok(ConstValue::Int(a.wrapping_shr(b as u32)))
-                    }
-                    _ => Err(ConstEvalError::NotConstant),
-                },
-                BinOp::Lt => cmp_values(lv, rv, |a, b| (a < b) as i128),
-                BinOp::Gt => cmp_values(lv, rv, |a, b| (a > b) as i128),
-                BinOp::Le => cmp_values(lv, rv, |a, b| (a <= b) as i128),
-                BinOp::Ge => cmp_values(lv, rv, |a, b| (a >= b) as i128),
-                BinOp::EqEq => cmp_values(lv, rv, |a, b| (a == b) as i128),
-                BinOp::Ne => cmp_values(lv, rv, |a, b| (a != b) as i128),
                 BinOp::AndAnd => {
                     Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 { 0 }
                         else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
@@ -796,6 +634,8 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                 BinOp::OrOr => Ok(ConstValue::Int(
                     (lv.as_int().unwrap_or(0) != 0 || rv.as_int().unwrap_or(0) != 0) as i128,
                 )),
+                // 算术/比较统一走类型感知路径 (与 eval_binop 共用)
+                _ => arith_binop_values(*op, ty, l, r, lv, rv),
             }
         }
         Expr::Unary { op, e, .. } => {
@@ -884,6 +724,165 @@ fn is_unsigned_int_ty(ty: &Type) -> bool {
             | Type::ULongLong
             | Type::UInt128
     )
+}
+
+/// 按类型规范化整数值: 有符号类型截断到位宽后符号扩展, 无符号
+/// 类型截断到位宽 (零扩展, 结果非负)。使 i128 承载的常量值与其
+/// C 类型宽度语义一致 (如 UInt 上下文中的 -1 → 4294967295)。
+fn normalize_int_value(v: i128, ty: &Type) -> i128 {
+    if let Some(bits) = int_type_bits(ty) {
+        if bits < 128 {
+            let mask = if bits == 64 {
+                u64::MAX as i128
+            } else {
+                (1i128 << bits) - 1
+            };
+            let truncated = v & mask;
+            if !is_unsigned_int_ty(ty) && (truncated & (1i128 << (bits - 1))) != 0 {
+                truncated | !mask
+            } else {
+                truncated
+            }
+        } else {
+            v
+        }
+    } else {
+        v
+    }
+}
+
+/// 类型感知的双目运算求值 (eval_binop 与 eval_with_env 共用)。
+/// binop_ty 为常用算术转换后的结果类型:
+/// - Div/Mod: 无符号结果类型时, 操作数先重解释为无符号再运算
+///   (C99 6.3.1.8)。纯 i128 有符号除法会把 -18U / -__INT_MAX__
+///   折叠为 -1, 正确值为 1 (pr94412)。
+/// - And/Or/Xor/Shl/Shr: 结果规范化到类型宽度 (有符号符号扩展,
+///   无符号掩码), 避免未截断的 i128 中间值泄漏到后续折叠
+///   (如有符号 (-1 << 3) 应为 -8 而非 0xFFFFFFF8)。
+/// - 比较: 按各操作数自身类型规范化; 任一操作数整型提升后为
+///   无符号 (宽度 >= int) 时按无符号比较。
+fn arith_binop_values(
+    op: BinOp,
+    binop_ty: &Type,
+    l: &Expr,
+    r: &Expr,
+    lv: ConstValue,
+    rv: ConstValue,
+) -> Result<ConstValue, ConstEvalError> {
+    let is_signed = !is_unsigned_int_ty(binop_ty);
+    match op {
+        BinOp::Add => add_values(lv, rv),
+        BinOp::Sub => sub_values(lv, rv),
+        BinOp::Mul => mul_values(lv, rv),
+        BinOp::Div | BinOp::Mod => {
+            if let (ConstValue::Int(a), ConstValue::Int(b)) = (&lv, &rv) {
+                let (a, b) = (*a, *b);
+                let a = normalize_int_value(a, binop_ty);
+                let b = normalize_int_value(b, binop_ty);
+                if b == 0 {
+                    return Err(ConstEvalError::DivisionByZero);
+                }
+                let val = if op == BinOp::Div {
+                    if is_signed {
+                        a.checked_div(b)
+                    } else {
+                        (a as u128).checked_div(b as u128).map(|v| v as i128)
+                    }
+                } else if is_signed {
+                    a.checked_rem(b)
+                } else {
+                    (a as u128).checked_rem(b as u128).map(|v| v as i128)
+                };
+                val.map(ConstValue::Int).ok_or(ConstEvalError::Overflow)
+            } else if op == BinOp::Div {
+                div_values(lv, rv)
+            } else {
+                mod_values(lv, rv)
+            }
+        }
+        BinOp::And => match (lv, rv) {
+            (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(normalize_int_value(
+                normalize_int_value(a, binop_ty) & normalize_int_value(b, binop_ty),
+                binop_ty,
+            ))),
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        BinOp::Or => match (lv, rv) {
+            (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(normalize_int_value(
+                normalize_int_value(a, binop_ty) | normalize_int_value(b, binop_ty),
+                binop_ty,
+            ))),
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        BinOp::Xor => match (lv, rv) {
+            (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(normalize_int_value(
+                normalize_int_value(a, binop_ty) ^ normalize_int_value(b, binop_ty),
+                binop_ty,
+            ))),
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv.as_int().unwrap_or(-1)) => {
+            Err(ConstEvalError::InvalidShift(rv.as_int().unwrap_or(0)))
+        }
+        BinOp::Shl => match (lv, rv) {
+            (ConstValue::Int(a), ConstValue::Int(b)) => {
+                let a = normalize_int_value(a, binop_ty);
+                Ok(ConstValue::Int(normalize_int_value(
+                    a.wrapping_shl(b as u32),
+                    binop_ty,
+                )))
+            }
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        BinOp::Shr => match (lv, rv) {
+            (ConstValue::Int(a), ConstValue::Int(b)) => {
+                // 有符号: 规范化 (符号扩展) 后算术右移; 无符号:
+                // 规范化 (掩码) 后逻辑右移。
+                let a = normalize_int_value(a, binop_ty);
+                Ok(ConstValue::Int(normalize_int_value(a >> b, binop_ty)))
+            }
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        BinOp::Lt => cmp_binop_values(l, r, lv, rv, |a, b| (a < b) as i128),
+        BinOp::Gt => cmp_binop_values(l, r, lv, rv, |a, b| (a > b) as i128),
+        BinOp::Le => cmp_binop_values(l, r, lv, rv, |a, b| (a <= b) as i128),
+        BinOp::Ge => cmp_binop_values(l, r, lv, rv, |a, b| (a >= b) as i128),
+        BinOp::EqEq => cmp_binop_values(l, r, lv, rv, |a, b| (a == b) as i128),
+        BinOp::Ne => cmp_binop_values(l, r, lv, rv, |a, b| (a != b) as i128),
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+
+/// 类型感知的整数比较: 按各操作数自身类型规范化 (掩码/符号扩展)
+/// 后比较。任一操作数整型提升后为无符号 (无符号且宽度 >= int,
+/// C99 6.3.1.1/6.3.1.8) 时, 位模式重解释为无符号再比较:
+/// (0U-1) > 0 应为真。UChar/UShort 等提升为 int, 不触发无符号
+/// 比较。非整数对回退到 f64 比较。
+fn cmp_binop_values<F: Fn(i128, i128) -> i128>(
+    l: &Expr,
+    r: &Expr,
+    lv: ConstValue,
+    rv: ConstValue,
+    f: F,
+) -> Result<ConstValue, ConstEvalError> {
+    if let (&ConstValue::Int(a), &ConstValue::Int(b)) = (&lv, &rv) {
+        let unsigned_cmp = matches!(
+            &l.ty(),
+            Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128
+        ) || matches!(
+            &r.ty(),
+            Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128
+        );
+        let a = normalize_int_value(a, &l.ty());
+        let b = normalize_int_value(b, &r.ty());
+        let res = if unsigned_cmp {
+            f(a as u128 as i128, b as u128 as i128)
+        } else {
+            f(a, b)
+        };
+        return Ok(ConstValue::Int(res));
+    }
+    cmp_values(lv, rv, |x, y| f(x as i128, y as i128))
 }
 
 /// 指针算术的字节缩放: ptr±n 中 n 乘 pointee 大小。
