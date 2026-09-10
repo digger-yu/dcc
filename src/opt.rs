@@ -2,9 +2,13 @@
 // 第一性原理: 优化在 IR 层做数据流/常量传播，后端只负责指令选择。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
-use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Program, Stmt};
+use crate::ast::{
+    AddrSpace, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program,
+    QualifierFlags, Stmt, VarDecl,
+};
 use crate::const_eval;
 use crate::diagnostics::Span;
 use crate::ir::Module;
@@ -1369,6 +1373,11 @@ fn inline_calls_in_stmt(
     fenv_access: bool,
     depth: u32,
 ) {
+    // always_inline / flatten 且函数体含局部声明: 语句级展开.
+    // 成功后调用点已被替换为展开后的块, 无需再做表达式级内联.
+    if try_stmt_inline_call(s, funcs, caller_flatten, depth) {
+        return;
+    }
     match s {
         Stmt::Return { val: Some(e), .. } => {
             *e = inline_expr(
@@ -1451,12 +1460,19 @@ fn extract_inline_return(body: &Block) -> Option<&Expr> {
         [BlockItem::Stmt(Stmt::Return { val: Some(e), .. })] => Some(e),
         items if !items.is_empty() => {
             if let BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) = items.last()? {
-                if items.iter().all(|it| {
+                // 表达式级内联只能保留返回表达式; 前置项必须是无运行时
+                // 副作用的类型定义. 变量声明 (尤其带初始化器) 会被丢弃,
+                // 导致返回表达式引用未定义变量或丢失副作用.
+                let only_types = items[..items.len() - 1].iter().all(|it| {
                     matches!(
                         it,
-                        BlockItem::Decl(_) | BlockItem::Stmt(Stmt::Return { .. })
+                        BlockItem::Decl(Decl::Typedef { .. })
+                            | BlockItem::Decl(Decl::StructDef(_))
+                            | BlockItem::Decl(Decl::UnionDef(_))
+                            | BlockItem::Decl(Decl::EnumDef(_))
                     )
-                }) {
+                });
+                if only_types {
                     Some(e)
                 } else {
                     None
@@ -1467,6 +1483,399 @@ fn extract_inline_return(body: &Block) -> Option<&Expr> {
         }
         _ => None,
     }
+}
+
+/// 语句级 forced 内联的全局唯一计数器 (每次展开生成不同的临时名)
+static STMT_INLINE_UID: AtomicU32 = AtomicU32::new(0);
+
+/// ty 是否含运行时长度数组维度 (VLA). VLA 声明的初始化/分配在
+/// 内联展开后无法简单跨语句重写, 遇到即拒绝展开.
+fn type_has_vla_dim(t: &crate::ast::Type) -> bool {
+    match t {
+        crate::ast::Type::Array(_, sz) => matches!(sz, ArraySize::Var(_)),
+        crate::ast::Type::Ptr(p) => type_has_vla_dim(&p.base),
+        crate::ast::Type::Struct(_, fields, _) | crate::ast::Type::Union(_, fields, _) => {
+            fields.iter().any(|f| type_has_vla_dim(&f.ty))
+        }
+        _ => false,
+    }
+}
+
+/// 将表达式中的标识符按 map 重命名 (callee 局部/形参 → 展开临时名).
+/// 只重命名 callee body 内的名字; 实参表达式不参与重命名.
+fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            if let Some(new) = map.get(&name.name) {
+                name.name = new.clone();
+            }
+        }
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } => {
+            rename_idents_in_expr(l, map);
+            rename_idents_in_expr(r, map);
+        }
+        Expr::Unary { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. } => rename_idents_in_expr(x, map),
+        Expr::Call { callee, args, .. } => {
+            rename_idents_in_expr(callee, map);
+            for a in args {
+                rename_idents_in_expr(a, map);
+            }
+        }
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            rename_idents_in_expr(cond, map);
+            rename_idents_in_expr(then_, map);
+            rename_idents_in_expr(else_, map);
+        }
+        Expr::Index { arr, idx, .. } => {
+            rename_idents_in_expr(arr, map);
+            rename_idents_in_expr(idx, map);
+        }
+        Expr::Member { expr, .. } => rename_idents_in_expr(expr, map),
+        Expr::Comma { l, r, .. } => {
+            rename_idents_in_expr(l, map);
+            rename_idents_in_expr(r, map);
+        }
+        Expr::VaArg { ap, .. } => rename_idents_in_expr(ap, map),
+        Expr::Offsetof { indices, .. } => {
+            for i in indices {
+                rename_idents_in_expr(i, map);
+            }
+        }
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for it in inits {
+                match it {
+                    InitItem::Expr(x) => rename_idents_in_expr(x, map),
+                    InitItem::Designated { value, designator } => {
+                        if let crate::ast::Designator::Index(idx) = designator {
+                            rename_idents_in_expr(idx, map);
+                        }
+                        rename_idents_in_expr(value, map);
+                    }
+                }
+            }
+        }
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
+            for o in outputs {
+                rename_idents_in_expr(o, map);
+            }
+            for i in inputs {
+                rename_idents_in_expr(i, map);
+            }
+        }
+        Expr::StmtExpr { block, .. } => {
+            rename_idents_in_items(&mut block.items, map);
+        }
+        // 字面量/sizeof/alignof/&&label: 不含可重命名的运行时标识符
+        _ => {}
+    }
+}
+
+fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
+    match s {
+        Stmt::Return { val, .. } => {
+            if let Some(e) = val {
+                rename_idents_in_expr(e, map);
+            }
+        }
+        Stmt::Expr { e, .. } => rename_idents_in_expr(e, map),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            rename_idents_in_expr(cond, map);
+            rename_idents_in_stmt(then_, map);
+            if let Some(el) = else_ {
+                rename_idents_in_stmt(el, map);
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+            rename_idents_in_expr(cond, map);
+            rename_idents_in_stmt(body, map);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                rename_idents_in_stmt(i, map);
+            }
+            if let Some(c) = cond {
+                rename_idents_in_expr(c, map);
+            }
+            if let Some(st) = step {
+                rename_idents_in_expr(st, map);
+            }
+            rename_idents_in_stmt(body, map);
+        }
+        Stmt::Block { b, .. } => rename_idents_in_items(&mut b.items, map),
+        _ => {}
+    }
+}
+
+fn rename_idents_in_items(items: &mut Vec<BlockItem>, map: &HashMap<String, String>) {
+    for it in items {
+        match it {
+            BlockItem::Stmt(s) => rename_idents_in_stmt(s, map),
+            BlockItem::Decl(Decl::Var(v)) => {
+                if let Some(init) = &mut v.init {
+                    rename_idents_in_expr(init, map);
+                }
+            }
+            BlockItem::Decl(Decl::Func(f)) => {
+                if let Some(b) = &mut f.body {
+                    rename_idents_in_items(&mut b.items, map);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 构造一个空的局部变量声明 (所有属性字段为默认值)
+fn plain_var_decl(ty: crate::ast::Type, name: String, init: Option<Expr>, span: &Span) -> VarDecl {
+    VarDecl {
+        ty,
+        name: Ident {
+            name,
+            span: span.clone(),
+        },
+        init,
+        span: span.clone(),
+        is_extern: false,
+        is_static: false,
+        section: None,
+        alignment: None,
+        is_weak: false,
+        visibility: None,
+        is_unused: false,
+        register_name: None,
+        cleanup_fn: None,
+        is_thread_local: false,
+        no_sanitize: vec![],
+        alias_name: None,
+        copy_fn: None,
+        is_retain: false,
+        is_used_attr: false,
+        quals: QualifierFlags::NONE,
+        addr_space: AddrSpace::None,
+        tls_model: None,
+        asm_label: None,
+    }
+}
+
+/// 语句级 forced 内联展开.
+///
+/// 处理函数体含局部变量声明的 always_inline / flatten 调用点:
+/// 将 `ret = f(args)` / `f(args)` 展开为
+///   { 形参临时声明; callee 局部声明 (重命名); 中间表达式语句; 返回语句 }
+///
+/// 展开为块后, 形参以临时变量传值 (实参只求值一次, 与 GCC 语义一致).
+/// 返回 true 表示调用点已被替换.
+fn try_stmt_inline_call(
+    s: &mut Stmt,
+    funcs: &HashMap<String, FuncDecl>,
+    caller_flatten: bool,
+    depth: u32,
+) -> bool {
+    // 提取调用点 (return f(...) 或表达式语句 f(...))
+    let (callee_name, args, in_return) = match s {
+        Stmt::Expr { e, .. } => match e {
+            Expr::Call {
+                callee,
+                args,
+                ..
+            } => match callee.as_ref() {
+                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
+                _ => return false,
+            },
+            _ => return false,
+        },
+        Stmt::Return { val: Some(e), span: rspan } => match e {
+            Expr::Call {
+                callee,
+                args,
+                ..
+            } => match callee.as_ref() {
+                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
+                _ => return false,
+            },
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let f = match funcs.get(&callee_name) {
+        Some(f) => f,
+        None => return false,
+    };
+    if !(f.is_always_inline || caller_flatten) {
+        return false;
+    }
+    if f.is_variadic || args.len() != f.params.len() {
+        return false;
+    }
+    if depth >= INLINE_MAX_DEPTH {
+        trace_inline_decision(
+            &callee_name,
+            "REJECT",
+            "stmt-inline depth limit (possible mutual recursion)",
+        );
+        return false;
+    }
+    let body = match f.body.as_ref() {
+        Some(b) => b,
+        None => return false,
+    };
+    // 单 return 表达式体交给表达式级替换 (避免生成不必要的临时变量)
+    if matches!(
+        body.items.as_slice(),
+        [BlockItem::Stmt(Stmt::Return { .. })]
+    ) {
+        return false;
+    }
+
+    // 结构检查: 只支持 [VarDecl]* [ExprStmt]* [Return?] 形式的函数体.
+    // 控制流 (if/loop/goto/嵌套块/switch) 与特殊存储类别 (static/extern/
+    // tls/register/cleanup/VLA) 保留普通调用, 避免错误重写.
+    let mut decls: Vec<VarDecl> = Vec::new();
+    let mut mid: Vec<Stmt> = Vec::new();
+    let mut ret_val: Option<Option<Expr>> = None;
+    for (i, item) in body.items.iter().enumerate() {
+        match item {
+            BlockItem::Decl(Decl::Var(v)) => {
+                if v.is_static
+                    || v.is_extern
+                    || v.is_thread_local
+                    || v.cleanup_fn.is_some()
+                    || v.register_name.is_some()
+                    || v.alias_name.is_some()
+                    || v.asm_label.is_some()
+                    || type_has_vla_dim(&v.ty)
+                {
+                    return false;
+                }
+                decls.push(v.clone());
+            }
+            // 类型定义无运行时副作用, 保留在展开块中
+            BlockItem::Decl(Decl::Typedef { .. })
+            | BlockItem::Decl(Decl::StructDef(_))
+            | BlockItem::Decl(Decl::UnionDef(_))
+            | BlockItem::Decl(Decl::EnumDef(_)) => {}
+            BlockItem::Stmt(st @ Stmt::Expr { .. }) => mid.push(st.clone()),
+            BlockItem::Stmt(Stmt::Return { val, .. }) if i + 1 == body.items.len() => {
+                ret_val = Some(val.clone());
+            }
+            // 非 return 结尾/中间 return/其他语句形态: 不展开
+            _ => return false,
+        }
+    }
+    // void 返回且调用点是表达式语句: 保留普通调用即可 (无副作用丢失风险)
+    let ret_val = match ret_val {
+        Some(v) => v,
+        None => {
+            trace_inline_decision(&callee_name, "REJECT", "stmt-inline: no trailing return");
+            return false;
+        }
+    };
+    let rspan = match s {
+        Stmt::Return { span, .. } | Stmt::Expr { span, .. } => span.clone(),
+        _ => unreachable!(),
+    }
+    .clone();
+
+    // 名字重映射: 形参与局部变量 → 展开临时名 (前缀 + uid, 避免与
+    // 调用方同名变量及多次展开互相冲突)
+    let uid = STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed);
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut items: Vec<BlockItem> = Vec::new();
+    for (p, a) in f.params.iter().zip(args.iter()) {
+        let pname = match p.name.as_ref() {
+            Some(id) => &id.name,
+            None => return false,
+        };
+        let tmp = format!("__inl{}_${}", uid, pname);
+        map.insert(pname.clone(), tmp.clone());
+        items.push(BlockItem::Decl(Decl::Var(plain_var_decl(
+            p.ty.clone(),
+            tmp,
+            Some(a.clone()),
+            &p.name
+                .as_ref()
+                .map(|i| i.span.clone())
+                .unwrap_or_else(|| rspan.clone()),
+        ))));
+    }
+    for mut v in decls {
+        let new = format!("__inl{}_l{}", uid, v.name.name);
+        map.insert(v.name.name.clone(), new.clone());
+        v.name.name = new;
+        items.push(BlockItem::Decl(Decl::Var(v)));
+    }
+    // 展开块内的 callee 名字重命名 (含声明初始化器与中间语句)
+    rename_idents_in_items(&mut items, &map);
+    for st in mid {
+        items.push(BlockItem::Stmt(st));
+    }
+    // 返回语句 (ret_val 的表达式已随 items 之前的 rename 处理? 不:
+    // ret_val 尚未插入 items, 单独重命名)
+    match ret_val {
+        Some(e) => {
+            let mut e = e;
+            rename_idents_in_expr(&mut e, &map);
+            items.push(BlockItem::Stmt(if in_return {
+                Stmt::Return {
+                    val: Some(e),
+                    span: rspan.clone(),
+                }
+            } else {
+                Stmt::Expr { e, span: rspan.clone() }
+            }));
+        }
+        None => {
+            if in_return {
+                items.push(BlockItem::Stmt(Stmt::Return {
+                    val: None,
+                    span: rspan.clone(),
+                }));
+            }
+            // void 返回且调用点是表达式语句: 无需返回语句
+        }
+    }
+    trace_inline_decision(&callee_name, "INLINE", "always_inline (statement expansion)");
+    *s = Stmt::Block {
+        b: Block {
+            items,
+            span: rspan.clone(),
+        },
+        span: rspan,
+    };
+    // 展开块内仍可能有嵌套调用 (如 callee 调用另一个 always_inline)
+    if let Stmt::Block { b, .. } = s {
+        inline_calls_in_block(
+            b,
+            funcs,
+            0,
+            caller_flatten,
+            false,
+            false,
+            depth + 1,
+        );
+    }
+    true
 }
 
 fn expr_calls_name(expr: &Expr, name: &str) -> bool {
@@ -1593,20 +2002,25 @@ fn try_inline_call(
 
     // --- 强制内联: always_inline / flatten ---
     // 不受尺寸限制, 不受深度限制. 内核 __always_inline 依赖此行为.
+    // 表达式级替换仅支持单 return 语句的函数体; 含局部变量声明等
+    // 结构的 always_inline 函数体由 try_stmt_inline_call 做语句级展开,
+    // 此处拒绝内联 (保留普通调用) 以避免丢失声明副作用.
     let forced = f.is_always_inline || caller_flatten;
     if forced {
-        let ret = extract_inline_return(body)?;
-        if expr_calls_name(ret, name) {
-            trace_inline_decision(name, "REJECT", "forced but direct recursion");
-            return None; // 直接递归保护
+        if let [BlockItem::Stmt(Stmt::Return { val: Some(ret), .. })] = body.items.as_slice() {
+            if expr_calls_name(ret, name) {
+                trace_inline_decision(name, "REJECT", "forced but direct recursion");
+                return None; // 直接递归保护
+            }
+            trace_inline_decision(name, "INLINE", "always_inline (expression body)");
+            return Some(substitute_call(f, ret, args));
         }
-        let reason = if f.is_always_inline {
-            "always_inline"
-        } else {
-            "caller flatten"
-        };
-        trace_inline_decision(name, "INLINE", reason);
-        return Some(substitute_call(f, ret, args));
+        trace_inline_decision(
+            name,
+            "REJECT",
+            "forced non-expression body (stmt-level inline handled at call site)",
+        );
+        return None;
     }
 
     // --- O0: 非强制内联一律拒绝 ---

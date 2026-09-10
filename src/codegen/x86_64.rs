@@ -7332,6 +7332,11 @@ impl Codegen {
             false
         };
         if !ends_ret {
+            // C99 5.1.2.2.3: main 无 return 语句时隐式 return 0.
+            // 否则 epilogue 直接 ret, eax 为启动代码残留值.
+            if f.name.name == "main" && matches!(f.ret_ty, Type::Int) {
+                self.emit(&[0xB8, 0, 0, 0, 0]); // mov eax, 0
+            }
             self.emit_func_epilogue();
         }
         // 记录函数大小
