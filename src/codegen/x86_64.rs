@@ -13157,7 +13157,11 @@ impl Codegen {
     fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
         let sub_count = match elem_ty {
             Type::Array(_, ArraySize::Const(n)) => *n,
-            Type::Struct(fields, _, _) => fields.len(),
+            Type::Struct(_, fields, _) => {
+                // 注意: 首元素是结构体名 (String), 第二个才是字段列表;
+                // 匿名位域不可初始化, 不计入字段数
+                fields.iter().filter(|f| !(f.name.is_empty() && f.bit_width.is_some())).count()
+            }
             Type::Union(_, _, _) => 1,
             _ => return inits.to_vec(),
         };
@@ -13403,6 +13407,15 @@ impl Codegen {
                     // 提取字段信息: (offset, size, type, value, bit_width, bit_offset)
                     let (off, sz, field_ty_opt, value, bit_w, bit_o) = match item {
                         InitItem::Expr(e) => {
+                            // 跳过匿名位域 (C11 6.7.9p9: 初始化器不作用于
+                            // 无名位域, 后续初始值顺延到下一个具名字段;
+                            // 与全局初始化路径 gen_global_init_list 保持一致)
+                            while field_idx < fields.len()
+                                && fields[field_idx].name.is_empty()
+                                && fields[field_idx].bit_width.is_some()
+                            {
+                                field_idx += 1;
+                            }
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
                                 // Brace elision: 如果当前字段是聚合类型 (数组/结构体/联合体)
