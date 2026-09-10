@@ -22175,9 +22175,7 @@ impl Codegen {
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("memcmp");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22196,9 +22194,7 @@ impl Codegen {
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22211,9 +22207,7 @@ impl Codegen {
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22235,9 +22229,7 @@ impl Codegen {
                     }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22375,9 +22367,7 @@ impl Codegen {
                     self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                     self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22392,9 +22382,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop_rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22457,9 +22445,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("memchr");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -22472,9 +22458,7 @@ impl Codegen {
                     if i >= 3 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("memcmp");
-                self.emit(&[0x5c]); // pop rsp
                 // test eax, eax; setz al; movzx eax, al
                 self.emit(&[0x85, 0xc0]); // test eax, eax
                 self.emit(&[0x0f, 0x94, 0xc0]); // setz al
@@ -22498,9 +22482,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -23643,9 +23625,7 @@ impl Codegen {
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -23664,9 +23644,7 @@ impl Codegen {
                 for (i, a) in args.iter().enumerate() {
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24104,9 +24082,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("strcat");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24191,16 +24167,11 @@ impl Codegen {
             // 转发到 libc (同 __builtin_strcpy 等模式)
             "__builtin_printf" | "__builtin_fprintf" | "__builtin_sprintf" | "__builtin_snprintf" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
-                let ar = [7u8, 6, 2, 1, 8, 9];
-                for (i, a) in args.iter().enumerate() {
-                    if i >= 6 { break; }
-                    self.gen_expr(a, ar[i]);
-                }
-                // 栈对齐: sub $8, %rsp 然后 add $8, %rsp
-                self.emit(&[0x48, 0x83, 0xec, 0x08]); // sub $8, %rsp
-                self.emit(&[0xb0, 0x00]); // mov $0, %al (no vector args for variadic)
-                self.call_label(libc_name);
-                self.emit(&[0x48, 0x83, 0xc4, 0x08]); // add $8, %rsp
+                // 通过 emit_sysv_call 转发: 内含参数暂存 (staging) 与 16 字节
+                // 栈对齐, 避免后续参数求值破坏已就位的寄存器参数 (如
+                // snprintf(buf, 5, "%hhd", x+1) 中 x+1 的 push/pop 临时
+                // 会覆盖 rdx 的格式串); SysV 变参 al 约定也由它统一设置.
+                self.emit_sysv_call(Some(libc_name), None, args, None);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24213,9 +24184,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("bcmp");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24229,9 +24198,7 @@ impl Codegen {
                     if i >= 6 { break; }
                     self.gen_expr(a, ar[i]);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24239,9 +24206,7 @@ impl Codegen {
             }
             // __builtin_abort: 转发到 libc abort()
             "__builtin_abort" => {
-                self.emit(&[0x54]); // push rsp
                 self.call_label("abort");
-                self.emit(&[0x5c]); // pop rsp
                 true
             }
             // __builtin_exit: 转发到 libc exit()
@@ -24249,9 +24214,7 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 7); // rdi = status
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("exit");
-                self.emit(&[0x5c]); // pop rsp
                 true
             }
             // __builtin_copysign: 转发到 libc copysign()
@@ -24272,9 +24235,7 @@ impl Codegen {
                 // 恢复 magnitude 到 xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 // 调用 libc copysign
-                self.emit(&[0x54]); // push rsp
                 self.call_label("copysign");
-                self.emit(&[0x5c]); // pop rsp
                 // 结果在 xmm0, 如果需要则移动到 dst
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -24291,9 +24252,7 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 7); // rdi = size
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("malloc");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24304,9 +24263,7 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 7); // rdi = ptr
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("free");
-                self.emit(&[0x5c]); // pop rsp
                 true
             }
             // __builtin_fabs / fabsf / fabsl: 浮点绝对值
@@ -24344,9 +24301,7 @@ impl Codegen {
                 self.gen_expr(&args[1], 0); // xmm0 = sign (float)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
-                self.emit(&[0x54]); // push rsp
                 self.call_label("copysignf");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24365,9 +24320,7 @@ impl Codegen {
                 self.gen_expr(&args[1], 0); // xmm0 = sign (long double)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
-                self.emit(&[0x54]); // push rsp
                 self.call_label("copysignl");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24389,9 +24342,7 @@ impl Codegen {
                 self.gen_expr(&args[1], 7); // rdi = iptr
                 // 调用 libc modf/modff/modfl
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 // 返回值在 xmm0 (小数部分), 如需则移动到 dst
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -24408,9 +24359,7 @@ impl Codegen {
                     // 交换 rdi, rsi
                     self.emit(&[0x48, 0x87, 0xFE]); // xchg rsi, rdi
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("memmove");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 7 {
                     self.mov(dst, 0);
                 }
@@ -24422,9 +24371,7 @@ impl Codegen {
                     self.gen_expr(&args[0], 7); // rdi = ptr
                     self.gen_expr(&args[1], 6); // rsi = len
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("bzero");
-                self.emit(&[0x5c]); // pop rsp
                 true
             }
             // __builtin_stpncpy(dst, src, len): 转发到 libc
@@ -24434,9 +24381,7 @@ impl Codegen {
                     self.gen_expr(&args[1], 6); // rsi = src
                     self.gen_expr(&args[2], 2); // rdx = len
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("stpncpy");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24448,9 +24393,7 @@ impl Codegen {
                     self.gen_expr(&args[0], 7); // rdi = str
                     self.gen_expr(&args[1], 6); // rsi = stream
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("fputs");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -24551,9 +24494,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = x
-                self.emit(&[0x54]); // push rsp
                 self.call_label("issignaling");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
@@ -24801,9 +24742,7 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 0);
                 }
-                self.emit(&[0x54]); // push rsp
                 self.call_label("sqrtl");
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
@@ -24945,9 +24884,7 @@ impl Codegen {
                     self.gen_expr(&args[0], 0);
                 }
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
-                self.emit(&[0x54]); // push rsp
                 self.call_label(libc_name);
-                self.emit(&[0x5c]); // pop rsp
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
