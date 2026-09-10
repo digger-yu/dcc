@@ -10911,6 +10911,10 @@ impl Codegen {
                 } else {
                     None
                 };
+                // gen_builtin 已完整物化 complex 返回的 builtin (conj 系列):
+                // result_off 含实/虚部, xmm0=实部 — 下方统一物化须跳过,
+                // 否则 movq 打包 store 会覆盖虚部 (20020411-1)
+                let mut complex_builtin_done = false;
                 if let Some(fname) = direct_name {
                     let name_name = fname;
                     // __atomic_* / __sync_* 内置函数特殊处理 (生成 lock 前缀指令)
@@ -10920,6 +10924,12 @@ impl Codegen {
                         // 已成功生成原子指令
                     } else if self.gen_builtin(&name_name, args, dst) {
                         // 已成功处理 __builtin_* 函数
+                        if matches!(
+                            name_name.as_str(),
+                            "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl"
+                        ) {
+                            complex_builtin_done = true;
+                        }
                     } else if Self::is_fortify_builtin(&name_name) {
                         // Linux FORTIFY: __builtin___memcpy_chk 等 FORTIFY 宏族展开后
                         // 带有 __builtin_ 前缀, 但实际应链接到 libc 的 __*_chk 符号.
@@ -10995,7 +11005,11 @@ impl Codegen {
                 // 返回被按 xmm 读取得垃圾 (complex-6: ctest_int)。
                 if let Type::Complex(inner) = ty {
                     let result_off = -self.frame_size + 8;
-                    if let Some(off) = sret_off {
+                    if complex_builtin_done {
+                        // conj 系列已在 gen_builtin 内自物化 (实部
+                        // result_off, 虚部 result_off+isz, xmm0=实部),
+                        // 只补 rax=result_off 约定 (下方统一 lea)
+                    } else if let Some(off) = sret_off {
                         // Memory 类 (long double): rax 已指向 sret 缓冲,
                         // 拷贝到 result_off 统一内存布局
                         self.mov(6, 0); // rsi = rax (缓冲地址)
