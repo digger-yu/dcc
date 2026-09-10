@@ -12243,15 +12243,22 @@ impl Codegen {
                             }
                         }
                         // 有符号位域: 符号扩展
-                        let is_unsigned = matches!(
-                            f.ty,
+                        // 枚举位域符号性: GCC 对全部枚举值非负的 enum
+                        // 取 unsigned int 作兼容类型, 此时位域按无符号
+                        // 解释 (不得符号扩展); 含负值则为 int.
+                        let is_unsigned = match &f.ty {
                             Type::UInt
                                 | Type::ULong
                                 | Type::ULongLong
                                 | Type::UShort
                                 | Type::UChar
-                                | Type::Bool
-                        );
+                                | Type::Bool => true,
+                            Type::Enum(_, values, underlying) => match underlying {
+                                Some(u) => !Self::is_signed_int(&u.base),
+                                None => values.iter().all(|(_, v)| *v >= 0),
+                            },
+                            _ => false,
+                        };
                         if !is_unsigned && bw < 64 {
                             let sign_bit: u64 = 1u64 << (bw - 1);
                             let inv_mask: u64 = !((1u64 << bw) - 1);
