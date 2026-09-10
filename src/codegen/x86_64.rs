@@ -15840,6 +15840,54 @@ impl Codegen {
         let saved_op_slot = self.vector_op_slot;
         self.vector_op_slot = result_slot + 1;
         if is_float || is_double {
+            if matches!(
+                op,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+            ) {
+                // 向量浮点比较 (GCC 扩展): cmpss/cmpsd 逐元素比较,
+                // 结果全 1/0。谓词: eq=0, lt=1, le=2, neq=4, nlt=5,
+                // nle=6。SSE 无直接大于谓词, 用 nlt/nle 取反表达:
+                // Gt → nle = !(xmm0<=xmm1) = xmm0>xmm1; NaN 时
+                // lt/le 为假 (ordered 数值语义)
+                let cmp_pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
+                let pred: u8 = match op {
+                    BinOp::EqEq => 0,
+                    BinOp::Ne => 4,
+                    BinOp::Lt => 1,
+                    BinOp::Le => 2,
+                    BinOp::Gt => 6, // nle: !(xmm0<=xmm1) 即 xmm0>xmm1
+                    _ => 5,         // nlt: !(xmm0<xmm1) 即 xmm0>=xmm1
+                };
+                for i in 0..count {
+                    // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
+                    if l_is_vec {
+                        self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
+                    } else {
+                        self.gen_expr(l, 0);
+                        self.emit_scalar_float_convert(&l.ty(), &elem_ty);
+                    }
+                    self.emit_sub_rsp(8);
+                    let spfx: u8 = if is_float { 0xF3 } else { 0xF2 };
+                    self.emit(&[spfx, 0x0F, 0x11, 0x04, 0x24]);
+                    // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
+                    if r_is_vec {
+                        self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
+                    } else {
+                        self.gen_expr(r, 0);
+                        self.emit_scalar_float_convert(&r.ty(), &elem_ty);
+                    }
+                    self.emit(&[spfx, 0x0F, 0x10, 0xC8]); // movss xmm1, xmm0
+                    self.emit(&[spfx, 0x0F, 0x10, 0x04, 0x24]); // xmm0 = left
+                    self.emit_add_rsp(8);
+                    // xmm0=left, xmm1=right → cmp xmm0, xmm1, pred
+                    self.emit(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]);
+                    self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0
+                    let off = result_off + (i * elem_size) as i64;
+                    self.emit_store(0, off, elem_size);
+                }
+                self.vector_op_slot = saved_op_slot;
+                return;
+            }
             let (prefix, opcode) = match op {
                 BinOp::Add => (if is_float { 0xF3 } else { 0xF2 }, 0x58),
                 BinOp::Sub => (if is_float { 0xF3 } else { 0xF2 }, 0x5C),
@@ -15894,18 +15942,22 @@ impl Codegen {
         }
         for i in 0..count {
             // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
+            // l 值经栈暂存 (push/pop): r 求值 (嵌套 binop/调用) 会
+            // 破坏 rcx, 旧 mov rcx,rax 暂存在 r 为复杂表达式时踩 l 值
+            // (pr109040: 6 > ((V){...} & m) 外层比较读到内层中间值)
             if l_is_vec {
                 self.gen_scalar_vector_load(l, i, elem_size);
             } else {
                 self.gen_expr(l, 0);
             }
-            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            self.emit(&[0x50]); // push rax (暂存 l 值)
             // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
             if r_is_vec {
                 self.gen_scalar_vector_load(r, i, elem_size);
             } else {
                 self.gen_expr(r, 0);
             }
+            self.emit(&[0x59]); // pop rcx (恢复 l 值)
             match op {
                 BinOp::Add => {
                     self.emit(&[0x48, 0x01, 0xC1]);
@@ -16004,6 +16056,57 @@ impl Codegen {
                         self.emit(&[0x48, 0xD3, 0xE0]);
                     }
                     self.mov(1, 0); // mov rcx, rax
+                }
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
+                    // 向量比较 (GCC 扩展): 逐元素比较, 结果全 1 (真) /
+                    // 0 (假), 元素类型同操作数 (真值 -1 按元素宽度截断)
+                    let signed = matches!(
+                        elem_ty,
+                        Type::SChar
+                            | Type::Short
+                            | Type::Int
+                            | Type::Long
+                            | Type::LongLong
+                            | Type::Int128
+                    );
+                    // rcx=left, rax=right → cmp rcx, rax
+                    self.emit(&[0x48, 0x39, 0xC1]);
+                    let setcc: u8 = match op {
+                        BinOp::EqEq => 0x94,
+                        BinOp::Ne => 0x95,
+                        BinOp::Lt => {
+                            if signed {
+                                0x9C
+                            } else {
+                                0x92
+                            }
+                        }
+                        BinOp::Le => {
+                            if signed {
+                                0x9E
+                            } else {
+                                0x96
+                            }
+                        }
+                        BinOp::Gt => {
+                            if signed {
+                                0x9F
+                            } else {
+                                0x97
+                            }
+                        }
+                        _ => {
+                            if signed {
+                                0x9D
+                            } else {
+                                0x93
+                            }
+                        }
+                    };
+                    self.emit(&[0x0F, setcc, 0xC0]); // setcc al
+                    self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+                    self.emit(&[0x48, 0xF7, 0xD8]); // neg rax (0/1 → 0/all-ones)
+                    self.mov(1, 0); // rcx = 结果 (循环尾统一存 rcx)
                 }
                 _ => {
                     self.emit(&[0x48, 0x01, 0xC1]);
