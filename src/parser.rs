@@ -10999,7 +10999,7 @@ impl<'a> Parser<'a> {
         ty: &Type,
         local_vars: &HashMap<String, Type>,
         parent_locals: &HashMap<String, Type>,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<(String, i64)>,
     ) {
         match ty {
             Type::Ptr(q) => {
@@ -11021,7 +11021,7 @@ impl<'a> Parser<'a> {
         items: &[BlockItem],
         local_vars: &HashMap<String, Type>,
         parent_locals: &HashMap<String, Type>,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<(String, i64)>,
     ) {
         for item in items {
             match item {
@@ -11047,7 +11047,7 @@ impl<'a> Parser<'a> {
         s: &Stmt,
         local_vars: &HashMap<String, Type>,
         parent_locals: &HashMap<String, Type>,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<(String, i64)>,
     ) {
         match s {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
@@ -11115,7 +11115,7 @@ impl<'a> Parser<'a> {
         e: &Expr,
         local_vars: &HashMap<String, Type>,
         parent_locals: &HashMap<String, Type>,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<(String, i64)>,
     ) {
         match e {
             Expr::Ident { name, .. } => {

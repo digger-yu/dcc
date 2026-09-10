@@ -37,7 +37,7 @@ pub struct StorageInfo {
     /// 全局对象的已解析符号键 (用于重定位)。仅 Global 身份有值。
     pub symbol_key: Option<String>,
     /// 栈帧偏移。仅 Local/Vla/Upvar 有值。
-    pub stack_offset: Option<i32>,
+    pub stack_offset: Option<i64>,
     /// 是否为 TLS (线程局部存储) 对象。
     pub is_tls: bool,
 }
@@ -89,15 +89,15 @@ pub struct AddressDescriptor {
 #[derive(Debug, Clone)]
 pub enum AddressBase {
     /// 栈帧偏移: base = FP + offset (数组取地址, 如 LEA r13+offset)
-    StackFrame { offset: i32 },
+    StackFrame { offset: i64 },
     /// 栈槽加载: base = LOAD(FP + offset) (指针/VLA 需从栈上加载值)
-    StackSlotLoad { offset: i32 },
+    StackSlotLoad { offset: i64 },
     /// 全局符号地址: base = &symbol (数组取地址, 如 RIP-relative LEA)
     GlobalSymbolAddr { symbol_key: String },
     /// 全局符号加载: base = LOAD(&symbol) (指针需加载值)
     GlobalSymbolLoad { symbol_key: String },
     /// Upvar 加载: base = LOAD(FP + upvar_offset)
-    UpvarLoad { offset: i32 },
+    UpvarLoad { offset: i64 },
     /// 来自另一个表达式的地址 (递归, 如 (*p)[i], s.arr[i])
     ExprAddr { sub: Box<AddressDescriptor> },
 }

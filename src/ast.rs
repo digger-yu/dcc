@@ -159,7 +159,7 @@ pub struct FuncDecl {
     pub alias_name: Option<String>,
     // 嵌套函数静态链
     pub is_nested: bool,             // 是否是嵌套函数
-    pub upvars: Vec<(String, i32)>,  // 从外层捕获的变量: (name, offset_in_parent_frame)
+    pub upvars: Vec<(String, i64)>,  // 从外层捕获的变量: (name, offset_in_parent_frame)
     pub is_old_style: bool,          // K&R 风格定义
     pub format_kind: Option<String>, // __attribute__((format(printf, ...)))
     pub format_string_idx: Option<u32>,
