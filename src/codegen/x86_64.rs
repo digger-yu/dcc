@@ -3849,6 +3849,14 @@ impl Codegen {
             }
             Expr::Float { v, .. } => Some((*v, 0.0)),
             Expr::Int { v, .. } => Some((*v as f64, 0.0)),
+            Expr::Unary { op, e, .. } => {
+                if matches!(op, UnOp::Neg) {
+                    let (re, im) = Self::complex_init_parts(e)?;
+                    Some((-re, -im))
+                } else {
+                    None
+                }
+            }
             Expr::Binop { op, l, r, .. } => match op {
                 BinOp::Add | BinOp::Sub => {
                     let neg = if matches!(op, BinOp::Sub) { -1.0 } else { 1.0 };
@@ -3862,67 +3870,106 @@ impl Codegen {
         }
     }
 
+    /// 整数分量复数常量拆解 (i128 精确): ComplexLit(整数 inner) / Int /
+    /// Float (截断转换) / Neg / Imag(整数常量) / Add / Sub 递归组合。
+    /// f64 拆解对大整数会丢精度, 整数分量优先用此路径。
+    fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
+        match e {
+            Expr::ComplexLit { real, imag, ty, .. } => {
+                let inner = match ty {
+                    Type::Complex(i) | Type::Imaginary(i) => &i.base,
+                    other => other,
+                };
+                if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
+                    return None;
+                }
+                Some((*real as i128, *imag as i128))
+            }
+            Expr::Int { v, .. } => Some((*v, 0)),
+            Expr::Float { v, .. } => Some((*v as i128, 0)),
+            Expr::Imag { e: inner, .. } => Some((0, const_eval::eval(inner).ok()?)),
+            Expr::Unary { op, e, .. } => {
+                if matches!(op, UnOp::Neg) {
+                    let (re, im) = Self::complex_init_parts_i(e)?;
+                    Some((-re, -im))
+                } else {
+                    None
+                }
+            }
+            Expr::Binop { op, l, r, .. } => match op {
+                BinOp::Add | BinOp::Sub => {
+                    let neg: i128 = if matches!(op, BinOp::Sub) { -1 } else { 1 };
+                    let (lre, lim) = Self::complex_init_parts_i(l)?;
+                    let (rre, rim) = Self::complex_init_parts_i(r)?;
+                    Some((lre + neg * rre, lim + neg * rim))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 复数常量初始化字节: 拆解 (实部, 虚部) 并按目标分量类型编码。
+    /// 返回 None 表示无法静态拆解 (乘除/非常量), 调用方回退通用路径。
+    fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
+        match inner {
+            Type::Float | Type::Double | Type::LongDouble => {
+                let (re, im) = Self::complex_init_parts(init)?;
+                Some(Self::encode_complex_parts_f(re, im, inner))
+            }
+            _ => {
+                // 整数分量: 优先 i128 精确求值; 失败退回 f64 拆解
+                // (浮点源按 C 语义截断转换)
+                if let Some((re, im)) = Self::complex_init_parts_i(init) {
+                    return Some(Self::encode_complex_parts_i(re, im, inner));
+                }
+                let (re, im) = Self::complex_init_parts(init)?;
+                Some(Self::encode_complex_parts_i(re as i128, im as i128, inner))
+            }
+        }
+    }
+
+    /// 整数分量编码: 每分量 i128 LE 截断到分量宽度
+    fn encode_complex_parts_i(re: i128, im: i128, inner: &Type) -> Vec<u8> {
+        let isz = inner.size().max(1);
+        let mut b = re.to_le_bytes()[..isz.min(16)].to_vec();
+        b.extend_from_slice(&im.to_le_bytes()[..isz.min(16)]);
+        b
+    }
+
+    /// 浮点分量编码: Float→f32 位模式; Double→f64 位模式;
+    /// LongDouble→dcc 布局 16B 槽 (低 8B double 位模式 + 高 8B 零)
+    fn encode_complex_parts_f(re: f64, im: f64, inner: &Type) -> Vec<u8> {
+        let mut b = Vec::new();
+        for v in [re, im] {
+            match inner {
+                Type::Float => b.extend_from_slice(&(v as f32).to_bits().to_le_bytes()),
+                Type::LongDouble => {
+                    b.extend_from_slice(&v.to_bits().to_le_bytes());
+                    b.extend_from_slice(&[0u8; 8]);
+                }
+                _ => b.extend_from_slice(&v.to_bits().to_le_bytes()),
+            }
+        }
+        b
+    }
+
     /// 全局初始化字节: 浮点目标时, 整型/浮点常量统一转位模式
     /// (double x = 1; 与 double x = 1.5;), 避免 eval 截断为 int
     fn global_init_bytes(
         init: &Expr,
         sz: usize,
         is_float: bool,
-        is_complex: bool,
+        ty: &Type,
     ) -> Option<Vec<u8>> {
-        // 复数常量初始化 (_Complex float/double/long double):
-        // 实部 + 虚部各自编码, 按目标尺寸落盘。
-        // 支持的字面量形态: ComplexLit / Imag(expr) / Add / Sub 组合。
-        // 注意: 必须由类型驱动 (is_complex), 仅靠 sz=8 无法区分
-        // 普通 double 与 _Complex float, 否则 double x = 3.3; 会被
-        // 误写成 f32 位模式 + 4 字节零填充。
-        if is_complex {
-            if let Some((re, im)) = Self::complex_init_parts(init) {
-                return match sz {
-                    2 => {
-                        // _Complex char/signed char/unsigned char:
-                        // 2 x 1 byte integer components
-                        let mut b = vec![(re as i8) as u8];
-                        b.push((im as i8) as u8);
-                        Some(b)
-                    }
-                    4 => {
-                        // _Complex short/unsigned short:
-                        // 2 x 2 byte integer components (LE)
-                        let mut b = (re as i16).to_le_bytes().to_vec();
-                        b.extend_from_slice(&(im as i16).to_le_bytes());
-                        Some(b)
-                    }
-                    8 => {
-                        // _Complex float: 2 x f32 位模式
-                        // Also _Complex int/unsigned int: 2 x 4 byte
-                        // integer components. Distinguish by checking
-                        // if values look like float bit patterns or
-                        // small integers. For safety, always encode
-                        // as integer if the type is integer complex.
-                        let mut b = (re as f32).to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&(im as f32).to_bits().to_le_bytes());
-                        Some(b)
-                    }
-                    16 => {
-                        // _Complex double: 2 x f64 位模式
-                        let mut b = re.to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&im.to_bits().to_le_bytes());
-                        Some(b)
-                    }
-                    _ => {
-                        // _Complex long double: 2 x [double 位模式 + 8 字节零]
-                        // dcc 内部 LD 为 double (xmm0-double 约定), 每分量
-                        // 16B 槽 = 低 8B double 位模式 + 高 8B 零; 运行时
-                        // movsd 读取依赖此布局。旧 x87 80-bit 编码与读取
-                        // 错位 (实部被读成 x87 尾数位模式 -0.0)。
-                        let mut b = re.to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&[0u8; 8]);
-                        b.extend_from_slice(&im.to_bits().to_le_bytes());
-                        b.extend_from_slice(&[0u8; 8]);
-                        Some(b)
-                    }
-                };
+        // 复数常量初始化: 必须由目标类型驱动, 分量编码按 inner 类型
+        // 决定 — 仅靠 sz 无法区分 _Complex float (2 x f32 位模式) 与
+        // _Complex int (2 x 4 字节整数值), 旧实现把 _Complex int /
+        // _Complex long 写成 float 位模式导致初始化错误。
+        // 支持的字面量形态: ComplexLit / Imag(expr) / Neg / Add / Sub 组合。
+        if let Type::Complex(inner) = ty {
+            if let Some(bytes) = Self::complex_init_bytes(init, &inner.base) {
+                return Some(bytes);
             }
         }
         if is_float {
@@ -4111,12 +4158,7 @@ impl Codegen {
                 }
             }
             // 整数/浮点常量: 统一走 eval_full, 浮点目标转位模式
-            _ => Self::global_init_bytes(
-                init,
-                sz,
-                is_float,
-                matches!(v.ty, Type::Complex(_)),
-            ),
+            _ => Self::global_init_bytes(init, sz, is_float, &v.ty),
         }
     }
 
@@ -4187,7 +4229,7 @@ impl Codegen {
                         let is_float =
                             matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
                         if let Some(bytes) =
-                            Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_)))
+                            Self::global_init_bytes(init, sz, is_float, &v.ty)
                         {
                             self.tdata_section.extend_from_slice(&bytes);
                         }
@@ -4234,7 +4276,7 @@ impl Codegen {
                         let is_float =
                             matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
                         if let Some(bytes) =
-                            Self::global_init_bytes(init, sz, is_float, matches!(v.ty, Type::Complex(_)))
+                            Self::global_init_bytes(init, sz, is_float, &v.ty)
                         {
                             self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
                             has_init = true;
@@ -4381,7 +4423,7 @@ impl Codegen {
                                     init,
                                     sz,
                                     is_float,
-                                    matches!(v.ty, Type::Complex(_)),
+                                    &v.ty,
                                 ) {
                                     self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
                                     has_init = true;
@@ -4592,7 +4634,7 @@ impl Codegen {
                                 init,
                                 sz,
                                 is_float,
-                                matches!(v.ty, Type::Complex(_)),
+                                &v.ty,
                             ) {
                                 self.data_section.extend_from_slice(&bytes);
                                 true
@@ -13816,9 +13858,17 @@ impl Codegen {
                                 data.push(0);
                             }
                             let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                            // 复数元素收到复数常量表达式: 按目标分量编码
+                            // (eval_const_expr 通用路径对复数只取虚部)
+                            let complex_data = match &elem_ty.base {
+                                Type::Complex(ci) => Self::complex_init_bytes(value, &ci.base),
+                                _ => None,
+                            };
                             // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
                             // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                            let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
+                            let elem_data = if let Some(b) = complex_data {
+                                b
+                            } else if matches!(&elem_ty.base, Type::Ptr(_)) {
                                 if let Expr::String { data, .. } = value {
                                     self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                                 } else {
@@ -13876,9 +13926,17 @@ impl Codegen {
                             Type::Float | Type::Double | Type::LongDouble
                         );
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                        // 复数元素收到复数常量表达式: 按目标分量编码
+                        // (eval_const_expr 通用路径对复数只取虚部)
+                        let complex_data = match &elem_ty.base {
+                            Type::Complex(ci) => Self::complex_init_bytes(value, &ci.base),
+                            _ => None,
+                        };
                         // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
                         // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                        let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
+                        let elem_data = if let Some(b) = complex_data {
+                            b
+                        } else if matches!(&elem_ty.base, Type::Ptr(_)) {
                             if let Expr::String { data, .. } = value {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
@@ -14018,8 +14076,17 @@ impl Codegen {
                                 .unwrap_or_else(|| vec![0; sz])
                             } else {
                                 consumed = 1;
-                                // 字符串指针字段 ({ char *p } s = {"x"}): 生成指针槽
-                                if matches!(&field_ty, Some(Type::Ptr(_))) {
+                                // 复数字段收到复数常量表达式: 按目标分量编码
+                                // (eval_const_expr 通用路径对复数只取虚部)
+                                let complex_data = match &field_ty {
+                                    Some(Type::Complex(ci)) => {
+                                        Self::complex_init_bytes(value, &ci.base)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(b) = complex_data {
+                                    b
+                                } else if matches!(&field_ty, Some(Type::Ptr(_))) {
                                     if let Expr::String { data, .. } = value {
                                         self.emit_string_ptr_slot(field_rel, data, rodata_slots)
                                     } else {
@@ -14084,8 +14151,16 @@ impl Codegen {
                         Type::Float | Type::Double | Type::LongDouble
                     );
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
+                    // 复数元素收到复数常量表达式: 按目标分量编码
+                    // (eval_const_expr 通用路径对复数只取虚部)
+                    let complex_data = match &elem_ty.base {
+                        Type::Complex(ci) => Self::complex_init_bytes(value, &ci.base),
+                        _ => None,
+                    };
                     // 字符串指针元素 (向量元素为指针时): 生成指针槽
-                    let elem_data = if matches!(&elem_ty.base, Type::Ptr(_)) {
+                    let elem_data = if let Some(b) = complex_data {
+                        b
+                    } else if matches!(&elem_ty.base, Type::Ptr(_)) {
                         if let Expr::String { data, .. } = value {
                             self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                         } else {
@@ -14124,6 +14199,22 @@ impl Codegen {
                     }
                 }
                 
+                // 单个复数常量表达式 ({1+2i} / {2i}): 拆解实虚部按目标
+                // 分量编码。不能当实部标量求值 (eval_full 对复数只返回
+                // 虚部, 会把整个复数当实部写入)
+                if imag_expr.is_none() {
+                    if let Some(e0) = real_expr {
+                        if matches!(e0.ty(), Type::Complex(_) | Type::Imaginary(_)) {
+                            if let Some(bytes) = Self::complex_init_bytes(e0, &inner.base) {
+                                if bytes.len() <= total_size {
+                                    data[..bytes.len()].copy_from_slice(&bytes);
+                                    return Some(data);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 处理实部
                 if let Some(real_e) = real_expr {
                     let real_data = self.eval_const_expr(real_e, rel, inner_size, is_float_inner, rodata_slots);
@@ -14233,30 +14324,36 @@ impl Codegen {
         }
         // 复数字面量: 必须特殊处理, 因为 eval_full 只返回虚部
         if let Expr::ComplexLit { real, imag, ty, .. } = e {
-            let inner_size = width / 2;
-            let is_float_inner = matches!(
-                ty,
-                Type::Complex(ref inner)
-                    if matches!(inner.base, Type::Float)
-            );
-            let mut data = Vec::with_capacity(width);
-            // 实部
-            if is_float_inner {
-                let bytes = (*real as f32).to_bits().to_le_bytes();
-                data.extend_from_slice(&bytes[..inner_size.min(4)]);
-            } else {
-                let bytes = real.to_bits().to_le_bytes();
-                data.extend_from_slice(&bytes[..inner_size.min(8)]);
+            // 分量编码由字面量自身类型的 inner 决定: Float→f32 位模式,
+            // Double/LongDouble→f64 位模式 (LD 补零到 16B 槽),
+            // 整数→整数值 LE 字节。不能用 width/2 猜测分量宽度:
+            // width 可能是单分量尺寸 (Complex arm) 或全复数尺寸, 且
+            // 整数 inner 目标必须是整数值而非 f64/f32 位模式。
+            let inner = match ty {
+                Type::Complex(i) | Type::Imaginary(i) => &i.base,
+                other => other,
+            };
+            let comp_sz = inner.size().max(1);
+            let mut data: Vec<u8> = Vec::new();
+            for v in [*real, *imag] {
+                match inner {
+                    Type::Float => data.extend_from_slice(&(v as f32).to_bits().to_le_bytes()),
+                    Type::LongDouble => {
+                        // dcc LD: 16B 槽 = 低 8B double 位模式 + 高 8B 零
+                        data.extend_from_slice(&v.to_bits().to_le_bytes());
+                        data.extend_from_slice(&[0u8; 8]);
+                    }
+                    Type::Double => data.extend_from_slice(&v.to_bits().to_le_bytes()),
+                    _ => {
+                        let b = (v as i128).to_le_bytes();
+                        data.extend_from_slice(&b[..comp_sz.min(16)]);
+                    }
+                }
             }
-            // 虚部
-            if is_float_inner {
-                let bytes = (*imag as f32).to_bits().to_le_bytes();
-                data.extend_from_slice(&bytes[..inner_size.min(4)]);
-            } else {
-                let bytes = imag.to_bits().to_le_bytes();
-                data.extend_from_slice(&bytes[..inner_size.min(8)]);
+            // 分量上下文 (width < 两分量) 只取前部; 不足补零到 width
+            if width > 0 && data.len() > width {
+                data.truncate(width);
             }
-            // 填充到 width
             while data.len() < width {
                 data.push(0);
             }
@@ -21726,7 +21823,7 @@ impl Codegen {
                         info.init.as_ref().unwrap(),
                         sz,
                         is_float,
-                        matches!(info.ty, Type::Complex(_)),
+                        &info.ty,
                     )
                     .is_some()
                 }
@@ -21794,7 +21891,7 @@ impl Codegen {
                             init,
                             sz,
                             is_float,
-                            matches!(info.ty, Type::Complex(_)),
+                            &info.ty,
                         ) {
                             self.data_section.extend_from_slice(&bytes);
                             true
