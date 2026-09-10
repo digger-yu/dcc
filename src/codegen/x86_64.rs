@@ -9625,6 +9625,18 @@ impl Codegen {
                         return;
                     }
                 }
+                // _Complex lvalue 赋值 (非 Ident): 统一走物化+分量拷贝。
+                // 下方 Index/Deref/Member 的标量 store 会把 rax 恒 8 字节
+                // 直接写入: 标量 RHS 污染虚部 (a[i] = -1 得 (-1,-1) 而非
+                // (-1,0), pr56837), complex RHS 则把 result_off 物化地址
+                // 当数据写入。gen_lvalue_addr 失败时落回旧分支。
+                if matches!(assign_l_ty, Type::Complex(_)) && !matches!(lv, Expr::Ident { .. }) {
+                    if self.gen_lvalue_addr(lv, 0) {
+                        self.push(0); // 保存目标地址 (gen_expr 可能占用 rcx)
+                        self.gen_complex_store_rcx(r, &assign_l_ty);
+                        return;
+                    }
+                }
                 if let Expr::Ident { name, ty: l_ty, .. } = lv {
                     let sz = l_ty.size();
                     // VM struct/union (含 VLA 字段的局部类型) 即使编译期
@@ -18547,6 +18559,65 @@ impl Codegen {
         self.emit(&[isz as u8]);
     }
 
+    /// _Complex 赋值统一存储路径: 目标地址在 rcx, RHS 在此求值。
+    /// 供非 Ident lvalue (Index/Deref/Member) 的 _Complex 赋值使用,
+    /// 与 Ident 路径 (gen_aggregate_assign) 语义一致:
+    /// - 浮点内型: gen_expr 后实部在 xmm0, store_complex_at_rcx
+    ///   逐分量写入 (标量 RHS 虚部自动清零)。
+    /// - 整数内型: 统一物化到 result_off 同宽布局再拷贝到 [rcx]:
+    ///   标量 RHS 实部按 inner 宽度存入、虚部清零 (旧路径把 rax
+    ///   恒 8 字节写入: a[i] = -1 得 (-1,-1) 而非 (-1,0), pr56837;
+    ///   complex RHS 则把 result_off 物化地址当数据写入)。
+    /// 调用前目标地址已 push 到栈顶; RHS 求值后 pop 到 rcx,
+    /// 避免 gen_expr 占用 rcx 作暂存时覆盖目标地址。
+    fn gen_complex_store_rcx(&mut self, r: &Expr, l_ty: &Type) {
+        if let Type::Complex(ref inner) = *l_ty {
+            if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
+                self.gen_expr(r, 0);
+                self.pop(1); // rcx = 目标地址
+                self.store_complex_at_rcx(r, &inner.base);
+                return;
+            }
+            let isz = inner.base.size() as i64;
+            let result_off = -self.frame_size + 8;
+            self.gen_expr(r, 0);
+            self.pop(1); // rcx = 目标地址
+            let src_isz = match r.ty() {
+                Type::Complex(ref c) | Type::Imaginary(ref c) => c.size() as i64,
+                _ => 0,
+            };
+            if src_isz == 0 {
+                // 标量 RHS: rax = 值 (浮点源先 cvttsd2si 截断)
+                if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si
+                }
+                self.emit_store(0, result_off, isz as usize);
+                self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax (虚部 = 0)
+                self.emit_store(0, result_off + isz, isz as usize);
+            } else if src_isz == isz {
+                // 同宽 complex RHS: 源已物化在 result_off (C99 6.3.1.7)
+            } else {
+                // 跨宽: 实/虚部分量分别转换 (倒序防自覆盖),
+                // 与 gen_aggregate_assign 跨宽分支同策略
+                for part in [1usize, 0] {
+                    self.emit_lea_r13(0, result_off);
+                    self.emit_load_mem_typed_disp(
+                        src_isz as usize,
+                        &inner.base,
+                        (part as i64) * src_isz,
+                    );
+                    self.store_stack(0, result_off + (part as i64) * isz);
+                }
+            }
+            // result_off → [rcx] 拷贝 2*isz 字节
+            self.mov(7, 1); // rdi = rcx (目标)
+            self.emit_lea_r13(6, result_off); // rsi = 源
+            self.mov_imm(1, (isz * 2) as i128); // rcx = 字节数
+            self.emit(&[0xFC]); // cld
+            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+        }
+    }
+
     // Complex 变量标量初始化: 存实部、虚部清零
     fn gen_complex_init(&mut self, name: &str, inner: &Type, init: &Expr) {
         let off = self.var_offset(name);
@@ -20020,8 +20091,16 @@ impl Codegen {
             }
         }
         // 1. 获取源地址到 rsi
+        // _Complex 目标 + 标量 RHS (非 complex/imaginary): 不能把标量
+        // 变量地址当聚合源整体拷贝 (c = i 会从 &i 拷 16 字节, 实部
+        // 混入 i 的栈上高位垃圾), 强制走下方 got_src==false 的物化
+        // 分量转换分支
+        let complex_scalar_rhs = matches!(dst_ty, Type::Complex(_))
+            && !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_));
         let got_src = if call_sret_handled {
             true
+        } else if complex_scalar_rhs {
+            false
         } else {
             match r {
                 Expr::Ident { name: src_name, .. } => {
@@ -20188,10 +20267,19 @@ impl Codegen {
                         self.gen_expr(r, 0);
                         if !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_)) {
                             // 标量 RHS: 实部 = rax 值, 虚部清零 (物化为同宽
-                            // 布局后走下方同宽整体拷贝)
-                            self.store_stack(0, result_off);
+                            // 布局后走下方同宽整体拷贝)。必须按 inner 宽度
+                            // 存储: store_stack 恒写 8 字节, _Complex int 的
+                            // 标量 -1 会把 0xFFFFFFFF 同时灌进虚部 (c = -1
+                            // 得 (-1,-1) 而非 (-1,0), pr56837)
+                            let scalar_isz = inner.base.size();
+                            if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                                // 浮点标量源: gen_expr 后值在 xmm0,
+                                // 先 cvttsd2si 截断为整数 (rax 未定义)
+                                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
+                            }
+                            self.emit_store(0, result_off, scalar_isz);
                             self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
-                            self.store_stack(0, result_off + 8);
+                            self.emit_store(0, result_off + scalar_isz as i64, scalar_isz);
                         }
                         let dst_isz = inner.size();
                         let src_isz = match r.ty() {
