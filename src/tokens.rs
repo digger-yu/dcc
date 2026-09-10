@@ -1008,10 +1008,34 @@ impl<'a> Lexer<'a> {
                 }
             }
             _ => {
+                // 非 ASCII 字节 (含 PUA 占位码点): 消费完整的 UTF-8 多字节
+                // 序列, 产生 Invalid token。游离在字面量之外的非 ASCII
+                // 字符即源码杂散字符, 类似 GCC "stray '\xxx' in program"。
+                let extra = if b >= 0xF0 {
+                    3
+                } else if b >= 0xE0 {
+                    2
+                } else if b >= 0xC0 {
+                    1
+                } else {
+                    0
+                };
+                for _ in 0..extra {
+                    if self.peek().map_or(false, |c| c & 0xC0 == 0x80) {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
                 return Tok {
                     kind: TokKind::Invalid,
-                    span: self.span_here(1),
-                    text: std::str::from_utf8(&[b]).unwrap().to_string(),
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text: String::from_utf8_lossy(&self.src[start..self.pos]).into_owned(),
                 };
             }
         };

@@ -1,2 +1,3 @@
-error[E0208]: source is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 7
-  --> <file>:1:1
+error[E0003]: expected type, got Invalid
+  --> <file>:2:1
+  hint: use a known type like int, void, or a typedef/struct/enum

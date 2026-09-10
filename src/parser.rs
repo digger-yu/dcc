@@ -11424,6 +11424,12 @@ fn parse_str(raw: &str) -> Vec<u8> {
             if bytes[i] < 0x80 {
                 d.push(bytes[i]);
                 i += 1;
+            } else if bytes[i] == 0xEE
+                && crate::preproc::pua_mapped_byte(bytes, i).is_some()
+            {
+                // 非法源字节的 PUA 占位 (U+E000+b): 还原原始字节
+                d.push(crate::preproc::pua_mapped_byte(bytes, i).unwrap());
+                i += 3;
             } else {
                 // UTF-8 多字节字符: 逐字节复制
                 d.push(bytes[i]);
@@ -11443,6 +11449,17 @@ fn widen_to_wchar(dst: &mut Vec<u8>, narrow: &[u8], wchar_sz: usize) {
     for &b in narrow {
         dst.push(b);
         dst.extend(std::iter::repeat_n(0u8, wchar_sz - 1));
+    }
+}
+
+/// 宽字符语义下 char 码点的映射: PUA 占位码点 (U+E080..=U+E0FF)
+/// 还原为原始字节值, 其余码点保持不变。
+fn wide_cp(c: char) -> u32 {
+    let cp = c as u32;
+    if (0xE080..=0xE0FF).contains(&cp) {
+        cp - 0xE000
+    } else {
+        cp
     }
 }
 
@@ -11541,11 +11558,11 @@ fn parse_wide_str(raw: &str, short_wchar: bool) -> Vec<u8> {
                     }
                     val
                 }
-                Some(c) => c as u32,
+                Some(c) => wide_cp(c),
                 None => '\\' as u32,
             }
         } else {
-            c as u32
+            wide_cp(c)
         };
         if short_wchar {
             // UTF-16LE: 2 bytes per code unit
@@ -11629,11 +11646,11 @@ fn parse_char16_str(raw: &str) -> Vec<u8> {
                     }
                     val
                 }
-                Some(c) => c as u32,
+                Some(c) => wide_cp(c),
                 None => '\\' as u32,
             }
         } else {
-            c as u32
+            wide_cp(c)
         };
         // Encode as UTF-16LE (char16_t = 2 bytes)
         if cp <= 0xFFFF {
@@ -11726,11 +11743,11 @@ fn parse_char32_str(raw: &str) -> Vec<u8> {
                     }
                     val
                 }
-                Some(c) => c as u32,
+                Some(c) => wide_cp(c),
                 None => '\\' as u32,
             }
         } else {
-            c as u32
+            wide_cp(c)
         };
         // Encode as UTF-32LE (char32_t = 4 bytes)
         d.extend_from_slice(&cp.to_le_bytes());
@@ -11822,6 +11839,14 @@ fn parse_chr(raw: &str) -> i128 {
                 }
                 _ => bytes[i] as i128,
             }
+        } else if bytes[i] == 0xEE
+            && crate::preproc::pua_mapped_byte(bytes, i).is_some()
+        {
+            // 非法源字节的 PUA 占位 (U+E000+b): 还原原始字节
+            let b = crate::preproc::pua_mapped_byte(bytes, i).unwrap();
+            chars_bytes.push(b as i128);
+            i += 3;
+            continue;
         } else {
             bytes[i] as i128
         };

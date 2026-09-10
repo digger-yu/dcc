@@ -503,6 +503,60 @@ impl PchBundle {
     }
 }
 
+/// 无损地将源码字节解码为 UTF-8 字符串。
+///
+/// C 源文件的字符串/字符字面量允许包含任意执行字符集字节
+/// (例如 "\377" 等价的原始 0xFF 字节), 不一定是合法 UTF-8。
+/// dcc 内部管线以 UTF-8 字符串承载源码, 因此对无法按 UTF-8
+/// 解码的字节序列, 逐字节映射到 Unicode 私有区码点 U+E000+b
+/// (b 为原始字节 0x80..=0xFF); 词法/解析层在解码字符串与
+/// 字符常量时再将该码点还原为原始字节。合法的 UTF-8 多字节
+/// 序列保持原样透传。
+pub fn decode_source(src: &[u8]) -> String {
+    match std::str::from_utf8(src) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut out = String::with_capacity(src.len() + 16);
+            let mut rest = src;
+            loop {
+                match std::str::from_utf8(rest) {
+                    Ok(text) => {
+                        out.push_str(text);
+                        break;
+                    }
+                    Err(e) => {
+                        let valid = e.valid_up_to();
+                        // 分段内必为合法 UTF-8 (Utf8Error 保证 valid_up_to 前有效)
+                        out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
+                        let bad_len = e.error_len().unwrap_or(rest.len() - valid);
+                        for &b in &rest[valid..valid + bad_len] {
+                            out.push(char::from_u32(0xE000 + b as u32).unwrap());
+                        }
+                        rest = &rest[valid + bad_len..];
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
+/// 检测字节序列是否为 PUA 映射码点 U+E080..=U+E0FF 的 UTF-8 编码
+/// (EE 82/83 80..BF), 即某个非法源字节的占位符。
+/// 返回还原后的原始字节。
+#[inline]
+pub fn pua_mapped_byte(bytes: &[u8], i: usize) -> Option<u8> {
+    if i + 2 < bytes.len()
+        && bytes[i] == 0xEE
+        && (bytes[i + 1] == 0x82 || bytes[i + 1] == 0x83)
+        && bytes[i + 2] & 0xC0 == 0x80
+    {
+        Some(0x80 | ((bytes[i + 1] & 1) << 6) | (bytes[i + 2] & 0x3F))
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn preprocess(
     src: &[u8],
@@ -525,20 +579,9 @@ pub fn preprocess(
     warn_undef: bool,
     opt_level: u8,
 ) -> PreprocessOutput {
-    let text = match std::str::from_utf8(src) {
-        Ok(text) => text,
-        Err(e) => {
-            return PreprocessOutput {
-                text: String::new(),
-                diags: vec![Diagnostic::err(
-                    "E0208",
-                    format!("source is not valid UTF-8: {}", e),
-                    Span::point(file, 1, 1),
-                )],
-                ..Default::default()
-            };
-        }
-    };
+    // 源码允许字符串/字符字面量包含任意字节 (C 执行字符集语义),
+    // 用无损 PUA 映射解码而非拒绝非 UTF-8 源文件。
+    let text = decode_source(src);
     let base = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
@@ -1732,7 +1775,7 @@ pub fn preprocess(
     // 匹配即可 (创建时的源处理可能增加宏, 不影响加载验证).
     let create_time_macro_hash = pp.hash_macro_state();
 
-    pp.process_text(text, file);
+    pp.process_text(&text, file);
     let text_output = pp.out.clone();
     let pch_deps: Vec<String> = pp.deps.clone();
     let pch_pack_history: Vec<(u32, Option<usize>)> = pp.pack_history.clone();
@@ -1875,8 +1918,9 @@ impl Preprocessor {
             }
             found.unwrap_or(path)
         };
-        match std::fs::read_to_string(&resolved) {
-            Ok(content) => {
+        match std::fs::read(&resolved) {
+            Ok(bytes) => {
+                let content = decode_source(&bytes);
                 // 强制包含文件也计入 include 图: -MD 依赖 + 缓存依赖闭包
                 self.deps.push(resolved.display().to_string());
                 self.dep_hashes
@@ -3341,8 +3385,9 @@ impl Preprocessor {
             return;
         }
         self.deps.push(full_path.to_string_lossy().into_owned());
-        match fs::read_to_string(&full_path) {
-            Ok(text) => {
+        match fs::read(&full_path) {
+            Ok(bytes) => {
+                let text = decode_source(&bytes);
                 let content_hash = Self::hash_content(&text);
                 // 记录自身依赖 (含后续守卫/缓存命中路径): 父文件的依赖闭包
                 // 必须包含子文件本身, 否则子文件变更时父条目无法失效
@@ -6503,6 +6548,14 @@ impl Preprocessor {
             } else {
                 0
             }
+        } else if *pos < bytes.len()
+            && bytes[*pos] == 0xEE
+            && pua_mapped_byte(bytes, *pos).is_some()
+        {
+            // 非法源字节的 PUA 占位 (U+E000+b): 还原原始字节
+            let c = pua_mapped_byte(bytes, *pos).unwrap() as i64;
+            *pos += 3;
+            c
         } else if *pos < bytes.len() {
             let c = bytes[*pos] as i64;
             *pos += 1;

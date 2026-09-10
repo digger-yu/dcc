@@ -776,6 +776,10 @@ fn e0209_force_include_unreadable_snapshot() {
 
 #[test]
 fn e0208_invalid_utf8_snapshot() {
+    // 源文件不再因非 UTF-8 字节被整体拒绝 (旧 E0208 语义): C 字符串/
+    // 字符字面量允许包含任意执行字符集字节。字面量之外的杂散非法
+    // 字节成为 Invalid token 并报语法错误 (类似 GCC 的
+    // "stray '\377' in program")。
     let dir = fixtures_dir();
     let invalid = dir.join(format!("e0208_utf8_{}.c", std::process::id()));
     fs::write(&invalid, b"int x;\n\xFF\n").expect("write invalid utf8 source");
@@ -786,8 +790,7 @@ fn e0208_invalid_utf8_snapshot() {
     let _ = fs::remove_file(&invalid);
 
     assert!(status != 0);
-    assert!(plain.contains("error[E0208]:"), "stderr:\n{plain}");
-    assert!(plain.contains("UTF-8"), "stderr:\n{plain}");
+    assert!(plain.contains("error[E"), "stderr:\n{plain}");
     assert_snapshot("e0208_utf8", &normalized);
 }
 
