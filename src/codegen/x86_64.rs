@@ -21848,9 +21848,9 @@ impl Codegen {
         let gsz = arg_ty.size();
         let gsigned = Self::va_arg_ty_signed(arg_ty);
         match gsz {
-            1 => self.emit_va_arg_int_load(1, gsigned, &[0x04, 0x01]),
-            2 => self.emit_va_arg_int_load(2, gsigned, &[0x04, 0x01]),
-            4 => self.emit_va_arg_int_load(4, gsigned, &[0x04, 0x01]),
+            1 => self.emit_va_arg_int_load(1, gsigned, 0x40, &[0x04, 0x01]),
+            2 => self.emit_va_arg_int_load(2, gsigned, 0x40, &[0x04, 0x01]),
+            4 => self.emit_va_arg_int_load(4, gsigned, 0x40, &[0x04, 0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x04, 0x01]),
         }
         self.emit(&[0x41, 0x83, 0x02, 0x08]); // add dword [r10], 8
@@ -21858,9 +21858,9 @@ impl Codegen {
         self.label(&overflow);
         self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
         match gsz {
-            1 => self.emit_va_arg_int_load(1, gsigned, &[0x01]),
-            2 => self.emit_va_arg_int_load(2, gsigned, &[0x01]),
-            4 => self.emit_va_arg_int_load(4, gsigned, &[0x01]),
+            1 => self.emit_va_arg_int_load(1, gsigned, 0x40, &[0x01]),
+            2 => self.emit_va_arg_int_load(2, gsigned, 0x40, &[0x01]),
+            4 => self.emit_va_arg_int_load(4, gsigned, 0x40, &[0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x01]),
         }
         self.push(0);
@@ -21914,18 +21914,18 @@ impl Codegen {
     /// SysV ABI: long double 按 MEMORY 类传递, 16 字节对齐。
     fn gen_va_arg_long_double_global(&mut self, ap_name: &str) {
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
-        // rcx = overflow_arg_area ([r10+8])
-        self.emit(&[0x4C, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
+        // rcx = overflow_arg_area ([r10+8]): REX.W+B (0x49) 使 rm=010→r10
+        self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
         // r9 = (rcx + 15) & ~15 (16 字节对齐)
-        self.emit(&[0x49, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
+        self.emit(&[0x48, 0x8D, 0x49, 0x0F]); // lea rcx, [rcx+15]
         self.emit(&[0x48, 0x83, 0xE1, 0xF0]); // and rcx, ~15
         // movsd (%rcx), %xmm0: 读取 8 字节 double (dcc 内部 long double = double)
         // F2 0F 10 /r: ModRM = 00_000_001 = 0x01 (reg=xmm0, rm=rcx)
         self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd (%rcx), %xmm0
         // rcx += 16 (推进到下一个 16 字节对齐位置)
         self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-        // 写回 [r10+8]
-        self.emit(&[0x4C, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
+        // 写回 [r10+8]: REX.W+B 使 rm=010→r10, reg=001→rcx 源
+        self.emit(&[0x49, 0x89, 0x4A, 0x08]); // mov [r10+8], rcx
         // 结果在 xmm0 (dcc 内部 long double = double 约定)
     }
 
@@ -22036,18 +22036,19 @@ impl Codegen {
     }
 
     /// va_arg 整数加载: 按类型符号性选择 movsx/movzx/movsxd/mov。
-    /// dcc 寄存器约定要求有符号值在 64 位寄存器中符号扩展保存;
-    /// 旧实现对 1/2/4 字节一律零扩展, va_arg(ap, int) 赋给 long
-    /// long 时得到错误的高位 (pr117432)。
-    fn emit_va_arg_int_load(&mut self, sz: usize, signed: bool, modrm: &[u8]) {
+    /// rex 是含扩展位的 REX 前缀 (0x40|flags); 4 字节有符号与
+    /// 8 字节加载自动置 REX.W。dcc 寄存器约定要求有符号值在
+    /// 64 位寄存器中符号扩展保存; 旧实现对 1/2/4 字节一律零扩展,
+    /// va_arg(ap, int) 赋给 long long 时得到错误的高位 (pr117432)。
+    fn emit_va_arg_int_load(&mut self, sz: usize, signed: bool, rex: u8, modrm: &[u8]) {
         match (sz, signed) {
-            (1, true) => self.emit(&[0x0F, 0xBE]),    // movsx
-            (1, false) => self.emit(&[0x0F, 0xB6]),   // movzx
-            (2, true) => self.emit(&[0x0F, 0xBF]),    // movsx
-            (2, false) => self.emit(&[0x0F, 0xB7]),   // movzx
-            (4, true) => self.emit(&[0x48, 0x63]),    // movsxd
-            (4, false) => self.emit(&[0x8B]),         // mov eax (零扩展)
-            _ => self.emit(&[0x48, 0x8B]),            // mov rax
+            (1, true) => self.emit(&[rex, 0x0F, 0xBE]),    // movsx
+            (1, false) => self.emit(&[rex, 0x0F, 0xB6]),   // movzx
+            (2, true) => self.emit(&[rex, 0x0F, 0xBF]),    // movsx
+            (2, false) => self.emit(&[rex, 0x0F, 0xB7]),   // movzx
+            (4, true) => self.emit(&[rex | 0x48, 0x63]),   // movsxd (REX.W)
+            (4, false) => self.emit(&[rex, 0x8B]),         // mov eax (零扩展)
+            _ => self.emit(&[rex | 0x48, 0x8B]),           // mov rax (REX.W)
         }
         self.emit(modrm);
     }
@@ -22098,9 +22099,9 @@ impl Codegen {
         let sz = arg_ty.size();
         let signed = Self::va_arg_ty_signed(arg_ty);
         match sz {
-            1 => self.emit_va_arg_int_load(1, signed, &[0x04, 0x01]),
-            2 => self.emit_va_arg_int_load(2, signed, &[0x04, 0x01]),
-            4 => self.emit_va_arg_int_load(4, signed, &[0x04, 0x01]),
+            1 => self.emit_va_arg_int_load(1, signed, 0x40, &[0x04, 0x01]),
+            2 => self.emit_va_arg_int_load(2, signed, 0x40, &[0x04, 0x01]),
+            4 => self.emit_va_arg_int_load(4, signed, 0x40, &[0x04, 0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x04, 0x01]),
         }
         self.emit(&[0x41, 0x83, 0x85]);
@@ -22111,9 +22112,9 @@ impl Codegen {
         self.emit(&[0x49, 0x8B, 0x8D]);
         self.emit(&((ap_off + 8) as i32).to_le_bytes());
         match sz {
-            1 => self.emit_va_arg_int_load(1, signed, &[0x01]),
-            2 => self.emit_va_arg_int_load(2, signed, &[0x01]),
-            4 => self.emit_va_arg_int_load(4, signed, &[0x01]),
+            1 => self.emit_va_arg_int_load(1, signed, 0x40, &[0x01]),
+            2 => self.emit_va_arg_int_load(2, signed, 0x40, &[0x01]),
+            4 => self.emit_va_arg_int_load(4, signed, 0x40, &[0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x01]),
         }
         self.push(0);
@@ -22479,8 +22480,11 @@ impl Codegen {
             self.emit(&[0xF2, 0x0F, 0x10, 0x01]); // movsd (%rcx), %xmm0
             // rcx += 16
             self.emit(&[0x48, 0x83, 0xC1, 0x10]); // add rcx, 16
-            // 写回 [r11+8]
-            self.emit(&[0x4C, 0x89, 0x4B, 0x08]); // mov [r11+8], rcx
+            // 写回推进后的 overflow_arg_area 到 [r11+8] (r11 = va_list 地址)。
+            // 旧编码 0x4C,0x89,0x4B 实际是 mov [rbx+8],r9 (REX.R=1 无 REX.B,
+            // reg→r9, rm→rbx), 写入错误基址导致 stdarg-1 segfault; 正确的
+            // mov [r11+8],rcx 需 REX.B (reg=rcx 源, rm=r11 目标)。
+            self.emit(&[0x49, 0x89, 0x4B, 0x08]);
             return;
         }
         let step = (arg_ty.size().div_ceil(8) * 8) as i32;
@@ -22494,11 +22498,12 @@ impl Codegen {
         // REX 0x4C: R=1 使 reg=r11, B=0 使 rm=rcx (rm=001+REX.B 会变 r9)
         self.emit(&[0x4C, 0x8B, 0x59, 0x10]); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         let sz = arg_ty.size();
+        let signed = Self::va_arg_ty_signed(arg_ty);
         match sz {
-            1 => self.emit(&[0x41, 0x0F, 0xB6, 0x04, 0x03]), // movzbl (r11,rax), eax
-            2 => self.emit(&[0x41, 0x0F, 0xB7, 0x04, 0x03]), // movzwl (r11,rax), eax
-            4 => self.emit(&[0x41, 0x8B, 0x04, 0x03]), // mov (r11,rax), eax
-            _ => self.emit(&[0x49, 0x8B, 0x04, 0x03]), // mov (r11,rax), rax
+            1 => self.emit_va_arg_int_load(1, signed, 0x41, &[0x04, 0x03]),
+            2 => self.emit_va_arg_int_load(2, signed, 0x41, &[0x04, 0x03]),
+            4 => self.emit_va_arg_int_load(4, signed, 0x41, &[0x04, 0x03]),
+            _ => self.emit_va_arg_int_load(8, signed, 0x41, &[0x04, 0x03]),
         }
         // gp_offset += step
         self.emit(&[0x83, 0x01]); // add (rcx), imm8
@@ -22508,10 +22513,10 @@ impl Codegen {
         // overflow_arg_area: 从 (rcx+8) 加载
         self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         match sz {
-            1 => self.emit(&[0x41, 0x0F, 0xB6, 0x03]), // movzbl (r11), eax
-            2 => self.emit(&[0x41, 0x0F, 0xB7, 0x03]), // movzwl (r11), eax
-            4 => self.emit(&[0x41, 0x8B, 0x03]), // mov (r11), eax
-            _ => self.emit(&[0x49, 0x8B, 0x03]), // mov (r11), rax
+            1 => self.emit_va_arg_int_load(1, signed, 0x41, &[0x03]),
+            2 => self.emit_va_arg_int_load(2, signed, 0x41, &[0x03]),
+            4 => self.emit_va_arg_int_load(4, signed, 0x41, &[0x03]),
+            _ => self.emit_va_arg_int_load(8, signed, 0x41, &[0x03]),
         }
         self.push(0);
         self.emit(&[0x4C, 0x8B, 0x59, 0x08]); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
