@@ -189,6 +189,12 @@ pub struct Codegen {
     nested_funcs: HashMap<String, Vec<(String, i64)>>, // 嵌套函数名 → upvars (name, parent_offset)
     // 嵌套函数重命名: (父函数名, 原名) → 唯一名 (避免同名嵌套函数符号冲突)
     nested_func_renames: HashMap<String, HashMap<String, String>>,
+    // 唯一名 → 定义父函数名 (静态链上溯解析兄弟/祖先嵌套函数引用)
+    nested_func_parent: HashMap<String, String>,
+    // 唯一名 → 定义父帧中 trampoline 槽偏移 (后代引用经静态链定位)
+    nested_tramp_offsets: HashMap<String, i64>,
+    // 唯一名 → 该帧静态链槽偏移 (多层静态链上溯需要逐帧偏移)
+    nested_chain_offsets: HashMap<String, i64>,
     nested_func_rename_counter: u32,
     current_func_name: String, // 当前正在编译的函数名
     current_func_ret_ty: Type, // 当前函数的返回类型
@@ -1348,6 +1354,9 @@ struct ParallelEmitCtx {
     old_style_funcs: std::collections::HashSet<String>,
     nested_funcs: HashMap<String, Vec<(String, i64)>>,
     nested_func_renames: HashMap<String, HashMap<String, String>>,
+    nested_func_parent: HashMap<String, String>,
+    nested_tramp_offsets: HashMap<String, i64>,
+    nested_chain_offsets: HashMap<String, i64>,
     nested_func_rename_counter: u32,
     func_param_types: HashMap<String, Vec<Type>>,
     defined_funcs: HashSet<String>,
@@ -1457,6 +1466,9 @@ impl Codegen {
             sret_depth: 0,
             nested_funcs: HashMap::new(),
             nested_func_renames: HashMap::new(),
+            nested_func_parent: HashMap::new(),
+            nested_tramp_offsets: HashMap::new(),
+            nested_chain_offsets: HashMap::new(),
             nested_func_rename_counter: 0,
             current_func_name: String::new(),
             current_func_ret_ty: Type::Int,
@@ -6073,6 +6085,9 @@ impl Codegen {
             old_style_funcs: self.old_style_funcs.clone(),
             nested_funcs: self.nested_funcs.clone(),
             nested_func_renames: self.nested_func_renames.clone(),
+            nested_func_parent: self.nested_func_parent.clone(),
+            nested_tramp_offsets: self.nested_tramp_offsets.clone(),
+            nested_chain_offsets: self.nested_chain_offsets.clone(),
             nested_func_rename_counter: self.nested_func_rename_counter,
             func_param_types: self.func_param_types.clone(),
             defined_funcs: self.defined_funcs.clone(),
@@ -6111,6 +6126,9 @@ impl Codegen {
         cg.old_style_funcs = ctx.old_style_funcs;
         cg.nested_funcs = ctx.nested_funcs;
         cg.nested_func_renames = ctx.nested_func_renames;
+        cg.nested_func_parent = ctx.nested_func_parent;
+        cg.nested_tramp_offsets = ctx.nested_tramp_offsets;
+        cg.nested_chain_offsets = ctx.nested_chain_offsets;
         cg.nested_func_rename_counter = ctx.nested_func_rename_counter;
         cg.func_param_types = ctx.func_param_types;
         cg.defined_funcs = ctx.defined_funcs;
@@ -6997,12 +7015,17 @@ impl Codegen {
                     }
                 }
             }
-            // 嵌套函数: 保存静态链. 调用方约定以 rdx 传入父帧指针
-            // (gen_call: mov rdx, r13), 序言必须保存同一寄存器.
+            // 嵌套函数: 保存静态链. 调用方约定以 r10 传入父帧指针
+            // (gen_call: mov r10, r13; trampoline: mov r10, r13), 序言必须
+            // 保存同一寄存器. 注意不能用 rdx: rdx 是第 3 个整型参数寄存器,
+            // 嵌套函数有 ≥3 个整型参数时静态链会覆盖第 3 个参数.
             if f.is_nested {
                 self.static_chain_offset = self.variadic_reg_save_offset + va_slots;
-                // mov [r13 + static_chain_offset], rdx
-                self.store_stack(2, self.static_chain_offset);
+                // mov [r13 + static_chain_offset], r10
+                self.store_stack(10, self.static_chain_offset);
+                // 登记本帧链槽偏移: 后代嵌套函数多层上溯静态链时逐帧使用
+                self.nested_chain_offsets
+                    .insert(self.current_func_name.clone(), self.static_chain_offset);
             }
             // ftrace: -pg inserts call mcount after prologue
             if matches!(self.target.ftrace_mode, crate::cli::FtraceMode::MCount) {
@@ -7111,11 +7134,6 @@ impl Codegen {
         }
         // 预收集嵌套函数并预注册重命名 (在编译函数体之前，这样调用点能使用正确的名称)
         let mut nested_decls: Vec<FuncDecl> = Vec::new();
-        // 在重命名之前扫描函数体, 找出实际引用的嵌套函数 (原始名)
-        let mut referenced_orig_names = Vec::new();
-        if let Some(body) = &f.body {
-            Self::collect_referenced_nested_funcs(&body.items, &self.nested_funcs, &mut referenced_orig_names);
-        }
         if let Some(body) = &f.body {
             Self::collect_direct_nested_funcs(&body.items, &mut nested_decls);
             let parent_name = f.name.name.clone();
@@ -7128,6 +7146,10 @@ impl Codegen {
                     .entry(parent_name.clone())
                     .or_default()
                     .insert(orig_name.clone(), unique_name.clone());
+                // 记录定义父函数: 后代嵌套函数引用兄弟/祖先嵌套函数时,
+                // 沿此映射上溯静态链找到定义父帧
+                self.nested_func_parent
+                    .insert(unique_name.clone(), parent_name.clone());
                 // 更新 nested_funcs 映射
                 if let Some(upvars) = self.nested_funcs.remove(&orig_name) {
                     self.nested_funcs.insert(unique_name, upvars);
@@ -7135,17 +7157,19 @@ impl Codegen {
             }
         }
         // 嵌套函数 trampoline 预分配 + 运行时写入 (在重命名之后):
-        // 将扫描得到的原始名映射到唯一名, 为其预分配 trampoline 槽,
-        // 然后发射 trampoline 字节写入代码 + mprotect.
-        // 这样 gen_expr 中引用嵌套函数时 trampoline 已在栈上就绪.
+        // 为全部直接嵌套函数预分配 trampoline 槽 (不仅是被取地址者):
+        // 兄弟/后代嵌套函数的引用经静态链访问定义父帧中的 trampoline,
+        // 编译后代时父帧序言已发射完毕, 无法回补槽位, 必须在此统一定位。
         let parent_name = f.name.name.clone();
-        for orig_name in &referenced_orig_names {
+        for nf_decl in &nested_decls {
+            let orig_name = nf_decl.name.name.clone();
             let unique_name = self.nested_func_renames
                 .get(&parent_name)
-                .and_then(|m| m.get(orig_name))
+                .and_then(|m| m.get(&orig_name))
                 .cloned()
                 .unwrap_or_else(|| orig_name.clone());
-            self.gen_trampoline(&unique_name);
+            let tramp_off = self.gen_trampoline(&unique_name);
+            self.nested_tramp_offsets.insert(unique_name, tramp_off);
         }
         if !self.trampoline_slots.is_empty() {
             self.emit_mprotect_for_stack();
@@ -8014,16 +8038,20 @@ impl Codegen {
         // variadic callee. Setting it for all calls is benign.
         self.emit(&[0xB0, fp as u8]);
         if let Some(name) = direct {
-            // 检查嵌套函数重命名 (使用作用域化的映射: 当前函数 → 原名 → 唯一名)
-            let effective_name = self.nested_func_renames
-                .get(&self.current_func_name)
-                .and_then(|m| m.get(name))
-                .cloned()
-                .unwrap_or_else(|| name.to_string());
-            if self.nested_funcs.contains_key(&effective_name) {
-                // mov rdx, r13: 静态链寄存器为 rdx (REX.WR + 89 /r,
-                // r13 在 reg 字段, rdx 在 r/m 字段)
-                self.emit(&[0x4C, 0x89, 0xEA]);
+            // 解析嵌套函数引用 (沿作用域链上溯: 支持从后代嵌套函数
+            // 内直接调用兄弟/祖先定义的嵌套函数)
+            let nested_ref = self.resolve_nested_func_ref(name);
+            let effective_name = match &nested_ref {
+                Some((unique, _, _)) => unique.clone(),
+                None => self.nested_func_renames
+                    .get(&self.current_func_name)
+                    .and_then(|m| m.get(name))
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string()),
+            };
+            if let Some((_, hops, offs)) = &nested_ref {
+                // 静态链 = 定义父帧指针 (SysV ABI: r10, 非参数寄存器)
+                self.load_static_chain_for_call(*hops, offs);
             }
             // Resolve GNU asm label (e.g., __asm__("real_name")) for call sites
             let resolved_name = self.resolve_asm_label(&effective_name).to_string();
@@ -8978,21 +9006,18 @@ impl Codegen {
                 }
                 if matches!(ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
                     // 函数名作为值: 退化为函数地址
-                    // 检查嵌套函数重命名
-                    let effective_name = self.nested_func_renames
-                        .get(&self.current_func_name)
-                        .and_then(|m| m.get(&name.name))
-                        .cloned()
-                        .unwrap_or_else(|| name.name.clone());
-                    // 检查是否为嵌套函数: 需要生成 trampoline
-                    // 用 effective_name (重命名后) 检查, 因为 nested_funcs
-                    // 的键是重命名后的名称 (如 "nested_main.0")
-                    if self.nested_funcs.contains_key(&effective_name) {
-                        let tramp_off = self.gen_trampoline(&effective_name);
-                        // lea dst, [r13 + tramp_off] - trampoline 地址
-                        // 帧基址为 r13 (非 rbp), 用 emit_lea_r13
-                        self.emit_lea_r13(dst as u8, tramp_off);
+                    // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义的嵌套函数)
+                    if let Some((unique, hops, offs)) =
+                        self.resolve_nested_func_ref(&name.name)
+                    {
+                        // trampoline 地址 (hops>0 时经静态链访问定义父帧)
+                        self.load_trampoline_addr(dst as u8, &unique, hops, &offs);
                     } else {
+                        let effective_name = self.nested_func_renames
+                            .get(&self.current_func_name)
+                            .and_then(|m| m.get(&name.name))
+                            .cloned()
+                            .unwrap_or_else(|| name.name.clone());
                         self.emit_func_addr(dst, &effective_name);
                     }
                 } else if matches!(ty, Type::Vector(_, _)) {
@@ -11832,19 +11857,17 @@ impl Codegen {
                 {
                     if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
                         // &func: 函数地址
-                        // 检查嵌套函数重命名
-                        let effective_name = self.nested_func_renames
-                            .get(&self.current_func_name)
-                            .and_then(|m| m.get(&name.name))
-                            .cloned()
-                            .unwrap_or_else(|| name.name.clone());
-                        // 检查是否为嵌套函数: 需要生成 trampoline
-                        // 用 effective_name (重命名后) 检查
-                        if self.nested_funcs.contains_key(&effective_name) {
-                            let tramp_off = self.gen_trampoline(&effective_name);
-                            // lea dst, [r13 + tramp_off]
-                            self.emit_lea_r13(dst as u8, tramp_off);
+                        // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义)
+                        if let Some((unique, hops, offs)) =
+                            self.resolve_nested_func_ref(&name.name)
+                        {
+                            self.load_trampoline_addr(dst as u8, &unique, hops, &offs);
                         } else {
+                            let effective_name = self.nested_func_renames
+                                .get(&self.current_func_name)
+                                .and_then(|m| m.get(&name.name))
+                                .cloned()
+                                .unwrap_or_else(|| name.name.clone());
                             self.emit_func_addr(dst, &effective_name);
                         }
                     } else if self.is_global_not_local(&name.name)
@@ -19437,6 +19460,87 @@ impl Codegen {
         }
     }
 
+    /// 解析嵌套函数引用: 从当前函数作用域链沿 nested_func_parent
+    /// 向上查找重命名映射, 返回 (唯一名, 静态链跳数, 逐帧链槽偏移).
+    /// 跳数 = 当前帧与定义父帧的距离: 0 = 当前函数体定义的嵌套函数
+    /// (trampoline 在当前帧), 1 = 兄弟 (定义于父帧), 以此类推。
+    fn resolve_nested_func_ref(&self, orig: &str) -> Option<(String, i32, Vec<i64>)> {
+        let mut cur = self.current_func_name.clone();
+        let mut hops: i32 = 0;
+        let mut offs: Vec<i64> = vec![self.static_chain_offset];
+        loop {
+            if let Some(m) = self.nested_func_renames.get(&cur) {
+                if let Some(u) = m.get(orig) {
+                    return Some((u.clone(), hops, offs));
+                }
+            }
+            let parent = self.nested_func_parent.get(&cur)?.clone();
+            if let Some(&o) = self.nested_chain_offsets.get(&parent) {
+                offs.push(o);
+            }
+            cur = parent;
+            hops += 1;
+        }
+    }
+
+    /// 沿静态链上溯 hops 层, 把定义父帧指针载入 dst。
+    /// offs[i] 为第 i+1 次取链的链槽偏移: offs[0] = 当前帧链槽
+    /// (static_chain_offset), offs[i>0] = 各祖先帧链槽。
+    fn load_frame_via_chain(&mut self, dst: u8, hops: i32, offs: &[i64]) {
+        for i in 0..hops.max(0) as usize {
+            let off = offs.get(i).copied().unwrap_or(self.static_chain_offset);
+            if i == 0 {
+                self.load_stack(dst, off);
+            } else if Self::fits_disp32(off) {
+                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x05 } else { 0 };
+                self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | (dst & 7)]);
+                self.emit(&(off as i32).to_le_bytes());
+            } else {
+                // 罕见: 链槽偏移超出 disp32, 用 r10 作缩放槽
+                self.mov_imm(10, off as i128);
+                // mov dst, [dst + r10]: REX.X (r10 索引) + REX.R/B (dst 扩展)
+                let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };
+                self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | 0x04, 0x10 | (dst & 7)]);
+            }
+        }
+    }
+
+    /// 加载嵌套函数 trampoline 地址到 dst。
+    /// hops=0: trampoline 在当前帧, gen_trampoline 复用/分配槽位;
+    /// hops>0: 沿静态链上溯到定义父帧, lea dst, [frame + tramp_off]
+    /// (槽位在定义父帧序言阶段预分配, 见 nested_tramp_offsets)。
+    fn load_trampoline_addr(&mut self, dst: u8, unique: &str, hops: i32, offs: &[i64]) {
+        if hops <= 0 {
+            let off = self.gen_trampoline(unique);
+            self.emit_lea_r13(dst, off);
+            return;
+        }
+        self.load_frame_via_chain(11, hops, offs);
+        let off = self.nested_tramp_offsets.get(unique).copied().unwrap_or(0);
+        if Self::fits_disp32(off) {
+            let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x04 } else { 0 };
+            self.emit(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]);
+            self.emit(&(off as i32).to_le_bytes());
+        } else {
+            self.mov_imm(10, off as i128);
+            // lea dst, [r11 + r10]: REX.X (r10) + REX.B (r11) + REX.R (dst 扩展)
+            let rex = 0x48u8 | 0x03 | if dst >= 8 { 0x04 } else { 0 };
+            self.emit(&[rex, 0x8D]);
+            self.emit(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]);
+        }
+    }
+
+    /// 加载嵌套函数调用的静态链到 r10: 链值 = 定义父帧指针。
+    /// hops=0: mov r10, r13; hops>0: 沿链上溯。
+    fn load_static_chain_for_call(&mut self, hops: i32, offs: &[i64]) {
+        if hops <= 0 {
+            // mov r10, r13 (REX.WRB + 89 /r)
+            self.emit(&[0x4F, 0x89, 0xEA]);
+            return;
+        }
+        self.load_frame_via_chain(10, hops, offs);
+    }
+
     /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
     /// 支持 Ident / Member / Index / Deref / Cast 递归组合, 例如
     /// `s.i[k]`, `p->arr[i].f`, `(*q).buf[n]`. 返回 false 表示无法处理.
@@ -25266,51 +25370,57 @@ impl Codegen {
             // lea rdi, [r13 + tramp_off]
             self.emit_lea_r13(7, tramp_off);
             // 写入 trampoline 字节到 [rdi + offset]
-            // Trampoline 布局 (32 字节, 与直接调用静态链 ABI 一致):
-            // [0..3)   mov rdx, r13        = 4c 89 ea (静态链 = 父帧指针)
-            // [3..5)   movabs r11, imm64   = 49 bb
-            // [5..13)  <func_addr 8 bytes>
-            // [13..16) jmp r11             = 41 ff e3
-            // [16..32) nop padding
-            // rdx = static chain (与 gen_call/序言保存一致), r11 = 目标地址
-            // 写入前 3 字节: mov rdx, r13 = 4c 89 ea
-            self.emit(&[0x48, 0xC6, 0x07, 0x4C]); // mov BYTE [rdi+0], 0x4C
-            self.emit(&[0x48, 0xC6, 0x47, 0x01, 0x89]); // mov BYTE [rdi+1], 0x89
-            self.emit(&[0x48, 0xC6, 0x47, 0x02, 0xEA]); // mov BYTE [rdi+2], 0xEA
-            // 写入字节 3-4: movabs r11 = 49 bb
-            self.emit(&[0x48, 0xC6, 0x47, 0x03, 0x49]); // mov BYTE [rdi+3], 0x49
-            self.emit(&[0x48, 0xC6, 0x47, 0x04, 0xBB]); // mov BYTE [rdi+4], 0xBB
-            // 写入字节 5-12: 函数地址 (rax 中的 8 字节)
-            self.emit(&[0x48, 0x89, 0x47, 0x05]); // mov [rdi+5], rax
-            // 写入字节 13-15: jmp r11 = 41 ff e3
-            self.emit(&[0x48, 0xC6, 0x47, 0x0D, 0x41]); // mov BYTE [rdi+13], 0x41
-            self.emit(&[0x48, 0xC6, 0x47, 0x0E, 0xFF]); // mov BYTE [rdi+14], 0xFF
-            self.emit(&[0x48, 0xC6, 0x47, 0x0F, 0xE3]); // mov BYTE [rdi+15], 0xE3
-            // 写入字节 16-31: nop 填充 (16 字节)
-            self.emit(&[0x48, 0xC7, 0x47, 0x10]); // mov DWORD [rdi+16]
-            self.emit(&0x90909090u32.to_le_bytes());
-            self.emit(&[0x48, 0xC7, 0x47, 0x14]); // mov DWORD [rdi+20]
-            self.emit(&0x90909090u32.to_le_bytes());
-            self.emit(&[0x48, 0xC7, 0x47, 0x18]); // mov DWORD [rdi+24]
-            self.emit(&0x90909090u32.to_le_bytes());
-            self.emit(&[0x48, 0xC7, 0x47, 0x1C]); // mov DWORD [rdi+28]
-            self.emit(&0x90909090u32.to_le_bytes());
+            // Trampoline 布局 (32 字节, 与 SysV ABI 嵌套函数约定一致):
+            // [0..2)   movabs r10, imm64 = 49 ba (静态链 = 定义父帧指针)
+            // [2..10)  <定义父帧 r13 值, 写入时从当前 r13 捕获>
+            // [10..12) movabs r11, imm64 = 49 bb
+            // [12..20) <func_addr 8 bytes>
+            // [20..23) jmp r11           = 41 ff e3
+            // [23..32) nop padding (不执行)
+            // 关键: 静态链必须在写入时捕获定义父帧的 r13 值烘焙为立即数,
+            // 而非调用时读取调用者 r13 — 否则外部函数调用函数指针时
+            // 静态链会指向调用者帧, 嵌套函数访问父帧 upvar 时读到垃圾。
+            // 写入字节 0-1: movabs r10 = 49 ba
+            self.emit(&[0x48, 0xC6, 0x07, 0x49]); // mov BYTE [rdi+0], 0x49
+            self.emit(&[0x48, 0xC6, 0x47, 0x01, 0xBA]); // mov BYTE [rdi+1], 0xBA
+            // 写入字节 2-9: 定义父帧指针 (当前 r13 值)
+            // mov [rdi+2], r13 = 4C 89 6F 02 (REX.WB, r13 为源寄存器)
+            self.emit(&[0x4C, 0x89, 0x6F, 0x02]);
+            // 写入字节 10-11: movabs r11 = 49 bb
+            self.emit(&[0x48, 0xC6, 0x47, 0x0A, 0x49]); // mov BYTE [rdi+10], 0x49
+            self.emit(&[0x48, 0xC6, 0x47, 0x0B, 0xBB]); // mov BYTE [rdi+11], 0xBB
+            // 写入字节 12-19: 函数地址 (rax 中的 8 字节)
+            self.emit(&[0x48, 0x89, 0x47, 0x0C]); // mov [rdi+12], rax
+            // 写入字节 20-22: jmp r11 = 41 ff e3
+            self.emit(&[0x48, 0xC6, 0x47, 0x14, 0x41]); // mov BYTE [rdi+20], 0x41
+            self.emit(&[0x48, 0xC6, 0x47, 0x15, 0xFF]); // mov BYTE [rdi+21], 0xFF
+            self.emit(&[0x48, 0xC6, 0x47, 0x16, 0xE3]); // mov BYTE [rdi+22], 0xE3
+            // 写入字节 23-31: nop 填充 (不执行)
+            self.emit(&[0x48, 0xC6, 0x47, 0x17, 0x90]); // mov BYTE [rdi+23], 0x90
+            self.emit(&[0x48, 0xC7, 0x47, 0x18]); // mov QWORD [rdi+24]
+            self.emit(&0x9090909090909090u64.to_le_bytes());
         }
     }
 
     /// 发射 mprotect 系统调用，使栈帧页可执行。
     /// 用于嵌套函数 trampoline 支持。
     fn emit_mprotect_for_stack(&mut self) {
-        // mprotect(r13 & ~0xFFF, 4096, PROT_READ|PROT_WRITE|PROT_EXEC)
-        // rdi = r13 & ~0xFFF (页对齐地址)
+        // mprotect((r13 & ~0xFFF) - 0x1000, 0x2000, PROT_READ|PROT_WRITE|PROT_EXEC)
+        // trampoline 槽位于帧底部下方 (r13-256..r13): 当 r13 页内偏移
+        // < 0x160 时 trampoline 跨入下一页, 仅保护 r13 所在单页会遗漏
+        // 导致跳转到不可执行页 SIGSEGV。覆盖 r13 上方页 + 下方页。
+        // rdi = r13 & ~0xFFF
         // 注意: mov rdi, r13 需要 REX.W + REX.B (r13 >= 8)
         // 4C 89 EF = mov rdi, r13 (REX.WR, src=r13 in r/m, dst=rdi in reg)
         self.emit(&[0x4C, 0x89, 0xEF]); // mov rdi, r13
         self.emit(&[0x48, 0x81, 0xE7]); // and rdi, ~0xFFF
         self.emit(&0xFFFFF000u32.to_le_bytes());
-        // rsi = 4096 (大小)
-        self.emit(&[0x48, 0xC7, 0xC6]); // mov rsi, 4096
-        self.emit(&4096i32.to_le_bytes());
+        // rdi -= 0x1000 (下方页)
+        self.emit(&[0x48, 0x81, 0xEF]); // sub rdi, 0x1000
+        self.emit(&0x1000u32.to_le_bytes());
+        // rsi = 0x2000 (两页)
+        self.emit(&[0x48, 0xC7, 0xC6]); // mov rsi, 0x2000
+        self.emit(&0x2000i32.to_le_bytes());
         // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
         self.emit(&[0x48, 0xC7, 0xC2]); // mov rdx, 7
         self.emit(&7i32.to_le_bytes());

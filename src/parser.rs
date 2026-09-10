@@ -3837,13 +3837,18 @@ impl<'a> Parser<'a> {
                 vec![]
             };
             if !is_nested_func {
-                self.globals.insert(name_for_decl.name.clone(), func_ty);
+                self.globals.insert(name_for_decl.name.clone(), func_ty.clone());
             }
-            // 非嵌套函数: 不克隆 globals, 让 lookup_ident_type 回退到 globals
+            // 非嵌套函数: 清空 locals, 让 lookup_ident_type 回退到 globals。
+            // 嵌套函数: 保留父作用域链 — 函数体解析期间必须能看到父函数
+            // 局部变量与先前定义的兄弟嵌套函数 (GCC 语义), 否则类型解析
+            // 会误报 implicit declaration 并误判引用类型。
             if !is_nested_func {
                 self.locals.clear();
             } else {
-                self.locals.load_globals(&self.globals);
+                // 形参入独立作用域, 与父帧隔离; 自身名入作用域支持递归调用
+                self.locals.push_scope();
+                self.locals.insert(name_for_decl.name.clone(), func_ty.clone());
             }
             self.in_function = true;
             let saved_func = self.current_function.replace(name_for_decl.name.clone());
@@ -3872,20 +3877,28 @@ impl<'a> Parser<'a> {
             // 恢复外层函数的 in_function 状态
             if is_nested_func {
                 // 将嵌套函数体内的 locals 展平为单 HashMap (供 collect_upvars 使用)
+                // 仅展平本函数自己的作用域 (参数 + 函数体), 跳过解析期间
+                // 可见的父作用域链 — 否则父变量会被误认为局部变量,
+                // upvar 捕获判定 (不在 child_flat 但在 parent_flat) 失效
                 let child_flat = {
                     let mut m = HashMap::new();
-                    for scope in &self.locals.scopes {
+                    for scope in self.locals.scopes.iter().skip(parent_locals.len()) {
                         for (k, v) in scope { m.insert(k.clone(), v.clone()); }
                     }
                     m
                 };
                 self.locals.restore(parent_locals.clone());
                 self.in_function = true;
-                // 将 parent_locals 展平
+                // 将 parent_locals 展平; 剔除函数类型条目 (兄弟嵌套函数
+                // 是可见的函数声明而非可捕获的变量, 不应作为 upvar 捕获)
                 let parent_flat = {
                     let mut m = HashMap::new();
                     for scope in &parent_locals {
-                        for (k, v) in scope { m.insert(k.clone(), v.clone()); }
+                        for (k, v) in scope {
+                            if !matches!(v, Type::Func(_, _)) {
+                                m.insert(k.clone(), v.clone());
+                            }
+                        }
                     }
                     m
                 };
