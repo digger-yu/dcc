@@ -10749,41 +10749,18 @@ impl Codegen {
                     }
                     return;
                 }
-                // Vector 取负/按位非: 逐元素操作
+                // Vector 取负/按位非: 逐元素操作, 结果写入约定槽 0
+                // (dcc vector rvalue 约定: 结果在 vector_temp_base(0),
+                // 消费端 gen_aggregate_assign 等按此读取)
                 if matches!(e.ty(), Type::Vector(_, _)) {
                     if let Type::Vector(ref elem_ty, count) = e.ty() {
-                        let elem_size = elem_ty.size();
-                        let vec_size = elem_size * count;
-                        // 分配结果临时区: 使用 vector_temp_base
-                        let result_off = self.vector_temp_base(0, vec_size);
-                        // 获取源向量地址: gen_lvalue_addr 将地址放入 rax
-                        let _is_lvalue = self.gen_lvalue_addr(e, 0);
-                        // 保存源地址到 rcx (后续 load/store 会破坏 rax)
-                        self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-                        for i in 0..count {
-                            let off = (i * elem_size) as i64;
-                            // 加载元素到 rax: 从 [rcx+off]
-                            if (-128..128).contains(&off) {
-                                self.emit(&[0x48, 0x8B, 0x41, off as u8]); // mov rax, [rcx+disp8]
-                            } else {
-                                self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
-                                self.emit(&(off as i32).to_le_bytes());
-                            }
-                            // 应用操作
-                            match op {
-                                UnOp::Neg => {
-                                    self.emit(&[0x48, 0xf7, 0xd8]); // neg rax
-                                }
-                                UnOp::BitNot => {
-                                    self.emit(&[0x48, 0xf7, 0xd0]); // not rax
-                                }
-                                _ => {}
-                            }
-                            // 存储到结果 [r13+result_off+off]
-                            self.emit_store(0, result_off + off, elem_size);
-                        }
-                        // rax 指向结果
-                        self.emit_lea_r13(0, result_off);
+                        self.gen_vector_unary_into_slot(
+                            *op,
+                            e,
+                            &elem_ty.base,
+                            count,
+                            0,
+                        );
                         return;
                     }
                 }
@@ -16470,6 +16447,55 @@ impl Codegen {
         self.gen_vector_load_into_slot(e, 0);
     }
 
+    /// 向量一元取负/按位非: 内层 lvalue 直接取址, rvalue 物化到
+    /// result_slot+1 后逐元素读改写, 结果写入 result_slot (rax 指向)
+    fn gen_vector_unary_into_slot(
+        &mut self,
+        op: UnOp,
+        e: &Expr,
+        elem_ty: &Type,
+        count: usize,
+        result_slot: usize,
+    ) {
+        let elem_size = elem_ty.size();
+        let vec_size = elem_size * count;
+        let result_off = self.vector_temp_base(result_slot, vec_size);
+        if self.gen_lvalue_addr(e, 0) {
+            // 保存源地址到 rcx (后续 load/store 会破坏 rax)
+            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+        } else {
+            // rvalue 内层 (如 -(-a)): 物化到更深的槽, 逐元素从那里读
+            self.gen_vector_load_into_slot(e, result_slot + 1);
+            let src_off = self.vector_temp_base(result_slot + 1, vec_size);
+            self.emit_lea_r13(6, src_off); // rsi = 源
+            self.emit(&[0x48, 0x89, 0xF1]); // mov rcx, rsi
+        }
+        for i in 0..count {
+            let off = (i * elem_size) as i64;
+            // 加载元素到 rax: 从 [rcx+off]
+            if (-128..128).contains(&off) {
+                self.emit(&[0x48, 0x8B, 0x41, off as u8]); // mov rax, [rcx+disp8]
+            } else {
+                self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
+                self.emit(&(off as i32).to_le_bytes());
+            }
+            // 应用操作
+            match op {
+                UnOp::Neg => {
+                    self.emit(&[0x48, 0xf7, 0xd8]); // neg rax
+                }
+                UnOp::BitNot => {
+                    self.emit(&[0x48, 0xf7, 0xd0]); // not rax
+                }
+                _ => {}
+            }
+            // 存储到结果槽
+            self.emit_store(0, result_off + off, elem_size);
+        }
+        // rax 指向结果
+        self.emit_lea_r13(0, result_off);
+    }
+
     fn gen_vector_load_into_slot(&mut self, e: &Expr, temp_slot: usize) {
         let (elem_ty, count) = match e.ty() {
             Type::Vector(ref elem, n) => {
@@ -16518,6 +16544,16 @@ impl Codegen {
             }
             Expr::Binop { op, l, r, .. } => {
                 self.gen_vector_binop(*op, l, r, temp_slot);
+            }
+            Expr::Unary { op, e: inner, .. }
+                if matches!(inner.ty(), Type::Vector(_, _))
+                    && matches!(op, UnOp::Neg | UnOp::BitNot) =>
+            {
+                // 一元向量运算: 显式传槽 (嵌套在 binop 操作数求值中时,
+                // 顶层硬编码槽 0 会覆盖外层逐元素已写入的结果)
+                if let Type::Vector(ref elem_ty, n) = inner.ty() {
+                    self.gen_vector_unary_into_slot(*op, inner, &elem_ty.base, n, temp_slot);
+                }
             }
             Expr::InitList { inits, .. } => {
                 self.gen_vector_init_rvalue(inits, &elem_ty, count, temp_slot);
