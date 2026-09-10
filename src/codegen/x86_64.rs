@@ -18792,6 +18792,20 @@ impl Codegen {
             // 源 4 字节时 result_off 低 8 字节为实部+虚部打包,
             // movsxd 取实部符号扩展 (_Complex int → _Complex long)。
             let result_off = -self.frame_size + 8;
+            if !init_is_complex {
+                // 标量 init: gen_expr 后 rax = 值 (非 result_off 地址
+                // 约定), 旧路径直接 load_stack(result_off) 丢弃 rax,
+                // 实部为残留垃圾 (_Complex int cj = 3 实部错)。先物化
+                // (值, 0) 同宽布局, 复用下方统一读取。
+                if matches!(init.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                    // 浮点标量源: 值在 xmm0, 截断为整数
+                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si
+                }
+                let s_isz = src_inner_sz as usize;
+                self.emit_store(0, result_off, s_isz);
+                self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax (虚部 = 0)
+                self.emit_store(0, result_off + src_inner_sz, s_isz);
+            }
             self.load_stack(0, result_off);
             if src_inner_sz == 4 && inner_sz == 8 {
                 self.emit(&[0x48, 0x63, 0xC0]); // movsxd rax, eax
