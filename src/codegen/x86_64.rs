@@ -18970,6 +18970,23 @@ impl Codegen {
                 self.emit(&[load_prefix, 0x0F, op_code, 0xC1]);
                 self.emit(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]);
             }
+            BinOp::Mul if !is_float_inner => {
+                // 整数 complex 乘法: real=ac-bd, imag=ad+bc (GCC
+                // expand_complex_multiplication)。中间积用 imul 低半
+                // (与分量宽度回绕语义一致); inner<4 时乘积必不溢出,
+                // 用 32 位运算后按分量宽度截断存回。旧实现走 SSE
+                // 浮点 limited 路径, 整数位模式当浮点算出垃圾。
+                // 栈布局: [rsp+0]=a, [rsp+inner]=b, [rsp+total]=c,
+                //         [rsp+total+inner]=d
+                self.gen_complex_int_mul(inner_sz, total_sz, &inner_ty);
+            }
+            BinOp::Div if !is_float_inner => {
+                // 整数 complex 除法 (GCC expand_complex_div_wide / Smith
+                // 算法): |c|>|d| 时 r=d/c, den=c+r*d, real=(r*b+a)/den,
+                // imag=(b-r*a)/den; 否则对偶分支。实测与 GCC 输出一致
+                // (直式公式 (ac+bd)/(c²+d²) 与 GCC 中间商回绕语义不符)。
+                self.gen_complex_int_div(inner_sz, total_sz, &inner_ty);
+            }
             BinOp::Mul => {
                 if matches!(inner_ty, Type::Float | Type::Double) && !self.cx_limited_range {
                     self.emit_complex_mul_call(is_float, inner_sz);
@@ -19324,6 +19341,362 @@ impl Codegen {
         self.emit(&[load_prefix, 0x0F, op_mul, 0xEA]);
         self.emit(&[load_prefix, 0x0F, op_add, 0xE5]);
         self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]);
+    }
+
+    /// 整数 complex 乘法 (分量宽度回绕): real=ac-bd, imag=ad+bc。
+    /// inner=8 用 64 位运算; inner≤4 用 32 位运算 (inner<4 时乘积与
+    /// 和均不溢出 32 位, 存回时截断到分量宽度即等价 GCC 逐宽度运算)。
+    fn gen_complex_int_mul(&mut self, inner_sz: i64, total_sz: i64, inner_ty: &Type) {
+        if inner_sz == 8 {
+            // rax=a, rcx=c, rdx=b, rsi=d
+            self.emit(&[0x48, 0x8B, 0x04, 0x24]);
+            self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]);
+            self.emit(&[0x48, 0x8B, 0x54, 0x24, inner_sz as u8]);
+            self.emit(&[0x48, 0x8B, 0x74, 0x24, (total_sz + inner_sz) as u8]);
+            self.emit(&[0x48, 0x89, 0xC7]); // rdi = a
+            self.emit(&[0x48, 0x0F, 0xAF, 0xF9]); // imul rdi, rcx (ac)
+            self.emit(&[0x49, 0x89, 0xD0]); // mov r8, rdx (b)
+            self.emit(&[0x4C, 0x0F, 0xAF, 0xC6]); // imul r8, rsi (bd)
+            self.emit(&[0x4C, 0x29, 0xC7]); // sub rdi, r8 (real)
+            self.emit(&[0x49, 0x89, 0xC0]); // mov r8, rax (a)
+            self.emit(&[0x4C, 0x0F, 0xAF, 0xC6]); // imul r8, rsi (ad)
+            self.emit(&[0x48, 0x89, 0xD0]); // rax = b
+            self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx (bc)
+            self.emit(&[0x4C, 0x01, 0xC0]); // add rax, r8 (imag)
+            self.emit(&[0x48, 0x89, 0x3C, 0x24]); // mov [rsp+0], rdi
+            self.emit(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]);
+        } else {
+            let (lsz, ld_s, ld_u) = match inner_sz {
+                4 => (0x8Bu8, 0u8, 0u8),
+                2 => (0x0Fu8, 0xBFu8, 0xB7u8), // movsx/movzx r32, m16
+                _ => (0x0Fu8, 0xBEu8, 0xB6u8), // movsx/movzx r32, m8
+            };
+            let ld = if Self::is_signed_int(inner_ty) { ld_s } else { ld_u };
+            let t = total_sz as u8;
+            let i = inner_sz as u8;
+            let ti = (total_sz + inner_sz) as u8;
+            if inner_sz == 4 {
+                self.emit(&[lsz, 0x04, 0x24]); // eax = a
+                self.emit(&[lsz, 0x4C, 0x24, t]); // ecx = c
+                self.emit(&[lsz, 0x54, 0x24, i]); // edx = b
+                self.emit(&[lsz, 0x74, 0x24, ti]); // esi = d
+            } else {
+                self.emit(&[0x0F, ld, 0x04, 0x24]);
+                self.emit(&[0x0F, ld, 0x4C, 0x24, t]);
+                self.emit(&[0x0F, ld, 0x54, 0x24, i]);
+                self.emit(&[0x0F, ld, 0x74, 0x24, ti]);
+            }
+            self.emit(&[0x89, 0xC7]); // edi = a
+            self.emit(&[0x0F, 0xAF, 0xF9]); // imul edi, ecx (ac)
+            self.emit(&[0x41, 0x89, 0xD0]); // mov r8d, edx (b)
+            self.emit(&[0x44, 0x0F, 0xAF, 0xC6]); // imul r8d, esi (bd)
+            self.emit(&[0x44, 0x29, 0xC7]); // sub edi, r8d (real)
+            self.emit(&[0x41, 0x89, 0xC0]); // r8d = a
+            self.emit(&[0x44, 0x0F, 0xAF, 0xC6]); // imul r8d, esi (ad)
+            self.emit(&[0x89, 0xD0]); // eax = b
+            self.emit(&[0x0F, 0xAF, 0xC1]); // imul eax, ecx (bc)
+            self.emit(&[0x44, 0x01, 0xC0]); // add eax, r8d (imag)
+            // 存回 (截断到分量宽度)
+            match inner_sz {
+                4 => {
+                    self.emit(&[0x89, 0x3C, 0x24]); // mov [rsp+0], edi
+                    self.emit(&[0x89, 0x44, 0x24, i]);
+                }
+                2 => {
+                    self.emit(&[0x66, 0x89, 0x3C, 0x24]);
+                    self.emit(&[0x66, 0x89, 0x44, 0x24, i]);
+                }
+                _ => {
+                    self.emit(&[0x88, 0x3C, 0x24]);
+                    self.emit(&[0x88, 0x44, 0x24, i]);
+                }
+            }
+        }
+    }
+
+    /// 整数 complex 除法 (GCC expand_complex_div_wide / Smith 算法,
+    /// 中间商与积按分量宽度回绕截断):
+    /// |c|>|d|: r=d/c, den=c+r*d, real=(a+r*b)/den, imag=(b-r*a)/den
+    /// 否则:   r=c/d, den=d+r*c, real=(a*r+b)/den, imag=(b*r-a)/den
+    /// 除法按分量符号性选 idiv/div; den==0 与 GCC 一致触发 SIGFPE。
+    fn gen_complex_int_div(&mut self, inner_sz: i64, total_sz: i64, inner_ty: &Type) {
+        let is_signed = Self::is_signed_int(inner_ty);
+        let lc = self.fresh_label();
+        let ld_ = self.fresh_label();
+        let lend = self.fresh_label();
+        // 预载 a/b (宽度扩展): r10 = a, r11 = b
+        match inner_sz {
+            8 => {
+                self.emit(&[0x4C, 0x8B, 0x54, 0x24, 0x00]); // mov r10, [rsp+0]
+                self.emit(&[0x4C, 0x8B, 0x5C, 0x24, inner_sz as u8]); // r11 = b
+            }
+            4 => {
+                self.emit(&[0x44, 0x8B, 0x54, 0x24, 0x00]); // mov r10d, [rsp+0]
+                self.emit(&[0x44, 0x8B, 0x5C, 0x24, inner_sz as u8]);
+            }
+            2 => {
+                let ld = if is_signed { 0xBF } else { 0xB7 };
+                self.emit(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]);
+                self.emit(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]);
+            }
+            _ => {
+                let ld = if is_signed { 0xBE } else { 0xB6 };
+                self.emit(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]);
+                self.emit(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]);
+            }
+        }
+        // 分支选择: |c| > |d| → lc
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8]); // rax = c
+            self.emit(&[0x48, 0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8]); // rdx = d
+            if is_signed {
+                // |rax| = (rax^(rax>>63)) - (rax>>63)
+                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                self.emit(&[0x48, 0xC1, 0xF9, 0x3F]); // sar rcx, 63
+                self.emit(&[0x48, 0x31, 0xC8]); // xor rax, rcx
+                self.emit(&[0x48, 0x29, 0xC8]); // sub rax, rcx
+                self.emit(&[0x48, 0x89, 0xD1]); // mov rcx, rdx
+                self.emit(&[0x48, 0xC1, 0xF9, 0x3F]);
+                self.emit(&[0x48, 0x31, 0xCA]); // xor rdx, rcx
+                self.emit(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
+            }
+            self.emit(&[0x48, 0x39, 0xD0]); // cmp rax, rdx
+        } else {
+            // eax = |c|, edx = |d| (inner<4 时按宽度扩展加载)
+            match inner_sz {
+                4 => {
+                    self.emit(&[0x8B, 0x44, 0x24, total_sz as u8]);
+                    self.emit(&[0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                }
+                2 => {
+                    let ld = if is_signed { 0xBF } else { 0xB7 };
+                    self.emit(&[0x0F, ld, 0x44, 0x24, total_sz as u8]);
+                    self.emit(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                }
+                _ => {
+                    let ld = if is_signed { 0xBE } else { 0xB6 };
+                    self.emit(&[0x0F, ld, 0x44, 0x24, total_sz as u8]);
+                    self.emit(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                }
+            }
+            if is_signed {
+                self.emit(&[0x89, 0xC1]); // mov ecx, eax
+                self.emit(&[0xC1, 0xF9, 0x1F]); // sar ecx, 31
+                self.emit(&[0x31, 0xC8]); // xor eax, ecx
+                self.emit(&[0x29, 0xC8]); // sub eax, ecx
+                self.emit(&[0x89, 0xD1]); // mov ecx, edx
+                self.emit(&[0xC1, 0xF9, 0x1F]);
+                self.emit(&[0x31, 0xCA]); // xor edx, ecx
+                self.emit(&[0x29, 0xCA]); // sub edx, ecx
+            }
+            self.emit(&[0x39, 0xD0]); // cmp eax, edx
+        }
+        self.jmp_rel32(&lc, JumpKind::Ja);
+        // ---- |d| >= |c| 分支: r = c/d ----
+        self.label(&ld_);
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8]); // rax = c
+            self.emit(&[0x48, 0x8B, 0x4C, 0x24, (total_sz + inner_sz) as u8]); // rcx = d
+        } else {
+            self.emit_c_ld32(inner_sz, total_sz, total_sz + inner_sz, is_signed); // eax=c, ecx=d
+        }
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
+        self.emit(&[0x89, 0xC6]); // mov esi, eax (r)
+        // den = d + r*c
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_rm(inner_sz, total_sz); // imul rax, [rsp+total]
+        self.emit_add_rm(inner_sz, total_sz + inner_sz); // add, [rsp+ti]
+        self.emit(&[0x89, 0xC7]); // mov edi, eax (den)
+        // real = (a*r + b) / den
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_r10(inner_sz); // imul rax, r10
+        self.emit_add_r11(inner_sz); // add rax, r11
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF7); // idiv/div edi
+        self.emit_store_rsp0(inner_sz); // store real
+        // imag = (b*r - a) / den
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_r11(inner_sz); // imul rax, r11
+        self.emit_mov_rcx_r10(inner_sz); // mov rcx, r10
+        self.emit_sub_rax_rcx(inner_sz); // sub rax, rcx
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF7);
+        self.emit_store_rspi(inner_sz); // store imag
+        self.jmp_rel32(&lend, JumpKind::Jmp);
+        // ---- |c| > |d| 分支: r = d/c ----
+        self.label(&lc);
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0x8B, 0x44, 0x24, (total_sz + inner_sz) as u8]); // rax = d
+            self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // rcx = c
+        } else {
+            self.emit_c_ld32(inner_sz, total_sz + inner_sz, total_sz, is_signed); // eax=d, ecx=c
+        }
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
+        self.emit(&[0x89, 0xC6]); // mov esi, eax (r)
+        // den = c + r*d
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_rm(inner_sz, total_sz + inner_sz); // imul rax, [rsp+ti]
+        self.emit_add_rm(inner_sz, total_sz); // add, [rsp+total]
+        self.emit(&[0x89, 0xC7]); // mov edi, eax (den)
+        // real = (r*b + a) / den
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_r11(inner_sz); // imul rax, r11
+        self.emit_add_r10(inner_sz); // add rax, r10
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF7);
+        self.emit_store_rsp0(inner_sz); // store real
+        // imag = (b - r*a) / den
+        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_imul_r10(inner_sz); // imul rax, r10 (r*a)
+        self.emit_mov_rcx_r11(inner_sz); // mov rcx, r11 (b)
+        self.emit_sub_rcx_rax(inner_sz); // sub rcx, rax
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+        } else {
+            self.emit(&[0x89, 0xC8]); // mov eax, ecx
+        }
+        if is_signed {
+            self.emit_cqo(inner_sz);
+        } else {
+            self.emit_xor_edx(inner_sz);
+        }
+        self.emit_div_rm(inner_sz, is_signed, 0xF7);
+        self.emit_store_rspi(inner_sz); // store imag
+        self.label(&lend);
+    }
+
+    // ---- gen_complex_int_div 的编码辅助 ----
+    fn emit_xor_edx(&mut self, inner_sz: i64) {
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0x31, 0xD2]);
+        } else {
+            self.emit(&[0x31, 0xD2]);
+        }
+    }
+    // 符号扩展 edx:eax (cdq) / rdx:rax (cqo)
+    fn emit_cqo(&mut self, inner_sz: i64) {
+        if inner_sz == 8 {
+            self.emit(&[0x48]);
+        }
+        self.emit(&[0x99]);
+    }
+    // 32/64 位 idiv/div, rm32: ecx→0xF1 (idiv) / edi→0xF7 (idiv)
+    fn emit_div_rm(&mut self, inner_sz: i64, is_signed: bool, rm32: u8) {
+        let op = if is_signed { rm32 + 8 } else { rm32 };
+        if inner_sz == 8 {
+            self.emit(&[0x48, 0xF7, op]);
+        } else {
+            self.emit(&[0xF7, op]);
+        }
+    }
+    // 32 位分支内组件加载: eax ← [rsp+off1], ecx ← [rsp+off2]
+    // inner<4 时用宽度扩展加载 (与 a/b 预载一致)
+    fn emit_c_ld32(&mut self, inner_sz: i64, off1: i64, off2: i64, signed: bool) {
+        if inner_sz == 4 {
+            self.emit(&[0x8B, 0x44, 0x24, off1 as u8]); // mov eax, [rsp+off1]
+            self.emit(&[0x8B, 0x4C, 0x24, off2 as u8]); // mov ecx, [rsp+off2]
+        } else {
+            let ld = match (inner_sz, signed) {
+                (2, true) => 0xBF,
+                (2, false) => 0xB7,
+                (_, true) => 0xBE,
+                (_, false) => 0xB6,
+            };
+            self.emit(&[0x0F, ld, 0x44, 0x24, off1 as u8]); // movsx/movzx eax
+            self.emit(&[0x0F, ld, 0x4C, 0x24, off2 as u8]); // movsx/movzx ecx
+        }
+    }
+    fn emit_imul_rm(&mut self, inner_sz: i64, off: i64) {
+        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
+        if rex != 0 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x0F, 0xAF, 0x44, 0x24, off as u8]); // imul rax/eax, [rsp+off]
+    }
+    fn emit_add_rm(&mut self, inner_sz: i64, off: i64) {
+        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
+        if rex != 0 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x03, 0x44, 0x24, off as u8]); // add rax/eax, [rsp+off]
+    }
+    fn emit_imul_r10(&mut self, inner_sz: i64) {
+        // imul rax/eax, r10: rm=r10 → REX.B (0x41/0x49)
+        let rex = if inner_sz == 8 { 0x49 } else { 0x41 };
+        self.emit(&[rex, 0x0F, 0xAF, 0xC2]);
+    }
+    fn emit_imul_r11(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x49 } else { 0x41 };
+        self.emit(&[rex, 0x0F, 0xAF, 0xC3]);
+    }
+    fn emit_add_r10(&mut self, inner_sz: i64) {
+        // add rax/eax, r10: reg=r10 → REX.R+W (0x4C)
+        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
+        self.emit(&[rex, 0x01, 0xD0]);
+    }
+    fn emit_add_r11(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
+        self.emit(&[rex, 0x01, 0xD8]);
+    }
+    fn emit_mov_rcx_r10(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
+        self.emit(&[rex, 0x89, 0xD1]);
+    }
+    fn emit_mov_rcx_r11(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
+        self.emit(&[rex, 0x89, 0xD9]);
+    }
+    fn emit_sub_rax_rcx(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
+        if rex != 0 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x29, 0xC8]); // sub rax/eax, rcx
+    }
+    fn emit_sub_rcx_rax(&mut self, inner_sz: i64) {
+        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
+        if rex != 0 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x29, 0xC1]); // sub rcx/eax? rcx, rax
+    }
+    fn emit_store_rsp0(&mut self, inner_sz: i64) {
+        match inner_sz {
+            8 => self.emit(&[0x48, 0x89, 0x04, 0x24]),
+            4 => self.emit(&[0x89, 0x04, 0x24]),
+            2 => self.emit(&[0x66, 0x89, 0x04, 0x24]),
+            _ => self.emit(&[0x88, 0x04, 0x24]),
+        }
+    }
+    fn emit_store_rspi(&mut self, inner_sz: i64) {
+        match inner_sz {
+            8 => self.emit(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]),
+            4 => self.emit(&[0x89, 0x44, 0x24, inner_sz as u8]),
+            2 => self.emit(&[0x66, 0x89, 0x44, 0x24, inner_sz as u8]),
+            _ => self.emit(&[0x88, 0x44, 0x24, inner_sz as u8]),
+        }
     }
 
     fn emit_complex_div_call(&mut self, is_float: bool, inner_sz: i64) {
