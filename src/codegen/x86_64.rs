@@ -18689,7 +18689,9 @@ impl Codegen {
             self.gen_expr(r, 0);
             self.pop(1); // rcx = 目标地址
             let src_isz = match r.ty() {
-                Type::Complex(ref c) | Type::Imaginary(ref c) => c.size() as i64,
+                // Complex 的 size() 是总宽 (inner*2), 分量步长取 inner 宽
+                Type::Complex(ref c) => c.base.size() as i64,
+                Type::Imaginary(ref c) => c.size() as i64,
                 _ => 0,
             };
             if src_isz == 0 {
@@ -18757,7 +18759,10 @@ impl Codegen {
         // _Complex long 变量, complex-6 test_long_int)。源/目标分量
         // 布局偏移与符号扩展都按源宽度计算。
         let src_inner_sz = match init.ty() {
-            Type::Complex(ref ci) | Type::Imaginary(ref ci) => ci.size() as i64,
+            // Complex 的 size() 是总宽 (inner*2), 分量宽度取 inner 宽
+            // (虚部偏移 result_off+src_inner_sz 才是 imag 槽)
+            Type::Complex(ref ci) => ci.base.size() as i64,
+            Type::Imaginary(ref ci) => ci.size() as i64,
             _ => inner_sz,
         };
         // 存实部: 统一从 result_off 物化区读 (与整数路径一致)
@@ -19858,9 +19863,11 @@ impl Codegen {
                 // 分量偏移/读取宽度按变量自身 inner (C99 提升后运算 inner
                 // = 更宽者, 变量可窄于运算 inner — Float 变量 movss 读 +
                 // cvtss2sd); 同宽时 cvt 为 no-op, 行为不变
+                let is_cplx = matches!(ty, Type::Complex(_) | Type::Imaginary(_));
+                // 分量偏移/读取宽度按变量自身 inner; 标量变量按自身类型
                 let v_inner = match ty {
                     Type::Complex(c) | Type::Imaginary(c) => c.base.clone(),
-                    _ => op_inner.clone(),
+                    _ => ty.clone(),
                 };
                 let v_pfx = if matches!(v_inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 let v_isz = v_inner.size() as i64;
@@ -19869,7 +19876,47 @@ impl Codegen {
                     v_inner,
                     Type::Float | Type::Double | Type::LongDouble
                 );
-                if !v_is_float && is_float_inner {
+                if !is_cplx && v_is_float {
+                    // 标量浮点变量提升: 实部=自身宽度读 (movss/movsd),
+                    // 虚部=0。旧路径把标量 home 当 complex 变量读
+                    // 2*inner 字节, Float 变量 (4B) 的 movsd 读会带上
+                    // 相邻内存位模式。
+                    if self.is_global_not_local(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                        self.emit(&[v_pfx, 0x0F, 0x10, 0x00]);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_xmm0_r13_disp(&[v_pfx, 0x49, 0x0F, 0x10], off);
+                    }
+                    self.emit_float_convert(&v_inner, op_inner);
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                } else if !is_cplx {
+                    // 标量整数变量提升为整数 _Complex: 实部=按自身宽度
+                    // 符号/零扩展加载, 虚部=0。旧路径把标量 home 当
+                    // complex 变量 movsd 读 2*inner 字节, 分量宽度不足时
+                    // 高位垃圾进实部 (pr104604: uchar v + _Complex uint t
+                    // 实部被污染)。
+                    if self.is_global_not_local(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(0, off);
+                    }
+                    self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                    if is_float_inner {
+                        let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
+                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                        self.emit(&[0x0F, 0x57, 0xC0]);
+                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                    } else {
+                        self.store_rsp_qword(0, rsp_slot as usize);
+                        self.mov_imm(0, 0);
+                        self.store_rsp_qword(0, (rsp_slot + inner_sz) as usize);
+                    }
+                } else if !v_is_float && is_float_inner {
                     // 整数 inner 复数变量参与浮点运算 (C99 常用算术转换,
                     // _Complex int op _Complex double → double): 分量按
                     // 变量自身整数宽度加载 → cvtsi2ss/cvtsi2sd → 按运算
@@ -19896,6 +19943,25 @@ impl Codegen {
                         self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
                         self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
                     }
+                } else if !v_is_float && !is_float_inner {
+                    // 整数 complex 变量参与整数运算: 分量按变量自身宽度
+                    // 扩展加载, 按运算 inner 宽度存槽。旧 movsd 整块读在
+                    // v_isz<inner_sz 时把 real|imag 打包位模式当宽分量
+                    // (_Complex int op _Complex long 实部混入虚部)。
+                    if self.is_global_not_local(&name.name) {
+                        self.emit_global_addr(0, &name.name);
+                        self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                        self.store_rsp_qword(0, rsp_slot as usize);
+                        self.emit_global_addr(0, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(0, off);
+                        self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                        self.store_rsp_qword(0, rsp_slot as usize);
+                        self.emit_lea_r13(0, off);
+                    }
+                    self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
+                    self.store_rsp_qword(0, (rsp_slot + inner_sz) as usize);
                 } else if self.is_global_not_local(&name.name)
                 {
                     // 全局 complex 变量: 通过 RIP-relative 寻址加载
@@ -20035,6 +20101,21 @@ impl Codegen {
                     // 标量整数提升为整数 _Complex: 实部=值, 虚部=0
                     // 注意: 操作数槽在 [rsp+slot], 用 store_rsp_qword (非 r13 相对)
                     self.gen_expr(e, 0);
+                    // 按 e 自身宽度符号/零扩展, 防高位脏值进分量
+                    // (Call 返回窄整型时 rax 高位为垃圾)
+                    if Self::is_integer_type(&e.ty()) {
+                        match e.ty().size() {
+                            1 | 2 => self.gen_int_narrow_cast(0, &e.ty()),
+                            4 => {
+                                if Self::is_signed_int(&e.ty()) {
+                                    self.emit(&[0x48, 0x63, 0xC0]); // movsxd rax, eax
+                                } else {
+                                    self.emit(&[0x89, 0xC0]); // mov eax, eax (零扩展高 32)
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     self.store_rsp_qword(0, rsp_slot as usize);
                     self.mov_imm(0, 0);
                     self.store_rsp_qword(0, (rsp_slot + inner_sz) as usize);

@@ -8921,6 +8921,11 @@ impl<'a> Parser<'a> {
                     let binop_ty = match target_ty {
                         Type::Ptr(_) if matches!(op, BinOp::Add | BinOp::Sub) => target_ty.clone(),
                         Type::Float | Type::Double | Type::LongDouble => target_ty.clone(),
+                        // 复数复合赋值: c op= e 的中间结果类型即 c 的复数类型
+                        // (C99 6.5.16.2), 窄内型 (_Complex char 等) 不得落
+                        // 入整数提升回退 (int_t), 否则赋值端把复数 rvalue
+                        // 误判为标量 (rax=地址被当值写入实部)
+                        Type::Complex(_) | Type::Imaginary(_) => target_ty.clone(),
                         Type::Vector(_, _) => target_ty.clone(),
                         _ => {
                             // C99 6.5.17: compound assignment computes
