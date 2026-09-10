@@ -21837,7 +21837,6 @@ impl Codegen {
     /// 槽导致跨函数读写不一致; rip 相对寻址无需帧槽且语义正确。
     fn gen_va_arg_global(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
         let step = (arg_ty.size().div_ceil(8) * 8) as i32;
-        let sz = arg_ty.size();
         let overflow = self.fresh_label();
         let done = self.fresh_label();
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
@@ -21846,20 +21845,22 @@ impl Codegen {
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // 寄存器保存区路径: rcx = reg_save_area
         self.emit(&[0x49, 0x8B, 0x4A, 0x10]); // mov rcx, [r10+16]
-        match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x04, 0x01]),
-            2 => self.emit(&[0x0F, 0xB7, 0x04, 0x01]),
-            4 => self.emit(&[0x8B, 0x04, 0x01]),
+        let gsz = arg_ty.size();
+        let gsigned = Self::va_arg_ty_signed(arg_ty);
+        match gsz {
+            1 => self.emit_va_arg_int_load(1, gsigned, &[0x04, 0x01]),
+            2 => self.emit_va_arg_int_load(2, gsigned, &[0x04, 0x01]),
+            4 => self.emit_va_arg_int_load(4, gsigned, &[0x04, 0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x04, 0x01]),
         }
         self.emit(&[0x41, 0x83, 0x02, 0x08]); // add dword [r10], 8
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         self.emit(&[0x49, 0x8B, 0x4A, 0x08]); // mov rcx, [r10+8]
-        match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x01]),
-            2 => self.emit(&[0x0F, 0xB7, 0x01]),
-            4 => self.emit(&[0x8B, 0x01]),
+        match gsz {
+            1 => self.emit_va_arg_int_load(1, gsigned, &[0x01]),
+            2 => self.emit_va_arg_int_load(2, gsigned, &[0x01]),
+            4 => self.emit_va_arg_int_load(4, gsigned, &[0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x01]),
         }
         self.push(0);
@@ -22034,6 +22035,37 @@ impl Codegen {
         self.label(&done);
     }
 
+    /// va_arg 整数加载: 按类型符号性选择 movsx/movzx/movsxd/mov。
+    /// dcc 寄存器约定要求有符号值在 64 位寄存器中符号扩展保存;
+    /// 旧实现对 1/2/4 字节一律零扩展, va_arg(ap, int) 赋给 long
+    /// long 时得到错误的高位 (pr117432)。
+    fn emit_va_arg_int_load(&mut self, sz: usize, signed: bool, modrm: &[u8]) {
+        match (sz, signed) {
+            (1, true) => self.emit(&[0x0F, 0xBE]),    // movsx
+            (1, false) => self.emit(&[0x0F, 0xB6]),   // movzx
+            (2, true) => self.emit(&[0x0F, 0xBF]),    // movsx
+            (2, false) => self.emit(&[0x0F, 0xB7]),   // movzx
+            (4, true) => self.emit(&[0x48, 0x63]),    // movsxd
+            (4, false) => self.emit(&[0x8B]),         // mov eax (零扩展)
+            _ => self.emit(&[0x48, 0x8B]),            // mov rax
+        }
+        self.emit(modrm);
+    }
+
+    /// va_arg 类型是否有符号 (决定加载指令的扩展方式)
+    fn va_arg_ty_signed(ty: &Type) -> bool {
+        !matches!(
+            ty,
+            Type::Bool
+                | Type::UChar
+                | Type::UShort
+                | Type::UInt
+                | Type::ULong
+                | Type::ULongLong
+                | Type::UInt128
+        )
+    }
+
     /// SysV va_arg: 按 gp_offset/fp_offset 与 overflow_arg_area 读取参数。
     fn gen_va_arg(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
         if matches!(arg_ty, Type::Float | Type::Double) && self.target.sse {
@@ -22064,10 +22096,11 @@ impl Codegen {
         self.emit(&[0x49, 0x8B, 0x8D]);
         self.emit(&((ap_off + 16) as i32).to_le_bytes());
         let sz = arg_ty.size();
+        let signed = Self::va_arg_ty_signed(arg_ty);
         match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x04, 0x01]),
-            2 => self.emit(&[0x0F, 0xB7, 0x04, 0x01]),
-            4 => self.emit(&[0x8B, 0x04, 0x01]),
+            1 => self.emit_va_arg_int_load(1, signed, &[0x04, 0x01]),
+            2 => self.emit_va_arg_int_load(2, signed, &[0x04, 0x01]),
+            4 => self.emit_va_arg_int_load(4, signed, &[0x04, 0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x04, 0x01]),
         }
         self.emit(&[0x41, 0x83, 0x85]);
@@ -22078,9 +22111,9 @@ impl Codegen {
         self.emit(&[0x49, 0x8B, 0x8D]);
         self.emit(&((ap_off + 8) as i32).to_le_bytes());
         match sz {
-            1 => self.emit(&[0x0F, 0xB6, 0x01]),
-            2 => self.emit(&[0x0F, 0xB7, 0x01]),
-            4 => self.emit(&[0x8B, 0x01]),
+            1 => self.emit_va_arg_int_load(1, signed, &[0x01]),
+            2 => self.emit_va_arg_int_load(2, signed, &[0x01]),
+            4 => self.emit_va_arg_int_load(4, signed, &[0x01]),
             _ => self.emit(&[0x48, 0x8B, 0x01]),
         }
         self.push(0);
