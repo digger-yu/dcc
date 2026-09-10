@@ -148,6 +148,11 @@ pub struct Codegen {
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
     cur_func_has_vla: bool,
     bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
+    /// 向量 binop 操作数物化槽号。嵌套向量 binop 时每层结果槽 R 的
+    /// 操作数物化到 R+1 (XMM 快速路径 R+1/R+2), 避免内层子表达式
+    /// 结果覆盖外层已写入的结果槽 (pr23135: 链式 k0+k1+k3+...
+    /// 低层元素被内层重物化覆盖)。非 binop 上下文默认槽 1。
+    vector_op_slot: usize,
     // 可重定位模式 (.o)
     pub relocatable: bool,
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
@@ -1428,6 +1433,7 @@ impl Codegen {
             vm_struct_size_slots: HashMap::new(),
             cur_func_has_vla: false,
             bf_rmw_depth: 0,
+            vector_op_slot: 1,
             relocatable: false,
             function_sections: false,
             patchable_function_entry,
@@ -6922,9 +6928,11 @@ impl Codegen {
             } else {
                 0
             };
-            // 向量临时槽区: 固定预留 128 字节, 位于 va save/静态链上方,
-            // 避免 vector_temp_base 与变量区重叠 (red-zone 模式无额外缓冲)
-            let vec_reserve: i64 = 128;
+            // 向量临时槽区: 预留 512 字节 (32 个 16B 槽), 位于 va save/静态链上方,
+            // 避免 vector_temp_base 与变量区重叠。嵌套向量 binop 每层
+            // 需要更深的操作数槽 (XMM 路径每层 2 槽), 128 字节只够
+            // 3 层嵌套, 深链式表达式会溢出到变量区 (pr23135)
+            let vec_reserve: i64 = 512;
             // 位域 RMW 临时槽: 预留 32 字节 (2 级嵌套, 每级 16 字节)
             let bf_rmw_reserve: i64 = 32;
             // 嵌套函数 trampoline 空间: 预留 256 字节 (最多 8 个 trampoline, 每个 32 字节)
@@ -7082,7 +7090,7 @@ impl Codegen {
             let tramp_reserve: i64 = 256; // 嵌套函数 trampoline 空间
             let raw = var_bytes
                 .saturating_add(hdr)
-                .saturating_add(128)
+                .saturating_add(512) // 向量临时槽区 (嵌套 binop 操作数槽)
                 .saturating_add(tramp_reserve)
                 .saturating_add(self.stack_reserve_bytes());
             self.frame_size = (raw + 15) & !15;
@@ -9562,9 +9570,12 @@ impl Codegen {
                 }
                 // 16 字节 vector 赋值到 Member/Index/Deref lvalue:
                 // RHS 物化到向量临时槽 0, 再整块拷贝到 LHS 地址
+                // (所有向量尺寸都走此路径: 8B 及更小向量若落入标量
+                // store, rax 只是 gen_vector_load 最后加载元素的残值,
+                // 会把单个元素位模式覆盖整个向量槽,
+                // pr23135: res.v = i 后 i2[0] 变 i2[1] 的值)
                 let assign_l_ty = lv.ty();
                 if matches!(assign_l_ty, Type::Vector(_, _))
-                    && assign_l_ty.size() > 8
                     && !matches!(lv, Expr::Ident { .. })
                 {
                     self.gen_expr(r, 0); // RHS → 向量临时槽 0
@@ -12703,8 +12714,8 @@ impl Codegen {
     fn materialize_bits_to_slot(&mut self, e: &Expr, dst_off: i64) {
         let src_ty = e.ty();
         if matches!(src_ty, Type::Vector(_, _)) {
-            self.gen_vector_to_temp(e, 1);
-            let src_off = self.vector_temp_base(1, src_ty.size());
+            self.gen_vector_to_temp(e, self.vector_op_slot);
+            let src_off = self.vector_temp_base(self.vector_op_slot, src_ty.size());
             self.copy_r13_bytes(src_off, dst_off, src_ty.size());
             return;
         }
@@ -15644,11 +15655,15 @@ impl Codegen {
         // SIMD 快速路径: 128-bit 纯向量运算使用 XMM 打包指令
         // 有标量操作数时走下方逐元素广播路径
         if l_is_vec && r_is_vec && vec_size == 16
-            && self.try_vector_binop_xmm(op, l, r, result_off, &elem_ty, count, elem_size, is_float, is_double) {
+            && self.try_vector_binop_xmm(op, l, r, result_slot, result_off, &elem_ty, count, elem_size, is_float, is_double) {
                 return;
             }
 
         // 标量回退路径 (支持标量广播: 标量操作数逐元素复用同一值)
+        // 操作数物化槽 = 结果槽+1: 内层子 binop 结果写入更深的槽,
+        // 不会覆盖本层已写入结果槽的元素 (pr23135 链式运算)
+        let saved_op_slot = self.vector_op_slot;
+        self.vector_op_slot = result_slot + 1;
         if is_float || is_double {
             let (prefix, opcode) = match op {
                 BinOp::Add => (if is_float { 0xF3 } else { 0xF2 }, 0x58),
@@ -15699,6 +15714,7 @@ impl Codegen {
                     is_float,
                 );
             }
+            self.vector_op_slot = saved_op_slot;
             return;
         }
         for i in 0..count {
@@ -15822,6 +15838,7 @@ impl Codegen {
             // add/sub/imul 结果在 rcx，按元素宽度写入临时区
             self.emit_store(1, off, elem_size);
         }
+        self.vector_op_slot = saved_op_slot;
     }
 
     /// SIMD 快速路径: 128-bit 向量使用 XMM 打包指令
@@ -15831,6 +15848,7 @@ impl Codegen {
         op: BinOp,
         l: &Expr,
         r: &Expr,
+        result_slot: usize,
         result_off: i64,
         _elem_ty: &Type,
         count: usize,
@@ -15839,11 +15857,15 @@ impl Codegen {
         is_double: bool,
     ) -> bool {
         let vec_size = elem_size * count;
-        // 先把左右操作数存入临时槽 1 和 2
-        self.gen_vector_load_into_slot(l, 1);
-        self.gen_vector_load_into_slot(r, 2);
-        let left_off = self.vector_temp_base(1, vec_size);
-        let right_off = self.vector_temp_base(2, vec_size);
+        // 先把左右操作数存入临时槽 (结果槽+1 / 结果槽+2):
+        // 嵌套 binop 时操作数自身的计算结果写入更深槽,
+        // 不会覆盖本层已物化的另一个操作数或结果槽
+        let l_slot = result_slot + 1;
+        let r_slot = result_slot + 2;
+        self.gen_vector_load_into_slot(l, l_slot);
+        self.gen_vector_load_into_slot(r, r_slot);
+        let left_off = self.vector_temp_base(l_slot, vec_size);
+        let right_off = self.vector_temp_base(r_slot, vec_size);
 
         // movdqu xmm0, [r13 + left_off]
         self.emit_movdqu_r13_to_xmm(0, left_off);
@@ -15957,8 +15979,9 @@ impl Codegen {
     ) {
         if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
             let vec_size = elem_size * n;
-            self.gen_vector_init_rvalue(inits, elem_ty, n, 1);
-            let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i64;
+            self.gen_vector_init_rvalue(inits, elem_ty, n, self.vector_op_slot);
+            let temp_off =
+                self.vector_temp_base(self.vector_op_slot, vec_size) + (elem_idx * elem_size) as i64;
             self.load_stack_xmm(0, temp_off, elem_size, is_float);
             return;
         }
@@ -15987,8 +16010,9 @@ impl Codegen {
                     _ => 0,
                 };
                 let vec_size = elem_size * count;
-                self.gen_vector_to_temp(e, 1);
-                let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i64;
+                self.gen_vector_to_temp(e, self.vector_op_slot);
+                let temp_off = self.vector_temp_base(self.vector_op_slot, vec_size)
+                    + (elem_idx * elem_size) as i64;
                 self.load_stack_xmm(0, temp_off, elem_size, is_float);
             }
             _ => {
@@ -16114,8 +16138,9 @@ impl Codegen {
         }
         if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
             let vec_size = elem_size * n;
-            self.gen_vector_init_rvalue(inits, elem_ty, n, 1);
-            let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i64;
+            self.gen_vector_init_rvalue(inits, elem_ty, n, self.vector_op_slot);
+            let temp_off =
+                self.vector_temp_base(self.vector_op_slot, vec_size) + (elem_idx * elem_size) as i64;
             self.load_stack_sized(0, temp_off, elem_size);
             return;
         }
@@ -16134,8 +16159,9 @@ impl Codegen {
                     _ => 0,
                 };
                 let vec_size = elem_size * count;
-                self.gen_vector_to_temp(e, 1);
-                let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i64;
+                self.gen_vector_to_temp(e, self.vector_op_slot);
+                let temp_off = self.vector_temp_base(self.vector_op_slot, vec_size)
+                    + (elem_idx * elem_size) as i64;
                 self.load_stack_sized(0, temp_off, elem_size);
             }
             _ => {
@@ -22265,9 +22291,66 @@ impl Codegen {
                 }
                 true
             }
-            // __builtin_setjmp(buf): 简单实现返回 0 (直接调用情况)
+            // __builtin_setjmp(buf): GCC 语义实现.
+            // buf 布局 (前 3 个 slot, 兼容 GCC 5-word buffer 约定):
+            //   buf[0] = receiver label 地址 (__builtin_longjmp 的落点)
+            //   buf[1] = 捕获时刻 rsp (含本 builtin 内部分配的 40 字节临时区)
+            //   buf[2] = r13 (dcc 帧基址)
+            // 直接调用返回 0; 经 __builtin_longjmp 返回时 receiver 处写 1.
+            // 栈上临时区布局: [rsp]=setjmp 结果, [rsp+8..40]=callee-saved
+            // pool 寄存器 (rbx,r12,r14,r15) 备份 — longjmp 返回时恢复,
+            // 避免陈旧寄存器值 (对应 GCC returns_twice 语义).
             "__builtin_setjmp" => {
-                self.mov_imm(dst, 0);
+                if args.is_empty() { return false; }
+                let recv = self.fresh_label();
+                let cont = self.fresh_label();
+                // rdi = buf
+                self.gen_expr(&args[0], 7);
+                // 栈上临时区
+                self.emit(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
+                self.emit(&[0x48, 0xC7, 0x04, 0x24, 0, 0, 0, 0]); // mov qword [rsp], 0
+                // 保存 callee-saved pool 寄存器
+                self.emit(&[0x48, 0x89, 0x5C, 0x24, 0x08]); // mov [rsp+8], rbx
+                self.emit(&[0x4C, 0x89, 0x64, 0x24, 0x10]); // mov [rsp+16], r12
+                self.emit(&[0x4C, 0x89, 0x74, 0x24, 0x18]); // mov [rsp+24], r14
+                self.emit(&[0x4C, 0x89, 0x7C, 0x24, 0x20]); // mov [rsp+32], r15
+                // buf[1] = rsp (含临时区)
+                self.emit(&[0x48, 0x89, 0x67, 0x08]); // mov [rdi+8], rsp
+                // buf[2] = r13
+                self.emit(&[0x4C, 0x89, 0x6F, 0x10]); // mov [rdi+16], r13
+                // buf[0] = receiver 地址: lea rax, [rip+recv] → mov [rdi], rax
+                self.emit(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]);
+                let disp_pos = self.pos() - 4;
+                self.label_addr_refs.push((disp_pos, recv.clone()));
+                self.emit(&[0x48, 0x89, 0x07]); // mov [rdi], rax
+                // 直接路径跳过 receiver
+                self.jmp_rel32(&cont, JumpKind::Jmp);
+                // receiver: longjmp 落点 (rsp/r13 已恢复到捕获点)
+                self.label(&recv);
+                self.emit(&[0x48, 0x8B, 0x5C, 0x24, 0x08]); // mov rbx, [rsp+8]
+                self.emit(&[0x4C, 0x8B, 0x64, 0x24, 0x10]); // mov r12, [rsp+16]
+                self.emit(&[0x4C, 0x8B, 0x74, 0x24, 0x18]); // mov r14, [rsp+24]
+                self.emit(&[0x4C, 0x8B, 0x7C, 0x24, 0x20]); // mov r15, [rsp+32]
+                self.emit(&[0x48, 0xC7, 0x04, 0x24, 1, 0, 0, 0]); // mov qword [rsp], 1
+                self.label(&cont);
+                // 结果 → dst
+                let rex = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
+                let modrm = 0x04u8 | ((dst & 7) << 3);
+                self.emit(&[rex, 0x8B, modrm, 0x24]); // mov dst, [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 40
+                true
+            }
+            // __builtin_longjmp(buf, val): 恢复 rsp/r13 后跳转到 receiver.
+            // val 按语义恒为 1, 仅求值其副作用.
+            "__builtin_longjmp" => {
+                if args.is_empty() { return false; }
+                self.gen_expr(&args[0], 7); // rdi = buf
+                if args.len() >= 2 {
+                    self.gen_expr(&args[1], 6); // rsi = val (副作用)
+                }
+                self.emit(&[0x48, 0x8B, 0x67, 0x08]); // mov rsp, [rdi+8]
+                self.emit(&[0x4C, 0x8B, 0x6F, 0x10]); // mov r13, [rdi+16]
+                self.emit(&[0xFF, 0x27]); // jmp [rdi]
                 true
             }
             // __builtin_va_arg_pack: 返回 0 (placeholder)
@@ -22438,8 +22521,8 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                // 计算分配大小到 rcx
-                self.gen_expr(&args[0], 2); // rcx = size
+                // 计算分配大小到 rcx (dcc 寄存器编码: 1 = rcx)
+                self.gen_expr(&args[0], 1); // rcx = size
                                             // 对齐到 16 字节: rcx = (rcx + 15) & ~15
                 self.emit(&[0x48, 0x83, 0xc1, 0x0f]); // add rcx, 15
                 self.emit(&[0x48, 0x83, 0xe1, 0xf0]); // and rcx, ~15
@@ -24004,7 +24087,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 2); // rcx = size
+                self.gen_expr(&args[0], 1); // rcx = size (dcc 编码: 1 = rcx)
                 self.emit(&[0x48, 0x83, 0xc1, 0x0f]); // add rcx, 15
                 self.emit(&[0x48, 0x83, 0xe1, 0xf0]); // and rcx, ~15
                 self.emit(&[0x48, 0x29, 0xcc]); // sub rsp, rcx
@@ -24041,46 +24124,9 @@ impl Codegen {
                 self.gen_fenv_builtin(name, args, dst)
             }
             // ===== 其他缺失的 __builtin_* 函数 =====
-            // __builtin_setjmp: 保存 callee-saved 寄存器到 buffer
-            // buffer 布局: rbx, rbp, r12-r15, rsp, return address (8 slots)
-            "__builtin_setjmp" => {
-                if args.is_empty() { return false; }
-                self.gen_expr(&args[0], 7); // rdi = buffer
-                // 保存 callee-saved registers
-                self.emit(&[0x48, 0x89, 0x1F]); // mov [rdi], rbx
-                self.emit(&[0x48, 0x89, 0x6F, 0x08]); // mov [rdi+8], rbp
-                self.emit(&[0x4C, 0x89, 0x67, 0x10]); // mov [rdi+16], r12
-                self.emit(&[0x4C, 0x89, 0x6F, 0x18]); // mov [rdi+24], r13
-                self.emit(&[0x4C, 0x89, 0x77, 0x20]); // mov [rdi+32], r14
-                self.emit(&[0x4C, 0x89, 0x7F, 0x28]); // mov [rdi+40], r15
-                // 保存 rsp
-                self.emit(&[0x48, 0x89, 0x67, 0x30]); // mov [rdi+48], rsp
-                // 保存 return address (从栈顶)
-                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
-                self.emit(&[0x48, 0x89, 0x47, 0x38]); // mov [rdi+56], rax
-                // 返回 0
-                self.mov_imm(dst, 0);
-                true
-            }
-            // __builtin_longjmp: 从 buffer 恢复 callee-saved 寄存器
-            "__builtin_longjmp" => {
-                if args.len() < 2 { return false; }
-                self.gen_expr(&args[0], 7); // rdi = buffer
-                self.gen_expr(&args[1], 6); // rsi = value (返回值)
-                // 恢复 callee-saved registers
-                self.emit(&[0x48, 0x8B, 0x1F]); // mov rbx, [rdi]
-                self.emit(&[0x48, 0x8B, 0x6F, 0x08]); // mov rbp, [rdi+8]
-                self.emit(&[0x4C, 0x8B, 0x67, 0x10]); // mov r12, [rdi+16]
-                self.emit(&[0x4C, 0x8B, 0x6F, 0x18]); // mov r13, [rdi+24]
-                self.emit(&[0x4C, 0x8B, 0x77, 0x20]); // mov r14, [rdi+32]
-                self.emit(&[0x4C, 0x8B, 0x7F, 0x28]); // mov r15, [rdi+40]
-                // 恢复 rsp
-                self.emit(&[0x48, 0x8B, 0x67, 0x30]); // mov rsp, [rdi+48]
-                // 跳转到 return address
-                self.emit(&[0x48, 0x8B, 0x47, 0x38]); // mov rax, [rdi+56]
-                self.emit(&[0xFF, 0xE0]); // jmp rax
-                true
-            }
+            // __builtin_setjmp / __builtin_longjmp: 实现见上方 match 臂
+            // (本 match 中先前此处存在重复臂, 已删除 — 位于同一 match 的
+            //  早期臂会遮蔽此处, 导致实现从未生效)
             // __builtin_speculation_safe_value: 返回参数值 (no-op)
             "__builtin_speculation_safe_value" => {
                 if args.is_empty() {
