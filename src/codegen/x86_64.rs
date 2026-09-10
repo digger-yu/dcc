@@ -23366,19 +23366,38 @@ impl Codegen {
                     return true;
                 }
                 let size = size as i32;
-                let frame = ((size + 8 + 15) / 16) * 16;
+                // 帧: [0..size) 栈参数拷贝, [size..size+16) 结果块,
+                // [size+16..size+24) 缓冲区指针保存槽, 余量为对齐.
+                let frame = ((size + 32 + 15) / 16) * 16;
+                let buf_off = size + 16;
                 self.gen_builtin_fn_ptr(&args[0], 10); // r10 = fn
                 self.gen_expr(&args[1], 6); // rsi = data
                 self.emit(&[0x48, 0x81, 0xEC]);
-                self.emit(&frame.to_le_bytes());
+                self.emit(&frame.to_le_bytes()); // sub rsp, frame
+                self.emit(&[0x48, 0x89, 0xB4, 0x24]);
+                self.emit(&buf_off.to_le_bytes()); // mov [rsp+buf_off], rsi
                 self.emit(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+                // 栈参数区在缓冲区 GP+XMM 保存区 (176 字节) 之后
+                self.emit(&[0x48, 0x81, 0xC6]);
+                self.emit(&176u32.to_le_bytes()); // add rsi, 176
                 self.emit(&[0x48, 0xC7, 0xC1]);
-                self.emit(&size.to_le_bytes());
+                self.emit(&size.to_le_bytes()); // mov rcx, size
                 self.emit(&[0xFC, 0xF3, 0x48, 0xA4]); // cld; rep movsb
-                self.emit(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+                // 从缓冲区恢复 GP 寄存器实参 (rdi..r9)
+                self.emit(&[0x4C, 0x8B, 0x9C, 0x24]);
+                self.emit(&buf_off.to_le_bytes()); // mov r11, [rsp+buf_off]
+                self.emit(&[0x49, 0x8B, 0x3B]); // mov rdi, [r11] (REX.W+B)
+                self.emit(&[0x49, 0x8B, 0x73, 0x08]); // mov rsi, [r11+8]
+                self.emit(&[0x49, 0x8B, 0x53, 0x10]); // mov rdx, [r11+16]
+                self.emit(&[0x49, 0x8B, 0x4B, 0x18]); // mov rcx, [r11+24]
+                self.emit(&[0x4D, 0x8B, 0x43, 0x20]); // mov r8, [r11+32]
+                self.emit(&[0x4D, 0x8B, 0x4B, 0x28]); // mov r9, [r11+40]
                 self.emit(&[0x41, 0xFF, 0xD2]); // call r10
+                // 结果块: [0]=rax, [8]=rdx (16 字节整数返回约定)
                 self.emit(&[0x48, 0x89, 0x84, 0x24]);
                 self.emit(&size.to_le_bytes()); // mov [rsp+size], rax
+                self.emit(&[0x48, 0x89, 0x94, 0x24]);
+                self.emit(&(size + 8).to_le_bytes()); // mov [rsp+size+8], rdx
                 self.emit(&[0x48, 0x8D, 0x84, 0x24]);
                 self.emit(&size.to_le_bytes()); // lea rax, [rsp+size]
                 if dst != 0 {
@@ -24020,10 +24039,44 @@ impl Codegen {
                 }
                 true
             }
-            // __builtin_apply_args(): 返回保存区指针 (SysV: [rsp+8])
+            // __builtin_apply_args(): 保存寄存器实参到栈上缓冲区并返回指针.
+            // 缓冲区布局 (与 __builtin_apply 自洽约定):
+            //   [0..48)    rdi, rsi, rdx, rcx, r8, r9
+            //   [48..176)  xmm0..xmm7
+            //   [176..432) 传入栈参数 (从 r13+16 拷贝 256 字节)
+            // 缓冲区占用 rsp 下方 448 字节 (16 对齐); 由随后 __builtin_apply
+            // 尾部统一回收 (含自身栈参区与结果区), 见 apply 代码注释.
             "__builtin_apply_args" => {
-                // lea rax, [rsp+8]: 48 8D 44 24 08
-                self.emit(&[0x48, 0x8D, 0x44, 0x24, 0x08]);
+                self.emit(&[0x48, 0x81, 0xEC]);
+                self.emit(&448u32.to_le_bytes()); // sub rsp, 448
+                self.emit(&[0x48, 0x89, 0x3C, 0x24]); // mov [rsp], rdi
+                self.emit(&[0x48, 0x89, 0x74, 0x24, 0x08]); // mov [rsp+8], rsi
+                self.emit(&[0x48, 0x89, 0x54, 0x24, 0x10]); // mov [rsp+16], rdx
+                self.emit(&[0x48, 0x89, 0x4C, 0x24, 0x18]); // mov [rsp+24], rcx
+                self.emit(&[0x4C, 0x89, 0x44, 0x24, 0x20]); // mov [rsp+32], r8
+                self.emit(&[0x4C, 0x89, 0x4C, 0x24, 0x28]); // mov [rsp+40], r9
+                for k in 0..8u32 {
+                    let off = 48 + k * 16;
+                    // movdqu [rsp+off], xmmK: F3 0F 7F /r (modrm.reg = K)
+                    if off < 128 {
+                        self.emit(&[0xF3, 0x0F, 0x7F, 0x44, 0x24, off as u8]);
+                        let n = self.code.len();
+                        self.code[n - 3] |= (k as u8) << 3; // modrm
+                    } else {
+                        self.emit(&[0xF3, 0x0F, 0x7F, 0x84, 0x24]);
+                        self.emit(&off.to_le_bytes());
+                        let n = self.code.len();
+                        // 9 字节: F3 0F 7F 84 24 disp32, modrm 在倒数第 6 字节
+                        self.code[n - 6] |= (k as u8) << 3; // modrm
+                    }
+                }
+                // 拷贝传入栈参数: rsi = r13+16 (首栈参), rdi = rsp+176
+                self.emit(&[0x49, 0x8D, 0x75, 0x10]); // lea rsi, [r13+16]
+                self.emit(&[0x48, 0x8D, 0xBC, 0x24]);
+                self.emit(&176u32.to_le_bytes()); // lea rdi, [rsp+176]
+                self.emit(&[0xB9, 32, 0, 0, 0]); // mov ecx, 32 (qwords)
+                self.emit(&[0xFC, 0xF3, 0x48, 0xA5]); // cld; rep movsq
+                self.emit(&[0x48, 0x8D, 0x04, 0x24]); // lea rax, [rsp]
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
