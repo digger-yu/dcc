@@ -6821,10 +6821,13 @@ impl Codegen {
             }
             let mut param_stores: Vec<(u8, i64)> = Vec::new(); // (gp reg, offset)
             let mut xmm_param_stores: Vec<(u8, i64, Type)> = Vec::new(); // (xmm reg, offset, ty)
-            let mut stack_param_stores: Vec<(usize, i64)> = Vec::new(); // (stack arg index, var offset)
+            // (栈上字节偏移, var offset)。SysV 栈参数按类型对齐:
+            // long double / __int128 / 16 字节对齐聚合体须落在 16 的
+            // 倍数上, 否则 callee 读取位置与 caller 布局错位 (pr44942)。
+            let mut stack_param_stores: Vec<(i64, i64)> = Vec::new();
             let mut gp_idx = if has_sret { 1 } else { 0 };
             let mut fp_idx = 0usize;
-            let mut stack_arg_idx = 0usize;
+            let mut stack_arg_off: i64 = 0;
             for p in f.params.iter() {
                 if let Some(nm) = &p.name {
                     // VLA 形参检测: 记录维度表达式, 序言中求值并存 stride 槽
@@ -6873,8 +6876,20 @@ impl Codegen {
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 更新累加值: 聚合参数占 chunks * 8 字节
                         param_used_total += (p.ty.size().div_ceil(8) * 8) as i64;
-                        // SysV: 按 abi_classes 逐 chunk 分配 GP/XMM/栈
-                        if gp_idx + need_gp <= 6 && fp_idx + need_fp <= 8 {
+                        // SysV: 按 abi_classes 逐 chunk 分配 GP/XMM/栈。
+                        // MEMORY/X87 类或寄存器不足时整个参数按类型对齐
+                        // 放栈 (revert 语义), 游标不推进。
+                        let agg_align = (p.ty.align() as i64).max(8);
+                        let mem_class = classes.iter().any(|c| {
+                            matches!(
+                                c,
+                                AbiClass::Memory
+                                    | AbiClass::X87
+                                    | AbiClass::X87Up
+                                    | AbiClass::ComplexX87
+                            )
+                        });
+                        if gp_idx + need_gp <= 6 && fp_idx + need_fp <= 8 && !mem_class {
                             for c in 0..chunks {
                                 let cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
                                 let chunk_off = off + c as i64 * 8;
@@ -6893,19 +6908,19 @@ impl Codegen {
                                         fp_idx += 1;
                                         self.variadic_named_fp += 1;
                                     }
-                                    AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
-                                        stack_param_stores.push((stack_arg_idx, chunk_off));
-                                        stack_arg_idx += 1;
-                                    }
-                                    AbiClass::NoClass => unreachable!(),
+                                    _ => unreachable!(),
                                 }
                             }
                         } else {
-                            // 寄存器不足: SysV revert 语义, 整个参数放栈, 游标不推进
+                            // 寄存器不足: SysV revert 语义, 整个参数放栈,
+                            // 游标不推进; 按类型对齐 (pr44942)
+                            let aligned =
+                                (stack_arg_off + agg_align - 1) & !(agg_align - 1);
                             for c in 0..chunks {
-                                stack_param_stores.push((stack_arg_idx, off + c as i64 * 8));
-                                stack_arg_idx += 1;
+                                stack_param_stores
+                                    .push((aligned + c as i64 * 8, off + c as i64 * 8));
                             }
+                            stack_arg_off = aligned + chunks as i64 * 8;
                             self.variadic_named_gp += need_gp as i32;
                             self.variadic_named_fp += need_fp as i32;
                         }
@@ -6922,9 +6937,11 @@ impl Codegen {
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 更新累加值: long double 占 16 字节
                         param_used_total += 16;
-                        stack_param_stores.push((stack_arg_idx, off));
-                        stack_param_stores.push((stack_arg_idx + 1, off + 8));
-                        stack_arg_idx += 2;
+                        // long double 16 字节对齐 (SysV ABI, pr44942)
+                        let aligned = (stack_arg_off + 15) & !15;
+                        stack_param_stores.push((aligned, off));
+                        stack_param_stores.push((aligned + 8, off + 8));
+                        stack_arg_off = aligned + 16;
                     } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
                         // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
                         // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
@@ -6942,8 +6959,8 @@ impl Codegen {
                             fp_idx += 1;
                             self.variadic_named_fp += 1;
                         } else {
-                            stack_param_stores.push((stack_arg_idx, off));
-                            stack_arg_idx += 1;
+                            stack_param_stores.push((stack_arg_off, off));
+                            stack_arg_off += 8;
                             self.variadic_named_fp += 1;
                         }
                     } else if gp_idx < 6 {
@@ -6973,14 +6990,16 @@ impl Codegen {
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 更新累加值: 标量参数占 8 字节
                         param_used_total += 8;
-                        stack_param_stores.push((stack_arg_idx, off));
-                        stack_arg_idx += 1;
+                        stack_param_stores.push((stack_arg_off, off));
+                        stack_arg_off += 8;
                         self.variadic_named_gp += 1;
                     }
                 }
             }
-            // 记录栈传参数量 (va_start overflow_arg_area 需要)
-            self.variadic_overflow_offset = 16 + 8 * stack_arg_idx as i64;
+            // 记录栈传参数量 (va_start overflow_arg_area 需要):
+            // overflow_arg_area 指向最后一个命名栈参数之后,
+            // 与 caller 的对齐布局一致
+            self.variadic_overflow_offset = 16 + stack_arg_off;
             // 将参数占用的栈空间计入 var_map_total_slots,
             // 使后续 register_var 运行时分配 (如 compound literal 临时变量)
             // 不会与参数栈槽重叠 (根因: compound lit temp 分配到参数 s 的
@@ -7132,11 +7151,12 @@ impl Codegen {
                     self.store_xmm64_stack(xmm, off);
                 }
             }
-            for (arg_index, off) in stack_param_stores {
+            for (arg_off, off) in stack_param_stores {
                 // 栈传参位于调用方栈顶: 经过 call 压入的返回地址与
-                // 被调方 push r13 后, 第一个栈参数位于 [r13 + 16 + 8*idx].
+                // 被调方 push r13 后, 第一个栈参数位于 [r13 + 16].
+                // arg_off 是字节偏移 (含对齐 padding, 与 caller 一致).
                 // (变参 overflow_arg_area 同样以 16 为基址 — 见 emit_va_start)
-                let incoming = 16i64 + 8 * arg_index as i64;
+                let incoming = 16i64 + arg_off;
                 self.load_stack(0, incoming);
                 self.store_stack(0, off);
             }
@@ -7667,13 +7687,10 @@ impl Codegen {
                 || gp + need_gp > gp_regs.len()
                 || fp + need_fp > 8;
             if force_mem {
-                // SysV ABI: long double 需要 16 字节对齐
-                let align = if matches!(effective_ty, Type::LongDouble) {
-                    (stack + 15) & !15
-                } else {
-                    (stack + 7) & !7
-                };
-                stack = align;
+                // SysV ABI: 栈参数按类型对齐 (long double/__int128/聚合 16, 标量 8)
+                let align = (effective_ty.align() as usize).max(8);
+                let aligned = (stack + align - 1) & !(align - 1);
+                stack = aligned;
                 let size = effective_ty.size().max(8);
                 let chunks = size.div_ceil(8);
                 locs.push((0..chunks).map(|i| ArgLoc::Stack(stack + i * 8)).collect());
