@@ -68,8 +68,9 @@ int main(void) {
     /* Boolean */
     CHECK_SIZEOF(_Bool, 1);
 
-    /* Enum */
-    CHECK_SIZEOF(enum { A, B, C }, 4);
+    /* Enum (花括号内的逗号不保护宏实参分隔, 用 typedef 避开) */
+    typedef enum { A, B, C } check_enum_t;
+    CHECK_SIZEOF(check_enum_t, 4);
 
     /* Alignof checks */
     CHECK_ALIGNOF(char, 1);

@@ -5027,6 +5027,32 @@ impl Preprocessor {
                                 );
                                 out.push_str(&rescanned);
                             } else {
+                                // 实参数量与形参数量不匹配: ISO C 6.10.3p4
+                                // 要求报错, GCC 输出
+                                //   macro "M" requires 2 arguments, but only 1 given
+                                //   macro "M" passed 3 arguments, but takes just 2
+                                // 旧实现静默保留裸标识符, 使 va_start(ap) 这类
+                                // 错误调用被静默吞掉 (对齐 GCC 行为改为硬错误)。
+                                let n_params = if def.variadic {
+                                    params.len().saturating_sub(1)
+                                } else {
+                                    params.len()
+                                };
+                                let msg = if raw_args.len() < n_params {
+                                    format!(
+                                        "macro \"{}\" requires {} arguments, but only {} given",
+                                        ident, n_params, raw_args.len()
+                                    )
+                                } else {
+                                    format!(
+                                        "macro \"{}\" passed {} arguments, but takes just {}",
+                                        ident,
+                                        raw_args.len(),
+                                        n_params
+                                    )
+                                };
+                                self.diags
+                                    .push(self.err_at("E0211", msg, map.line(nl)));
                                 out.push_str(&ident);
                             }
                             i = j;
