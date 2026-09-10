@@ -16020,8 +16020,15 @@ impl Codegen {
                         }
                     }
                     if is_mod {
-                        // 余数在 rdx, 移到 rcx
-                        self.emit(&[0x48, 0x89, 0xD1]); // mov rcx, rdx
+                        if elem_size == 1 {
+                            // 8 位除法余数在 ah (非 rdx): ror rax,8
+                            // 后取低字节
+                            self.emit(&[0x48, 0xC1, 0xC8, 0x08]); // ror rax, 8
+                            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                        } else {
+                            // 余数在 rdx, 移到 rcx
+                            self.emit(&[0x48, 0x89, 0xD1]); // mov rcx, rdx
+                        }
                     } else {
                         self.mov(1, 0); // rcx = 商 (rax)
                     }
