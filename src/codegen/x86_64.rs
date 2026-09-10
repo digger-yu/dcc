@@ -8508,14 +8508,7 @@ impl Codegen {
                     // else: condition is false, no labels, no else → skip
                 } else {
                     self.gen_expr(cond, 0);
-                    // 根据条件类型宽度选择 test 指令: 64 位类型必须用
-                    // test %rax,%rax (48 85 C0), 否则高 32 位非零值会被
-                    // test %eax,%eax (85 C0) 误判为零.
-                    if cond.ty().size() > 4 {
-                        self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
-                    } else {
-                        self.emit(&[0x85, 0xc0]); // test %eax, %eax
-                    }
+                    self.emit_truth_flags(&cond.ty());
                     let le = self.fresh_label();
                     let lend = self.fresh_label();
                     self.jmp_rel32(&le, JumpKind::Je);
@@ -8542,11 +8535,7 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 self.gen_expr(cond, 0);
-                if cond.ty().size() > 4 {
-                    self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
-                } else {
-                    self.emit(&[0x85, 0xc0]); // test %eax, %eax
-                }
+                self.emit_truth_flags(&cond.ty());
                 self.jmp_rel32(&le, JumpKind::Je);
                 self.gen_stmt(body);
                 self.jmp_rel32(&ls, JumpKind::Jmp);
@@ -8576,11 +8565,7 @@ impl Codegen {
                 self.label(&ls);
                 if let Some(c) = cond {
                     self.gen_expr(c, 0);
-                    if c.ty().size() > 4 {
-                        self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
-                    } else {
-                        self.emit(&[0x85, 0xc0]); // test %eax, %eax
-                    }
+                    self.emit_truth_flags(&c.ty());
                     self.jmp_rel32(&le, JumpKind::Je);
                 }
                 self.gen_stmt(body);
@@ -8605,11 +8590,7 @@ impl Codegen {
                 self.label(&ls);
                 self.gen_stmt(body);
                 self.gen_expr(cond, 0);
-                if cond.ty().size() > 4 {
-                    self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
-                } else {
-                    self.emit(&[0x85, 0xc0]); // test %eax, %eax
-                }
+                self.emit_truth_flags(&cond.ty());
                 self.jmp_rel32(&ls, JumpKind::Jne);
                 self.label(&le);
                 self.loop_continue = sc;
@@ -11741,7 +11722,7 @@ impl Codegen {
                 cond, then_, else_, ..
             } => {
                 self.gen_expr(cond, 0);
-                self.emit(&[0x85, 0xc0]);
+                self.emit_truth_flags(&cond.ty());
                 let le = self.fresh_label();
                 let lend = self.fresh_label();
                 self.jmp_rel32(&le, JumpKind::Je);
@@ -18687,10 +18668,20 @@ impl Codegen {
     /// 避免 gen_expr 占用 rcx 作暂存时覆盖目标地址。
     fn gen_complex_store_rcx(&mut self, r: &Expr, l_ty: &Type) {
         if let Type::Complex(ref inner) = *l_ty {
+            let result_off = -self.frame_size + 8;
             if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
                 self.gen_expr(r, 0);
                 self.pop(1); // rcx = 目标地址
                 self.store_complex_at_rcx(r, &inner.base);
+                // 统一 rvalue 约定收尾: [rcx] → result_off,
+                // xmm0=实部, rax=地址 (赋值表达式值消费端依赖)
+                self.mov(6, 1);
+                self.emit_lea_r13(7, result_off);
+                self.mov_imm(1, (inner.size() * 2) as i128);
+                self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+                let pfx = if matches!(inner.base, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                self.emit_lea_r13(0, result_off);
                 return;
             }
             let isz = inner.base.size() as i64;
@@ -18730,6 +18721,8 @@ impl Codegen {
             self.mov_imm(1, (isz * 2) as i128); // rcx = 字节数
             self.emit(&[0xFC]); // cld
             self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+            // 统一 rvalue 约定: result_off 已含结果, rax=地址
+            self.emit_lea_r13(0, result_off);
         }
     }
 
@@ -19664,6 +19657,107 @@ impl Codegen {
         let _ = total_sz;
     }
 
+    /// 复数赋值表达式收尾 (C11 6.5.16p3 赋值表达式的值 = 左值转换后
+    /// 的值): 目标变量已写入后, 按统一 complex rvalue 约定物化结果
+    /// 到 result_off (rax=地址, 浮点 inner 重载 xmm0=实部)。旧路径
+    /// 各分支直接 return, rax 残留垃圾, 条件/链式赋值消费端读到
+    /// 错误值 (960512-1: if (c = f()) 段错误/恒真)。
+    fn finish_complex_assign_value(
+        &mut self,
+        is_global_dst: bool,
+        dst_name: &str,
+        dst_off: i64,
+        dst_ty: &Type,
+    ) {
+        if let Type::Complex(inner) = dst_ty {
+            let total = inner.size() * 2;
+            let result_off = -self.frame_size + 8;
+            if let Some(&off) = self.vla_offsets.get(dst_name) {
+                self.load_stack(6, off);
+            } else if is_global_dst {
+                self.emit_global_addr(6, dst_name);
+            } else {
+                self.emit_lea_r13(6, dst_off);
+            }
+            self.emit_lea_r13(7, result_off);
+            self.mov_imm(1, total as i128);
+            self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+            if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble) {
+                let pfx = if matches!(inner.base, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+            }
+            self.emit_lea_r13(0, result_off);
+        }
+    }
+
+    /// 条件上下文真值测试: 条件求值后设置标志位, 供后续 Je/Jne 使用
+    /// (ZF=1 ⇔ 条件为假)。
+    /// 复数条件 (C11: real != 0 || imag != 0) 不能沿用标量 test
+    /// %rax — complex rvalue 统一约定 rax=result_off 槽地址 (恒非零),
+    /// 直接 test 会把所有复数条件判真 (960512-1: if (c = f()))。
+    /// 浮点分量按位与清除符号位后 or, 使 ±0.0 均判零。
+    fn emit_truth_flags(&mut self, ty: &Type) {
+        if let Type::Complex(inner) = ty {
+            let isz = inner.base.size();
+            let total = isz * 2;
+            match &inner.base {
+                Type::Float => {
+                    // 32 位浮点分量位模式: 清符号位后按位 or (±0.0 → 0)。
+                    // 不能用 eax 作目的地 — 32 位 load 零扩展会破坏 rax
+                    // 中的槽地址, 后续 [rax+isz] 变成对实部位模式解引用。
+                    self.emit(&[0x8B, 0x08]); // mov ecx, [rax] (实部)
+                    self.emit(&[0x8B, 0x50, isz as u8]); // mov edx, [rax+isz]
+                    self.emit(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]);
+                    self.emit(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]);
+                    self.emit(&[0x09, 0xD1]); // or ecx, edx
+                    self.emit(&[0x85, 0xC9]); // test ecx, ecx
+                }
+                Type::Double | Type::LongDouble => {
+                    self.emit(&[0x48, 0x8B, 0x08]); // mov rcx, [rax]
+                    self.emit(&[0x48, 0x8B, 0x50, isz as u8]); // mov rdx, [rax+isz]
+                    self.mov_imm(0, 0x7FFF_FFFF_FFFF_FFFFi128); // rax = 符号掩码
+                    self.emit(&[0x48, 0x21, 0xC1]); // and rcx, rax
+                    self.emit(&[0x48, 0x21, 0xC2]); // and rdx, rax
+                    self.emit(&[0x48, 0x09, 0xD1]); // or rcx, rdx
+                    self.emit(&[0x48, 0x85, 0xC9]); // test rcx, rcx
+                }
+                _ => {
+                    // 整数分量: 任一分量非零即真。result_off 8 字节
+                    // 对齐, ≤8 字节复数可一次整槽载入覆盖两分量。
+                    match total {
+                        16 => {
+                            self.emit(&[0x48, 0x8B, 0x08]); // mov rcx, [rax]
+                            self.emit(&[0x48, 0x0B, 0x48, isz as u8]); // or rcx, [rax+isz]
+                            self.emit(&[0x48, 0x85, 0xC9]); // test rcx, rcx
+                        }
+                        8 => {
+                            self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                            self.emit(&[0x48, 0x85, 0xC0]);
+                        }
+                        4 => {
+                            self.emit(&[0x8B, 0x00]); // mov eax, [rax]
+                            self.emit(&[0x85, 0xC0]);
+                        }
+                        _ => {
+                            // total==2 (_Complex char 等)
+                            self.emit(&[0x0F, 0xB7, 0x00]); // movzx eax, word [rax]
+                            self.emit(&[0x85, 0xC0]);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // 根据条件类型宽度选择 test 指令: 64 位类型必须用
+        // test %rax,%rax (48 85 C0), 否则高 32 位非零值会被
+        // test %eax,%eax (85 C0) 误判为零.
+        if ty.size() > 4 {
+            self.emit(&[0x48, 0x85, 0xc0]); // test %rax, %rax
+        } else {
+            self.emit(&[0x85, 0xc0]); // test %eax, %eax
+        }
+    }
+
     /// 发射 xmm0 <-> [r13+off] 的 movss/movsd, 正确处理 disp8/disp32 编码.
     /// opcode: 不含 ModRM 的完整前缀+操作码 (如 [0xF3,0x49,0x0F,0x10])
     fn emit_xmm0_r13_disp(&mut self, opcode: &[u8], off: i64) {
@@ -20383,6 +20477,11 @@ impl Codegen {
                                 self.emit_store(0, dst_off + isz, isz as usize);
                             }
                         }
+                        // 赋值表达式值 = 左值转换后的值: 按统一 complex
+                        // rvalue 约定物化结果 (960512-1: if (c = f()))
+                        self.finish_complex_assign_value(
+                            is_global_dst, dst_name, dst_off, dst_ty,
+                        );
                         return;
                     }
                 }
@@ -20480,6 +20579,9 @@ impl Codegen {
                                 self.emit(&[0xF3, 0xA4]); // rep movsb
                             }
                         }
+                        // 赋值表达式值 = 左值转换后的值: result_off 已含
+                        // 结果, 补齐 rax=地址约定 (960512-1: if (c = f()))
+                        self.emit_lea_r13(0, result_off);
                         return;
                     }
                 }
