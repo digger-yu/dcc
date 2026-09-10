@@ -1764,14 +1764,30 @@ impl Codegen {
         }
     }
 
+    /// 成员访问的基类型解析: `->` 时解引用指针, 并兼容数组到首元素
+    /// 指针的隐式衰减 (C11 6.5.2.1: s->m 等价 (*s).m, s 可为数组).
+    /// 此前仅处理 Type::Ptr: 当基址是数组 (如 struct T s[1]; s->c)
+    /// 时 find_field 返回 None, 字段偏移与位域提取全部丢失.
+    fn member_target_ty(expr_ty: Type, is_arrow: bool) -> Type {
+        if !is_arrow {
+            return expr_ty;
+        }
+        match &expr_ty {
+            Type::Ptr(p) => p.base.clone(),
+            Type::Array(elem, _) => elem.base.clone(),
+            _ => expr_ty,
+        }
+    }
+
     /// 如果表达式是位域成员访问, 返回位域宽度; 否则返回 None.
     /// 用于移位运算后掩码结果到正确的位域宽度.
     fn expr_bitfield_width(e: &Expr) -> Option<u32> {
         if let Expr::Member { expr: inner, field, .. } = e {
             let inner_ty = inner.ty();
-            // 指针解引用: 取所指类型
+            // 指针解引用: 取所指类型 (兼容数组隐式衰减)
             let struct_ty: &Type = match &inner_ty {
                 Type::Ptr(p) => &p.base,
+                Type::Array(elem, _) => &elem.base,
                 other => other,
             };
             match struct_ty {
@@ -10027,15 +10043,7 @@ impl Codegen {
                     // 1. 查找字段信息 (支持匿名 struct/union)
                     //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
                     let expr_ty = expr.ty();
-                    let target_ty = if *is_arrow {
-                        if let Type::Ptr(p) = &expr_ty {
-                            p.base.clone()
-                        } else {
-                            expr_ty
-                        }
-                    } else {
-                        expr_ty
-                    };
+                    let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -11962,15 +11970,7 @@ impl Codegen {
                     }
                     // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                     let expr_ty = expr.ty();
-                    let target_ty = if *is_arrow {
-                        if let Type::Ptr(p) = &expr_ty {
-                            p.base.clone()
-                        } else {
-                            expr_ty
-                        }
-                    } else {
-                        expr_ty
-                    };
+                    let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -12165,15 +12165,7 @@ impl Codegen {
                 // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
                 //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
                 let expr_ty = expr.ty();
-                let target_ty = if *is_arrow {
-                    if let Type::Ptr(p) = &expr_ty {
-                        p.base.clone()
-                    } else {
-                        expr_ty
-                    }
-                } else {
-                    expr_ty
-                };
+                let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                 let field_info = match &target_ty {
                     Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                         find_field(fields, &field.name).map(|(f, extra)| {
@@ -19787,15 +19779,7 @@ impl Codegen {
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
-                let target_ty = if *is_arrow {
-                    if let Type::Ptr(p) = &expr_ty {
-                        p.base.clone()
-                    } else {
-                        expr_ty
-                    }
-                } else {
-                    expr_ty
-                };
+                let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                 let field_off = match &target_ty {
                     Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
