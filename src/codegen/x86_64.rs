@@ -12345,6 +12345,30 @@ impl Codegen {
                                 self.emit(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                             }
                         }
+                    } else if let Type::Complex(inner) = &f.ty {
+                        // 复数字段: 按 complex rvalue 统一约定物化到
+                        // result_off (rax=地址)。不能按标量加载到 dst —
+                        // spill/比较端把 rax 当源地址 rep movsb, 标量加载
+                        // 会让它以位模式值为指针 (foo().x 段错误)。
+                        let isz = inner.base.size();
+                        let result_off = -self.frame_size + 8;
+                        self.mov(6, dst); // rsi = 字段地址
+                        self.emit_lea_r13(7, result_off); // rdi = 物化槽
+                        self.mov_imm(1, (isz * 2) as i128);
+                        self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+                        if matches!(
+                            inner.base,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) {
+                            // 浮点 inner 结果约定: xmm0 = 实部
+                            let pfx = if matches!(inner.base, Type::Float) {
+                                0xF3u8
+                            } else {
+                                0xF2u8
+                            };
+                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                        }
+                        self.emit_lea_r13(0, result_off);
                     } else {
                         // 普通字段: 直接加载
                         let size = f.ty.size();
@@ -18996,12 +19020,29 @@ impl Codegen {
                     self.jmp_rel32(&false_label, JumpKind::Jne);
                 } else {
                     // 整数 complex: 按内型宽度比较实虚部
-                    if inner_sz == 4 {
-                        // [rsp+0..8) 连续含实部+虚部, 单次 8 字节比较覆盖两者
-                        // (否则虚部之后的 4 字节垃圾会污染第二次比较)
-                        self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp+0]
-                        self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov rcx, [rsp+total]
-                        self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+                    if inner_sz <= 4 {
+                        // [rsp+0..total) 连续含实部+虚部, 单次整槽比较覆盖
+                        // 两者 (否则槽尾垃圾会污染后续分量比较):
+                        // inner=4 → 8B, inner=2 → 4B, inner=1 → 2B。
+                        // 旧实现仅处理 inner=4, inner<4 时 8B 读取越过槽尾,
+                        // 邻接垃圾导致 _Complex short/char 比较误判 (foo().x)。
+                        match inner_sz {
+                            4 => {
+                                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp+0]
+                                self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov rcx, [rsp+total]
+                                self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+                            }
+                            2 => {
+                                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp+0]
+                                self.emit(&[0x8B, 0x4C, 0x24, total_sz as u8]); // mov ecx, [rsp+total]
+                                self.emit(&[0x39, 0xC8]); // cmp eax, ecx
+                            }
+                            _ => {
+                                self.emit(&[0x66, 0x8B, 0x04, 0x24]); // mov ax, [rsp+0]
+                                self.emit(&[0x66, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov cx, [rsp+total]
+                                self.emit(&[0x66, 0x39, 0xC8]); // cmp ax, cx
+                            }
+                        }
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                     } else {
                         // 8 字节内型: 实部/虚部各占独立 8 字节, 分两次比较
