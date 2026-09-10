@@ -12187,31 +12187,25 @@ impl Codegen {
                             let is_compound = matches!(expr.as_ref(), Expr::CompoundLit { .. });
                             if matches!(expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) && !is_compound {
                                 let struct_size = expr_ty.size();
-                                // Allocate temp space on stack: sub rsp, aligned_size
-                                let aligned = (struct_size + 7) & !7;
-                                let rex_sub = 0x48u8;
-                                self.emit(&[rex_sub, 0x81, 0xEC]);
-                                self.emit(&(aligned as u32).to_le_bytes());
-                                // Store dst (struct value) to [rsp]
-                                // SysV ABI returns structs <=16 bytes in rax/rdx.
-                                // For structs <=8 bytes, the entire value is in rax.
-                                // Store it based on the aligned size to avoid partial writes.
-                                if struct_size <= 8 {
-                                    match aligned {
-                                        1 => self.emit(&[0x40, 0x88, 0x04, 0x24]), // mov [rsp], al
-                                        2 => self.emit(&[0x66, 0x89, 0x04, 0x24]), // mov [rsp], ax
-                                        4 => self.emit(&[0x89, 0x04, 0x24]),       // mov [rsp], eax
-                                        8 => self.emit(&[0x48, 0x89, 0x04, 0x24]), // mov [rsp], rax
-                                        _ => self.emit(&[0x48, 0x89, 0x04, 0x24]), // default to 8 bytes
-                                    }
+                                // 物化到帧临时区 result_off (r13 相对)。
+                                // 不能用动态 sub rsp 槽: 该槽在表达式求值
+                                // 期间从不回收, 泄漏使后续 rsp 相对寻址
+                                // (emit_sysv_call 的参数暂存槽/对齐垫) 全部
+                                // 错位 — f().a 作 printf 实参时段错误/乱码。
+                                // SysV ABI: >16B (MEMORY 类) 返回时 rax 已是
+                                // 被调方写入的 sret 缓冲地址, 无需物化。
+                                if struct_size > 16 {
+                                    // dst (rax) 已指向返回值, 保持不变
                                 } else {
-                                    // SysV ABI: struct >8B && <=16B returned in rax:rdx
-                                    // Store both registers to spill area
-                                    self.emit(&[0x48, 0x89, 0x04, 0x24]); // mov [rsp], rax
-                                    self.emit(&[0x48, 0x89, 0x54, 0x24, 0x08]); // mov [rsp+8], rdx
+                                    // <=8B 全值在 rax; >8B 且 <=16B 在 rax:rdx
+                                    let result_off = -self.frame_size + 8;
+                                    self.emit_store(0, result_off, 8);
+                                    if struct_size > 8 {
+                                        self.emit_store(2, result_off + 8, 8);
+                                    }
+                                    // dst = 指向物化后的 struct 值
+                                    self.emit_lea_r13(dst, result_off);
                                 }
-                                // dst = rsp (address of spilled struct)
-                                self.emit(&[0x48 | if dst >= 8 { 0x04 } else { 0 }, 0x89, 0xE0 | (dst & 7)]);
                             }
                         }
                     }
