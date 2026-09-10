@@ -2532,6 +2532,7 @@ mod tests {
                     span: span.clone(),
                 }),
                 span: span.clone(),
+                vla_dim: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -3003,12 +3004,14 @@ mod tests {
                     name: Some(Ident { name: "x".into(), span: sp.clone() }),
                     ty: int_ty(),
                     span: sp.clone(),
+                    vla_dim: None,
                 },
                 crate::ast::Param {
                     quals: crate::ast::QualifierFlags::NONE,
                     name: Some(Ident { name: "y".into(), span: sp.clone() }),
                     ty: int_ty(),
                     span: sp.clone(),
+                    vla_dim: None,
                 },
             ],
             body: Some(Block {

@@ -242,6 +242,11 @@ pub struct Param {
     pub span: Span,
     /// ISO C 限定符 (const/volatile/restrict) 附着在该参数上
     pub quals: QualifierFlags,
+    /// 数组参数退化时丢弃的最外层 VLA 维度表达式。
+    /// C11 6.9.1p10: 形参声明中的可变长维度在每次调用入口求值
+    /// (副作用生效), 如 `int f(int i, int a[i++])` 的 i++。
+    /// 多维时仅最外层被丢弃 (内层维度保留在 Ptr(Array(...)) 中)。
+    pub vla_dim: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone)]

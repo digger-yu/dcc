@@ -639,6 +639,7 @@ fn rewrite_function_params(
                             span: param.span.clone(),
                         }),
                         span: param.span.clone(),
+                        vla_dim: None,
                     });
                 }
             }
@@ -1130,6 +1131,7 @@ mod tests {
                     span: span_zero(),
                 }),
                 span: span_zero(),
+                vla_dim: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1237,6 +1239,7 @@ mod tests {
                     span: span_zero(),
                 }),
                 span: span_zero(),
+                vla_dim: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Expr {
@@ -1344,6 +1347,7 @@ mod tests {
                     span: span_zero(),
                 }),
                 span: span_zero(),
+                vla_dim: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1480,6 +1484,7 @@ mod tests {
                     span: span_zero(),
                 }),
                 span: span_zero(),
+                vla_dim: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {

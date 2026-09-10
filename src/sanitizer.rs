@@ -3151,6 +3151,7 @@ mod tests {
                     ty: Type::Int,
                     name: None,
                     span: Span::point("t.c", 1, 1),
+                    vla_dim: None,
                 }],
                 body: None,
                 span: Span::point("t.c", 1, 1),

@@ -585,14 +585,14 @@ impl<'a> Parser<'a> {
     /// 登记 typedef；GCC 允许兼容或整型别名的重复 typedef（宿主头文件常见）
     fn register_typedef(&mut self, name: &Ident, ty: Type) -> bool {
         if let Some(existing) = self.typedefs.get(&name.name) {
-            if Self::types_compatible(existing, &ty) {
-                return true;
-            }
-            if Self::is_integer_typedef(existing) && Self::is_integer_typedef(&ty) {
-                self.typedefs.insert(name.name.clone(), ty);
-                return true;
-            }
-            if Self::typedef_redef_allowed(existing, &ty) {
+            if Self::types_compatible(existing, &ty)
+                || (Self::is_integer_typedef(existing) && Self::is_integer_typedef(&ty))
+                || Self::typedef_redef_allowed(existing, &ty)
+            {
+                // 允许的重定义必须覆盖旧类型: typedef 有块作用域, 不同
+                // 函数的同名 typedef (如 20040423-1 的匿名 VM struct) 各自
+                // 的使用点应解析到最近一次定义, 否则后面的函数会误用
+                // 前一个函数的 VLA 结构类型
                 self.typedefs.insert(name.name.clone(), ty);
                 return true;
             }
@@ -7300,6 +7300,7 @@ impl<'a> Parser<'a> {
                         span: Span::point("", 0, 0),
                     }),
                     span: Span::point("", 0, 0),
+                    vla_dim: None,
                     quals: QualifierFlags::NONE,
                 });
             }
@@ -7442,6 +7443,7 @@ impl<'a> Parser<'a> {
                     ty,
                     name: nm,
                     span: param_span,
+                    vla_dim: None,
                     quals: QualifierFlags::NONE,
                 });
                 if self.cur.kind == TokKind::Comma {
@@ -7488,6 +7490,7 @@ impl<'a> Parser<'a> {
                     ty,
                     name: nm,
                     span: param_span,
+                    vla_dim: None,
                     quals: QualifierFlags::NONE,
                 });
                 if self.cur.kind == TokKind::Comma {
@@ -7538,6 +7541,7 @@ impl<'a> Parser<'a> {
                     ty,
                     name: Some(id),
                     span: param_span,
+                    vla_dim: None,
                     quals: QualifierFlags::NONE,
                 });
                 if self.cur.kind == TokKind::Comma {
@@ -7580,6 +7584,10 @@ impl<'a> Parser<'a> {
             }
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
+            // 最外层 (首个) 数组维度为运行时表达式时记录: 退化成指针后
+            // 该维度被丢弃, 但其副作用 (如 i++) 需在函数入口求值
+            // (C11 6.9.1p10)。声明在此处 (LBracket 分支外) 以供 Param 构造读取
+            let mut outermost_vla_dim: Option<Box<Expr>> = None;
             if self.cur.kind == TokKind::LBracket {
                 // 多维数组参数按 C11 6.7.6.2p4 从内向外结合: `int a[][3]`
                 // 是"未知行数的 int[3]", 收集维度后反转包裹. 参数退化时只
@@ -7620,6 +7628,11 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RBracket, "']'") {
                         return None;
                     }
+                    if arr_sizes.is_empty() {
+                        if let ArraySize::Var(se) = &arr_size {
+                            outermost_vla_dim = Some(se.clone());
+                        }
+                    }
                     arr_sizes.push(arr_size);
                 }
                 for sz in arr_sizes.into_iter().rev() {
@@ -7639,6 +7652,7 @@ impl<'a> Parser<'a> {
                 name: nm,
                 span: self.cur.span.clone(),
                 quals: QualifierFlags::NONE,
+                vla_dim: outermost_vla_dim.take(),
             });
             if self.cur.kind == TokKind::Comma {
                 self.advance();

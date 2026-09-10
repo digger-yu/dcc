@@ -6609,6 +6609,10 @@ impl Codegen {
         self.var_map.clear();
         self.var_map_total_slots = 0;
         self.vla_offsets.clear();
+        // VM 类型尺寸绑定槽是每函数帧内状态 (槽偏移在各函数独立
+        // 分配), 跨函数残留会导致 sizeof 读到别的函数帧的槽
+        // (20040423-1: 匿名 struct 的空 tag 在 main/sub1 同 key)
+        self.vm_struct_size_slots.clear();
         self.reg_bindings.clear();
         self.reg_bindings.extend(self.global_reg_bindings.clone());
         self.cleanup_vars.clear();
@@ -6719,6 +6723,9 @@ impl Codegen {
         // 已退化为 Ptr(Array(Char, Var(++N))), 维度表达式保留但需在
         // 序言求值 (C11 6.9.1p10: 每次调用求值, 副作用生效)
         let mut vla_param_dims: Vec<(String, Expr, usize)> = Vec::new();
+        // 一维 VLA 形参被丢弃的最外层维度表达式 (Param::vla_dim):
+        // 仅需在入口求值副作用, 不影响类型语义 (C11 6.9.1p10)
+        let mut param_dim_effects: Vec<Expr> = Vec::new();
         if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方).
             // 使用 var_map_total_slots 累加器替代 O(n) 遍历.
@@ -6771,6 +6778,9 @@ impl Codegen {
                                 elem.base.size(),
                             ));
                         }
+                    }
+                    if let Some(se) = &p.vla_dim {
+                        param_dim_effects.push((**se).clone());
                     }
                     // __int128 / 聚合体按 8 字节块占用 GP 寄存器或栈槽
                     // 所有 struct/union/array 均走聚合路径, 确保 SSE 类
@@ -7132,6 +7142,11 @@ impl Codegen {
         // 调用生效 (C11 6.9.1p10); 行大小 = 维度表达式值 * 元素大小,
         // 存入形参指针槽前 off-8 的 stride 槽, 供 sizeof(a[i]) 与索引
         // 步长读取声明时绑定的行大小 (C11 6.2.4p7)。
+        // 一维 VLA 形参维度副作用求值 (声明顺序, 先于 stride 求值:
+        // 多维参数的内层维度表达式可能依赖外层维度副作用后的值)
+        for se in &param_dim_effects {
+            self.gen_expr(se, 0);
+        }
         for (pname, se, elem_sz) in &vla_param_dims {
             let off = self.var_offset(pname);
             self.gen_expr(se, 0);
@@ -10041,13 +10056,20 @@ impl Codegen {
                             self.emit_global_addr(0, &name.name);
                         } else {
                             let off = self.var_offset(&name.name);
-                            // LEA rax, [r13 + off]
-                            self.emit(&[0x49, 0x8D]);
-                            if off.abs() < 128 {
-                                self.emit(&[0x45, off as i8 as u8]); // mod=01, rm=r13
+                            // VLA/VM struct 变量: [off] 存数据基址, 须加载
+                            // 而非 lea 槽地址 (否则寻址到元数据槽,
+                            // pr82210: s.a[i].c 写坏基址槽)
+                            if self.vla_offsets.contains_key(&name.name) {
+                                self.load_stack(0, off);
                             } else {
-                                self.emit(&[0x85]); // mod=00, rm=r13
-                                self.emit(&(off as i32).to_le_bytes());
+                                // LEA rax, [r13 + off]
+                                self.emit(&[0x49, 0x8D]);
+                                if off.abs() < 128 {
+                                    self.emit(&[0x45, off as i8 as u8]); // mod=01, rm=r13
+                                } else {
+                                    self.emit(&[0x85]); // mod=00, rm=r13
+                                    self.emit(&(off as i32).to_le_bytes());
+                                }
                             }
                         }
                     } else if !self.gen_lvalue_addr(expr, 0) {
@@ -11044,7 +11066,8 @@ impl Codegen {
                                 }
                             }
                             // dst += rcx
-                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                            // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                             self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
                             // 下降到元素类型
                             cur_ty = elem.base.clone();
@@ -12079,13 +12102,20 @@ impl Codegen {
                             self.emit_global_addr(dst, &name.name);
                         } else {
                             let off = self.var_offset(&name.name);
-                            let rex = 0x49u8;
-                            self.emit(&[rex, 0x8D]);
-                            if off.abs() < 128 {
-                                self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                            // VLA/VM struct 变量: [off] 存数据基址, 须加载
+                            // 而非 lea 槽地址 (否则寻址到元数据槽,
+                            // pr82210: s.a[i].c 写坏基址槽)
+                            if self.vla_offsets.contains_key(&name.name) {
+                                self.load_stack(dst, off);
                             } else {
-                                self.emit(&[0x85 | ((dst & 7) << 3)]);
-                                self.emit(&(off as i32).to_le_bytes());
+                                let rex = 0x49u8;
+                                self.emit(&[rex, 0x8D]);
+                                if off.abs() < 128 {
+                                    self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                                } else {
+                                    self.emit(&[0x85 | ((dst & 7) << 3)]);
+                                    self.emit(&(off as i32).to_le_bytes());
+                                }
                             }
                         }
                     } else {
@@ -12154,12 +12184,18 @@ impl Codegen {
                     }
                     _ => None,
                 };
-                if let Some(ref f) = field_info {
-                    let field_off = f.offset as i32;
-                    if field_off != 0 {
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                        self.emit(&field_off.to_le_bytes());
+                // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
+                // pr82210): 偏移已加到 dst, 跳过静态偏移加法
+                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _))
+                    && self.gen_vm_member_offset(&target_ty, &field.name, dst);
+                if !vm_off_done {
+                    if let Some(ref f) = field_info {
+                        let field_off = f.offset as i32;
+                        if field_off != 0 {
+                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&field_off.to_le_bytes());
+                        }
                     }
                 }
                 // 3. 加载成员值 (位域 vs 普通)
@@ -16604,11 +16640,13 @@ impl Codegen {
                         acc_open = true;
                     } else {
                         // 动态区: dst = align_up(dst, fa) + sizeof(f)
+                        // add/and r/m64=dst, imm32: dst>=8 需 REX.B(0x01)
                         if fa > 1 {
                             let m = (fa - 1) as i128;
-                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                            self.emit(&m.to_le_bytes());
+                            // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
+                            self.emit(&(m as u32).to_le_bytes());
                             self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
                             self.emit(&(!m as u64 as u32).to_le_bytes());
                         }
@@ -16619,7 +16657,7 @@ impl Codegen {
                                 | if dst >= 8 { 0x01 } else { 0 };
                             self.emit(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         } else {
-                            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                             self.emit(&(f.ty.size() as u32).to_le_bytes());
                         }
@@ -16630,9 +16668,11 @@ impl Codegen {
                     self.mov_imm(dst, ty.size() as i128);
                 } else if *salign > 1 {
                     let m = (*salign - 1) as i128;
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    // add/and r/m64=dst, imm32: dst>=8 需 REX.B(0x01)
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                    self.emit(&m.to_le_bytes());
+                    // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
+                    self.emit(&(m as u32).to_le_bytes());
                     self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
                     self.emit(&(!m as u64 as u32).to_le_bytes());
                 }
@@ -16677,6 +16717,112 @@ impl Codegen {
             }
             _ => self.mov_imm(dst, ty.size() as i128),
         }
+    }
+
+    /// VM struct (含 VLA 字段的局部 struct) 成员运行时偏移: 静态布局
+    /// 把 VLA 字段按退化大小计算 (Type::size() 对 Array(_, Var) 返回
+    /// 8), 首个 VLA 字段之后的字段偏移与运行时布局 (gen_sizeof_runtime
+    /// Struct 分支的 align_up + sizeof 累加规则) 不一致 (pr82210:
+    /// `struct T a[n]; int b[n]` 的 b 静态偏移 8 落入 a 的运行时区域)。
+    /// 本函数求值目标字段相对 struct 基址的运行时偏移并加到 dst
+    /// (dst 持基址, 全程不动)。仅当类型为 VM 绑定实例 (vm_size_slot
+    /// 有槽) 且目标字段位于首个 VLA 字段之后 (含自身) 时生效并返回
+    /// true; 否则返回 false, 调用方走静态偏移路径 (union 成员偏移恒
+    /// 为 0, 静态即正确)。
+    /// 求值顺序: 各 VLA 字段 sizeof 按声明顺序求值到独立栈槽
+    /// (C 副作用顺序), 再纯算术累加 (求值期间累计值不驻留寄存器,
+    /// 避免 gen_expr 的 scratch 破坏)。
+    fn gen_vm_member_offset(&mut self, ty: &Type, field_name: &str, dst: u8) -> bool {
+        let fields = match ty {
+            Type::Struct(_, fields, _) => fields,
+            _ => return false,
+        };
+        if self.vm_size_slot(ty).is_none() {
+            return false;
+        }
+        let Some(tf_idx) = fields.iter().position(|f| f.name == field_name) else {
+            return false; // 匿名穿透 (find_field extra) 场景: 交静态路径
+        };
+        let Some(fv_idx) = fields.iter().position(|f| f.ty.has_vla()) else {
+            return false;
+        };
+        if fields[tf_idx].offset < fields[fv_idx].offset {
+            // 目标在首个 VLA 字段之前: 静态前缀编译期正确
+            return false;
+        }
+        // 累计器避开 dst (dst 持基址, 最后 add dst, acc 不能自加)
+        let acc: u8 = if dst == 10 { 9 } else { 10 };
+        // add acc, r11: opcode 01 /r, r/m=acc(B), reg=r11(R)
+        // REX.W|R|B: 源 r11 需 REX.R, 累计器 r9/r10 需 REX.B
+        let rex_ar = 0x4C | if acc >= 8 { 0x01 } else { 0 };
+        let add_acc_r11 = [rex_ar, 0x01, 0xC0 | (3 << 3) | (acc & 7)];
+        // 阶段 1: 按声明顺序求值 [fv, tf) 内各 VLA 字段 sizeof 到栈槽
+        let mut slots: Vec<i64> = Vec::new();
+        for f in fields.iter().take(tf_idx).skip(fv_idx) {
+            if !f.ty.has_vla() {
+                continue;
+            }
+            let slot = self.alloc_sret_slot(8);
+            self.gen_sizeof_runtime(&f.ty, 11);
+            self.store_stack(11, slot);
+            slots.push(slot);
+        }
+        // 阶段 2: 纯算术累加 (无 gen_expr)
+        let fv = &fields[fv_idx];
+        let fa0 = fv.field_align.unwrap_or(fv.ty.align()).max(1);
+        self.mov_imm(acc, ((fv.offset + fa0 - 1) & !(fa0 - 1)) as i128);
+        let mut slot_iter = slots.iter();
+        if tf_idx != fv_idx {
+            let s0 = *slot_iter.next().unwrap();
+            self.load_stack(11, s0);
+            self.emit(&add_acc_r11);
+        }
+        for f in fields
+            .iter()
+            .skip(fv_idx + 1)
+            .take(tf_idx.saturating_sub(fv_idx + 1))
+        {
+            let fa = f.field_align.unwrap_or(f.ty.align()).max(1);
+            if fa > 1 {
+                let m = (fa - 1) as i128;
+                // add/and r/m64=acc, imm32: acc>=8 需 REX.B(0x01)
+                let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };
+                self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
+                // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
+                self.emit(&(m as u32).to_le_bytes());
+                self.emit(&[rex, 0x81, 0xE0 | (acc & 7)]);
+                self.emit(&(!m as u64 as u32).to_le_bytes());
+            }
+            if f.ty.has_vla() {
+                let s = *slot_iter.next().unwrap();
+                self.load_stack(11, s);
+                self.emit(&add_acc_r11);
+            } else {
+                let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };
+                self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
+                self.emit(&(f.ty.size() as u32).to_le_bytes());
+            }
+        }
+        // 目标字段偏移 = align_up(acc, tf 对齐)
+        let tfa = fields[tf_idx]
+            .field_align
+            .unwrap_or(fields[tf_idx].ty.align())
+            .max(1);
+        if tfa > 1 {
+            let m = (tfa - 1) as i128;
+            // add/and r/m64=acc, imm32: acc>=8 需 REX.B(0x01)
+            let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
+            self.emit(&(m as u32).to_le_bytes());
+            self.emit(&[rex, 0x81, 0xE0 | (acc & 7)]);
+            self.emit(&(!m as u64 as u32).to_le_bytes());
+        }
+        // dst += acc: opcode 01 /r, r/m=dst(B), reg=acc(R)
+        let rex = 0x48
+            | if acc >= 8 { 0x04 } else { 0 }
+            | if dst >= 8 { 0x01 } else { 0 };
+        self.emit(&[rex, 0x01, 0xC0 | ((acc & 7) << 3) | (dst & 7)]);
+        true
     }
 
     /// imul reg, reg, imm32 (64 位)
@@ -17088,6 +17234,24 @@ impl Codegen {
     /// 关键修复: 全局判定使用 resolve_global_key 解析 static local -> mangled 名,
     /// 避免源名称与文件级全局同名时的错误路由。
     fn emit_ident_base_addr(&mut self, name: &str, arr_ty: &Type, dst: u8) {
+        // 嵌套函数 upvar 数组/VLA: 对象在定义父帧中。VLA/VM struct 的
+        // 父帧 [off] 是元数据槽, 槽内容才是数据基址 (二次加载);
+        // 普通数组/向量的父帧+off 即数据地址 (921017-1: 嵌套函数
+        // g 读外层 VLA a, 无此分支会懒分配本帧垃圾槽)。
+        if self.current_func_is_nested && self.upvar_offsets.contains_key(name) {
+            let parent_off = self.upvar_offsets.get(name).copied().unwrap_or(0);
+            if Self::type_has_vla(arr_ty) {
+                self.load_upvar(dst, parent_off, 8);
+            } else {
+                self.load_stack(dst, self.static_chain_offset); // dst = 父帧
+                if parent_off != 0 {
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                    self.emit(&(parent_off as i32).to_le_bytes());
+                }
+            }
+            return;
+        }
         if self.vla_offsets.contains_key(name) {
             // VLA: 基址存储在变量栈槽中
             let off = self.var_offset(name);
@@ -19577,7 +19741,27 @@ impl Codegen {
     /// `s.i[k]`, `p->arr[i].f`, `(*q).buf[n]`. 返回 false 表示无法处理.
     fn gen_lvalue_addr(&mut self, e: &Expr, dst: u8) -> bool {
         match e {
-            Expr::Ident { name, .. } => {
+            Expr::Ident { name, ty, .. } => {
+                // 嵌套函数 upvar: 对象在定义父帧中 (VLA 二次加载基址,
+                // 其余取父帧+off 地址), 详见 emit_ident_base_addr 注释
+                if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name) {
+                    let parent_off = self
+                        .upvar_offsets
+                        .get(&name.name)
+                        .copied()
+                        .unwrap_or(0);
+                    if Self::type_has_vla(ty) {
+                        self.load_upvar(dst, parent_off, 8);
+                    } else {
+                        self.load_stack(dst, self.static_chain_offset);
+                        if parent_off != 0 {
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&(parent_off as i32).to_le_bytes());
+                        }
+                    }
+                    return true;
+                }
                 if self.is_global_var(&name.name) {
                     self.emit_global_addr(dst, &name.name);
                 } else if self.vla_offsets.contains_key(&name.name) {
@@ -19618,6 +19802,13 @@ impl Codegen {
                     }
                     _ => None,
                 };
+                // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
+                // pr82210): 偏移已加到 dst, 跳过静态偏移加法
+                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _))
+                    && self.gen_vm_member_offset(&target_ty, &field.name, dst);
+                if vm_off_done {
+                    return true;
+                }
                 if let Some(off) = field_off {
                     let off = off as i32;
                     if off != 0 {
