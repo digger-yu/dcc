@@ -23457,7 +23457,158 @@ impl Codegen {
                         self.emit(&[0x48, 0x29, 0xd0]); // sub rax, rdx
                     }
                     "__builtin_mul_overflow" => {
-                        self.emit(&[0x48, 0x0f, 0xaf, 0xc1]); // imul rax, rcx
+                        // GCC 语义 (fold_builtin_arith_overflow): 操作数按
+                        // 自身类型的值在无限精度下相乘 (无中间 usual
+                        // conversion); 溢出 = 数学积不能被 *res 类型表示;
+                        // 存储值为积 wrap 到 res 类型.
+                        // 精确路径: 各输入按自身类型扩展到 64 位, 128 位乘法
+                        // (mul/imul) 得到 rdx:rax = 数学积的精确补码表示, 再按
+                        // res 宽度/符号判断 fit. 同号乘法才可用单指令; 混合
+                        // 符号与 __int128 输入退回硬件标志近似.
+                        let a_uns = !Self::is_signed_int(&args[0].ty());
+                        let b_uns = !Self::is_signed_int(&args[1].ty());
+                        let op_sz = args[0].ty().size().max(args[1].ty().size()).max(4);
+                        if op_sz >= 16 {
+                            // __int128 输入: 128×128 乘积需 256 位精度才能
+                            // 精确判溢出, 退回硬件近似 (imul 低 64 位 + 标志)
+                            self.emit(&[0x48, 0x0f, 0xaf, 0xc1]); // imul rax, rcx
+                            self.emit(&[0x48, 0x99]); // cqo: rdx = 近似积高 64
+                            let res_ty = match &args[2].ty() {
+                                Type::Ptr(p) => p.base.clone(),
+                                other => other.clone(),
+                            };
+                            let res_sz = res_ty.size();
+                            if res_sz >= 16 {
+                                self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                                self.emit(&[0x49, 0x89, 0x52, 0x08]); // mov [r10+8], rdx
+                            } else if res_sz == 8 {
+                                self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                            } else if res_sz == 4 {
+                                self.emit(&[0x41, 0x89, 0x02]); // mov [r10], eax
+                            } else if res_sz == 2 {
+                                self.emit(&[0x66, 0x41, 0x89, 0x02]); // mov [r10], ax
+                            } else {
+                                self.emit(&[0x41, 0x88, 0x02]); // mov [r10], al
+                            }
+                            if Self::is_signed_int(&res_ty) {
+                                self.emit(&[0x0f, 0x90, 0xc2]); // seto dl
+                            } else {
+                                self.emit(&[0x0f, 0x92, 0xc2]); // setc dl
+                            }
+                            self.emit(&[0x0f, 0xb6, 0xc2]); // movzx eax, dl
+                            if dst != 0 {
+                                self.mov(dst, 0);
+                            }
+                            return true;
+                        }
+                        // rax = b, rcx = a: 按各自类型扩展到 64 位
+                        if op_sz < 8 {
+                            if a_uns {
+                                self.emit(&[0x89, 0xc9]); // mov ecx, ecx
+                            } else {
+                                self.emit(&[0x48, 0x63, 0xc9]); // movsxd rcx, ecx
+                            }
+                            if b_uns {
+                                self.emit(&[0x89, 0xc0]); // mov eax, eax
+                            } else {
+                                self.emit(&[0x48, 0x63, 0xc0]); // movsxd rax, eax
+                            }
+                        }
+                        // rdx:rax = 数学积 (128 位精确)
+                        if a_uns != b_uns {
+                            // 混合符号: imul 结果 + 运行时修正.
+                            // P = imul_128 + d×2^64×v (d=unsigned 侧 bit63,
+                            // v=signed 侧位模式); 单条件修正后仍精确.
+                            self.emit(&[0x48, 0x89, 0xc6]); // mov rsi, rax (b 位模式)
+                            self.emit(&[0x48, 0xf7, 0xe9]); // imul rcx
+                            let ok = self.fresh_label();
+                            if a_uns {
+                                self.emit(&[0x48, 0x85, 0xc9]); // test rcx, rcx
+                                self.jmp_rel32(&ok, JumpKind::Jns);
+                                self.emit(&[0x48, 0x01, 0xf2]); // add rdx, rsi
+                            } else {
+                                self.emit(&[0x48, 0x85, 0xf6]); // test rsi, rsi
+                                self.jmp_rel32(&ok, JumpKind::Jns);
+                                self.emit(&[0x48, 0x01, 0xca]); // add rdx, rcx
+                            }
+                            self.label(&ok);
+                        } else if a_uns {
+                            self.emit(&[0x48, 0xf7, 0xe1]); // mul rcx
+                        } else {
+                            self.emit(&[0x48, 0xf7, 0xe9]); // imul rcx
+                        }
+                        let res_ty = match &args[2].ty() {
+                            Type::Ptr(p) => p.base.clone(),
+                            other => other.clone(),
+                        };
+                        let res_sz = res_ty.size();
+                        let res_uns = !Self::is_signed_int(&res_ty);
+                        // 1/2/4 字节: 先提取 wrapped → rsi (存储与比较共用),
+                        // r11 保留原始低 64 位用于溢出比较
+                        if res_sz < 8 {
+                            self.emit(&[0x49, 0x89, 0xc3]); // mov r11, rax
+                            match (res_sz, res_uns) {
+                                (4, true) => self.emit(&[0x89, 0xc6]), // mov esi, eax
+                                (4, false) => self.emit(&[0x48, 0x63, 0xf0]), // movsxd rsi, eax
+                                (2, true) => self.emit(&[0x0f, 0xb7, 0xf0]), // movzx esi, ax
+                                (2, false) => self.emit(&[0x0f, 0xbf, 0xf0]), // movsx esi, ax
+                                (1, true) => self.emit(&[0x0f, 0xb6, 0xf0]), // movzx esi, al
+                                _ => self.emit(&[0x0f, 0xbe, 0xf0]), // movsx esi, al
+                            }
+                        }
+                        // 存储先于标志使用 (比较会破坏 rdx)
+                        if res_sz >= 16 {
+                            self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                            self.emit(&[0x49, 0x89, 0x52, 0x08]); // mov [r10+8], rdx
+                        } else if res_sz == 8 {
+                            self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                        } else if res_sz == 4 {
+                            self.emit(&[0x41, 0x89, 0x32]); // mov [r10], esi
+                        } else if res_sz == 2 {
+                            self.emit(&[0x41, 0x89, 0x32]); // mov [r10], si
+                        } else {
+                            self.emit(&[0x41, 0x88, 0x32]); // mov [r10], sil
+                        }
+                        // 溢出判断
+                        if res_sz >= 16 {
+                            // 128 位积对 signed res 恒 fit (输入≤64 位,
+                            // 积≤2^126); 对 unsigned res 不 fit ⟺ 积<0
+                            if res_uns {
+                                self.emit(&[0x48, 0x85, 0xd2]); // test rdx, rdx
+                                self.emit(&[0x0f, 0x98, 0xc0]); // sets al
+                            } else {
+                                self.emit(&[0x31, 0xc0]); // xor eax, eax
+                            }
+                        } else if res_sz == 8 {
+                            // fit ⟺ rdx == 期望高位 (uns:0 / signed:符号扩展)
+                            if res_uns {
+                                self.emit(&[0x31, 0xf6]); // xor esi, esi
+                            } else {
+                                self.emit(&[0x48, 0x89, 0xc6]); // mov rsi, rax
+                                self.emit(&[0x48, 0xc1, 0xfe, 0x3f]); // sar rsi, 63
+                            }
+                            self.emit(&[0x48, 0x39, 0xf2]); // cmp rdx, rsi
+                            self.emit(&[0x0f, 0x95, 0xc0]); // setne al
+                            self.emit(&[0x0f, 0xb6, 0xc0]); // movzx eax, al
+                        } else {
+                            // 1/2/4 字节: 溢出 = (rdx != 期望高位 rdi) || (r11 != rsi)
+                            if res_uns {
+                                self.emit(&[0x31, 0xff]); // xor edi, edi
+                            } else {
+                                self.emit(&[0x48, 0x89, 0xf7]); // mov rdi, rsi
+                                self.emit(&[0x48, 0xc1, 0xff, 0x3f]); // sar rdi, 63
+                            }
+                            self.emit(&[0x48, 0x39, 0xfa]); // cmp rdx, rdi
+                            self.emit(&[0x0f, 0x95, 0xc0]); // setne al
+                            self.emit(&[0x4c, 0x39, 0xde]); // cmp rsi, r11
+                            self.emit(&[0x0f, 0x95, 0xc2]); // setne dl
+                            self.emit(&[0x08, 0xd0]); // or al, dl
+                            self.emit(&[0x0f, 0xb6, 0xc0]); // movzx eax, al
+                        }
+                        if dst != 0 {
+                            self.mov(dst, 0);
+                        }
+                        return true;
                     }
                     _ => unreachable!(),
                 }
