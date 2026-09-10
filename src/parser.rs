@@ -3588,7 +3588,36 @@ impl<'a> Parser<'a> {
         pre_attrs = Self::merge_attrs(pre_attrs, self.parse_attributes());
         // 括号包函数名防宏展开: size_t (htab_size) (htab_t h)
         // 也处理括号化声明符: int *(p[25]) 等价于 int *p[25]
-        let name = if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
+        let name = if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::LParen {
+            // 多层括号包裹的声明符组: `void ((g));`, `cb ((fp));` 等。
+            // C 允许声明符整体加任意层括号, 递归解析后通过 paren_decl_ty
+            // 把完整类型传给后续声明逻辑。
+            let sv = self.save_parse_state();
+            match self.try_parse_paren_decl_group(ty.clone(), true) {
+                // 常规路径: 括号组 (含函数后缀) 成功解析且其后不是函数体
+                Some((pty, Some(id))) if self.cur.kind != TokKind::LBrace => {
+                    self.paren_decl_ty = Some(pty);
+                    id
+                }
+                // 括号组后紧跟函数体: 函数定义 (如 `int ((f))(int) { }`)。
+                // 参数后缀已在试探中消费, 回滚到声明符起点后改用不消费
+                // 后缀的模式, 让后续通用声明路径统一处理参数与函数体。
+                Some((_, Some(_))) => {
+                    self.restore_parse_state(&sv);
+                    match self.try_parse_paren_decl_group(ty.clone(), false) {
+                        Some((pty, Some(id))) => {
+                            self.paren_decl_ty = Some(pty);
+                            id
+                        }
+                        _ => self.parse_ident()?,
+                    }
+                }
+                Some((_, None)) | None => {
+                    self.restore_parse_state(&sv);
+                    self.parse_ident()?
+                }
+            }
+        } else if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
             self.advance(); // (
             let id = self.parse_ident()?;
             // 检查是否是括号化声明符: (name[...]) 或 (name(...))
@@ -7261,6 +7290,104 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 保存/恢复解析器状态, 用于括号声明符的试探性解析。
+    fn save_parse_state(&self) -> (Tok, Tok, usize, u32, u32) {
+        (
+            self.cur.clone(),
+            self.peek.clone(),
+            self.lex.pos,
+            self.lex.line,
+            self.lex.col,
+        )
+    }
+
+    fn restore_parse_state(&mut self, s: &(Tok, Tok, usize, u32, u32)) {
+        self.cur = s.0.clone();
+        self.peek = s.1.clone();
+        self.lex.pos = s.2;
+        self.lex.line = s.3;
+        self.lex.col = s.4;
+    }
+
+    /// 尝试解析括号包裹的声明符组: `( declarator )` 及随后的
+    /// `(params)` / `[dims]` 后缀, 支持递归嵌套:
+    ///   `void ((*f)(void))`      — 声明符 `(*f)(void)` 整体加括号
+    ///   `void ((*f) (void ()))`  — 参数为函数类型 `void ()`
+    ///   `void ((g))`             — `((name))` 形式
+    /// `ty` 为声明符左侧的基类型。成功返回 (完整类型, 名字);
+    /// 无法识别时恢复现场并返回 None, 交回调用方按其他形式处理。
+    /// `consume_suffix` 控制是否消费 `(params)` 函数后缀: 参数上下文
+    /// 必须消费 (声明符即最终类型); 声明上下文若随后是函数体 `{`,
+    /// 需回滚后不消费, 让通用声明路径统一处理函数定义。
+    fn try_parse_paren_decl_group(
+        &mut self,
+        ty: Type,
+        consume_suffix: bool,
+    ) -> Option<(Type, Option<Ident>)> {
+        let sv = self.save_parse_state();
+        match self.parse_paren_decl_group_inner(ty, consume_suffix) {
+            Some(v) => Some(v),
+            None => {
+                self.restore_parse_state(&sv);
+                None
+            }
+        }
+    }
+
+    fn parse_paren_decl_group_inner(
+        &mut self,
+        ty: Type,
+        consume_suffix: bool,
+    ) -> Option<(Type, Option<Ident>)> {
+        self.advance(); // (
+        self.skip_attributes();
+        self.skip_ptr_qualifiers();
+        // 收集本层指针: (*name), (**name)
+        let mut stars = 0;
+        while self.cur.kind == TokKind::Star {
+            self.advance();
+            stars += 1;
+            self.skip_ptr_qualifiers();
+        }
+        self.skip_attributes();
+        // 名字: 直接标识符或更深层的括号声明符
+        let (mut cur_ty, name) = if self.cur.kind == TokKind::LParen {
+            self.parse_paren_decl_group_inner(ty, consume_suffix)?
+        } else if self.cur.kind == TokKind::Ident {
+            let id = Ident {
+                name: self.cur.text.clone(),
+                span: self.cur.span.clone(),
+            };
+            self.advance();
+            (ty, Some(id))
+        } else {
+            // 抽象声明符 (无名): 不属于括号包裹的命名声明符, 交回上层
+            return None;
+        };
+        for _ in 0..stars {
+            cur_ty = Type::Ptr(Box::new(cur_ty.into()));
+        }
+        // 关闭本层括号
+        if !self.expect(TokKind::RParen, "')'") {
+            return None;
+        }
+        self.skip_attributes();
+        // 后缀: 函数参数列表 (声明符为函数指针)
+        if consume_suffix && self.cur.kind == TokKind::LParen {
+            self.advance();
+            let params = self.parse_params()?;
+            if !self.expect(TokKind::RParen, "')'") {
+                return None;
+            }
+            let func_ty = Type::Func(
+                Box::new(cur_ty.into()),
+                params.iter().map(|p| p.ty.clone().into()).collect(),
+            );
+            cur_ty = Type::Ptr(Box::new(func_ty.into()));
+        }
+        Some((cur_ty, name))
+    }
+
     fn parse_params(&mut self) -> Option<Vec<Param>> {
         let mut ps = vec![];
         self.last_variadic = false;
@@ -7559,6 +7686,35 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+            // 括号包裹的声明符组: `void ((*f)(void))`, `void ((g))`,
+            // `void ((*f) (void ()))` 等 — 整个声明符 (可嵌套) 被外层
+            // 括号包住, 前面的 LParen-Star / LParen-Ident 探测均不命中
+            // (peek 是 LParen), 需递归解析括号声明符组。
+            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::LParen {
+                if let Some((pty, pname)) = self.try_parse_paren_decl_group(ty.clone(), true) {
+                    ps.push(Param {
+                        ty: pty,
+                        name: pname,
+                        span: param_span,
+                        vla_dim: None,
+                        quals: QualifierFlags::NONE,
+                    });
+                    if self.cur.kind == TokKind::Comma {
+                        self.advance();
+                        if self.cur.kind == TokKind::Ellipsis {
+                            self.advance();
+                            self.last_variadic = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    if self.cur.kind == TokKind::Ellipsis {
+                        self.advance();
+                        self.last_variadic = true;
+                    }
+                    break;
+                }
+            }
             let nm = if self.cur.kind == TokKind::Ident {
                 let id = Ident {
                     name: self.cur.text.clone(),
@@ -7571,7 +7727,9 @@ impl<'a> Parser<'a> {
             };
             // C89 函数类型参数: `int getfrag(void *from, char *to, ...)`
             // 声明为函数类型的参数按 C11 6.7.6.3p8 调整为指向函数的指针.
-            if nm.is_some() && self.cur.kind == TokKind::LParen {
+            // 无名形式 (抽象函数类型参数 `void ()`) 同样适用: 921215-1 等
+            // 函数指针参数声明的内层类型会用到。
+            if self.cur.kind == TokKind::LParen {
                 self.advance();
                 let inner_params = self.parse_params()?;
                 if !self.expect(TokKind::RParen, "')'") {
