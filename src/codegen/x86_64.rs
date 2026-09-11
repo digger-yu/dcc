@@ -14037,14 +14037,21 @@ impl Codegen {
                             }
                         }
                         // 左移到位置: shl rax, bit_o
-                        if bit_o > 0 {
-                            self.emit(&[0x48, 0xC1, 0xE0, bit_o as u8]);
+                        // 对于 reverse_sso: 反转位域在容器内的位置
+                        let effective_bit_o = if reverse_sso {
+                            let container_bits = (container_size * 8) as u32;
+                            container_bits - bit_o - bw
+                        } else {
+                            bit_o
+                        };
+                        if effective_bit_o > 0 {
+                            self.emit(&[0x48, 0xC1, 0xE0, effective_bit_o as u8]);
                         }
                         // 加载保存的容器值 → rcx
                         self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
                         // 清除目标位: and rcx, inv_mask
                         let mask: u64 = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
-                        let inv_mask = !(mask << bit_o);
+                        let inv_mask = !(mask << effective_bit_o);
                         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
                             self.emit(&[0x48, 0x81, 0xE1]);
                             self.emit(&(inv_mask as u32).to_le_bytes());
