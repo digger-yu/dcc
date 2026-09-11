@@ -22399,7 +22399,9 @@ impl Codegen {
         let overflow = self.fresh_label();
         let regs = self.fresh_label();
         let done = self.fresh_label();
-        if has_memory {
+        // 对高对齐 struct (>16 byte align) 强制走溢出区路径
+        // 因为这通常意味着它在 caller 的 stack layout 中有特殊对齐要求
+        if has_memory || align >= 16 {
             self.jmp_rel32(&overflow, JumpKind::Jmp);
         } else {
             self.emit(&[0x3D]); // cmp eax, imm32
