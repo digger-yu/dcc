@@ -128,6 +128,10 @@ pub struct Codegen {
     ubsan_ptr_refs: Vec<(u64, u64, u64)>,
     // 全局变量 (通过 lookup_global_info / lookup_global_by_key 受控访问)
     globals_raw: HashMap<String, GlobalVar>,
+    // CompoundLit 去重缓存: 同类型同内容的 CompoundLit 只物化一次
+    // key = format!("{:?}", Expr) (类型+inits 序列化),
+    // value = (anon_name, rodata_offset)
+    compound_lit_cache: HashMap<String, (String, u64)>,
     frame_size: i64,
     expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
     max_expr_depth: u32, // 最大表达式嵌套深度
@@ -225,6 +229,9 @@ pub struct Codegen {
     // data 节 64 位符号引用重定位: (data_section_offset, symbol_name)
     /// (data_off, symbol, custom_sec, rel_type, addend) — addend 用于 &arr[i] 等
     pending_data64_rels: Vec<(u64, String, Option<usize>, u32, i64)>,
+    // rodata 节内部重定位: rodata 里的 CompoundLit 结构体指针字段
+    // 引用另一个 rodata 里的匿名 CompoundLit。(offset_in_rodata, symbol_name, rel_type, addend)
+    pending_rodata_rels: Vec<(u64, String, u32, i64)>,
     // data 节最终重定位条目
     pub data_relocations: Vec<ElfRela>,
     // cleanup 属性变量: (变量名, 清理函数名)
@@ -1424,6 +1431,7 @@ impl Codegen {
             ubsan_lea_refs: vec![],
             ubsan_ptr_refs: vec![],
             globals_raw: HashMap::new(),
+            compound_lit_cache: HashMap::new(),
             frame_size: 0,
             expr_depth: 0,
             max_expr_depth: 0,
@@ -1492,6 +1500,7 @@ impl Codegen {
             reg_bindings: HashMap::new(),
             global_reg_bindings: HashMap::new(),
             pending_data64_rels: vec![],
+            pending_rodata_rels: vec![],
             data_relocations: vec![],
             cleanup_vars: vec![],
             extra_rela_sections: vec![],
@@ -4156,23 +4165,196 @@ impl Codegen {
                 self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata)
             }
             Expr::AddrOf { e, .. } => {
-                // Compute base global + byte offset for address expressions
-                // like &a[3][5], &s.field, &a[i].field, etc.
+                // 1. 首先尝试命名全局变量 + 偏移 (如 &a[3], &s.field)
                 if let Some((base_name, byte_off)) =
                     Self::eval_global_lvalue_offset(e, &self.globals_raw)
                 {
                     if let Some(g) = self.globals_raw.get(&base_name) {
                         let vaddr = self.entry + g.offset + byte_off as u64;
-                        Some(vaddr.to_le_bytes().to_vec())
+                        return Some(vaddr.to_le_bytes().to_vec());
                     } else {
-                        Some(vec![0u8; 8])
+                        return Some(vec![0u8; 8]);
                     }
-                } else {
-                    None
                 }
+                // 2. Compound literal 取地址: 发射为匿名静态对象
+                // (&(struct B){...} 是合法的 C99 文件地址常量)
+                if let Some((anon_name, vaddr)) =
+                    self.materialize_compound_literal(e, use_rodata)
+                {
+                    // 记录匿名对象到 globals_raw (供后续嵌套 AddrOf 查找)
+                    let sz = e.ty().size().max(1);
+                    let rodata_offset = vaddr - self.entry;
+                    self.globals_raw.insert(
+                        anon_name.clone(),
+                        GlobalVar {
+                            offset: rodata_offset,
+                            size: sz,
+                            ty: e.ty().clone(),
+                            init: None,
+                            section: 1,
+                            is_tls: false, in_data_section: false,
+                        },
+                    );
+                    return Some(vaddr.to_le_bytes().to_vec());
+                }
+                None
             }
             // 整数/浮点常量: 统一走 eval_full, 浮点目标转位模式
             _ => Self::global_init_bytes(init, sz, is_float, &v.ty),
+        }
+    }
+
+    /// 把 `&(T){...}` / `&{...}` 中的 CompoundLit 发射为 rodata 里的匿名静态对象。
+    /// 返回 (匿名名, 绝对虚拟地址) 或 None (非 CompoundLit)。
+    /// 递归处理嵌套: CompoundLit 的成员初始化器中若有 &(T){...}，同样 materialize。
+    fn materialize_compound_literal(
+        &mut self,
+        e: &Expr,
+        use_rodata: bool,
+    ) -> Option<(String, u64)> {
+        let (ty, inits) = match e {
+            Expr::CompoundLit { ty, inits, .. } => (ty.clone(), inits.clone()),
+            Expr::InitList { inits, ty, .. } => (ty.clone(), inits.clone()),
+            _ => return None,
+        };
+        let sz = ty.size().max(1);
+        let align = ty.align().max(1) as usize;
+        // 匿名名: .L.compound_<next_label>
+        let anon_name = format!(".L.compound.{}", self.next_label);
+        self.next_label += 1;
+        // 分配 rodata 空间并对齐
+        let section = if use_rodata {
+            while self.rodata.len() % align != 0 {
+                self.rodata.push(0);
+            }
+            let base = self.rodata.len() as u64;
+            // 递归生成初始化数据 (嵌套 AddrOf→CompoundLit 走 eval_const_expr)
+            let init_data = self
+                .gen_global_init_list(&ty, &inits, Some((base, None)), use_rodata)
+                .unwrap_or_else(|| vec![0u8; sz]);
+            self.rodata.extend_from_slice(&init_data);
+            while self.rodata.len() % align != 0 {
+                self.rodata.push(0);
+            }
+            (base, 1u16)
+        } else {
+            while self.tdata_section.len() % align != 0 {
+                self.tdata_section.push(0);
+            }
+            let base = self.tdata_section.len() as u64;
+            let init_data = self
+                .gen_global_init_list(&ty, &inits, Some((base, None)), use_rodata)
+                .unwrap_or_else(|| vec![0u8; sz]);
+            self.tdata_section.extend_from_slice(&init_data);
+            while self.tdata_section.len() % align != 0 {
+                self.tdata_section.push(0);
+            }
+            (base, 5u16)
+        };
+        let vaddr = self.entry + section.0;
+        // 记录匿名对象 (嵌套 AddrOf→CompoundLit 时 eval_global_lvalue_offset 可查找)
+        self.globals_raw.insert(
+            anon_name.clone(),
+            GlobalVar {
+                offset: section.0,
+                size: sz,
+                ty,
+                init: None,
+                section: section.1,
+                is_tls: false,
+                in_data_section: false,
+            },
+        );
+        Some((anon_name, vaddr))
+    }
+
+    /// ET_REL 版 CompoundLit 物化: 写入 .rodata section, 登记 globals_raw,
+    /// 自动发射 LOCAL 符号 (compile_rel 尾部扫 globals_raw).
+    /// 返回 (匿名符号名, rodata 内偏移) 或 None.
+    fn materialize_compound_literal_rel(
+        &mut self,
+        e: &Expr,
+    ) -> Option<(String, u64)> {
+        let (ty, inits) = match e {
+            Expr::CompoundLit { ty, inits, .. } => (ty.clone(), inits.clone()),
+            Expr::InitList { inits, ty, .. } => (ty.clone(), inits.clone()),
+            _ => return None,
+        };
+        let sz = ty.size().max(1);
+        let align = ty.align().max(1) as usize;
+        // 去重缓存: 同类型同内容只物化一次
+        let cache_key = format!("{:?}", e);
+        if let Some((cached_name, cached_off)) = self.compound_lit_cache.get(&cache_key) {
+            return Some((cached_name.clone(), *cached_off));
+        }
+        let anon_name = format!(".L.compound.{}", self.next_label);
+        self.next_label += 1;
+        // 关键: 先递归物化所有子 AddrOf(CompoundLit), 让 rodata 正确增长,
+        // 再取 base 保证父子对象的偏移不重叠.
+        self.materialize_nested_compound_lits(&inits);
+        // 对齐 rodata, 此时所有子对象已经在 rodata 里了
+        while self.rodata.len() % align != 0 {
+            self.rodata.push(0);
+        }
+        let base = self.rodata.len() as u64;
+        let rodata_marker: Option<usize> = Some(usize::MAX);
+        let init_data = self
+            .gen_global_init_list(&ty, &inits, Some((base, rodata_marker)), false)
+            .unwrap_or_else(|| vec![0u8; sz]);
+        self.rodata.extend_from_slice(&init_data);
+        while self.rodata.len() % align != 0 {
+            self.rodata.push(0);
+        }
+        self.globals_raw.insert(
+            anon_name.clone(),
+            GlobalVar {
+                offset: base,
+                size: sz,
+                ty,
+                init: None,
+                section: 2,
+                is_tls: false,
+                in_data_section: false,
+            },
+        );
+        self.compound_lit_cache
+            .insert(cache_key, (anon_name.clone(), base));
+        Some((anon_name, base))
+    }
+
+    /// 递归物化 inits 中的嵌套 AddrOf(CompoundLit)。
+    /// gen_global_init_list 会遍历结构体/数组的 init items,
+    /// 遇到 `&(T){...}` 先物化子对象, 确保父对象的 base 正确。
+    fn materialize_nested_compound_lits(&mut self, inits: &[InitItem]) {
+        for item in inits {
+            match item {
+                InitItem::Expr(e) => self.materialize_nested_compound_lits_expr(e),
+                InitItem::Designated { value, .. } => {
+                    self.materialize_nested_compound_lits_expr(value);
+                }
+            }
+        }
+    }
+
+    fn materialize_nested_compound_lits_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AddrOf { e: inner, .. } => {
+                // 直接 AddrOf(CompoundLit) → 物化
+                if matches!(
+                    inner.as_ref(),
+                    Expr::CompoundLit { .. } | Expr::InitList { .. }
+                ) {
+                    self.materialize_compound_literal_rel(inner);
+                }
+            }
+            Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+                // 嵌套 CompoundLit/InitList: 递归处理子 items
+                self.materialize_nested_compound_lits(inits);
+            }
+            Expr::Cast { e: inner, .. } => {
+                self.materialize_nested_compound_lits_expr(inner);
+            }
+            _ => {}
         }
     }
 
@@ -4574,6 +4756,19 @@ impl Codegen {
                                     0,
                                 ));
                                 true
+                            } else if let Some((anon_name, _off)) =
+                                self.materialize_compound_literal_rel(e)
+                            {
+                                // &(struct A){42,43} — C99 合法的文件地址常量
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                                self.pending_data64_rels.push((
+                                    ref_off, anon_name, None, rel_type, 0,
+                                ));
+                                true
                             } else {
                                 false
                             }
@@ -4598,6 +4793,18 @@ impl Codegen {
                                         let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
                                         self.pending_data64_rels.push((
                                             ref_off, base_name, None, rel_type, byte_off,
+                                        ));
+                                        true
+                                    } else if let Some((anon_name, _off)) =
+                                        self.materialize_compound_literal_rel(ae)
+                                    {
+                                        let ref_off = self.data_section.len() as u64;
+                                        let width = if sz <= 4 { 4 } else { 8 };
+                                        self.data_section
+                                            .resize(ref_off as usize + sz.max(width), 0);
+                                        let rel_type = if width == 4 { R_X86_64_32 } else { R_X86_64_64 };
+                                        self.pending_data64_rels.push((
+                                            ref_off, anon_name, None, rel_type, 0,
                                         ));
                                         true
                                     } else {
@@ -5864,6 +6071,38 @@ impl Codegen {
                 relocations,
                 target_sec_index: 7 + sec_idx as u32,
             });
+        }
+
+        // rodata 节内部重定位 (.rela.rodata): rodata 内 CompoundLit 结构体
+        // 指针字段引用另一个 rodata 内的匿名 CompoundLit (C99 合法的文件地址常量)。
+        // .rodata section header index = 2 (0=NULL, 1=.text, 2=.rodata, 3=.data, ...)
+        if !self.pending_rodata_rels.is_empty() {
+            let rodata_sym_idx = self.sym_index.get(".rodata").copied().unwrap_or(2);
+            let mut rodata_relas = Vec::new();
+            for (off, sym_name, rel_type, addend) in self.pending_rodata_rels.drain(..) {
+                let resolved =
+                    self.asm_label_map.get(&sym_name).cloned().unwrap_or(sym_name);
+                let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(
+                    // 符号可能还未进入 sym_index, 用 section 符号兜底.
+                    // 实际符号名会在最终 symtab 里 (compile_rel 尾部扫 globals_raw).
+                    0,
+                );
+                let _ = rodata_sym_idx; // 不直接引用 .rodata section symbol,
+                                        // 用具体 compound lit 符号名.
+                rodata_relas.push(ElfRela {
+                    offset: off,
+                    sym_index: sym_idx,
+                    rel_type,
+                    addend,
+                });
+            }
+            if !rodata_relas.is_empty() {
+                self.extra_rela_sections.push(elf::ExtraRelaSection {
+                    name: ".rela.rodata".to_string(),
+                    relocations: rodata_relas,
+                    target_sec_index: 2, // .rodata
+                });
+            }
         }
 
         // __attribute__((constructor/destructor)): 生成 .init_array/.fini_array
@@ -14449,6 +14688,51 @@ impl Codegen {
                 );
             }
             return vec![0u8; size];
+        }
+        // &(T){...} / &{...}: 嵌套 AddrOf+CompoundLit 路径
+        // (gen_global_init_list 处理 struct 指针字段时走 eval_const_expr,
+        // 而 eval_full 不支持 CompoundLit 取地址, 必须显式 materialize)
+        if let Expr::AddrOf { e: inner, .. } = e {
+            if self.relocatable {
+                // ET_REL: 物化到 .rodata, 登记 LOCAL 符号, 返回占位+重定位
+                if let Some((anon_name, rodata_off)) =
+                    self.materialize_compound_literal_rel(inner)
+                {
+                    let sz = width.max(8);
+                    let off = rel.map(|(o, _)| o).unwrap_or(0);
+                    let sec = rel.and_then(|(_, s)| s);
+                    let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                    if matches!(sec, Some(v) if v == usize::MAX) {
+                        // 当前在 rodata section 内: 发射 .rela.rodata 重定位
+                        self.pending_rodata_rels.push((off, anon_name, rel_type, 0));
+                    } else {
+                        // 在 data section (或 custom section) 内: 走 data 重定位
+                        self.pending_data64_rels.push((off, anon_name, sec, rel_type, 0));
+                    }
+                    let _ = rodata_off; // 符号已登记, 链接时自动解析
+                    return vec![0u8; sz];
+                }
+            } else {
+                // ET_EXEC: 物化, 返回绝对地址字节 (compile_exec 直接写死)
+                if let Some((anon_name, vaddr)) =
+                    self.materialize_compound_literal(inner, rodata_slots)
+                {
+                    let sz = inner.ty().size().max(1);
+                    let rodata_offset = vaddr - self.entry;
+                    self.globals_raw.insert(
+                        anon_name.clone(),
+                        GlobalVar {
+                            offset: rodata_offset,
+                            size: sz,
+                            ty: inner.ty().clone(),
+                            init: None,
+                            section: 1,
+                            is_tls: false, in_data_section: false,
+                        },
+                    );
+                    return vaddr.to_le_bytes().to_vec();
+                }
+            }
         }
         if let Ok(cv) = const_eval::eval_full(e) {
             match cv {
