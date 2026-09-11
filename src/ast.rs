@@ -1043,8 +1043,8 @@ pub enum Type {
     Ptr(Box<QualType>),
     Array(Box<QualType>, ArraySize),
     Vector(Box<QualType>, usize), // SIMD 向量: (元素类型, 元素个数)
-    Struct(String, Arc<Vec<Field>>, usize), // (name, fields, align)
-    Union(String, Arc<Vec<Field>>, usize),   // (name, fields, align)
+    Struct(String, Arc<Vec<Field>>, usize, bool), // (name, fields, align, reverse_sso)
+    Union(String, Arc<Vec<Field>>, usize, bool),   // (name, fields, align, reverse_sso)
     Enum(String, Arc<Vec<(String, i64)>>, Option<Box<QualType>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
     Func(Box<QualType>, Vec<QualType>),
     Named(String),
@@ -1160,7 +1160,7 @@ impl Type {
             Type::Complex(inner) => inner.size() * 2,
             Type::Imaginary(inner) => inner.size(),
             Type::Atomic(inner) => inner.size(),
-            Type::Struct(_, fields, align) => {
+            Type::Struct(_, fields, align, _) => {
                 // 计算结构体大小: 考虑所有字段 (包括零宽度位域的位置)
                 // 零宽度位域不贡献存储, 但其位置决定结构体最小大小
                 let size = fields.iter()
@@ -1184,7 +1184,7 @@ impl Type {
                     size
                 }
             }
-            Type::Union(_, fields, align) => {
+            Type::Union(_, fields, align, _) => {
                 let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
                 if *align > 1 {
                     (size + align - 1) & !(align - 1)
@@ -1222,8 +1222,8 @@ impl Type {
             Type::Complex(inner) => inner.align(),
             Type::Imaginary(inner) => inner.align(),
             Type::Atomic(inner) => inner.align(),
-            Type::Struct(_, _, align) => *align,
-            Type::Union(_, _, align) => *align,
+            Type::Struct(_, _, align, _) => *align,
+            Type::Union(_, _, align, _) => *align,
             _ => 8,
         }
     }
@@ -1239,7 +1239,7 @@ impl Type {
         match self {
             Type::Array(_, ArraySize::Var(_)) => true,
             Type::Array(elem, ArraySize::Const(_)) => elem.base.has_vla(),
-            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
                 fields.iter().any(|f| f.ty.has_vla())
             }
             _ => false,
@@ -1487,8 +1487,8 @@ impl std::fmt::Display for Type {
                 n * inner.size() * 8,
                 inner
             ),
-            Type::Struct(name, _, _) => write!(f, "struct {}", name),
-            Type::Union(name, _, _) => write!(f, "union {}", name),
+            Type::Struct(name, _, _, _) => write!(f, "struct {}", name),
+            Type::Union(name, _, _, _) => write!(f, "union {}", name),
             Type::Enum(name, _, _) => write!(f, "enum {}", name),
             Type::Func(ret, params) => {
                 write!(f, "(")?;
@@ -1516,7 +1516,7 @@ pub fn find_field<'a>(fields: &'a [Field], name: &str) -> Option<(&'a Field, usi
     // 2. 递归查找匿名 struct/union 字段
     for f in fields.iter() {
         if f.name.is_empty() {
-            if let Type::Struct(_, inner, _) | Type::Union(_, inner, _) = &f.ty {
+            if let Type::Struct(_, inner, _, _) | Type::Union(_, inner, _, _) = &f.ty {
                 if let Some((found, inner_off)) = find_field(inner, name) {
                     return Some((found, f.offset + inner_off));
                 }

@@ -115,6 +115,9 @@ struct ParsedAttrs {
     mode_name: Option<String>,
     /// C `inline` 关键字: GNU89 语义, 非 static inline 函数发射为 weak 符号
     is_inline: bool,
+    /// __attribute__((scalar_storage_order("big-endian"|"little-endian"))):
+    /// 结构体/联合体内所有标量成员按指定字节序存储. None = 默认本地序.
+    scalar_storage_order: Option<String>,
 }
 
 /// 解析选项（Driver 传入）
@@ -193,6 +196,7 @@ impl ParsedAttrs {
         mo!(assume_aligned); mo!(ctor_priority); mo!(dtor_priority);
         mo!(format_arg_idx); mo!(vector_size);
         mv!(no_sanitize); mv!(target_clones);
+        mo!(scalar_storage_order);
     }
 }
 
@@ -286,7 +290,7 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>,
     finished: bool,
     typedefs: HashMap<String, Type>,
-    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool, usize)>,
+    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool, usize, bool)>,
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: ScopeChain,                      // 分层作用域链 (替代单 HashMap + clone)
@@ -414,10 +418,10 @@ impl<'a> Parser<'a> {
             }
         }
         match (unwrap(a), unwrap(b)) {
-            (Type::Struct(an, af, _), Type::Struct(bn, bf, _)) => {
+            (Type::Struct(an, af, _, false), Type::Struct(bn, bf, _, false)) => {
                 an == bn && (af.is_empty() || bf.is_empty() || af == bf)
             }
-            (Type::Union(an, af, _), Type::Union(bn, bf, _)) => {
+            (Type::Union(an, af, _, false), Type::Union(bn, bf, _, false)) => {
                 an == bn && (af.is_empty() || bf.is_empty() || af == bf)
             }
             // enum 同标签兼容: 前向声明 (空 values) 与完整定义视为同一类型
@@ -565,18 +569,18 @@ impl<'a> Parser<'a> {
     /// 用于 typedef 引用前向声明的 struct 时，获取已完成字段的版本。
     fn resolve_type_latest(&self, ty: &Type) -> Type {
         match ty {
-            Type::Struct(name, fields, align) if fields.is_empty() => {
-                if let Some((f, _, a)) = self.struct_defs.get(name) {
+            Type::Struct(name, fields, align, _) if fields.is_empty() => {
+                if let Some((f, _, a, reverse_sso)) = self.struct_defs.get(name) {
                     if !f.is_empty() {
-                        return Type::Struct(name.clone(), Arc::clone(f), *a);
+                        return Type::Struct(name.clone(), Arc::clone(f), *a, *reverse_sso);
                     }
                 }
                 ty.clone()
             }
-            Type::Union(name, fields, align) if fields.is_empty() => {
-                if let Some((f, _, a)) = self.struct_defs.get(name) {
+            Type::Union(name, fields, align, _) if fields.is_empty() => {
+                if let Some((f, _, a, reverse_sso)) = self.struct_defs.get(name) {
                     if !f.is_empty() {
-                        return Type::Union(name.clone(), Arc::clone(f), *a);
+                        return Type::Union(name.clone(), Arc::clone(f), *a, *reverse_sso);
                     }
                 }
                 ty.clone()
@@ -1013,11 +1017,11 @@ impl<'a> Parser<'a> {
                     self.advance();
                     // Look up the type
                     let key = format!("{} {}", is_struct, name);
-                    if let Some((fields, is_u, _align)) = self.struct_defs.get(&key) {
+                    if let Some((fields, is_u, _align, reverse_sso)) = self.struct_defs.get(&key) {
                         if *is_u {
-                            Some(Type::Union(key, Arc::clone(fields), 1))
+                            Some(Type::Union(key, Arc::clone(fields), 1, *reverse_sso))
                         } else {
-                            Some(Type::Struct(key, Arc::clone(fields), 1))
+                            Some(Type::Struct(key, Arc::clone(fields), 1, *reverse_sso))
                         }
                     } else {
                         Some(Type::Named(key))
@@ -1510,6 +1514,19 @@ impl<'a> Parser<'a> {
                     "packed" => {
                         attrs.is_packed = true;
                         self.advance();
+                    }
+                    // __attribute__((scalar_storage_order("big-endian"|"little-endian")))
+                    "scalar_storage_order" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance(); // (
+                            if let Some(order) = self.parse_concatenated_string_lit() {
+                                attrs.scalar_storage_order = Some(order);
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
+                            }
+                        }
                     }
                     // __attribute__((tls_model("model")))
                     // TLS 访问模型: "global-dynamic", "local-dynamic",
@@ -2097,13 +2114,13 @@ impl<'a> Parser<'a> {
             base.ty()
         };
         match aggregate {
-            Type::Struct(ref name, ref fields, _) | Type::Union(ref name, ref fields, _) => {
+            Type::Struct(ref name, ref fields, _, false) | Type::Union(ref name, ref fields, _, false) => {
                 // 仅当嵌入字段为空（前向声明）时才查 struct_defs；
                 // 匿名 struct 名同为 ""，不能覆盖已嵌入的正确字段。
                 let resolved = if fields.is_empty() {
                     self.struct_defs
                         .get(name)
-                        .map(|(f, _, _)| f.as_ref())
+                        .map(|(f, _, _, _)| f.as_ref())
                         .unwrap_or(fields.as_ref())
                 } else {
                     fields.as_ref()
@@ -3189,7 +3206,7 @@ impl<'a> Parser<'a> {
                 // 单独的 struct/union/enum 定义: 发射类型定义声明以便 IR 层保留类型信息 (5.1 修复)
                 let span = self.cur.span.clone();
                 let type_decl = match &ty {
-                    Type::Struct(name, fields, _) => {
+                    Type::Struct(name, fields, _, false) => {
                         let tag_name = name.strip_prefix("struct ").unwrap_or(name);
                         Some(Decl::StructDef(crate::ast::StructDef {
                             name: Ident { name: tag_name.to_string(), span: span.clone() },
@@ -3198,7 +3215,7 @@ impl<'a> Parser<'a> {
                             span,
                         }))
                     }
-                    Type::Union(name, fields, _) => {
+                    Type::Union(name, fields, _, false) => {
                         let tag_name = name.strip_prefix("union ").unwrap_or(name);
                         Some(Decl::UnionDef(crate::ast::StructDef {
                             name: Ident { name: tag_name.to_string(), span: span.clone() },
@@ -3270,12 +3287,12 @@ impl<'a> Parser<'a> {
             // 发射类型定义声明以便 IR 层保留类型信息 (5.1 修复).
             if matches!(
                 ty,
-                Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _)
+                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Enum(_, _, _)
             ) && self.cur.kind == TokKind::Semi
             {
                 let span = self.cur.span.clone();
                 let type_decl = match &ty {
-                    Type::Struct(name, fields, _) => {
+                    Type::Struct(name, fields, _, false) => {
                         let tag_name = name.strip_prefix("struct ").unwrap_or(name);
                         Some(Decl::StructDef(crate::ast::StructDef {
                             name: Ident { name: tag_name.to_string(), span: span.clone() },
@@ -3284,7 +3301,7 @@ impl<'a> Parser<'a> {
                             span,
                         }))
                     }
-                    Type::Union(name, fields, _) => {
+                    Type::Union(name, fields, _, false) => {
                         let tag_name = name.strip_prefix("union ").unwrap_or(name);
                         Some(Decl::UnionDef(crate::ast::StructDef {
                             name: Ident { name: tag_name.to_string(), span: span.clone() },
@@ -3446,7 +3463,7 @@ impl<'a> Parser<'a> {
         let struct_name = if enabled { "static_key_true" } else { "static_key_false" };
         if !self.struct_defs.contains_key(struct_name) {
             self.struct_defs
-                .insert(struct_name.to_string(), (Arc::new(vec![]), false, 4));
+                .insert(struct_name.to_string(), (Arc::new(vec![]), false, 4, false));
         }
         if !self.expect(TokKind::LParen, "'('") {
             return None;
@@ -3472,7 +3489,7 @@ impl<'a> Parser<'a> {
         if !self.expect(TokKind::Semi, "';'") {
             return None;
         }
-        let ty = Type::Struct(struct_name.to_string(), Arc::new(vec![]), 8);
+        let ty = Type::Struct(struct_name.to_string(), Arc::new(vec![]), 8, false);
         self.globals.insert(name.name.clone(), ty.clone());
         Some(vec![Decl::Var(VarDecl {
             ty,
@@ -5866,6 +5883,7 @@ impl<'a> Parser<'a> {
                             },
                         ]),
                         8, // va_list align: max field = ptr (8)
+                        false,
                     );
                     // 包装为单元素数组，使其在传参时退化为指针
                     base = Some(Type::Array(Box::new(va_struct.into()), ArraySize::Const(1)));
@@ -5987,12 +6005,13 @@ impl<'a> Parser<'a> {
             let mut pack = false;
             let mut align_n: Option<usize> = None;
             let mut may_alias = false;
+            let mut sso_order: Option<String> = None;
             while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                 let pre_attrs = self.parse_attributes();
                 if pre_attrs.is_packed { pack = true; }
                 if pre_attrs.alignment.is_some() { align_n = pre_attrs.alignment; }
                 if pre_attrs.may_alias { may_alias = true; }
-                // 非类型属性存入 decl_attrs 供后续声明使用
+                if pre_attrs.scalar_storage_order.is_some() { sso_order = pre_attrs.scalar_storage_order.clone(); }
                 self.decl_attrs.merge(pre_attrs);
             }
             let nm = if self.cur.kind == TokKind::Ident {
@@ -6015,6 +6034,7 @@ impl<'a> Parser<'a> {
                 if post_attrs.is_packed { pack = true; }
                 if post_attrs.alignment.is_some() { align_n = post_attrs.alignment; }
                 if post_attrs.may_alias { may_alias = true; }
+                if post_attrs.scalar_storage_order.is_some() { sso_order = post_attrs.scalar_storage_order.clone(); }
                 self.decl_attrs.merge(post_attrs);
                 // After attributes, check for actual struct name
                 if self.cur.kind == TokKind::Ident
@@ -6055,13 +6075,14 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // union 中零长数组: GCC 扩展, 静默接受
+                // union 中零长数组：GCC 扩展，静默接受
                 // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias/...))
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                     let post_attrs = self.parse_attributes();
                     if post_attrs.is_packed { pack = true; }
                     if post_attrs.alignment.is_some() { align_n = post_attrs.alignment; }
                     if post_attrs.may_alias { may_alias = true; }
+                    if post_attrs.scalar_storage_order.is_some() { sso_order = post_attrs.scalar_storage_order.clone(); }
                     // 非类型属性存入 decl_attrs 供后续声明使用
                     self.decl_attrs.merge(post_attrs);
                 }
@@ -6119,35 +6140,42 @@ impl<'a> Parser<'a> {
                     struct_align
                 };
                 let fields_rc = Arc::new(fields);
-                self.struct_defs
-                    .insert(nm.clone(), (Arc::clone(&fields_rc), is_u, struct_align));
                 // 记录 may_alias 类型属性供后续使用
                 if may_alias {
                     self.decl_attrs.may_alias = true;
                 }
+                // struct_level scalar_storage_order: 决定是否反转所有标量的字节序
+                let host_be = cfg!(target_endian = "big");
+                let reverse_sso = match sso_order.as_deref() {
+                    Some("big-endian") => !host_be,
+                    Some("little-endian") => host_be,
+                    _ => false,
+                };
+                self.struct_defs
+                    .insert(nm.clone(), (Arc::clone(&fields_rc), is_u, struct_align, reverse_sso));
                 let ty = if is_u {
-                    Type::Union(nm, fields_rc, struct_align)
+                    Type::Union(nm, fields_rc, struct_align, reverse_sso)
                 } else {
-                    Type::Struct(nm, fields_rc, struct_align)
+                    Type::Struct(nm, fields_rc, struct_align, reverse_sso)
                 };
                 return Some(self.finish_type(ty, specifiers_only));
             } else if !nm.is_empty() {
-                if let Some((f, _, a)) = self.struct_defs.get(&nm) {
+                if let Some((f, _, a, reverse_sso)) = self.struct_defs.get(&nm) {
                     let ty = if is_u {
-                        Type::Union(nm, Arc::clone(f), *a)
+                        Type::Union(nm, Arc::clone(f), *a, *reverse_sso)
                     } else {
-                        Type::Struct(nm, Arc::clone(f), *a)
+                        Type::Struct(nm, Arc::clone(f), *a, *reverse_sso)
                     };
                     return Some(self.finish_type(ty, specifiers_only));
                 }
                 // 不完整类型: 登记占位，待后续定义补全字段
                 let empty = Arc::new(vec![]);
                 self.struct_defs
-                    .insert(nm.clone(), (Arc::clone(&empty), is_u, 0));
+                    .insert(nm.clone(), (Arc::clone(&empty), is_u, 0, false));
                 let ty = if is_u {
-                    Type::Union(nm, empty, 0)
+                    Type::Union(nm, empty, 0, false)
                 } else {
-                    Type::Struct(nm, empty, 0)
+                    Type::Struct(nm, empty, 0, false)
                 };
                 return Some(self.finish_type(ty, specifiers_only));
             }
@@ -6678,7 +6706,7 @@ impl<'a> Parser<'a> {
 
     fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
         if let Some(
-            ty @ (Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _) | Type::Atomic(_) | Type::Array(_, _)),
+            ty @ (Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Enum(_, _, _) | Type::Atomic(_) | Type::Array(_, _)),
         ) = base
         {
             return ty;
@@ -7062,7 +7090,7 @@ impl<'a> Parser<'a> {
             // __attribute__ 是 Ident 但不是字段名, 必须排除.
             let nm = if self.cur.kind == TokKind::Ident
                 && self.cur.text != "__attribute__"
-                && !(matches!(ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                && !(matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                     && (Self::is_type_specifier_ident(
                         &self.cur.text,
                         &self.typedefs,
@@ -7200,7 +7228,7 @@ impl<'a> Parser<'a> {
                 //   - 标签名非空 + 字段名为空 + 类型无字段: 纯前向声明
                 //     (如 `struct incomplete;`), 不贡献大小, 跳过
                 let should_add = match &ty {
-                    Type::Struct(tag, fields, _) | Type::Union(tag, fields, _) => {
+                    Type::Struct(tag, fields, _, false) | Type::Union(tag, fields, _, false) => {
                         tag.is_empty() || !nm.is_empty() || !fields.is_empty()
                     }
                     _ => true, // 非 struct/union 类型总是添加
@@ -10337,7 +10365,7 @@ impl<'a> Parser<'a> {
                                 Type::Ptr(_) | Type::Func(_, _) => 3,
                                 Type::Float | Type::Double | Type::LongDouble => 4,
                                 Type::Complex(_) | Type::Imaginary(_) => 5,
-                                Type::Struct(_, _, _) | Type::Union(_, _, _) => 6,
+                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => 6,
                                 Type::Array(_, _) => 7,
                                 Type::Vector(_, _) => 9,
                                 Type::Enum(_, _, _) => 10,
@@ -11551,8 +11579,8 @@ impl<'a> Parser<'a> {
             (Type::Void, Type::Void) => true,
             (Type::Fract, Type::Fract) => true,
             (Type::Accum, Type::Accum) => true,
-            (Type::Struct(na, _, _), Type::Struct(nb, _, _)) => na == nb,
-            (Type::Union(na, _, _), Type::Union(nb, _, _)) => na == nb,
+            (Type::Struct(na, _, _, false), Type::Struct(nb, _, _, false)) => na == nb,
+            (Type::Union(na, _, _, false), Type::Union(nb, _, _, false)) => na == nb,
             (Type::Enum(na, va, _), Type::Enum(nb, vb, _)) => {
                 if na.is_empty() && nb.is_empty() {
                     // Both anonymous: compatible only if same variants

@@ -391,12 +391,12 @@ fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
             let elem = best_effort_lower_type(&inner.base);
             ValueType::Vector(Box::new(elem), *count)
         }
-        ast::Type::Struct(name, _, _) => ValueType::Aggregate {
+        ast::Type::Struct(name, _, _, _) => ValueType::Aggregate {
             name: name.clone(),
             size: ty.size().max(1),
             is_union: false,
         },
-        ast::Type::Union(name, _, _) => ValueType::Aggregate {
+        ast::Type::Union(name, _, _, _) => ValueType::Aggregate {
             name: name.clone(),
             size: ty.size().max(1),
             is_union: true,
@@ -443,6 +443,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     format!("struct {}", sd.name.name),
                     std::sync::Arc::new(sd.fields.clone()),
                     1,
+                    false,
                 ));
             }
             Decl::UnionDef(sd) => {
@@ -451,6 +452,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     format!("union {}", sd.name.name),
                     std::sync::Arc::new(sd.fields.clone()),
                     1,
+                    false,
                 ));
             }
             Decl::EnumDef(ed) => {
@@ -1094,12 +1096,12 @@ impl Lowering {
                     }
                 },
             ),
-            Type::Struct(name, _, _) => ValueType::Aggregate {
+            Type::Struct(name, _, _, _) => ValueType::Aggregate {
                 name: name.clone(),
                 size: ty.size(),
                 is_union: false,
             },
-            Type::Union(name, _, _) => ValueType::Aggregate {
+            Type::Union(name, _, _, _) => ValueType::Aggregate {
                 name: name.clone(),
                 size: ty.size(),
                 is_union: true,
@@ -1333,7 +1335,7 @@ impl Lowering {
                 } else {
                     base.ty()
                 };
-                if let Type::Struct(_, fields, _) | Type::Union(_, fields, _) = aggregate {
+                if let Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) = aggregate {
                     if let Some((found, _)) = ast::find_field(&fields, &field.name) {
                         ty = self.lower_type(&found.ty, &field.span);
                     } else if !fields.is_empty() {
@@ -1692,7 +1694,7 @@ mod tests {
         if let Decl::Var(v) = &program.decls[0] {
             assert!(v.is_extern);
             assert_eq!(v.name.name, "init_on_alloc");
-            assert!(matches!(v.ty, Type::Struct(ref n, _, _) if n == "static_key_false"));
+            assert!(matches!(v.ty, Type::Struct(ref n, _, _, _) if n == "static_key_false"));
         } else {
             panic!("expected VarDecl, got {:?}", program.decls[0]);
         }

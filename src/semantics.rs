@@ -400,7 +400,7 @@ fn element_info_from_type(ty: &Type) -> ElementInfo {
             elem_size: elem.size(),
             count: None,
         },
-        Type::Struct(_, _, _) | Type::Union(_, _, _) => ElementKind::Aggregate { size },
+        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => ElementKind::Aggregate { size },
         Type::Complex(inner) => ElementKind::Complex {
             inner_size: inner.size(),
         },
@@ -432,7 +432,7 @@ fn member_field_offset(base_expr: &Expr, field: &ast::Ident) -> i64 {
         other => other,
     };
     match struct_ty {
-        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
             for f in fields.iter() {
                 if f.name == field.name {
                     return f.offset as i64;
@@ -448,7 +448,7 @@ fn member_field_offset(base_expr: &Expr, field: &ast::Ident) -> i64 {
 pub fn determine_action(elem_ty: &Type, is_load: bool) -> MaterializeAction {
     match elem_ty {
         Type::Array(_, _) => MaterializeAction::ArrayDecay,
-        Type::Struct(_, _, _) | Type::Union(_, _, _) if elem_ty.size() > 8 => {
+        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) if elem_ty.size() > 8 => {
             if is_load {
                 MaterializeAction::AggregateLoad
             } else {
@@ -497,7 +497,7 @@ pub fn storage_type_from_ast(ty: &Type) -> StorageType {
         Type::Complex(inner) => StorageType::Complex {
             inner_size: inner.size(),
         },
-        Type::Struct(_, _, _) | Type::Union(_, _, _) => StorageType::Aggregate { size: ty.size() },
+        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => StorageType::Aggregate { size: ty.size() },
         _ => StorageType::Scalar { size: ty.size() },
     }
 }

@@ -1188,7 +1188,7 @@ impl ArmCodegen {
                     // ptr->member: expr.ty() 是指针或数组, 取元素类型
                     match expr.ty() {
                         Type::Ptr(inner) | Type::Array(inner, _) => match &inner.base {
-                            Type::Struct(name, _, _) | Type::Union(name, _, _) => Some(name.clone()),
+                            Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => Some(name.clone()),
                             _ => None,
                         },
                         _ => None,
@@ -1196,7 +1196,7 @@ impl ArmCodegen {
                 } else {
                     // s.member: expr.ty() 是结构体/联合体本身
                     match expr.ty() {
-                        Type::Struct(name, _, _) | Type::Union(name, _, _) => Some(name.clone()),
+                        Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => Some(name.clone()),
                         _ => None,
                     }
                 };

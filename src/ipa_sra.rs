@@ -69,13 +69,13 @@ struct StructParamAnalysis {
 
 /// 判断类型是否为按值传递的 struct/union
 fn is_aggregate_by_value(ty: &Type) -> bool {
-    matches!(ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+    matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
 }
 
 /// 从参数类型中提取字段列表
 fn extract_fields(ty: &Type) -> Vec<(String, Type)> {
     match ty {
-        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => fields
             .iter()
             .filter(|f| f.bit_width.is_none()) // 跳过位域
             .map(|f| (f.name.clone(), f.ty.clone()))

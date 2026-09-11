@@ -34,7 +34,7 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
     match d {
         Designator::Field(name) => {
             let fields = match ty {
-                Type::Struct(_, fs, _) | Type::Union(_, fs, _) => fs.as_ref(),
+                Type::Struct(_, fs, _, _) | Type::Union(_, fs, _, false) => fs.as_ref(),
                 _ => return None,
             };
             // Use find_field for anonymous struct/union穿透 support
@@ -1811,7 +1811,7 @@ impl Codegen {
                 other => other,
             };
             match struct_ty {
-                Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                     find_field(fields, &field.name)
                         .and_then(|(f, _)| f.bit_width)
                 }
@@ -2072,7 +2072,7 @@ impl Codegen {
     /// 用于区分 eightbyte 含字段数据 vs 纯对齐填充.
     fn has_field_data_in_range(ty: &Type, lo: usize, hi: usize) -> bool {
         match ty {
-            Type::Struct(_, fields, _) => {
+            Type::Struct(_, fields, _, false) => {
                 for f in fields.iter() {
                     let f_lo = f.offset;
                     let f_hi = f.offset + f.ty.size();
@@ -2082,7 +2082,7 @@ impl Codegen {
                 }
                 false
             }
-            Type::Union(_, fields, _) => {
+            Type::Union(_, fields, _, false) => {
                 for f in fields.iter() {
                     if 0 < hi && f.ty.size() > lo {
                         return true;
@@ -2114,12 +2114,12 @@ impl Codegen {
             return;
         }
         match ty {
-            Type::Struct(_, fields, _) => {
+            Type::Struct(_, fields, _, false) => {
                 for field in fields.iter() {
                     Self::classify_field(&field.ty, base + field.offset, classes);
                 }
             }
-            Type::Union(_, fields, _) => {
+            Type::Union(_, fields, _, false) => {
                 // 联合各字段共享同一基址, 各自分类后合并
                 for field in fields.iter() {
                     let f_sz = field.ty.size();
@@ -4096,9 +4096,9 @@ impl Codegen {
                     other => other,
                 };
                 let field_off = match struct_ty {
-                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         let mut cur = 0i64;
-                        let is_union = matches!(struct_ty, Type::Union(_, _, _));
+                        let is_union = matches!(struct_ty, Type::Union(_, _, _, _));
                         for f in fields.iter() {
                             if is_union {
                                 if f.name == field.name {
@@ -7116,8 +7116,8 @@ impl Codegen {
                         matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
                             || matches!(
                                 &p.ty,
-                                Type::Struct(_, _, _)
-                                    | Type::Union(_, _, _)
+                                Type::Struct(_, _, _, _)
+                                    | Type::Union(_, _, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                                     | Type::Vector(_, _)
@@ -7568,7 +7568,7 @@ impl Codegen {
                                 .push((v.name.name.clone(), fn_name.clone()));
                         }
                         // 定义+声明一体的 struct/union 类型绑定 (同 gen_block_items)
-                        if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                        if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
                             self.gen_vm_type_bind(&v.ty);
                         }
                         self.register_var(&v.name.name, &v.ty);
@@ -7604,8 +7604,8 @@ impl Codegen {
                                 let is_vec_init = matches!(&v.ty, Type::Vector(_, _));
                                 let is_agg = matches!(
                                     &v.ty,
-                                    Type::Struct(_, _, _)
-                                        | Type::Union(_, _, _)
+                                    Type::Struct(_, _, _, _)
+                                        | Type::Union(_, _, _, _)
                                         | Type::Array(_, ArraySize::Const(_))
                                         | Type::Atomic(_)
                                 ) && v.ty.size() > 8;
@@ -7616,7 +7616,7 @@ impl Codegen {
                                 let needs_compound_copy = matches!(init, Expr::CompoundLit { .. })
                                     && matches!(
                                         &v.ty,
-                                        Type::Struct(_, _, _) | Type::Union(_, _, _)
+                                        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
                                     );
                                 if is_vec_init || is_agg || needs_compound_copy {
                                     // struct/array/vector 初始化: 整体拷贝
@@ -8103,8 +8103,8 @@ impl Codegen {
                 Type::Int128 | Type::UInt128 | Type::Complex(_)
             ) || matches!(
                 effective_ty,
-                Type::Struct(_, _, _)
-                    | Type::Union(_, _, _)
+                Type::Struct(_, _, _, _)
+                    | Type::Union(_, _, _, _)
                     | Type::Array(_, ArraySize::Const(_))
                     | Type::Atomic(_)
             );
@@ -8593,8 +8593,8 @@ impl Codegen {
                         } else {
                             matches!(
                                 &ret_ty,
-                                Type::Struct(_, _, _)
-                                    | Type::Union(_, _, _)
+                                Type::Struct(_, _, _, _)
+                                    | Type::Union(_, _, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                                     | Type::Vector(_, _)
@@ -8713,7 +8713,7 @@ impl Codegen {
                             // Small struct (<=8B) returned as value in rax.
                             // CompoundLit/InitList gen_expr returns an ADDRESS
                             // in rax; we must load the VALUE from that address.
-                            if matches!(&ret_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                            if matches!(&ret_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                                 && ret_sz <= 8
                                 && matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. })
                             {
@@ -9274,7 +9274,7 @@ impl Codegen {
                     // 定义+声明一体的 struct/union 类型: 变量声明点即类型
                     // 声明点, 触发 VM 槽绑定/静态清除 (parser 不产生独立
                     // StructDef BlockItem)
-                    if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                    if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
                         self.gen_vm_type_bind(&v.ty);
                     }
                     // static local 需要运行时初始化: 发射初始化代码到全局地址
@@ -9296,8 +9296,8 @@ impl Codegen {
                         } else {
                             let is_agg = matches!(
                                 &v.ty,
-                                Type::Struct(_, _, _)
-                                    | Type::Union(_, _, _)
+                                Type::Struct(_, _, _, _)
+                                    | Type::Union(_, _, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                             ) && v.ty.size() > 8;
@@ -9368,12 +9368,14 @@ impl Codegen {
                 sd.name.name.clone(),
                 Arc::new(sd.fields.clone()),
                 salign,
+                false,
             )
         } else {
             Type::Struct(
                 sd.name.name.clone(),
                 Arc::new(sd.fields.clone()),
                 salign,
+                false,
             )
         };
         self.gen_vm_type_bind(&vm_ty);
@@ -9385,11 +9387,11 @@ impl Codegen {
     /// 此时从变量声明的 ty 触发绑定; 语义与独立声明一致。
     fn gen_vm_type_bind(&mut self, ty: &Type) {
         let (key, has_vla_field) = match ty {
-            Type::Struct(tag, fields, _) => (
+            Type::Struct(tag, fields, _, false) => (
                 format!("struct:{}", tag),
                 fields.iter().any(|f| f.ty.has_vla()),
             ),
-            Type::Union(tag, fields, _) => (
+            Type::Union(tag, fields, _, false) => (
                 format!("union:{}", tag),
                 fields.iter().any(|f| f.ty.has_vla()),
             ),
@@ -10047,8 +10049,8 @@ impl Codegen {
                     // 当内容存入 (20070919-1: b = p[2] 后 b.w 变地址字节)
                     let is_aggregate = matches!(
                         l_ty,
-                        Type::Struct(_, _, _)
-                            | Type::Union(_, _, _)
+                        Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _)
                             | Type::Array(_, ArraySize::Const(_))
                             | Type::Atomic(_)
                     ) && (sz > 8
@@ -10236,8 +10238,8 @@ impl Codegen {
                         // 或 8 字节内容截断写入, 语义都错 (20070919-1)
                         let is_agg_elem = matches!(
                             elem_ty,
-                            Type::Struct(_, _, _)
-                                | Type::Union(_, _, _)
+                            Type::Struct(_, _, _, _)
+                                | Type::Union(_, _, _, _)
                                 | Type::Array(_, ArraySize::Const(_))
                                 | Type::Atomic(_)
                         ) && (es > 8 || elem_ty.has_vla());
@@ -10294,8 +10296,8 @@ impl Codegen {
                         // 聚合元素赋值: rep movsb 整体拷贝 (同 Ident arr 路径)
                         let is_agg_elem = matches!(
                             elem_ty,
-                            Type::Struct(_, _, _)
-                                | Type::Union(_, _, _)
+                            Type::Struct(_, _, _, _)
+                                | Type::Union(_, _, _, _)
                                 | Type::Array(_, ArraySize::Const(_))
                                 | Type::Atomic(_)
                         ) && (es > 8 || elem_ty.has_vla());
@@ -10336,7 +10338,7 @@ impl Codegen {
                     let seg_prefix = Self::ptr_seg_prefix(&ptr_e.ty());
                     let is_deref_aggregate = matches!(
                         assign_l_ty,
-                        Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _)
+                        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)
                     ) && (assign_l_ty.size() > 8 || assign_l_ty.has_vla());
                     if is_deref_aggregate {
                         // Aggregate *ptr assignment: use rep movsb
@@ -10459,7 +10461,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                     let field_info = match &target_ty {
-                        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
@@ -10650,7 +10652,7 @@ impl Codegen {
                     } else {
                         // Check if field type is aggregate (struct/union/array)
                         let field_is_aggregate = field_info.as_ref().is_some_and(|f| {
-                            matches!(&f.ty, Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _))
+                            matches!(&f.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _))
                         });
                         if field_is_aggregate {
                             // Aggregate member assignment: use rep movsb to copy full struct
@@ -10826,8 +10828,8 @@ impl Codegen {
                     );
                     let is_aggregate = matches!(
                         assign_l_ty,
-                        Type::Struct(_, _, _)
-                            | Type::Union(_, _, _)
+                        Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _)
                             | Type::Array(_, _)
                     ) && assign_sz > 8;
                     // _Complex 浮点赋值到 Index/Deref/Cast lvalue: 取目标
@@ -11408,8 +11410,8 @@ impl Codegen {
                 // 声明时绑定槽, 不用当前变量值重算 (C11 6.2.4p7;
                 // 20041218-2: 声明后 n++ 不影响 sizeof(struct s))
                 let vm_key = match ty {
-                    Type::Struct(n, _, _) => Some(format!("struct:{}", n)),
-                    Type::Union(n, _, _) => Some(format!("union:{}", n)),
+                    Type::Struct(n, _, _, false) => Some(format!("struct:{}", n)),
+                    Type::Union(n, _, _, false) => Some(format!("union:{}", n)),
                     _ => None,
                 };
                 if let Some(k) = vm_key {
@@ -11561,7 +11563,7 @@ impl Codegen {
                             // - Call: SysV ABI >16B 返回已走 sret 约定 (rax=buffer 地址),
                             //   否则物化寄存器返回值到临时槽
                             // - 标量/其他: 正常 gen_expr
-                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                            if matches!(e_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
                                 let sz = e_ty.size();
                                 if self.gen_lvalue_addr(e, 6) {
                                     // lvalue 路径: 整体拷贝到 sret 临时槽
@@ -11619,7 +11621,7 @@ impl Codegen {
                             self.register_var(&v.name.name, &v.ty);
                             // 定义+声明一体的 struct/union 类型绑定 +
                             // VLA/VM struct 变量动态分配 (语句表达式内)
-                            if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
+                            if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
                                 self.gen_vm_type_bind(&v.ty);
                             }
                             // VLA/VM struct 变量: 语句表达式内也需动态分配
@@ -12394,7 +12396,7 @@ impl Codegen {
                     let expr_ty = expr.ty();
                     let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                     let field_info = match &target_ty {
-                        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
@@ -12553,7 +12555,7 @@ impl Codegen {
                             // use dst directly without spilling.
                             let expr_ty = expr.ty();
                             let is_compound = matches!(expr.as_ref(), Expr::CompoundLit { .. });
-                            if matches!(expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) && !is_compound {
+                            if matches!(expr_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) && !is_compound {
                                 let struct_size = expr_ty.size();
                                 // 物化到帧临时区 result_off (r13 相对)。
                                 // 不能用动态 sub rsp 槽: 该槽在表达式求值
@@ -12583,7 +12585,7 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                 let field_info = match &target_ty {
-                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| {
                             let mut fc = f.clone();
                             fc.offset += extra;
@@ -12594,7 +12596,7 @@ impl Codegen {
                 };
                 // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
                 // pr82210): 偏移已加到 dst, 跳过静态偏移加法
-                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _))
+                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _, _))
                     && self.gen_vm_member_offset(&target_ty, &field.name, dst);
                 if !vm_off_done {
                     if let Some(ref f) = field_info {
@@ -12827,7 +12829,7 @@ impl Codegen {
             Expr::VaArg { ap, ty: arg_ty, .. } => {
                 // 聚合 va_arg: 物化到临时槽, rax = 槽地址 (与 sret Call
                 // 约定一致), 供调用方 gen_aggregate_assign 以 rax 为源拷贝
-                if matches!(arg_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+                if matches!(arg_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                     && arg_ty.size() > 8
                 {
                     let slot = self.alloc_sret_slot(arg_ty.size());
@@ -13572,7 +13574,7 @@ impl Codegen {
 
         if matches!(
             ty,
-            Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _)
+            Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
         ) {
             self.gen_init_list_at(var_off, ty, inits);
         } else if let Some(InitItem::Expr(e)) = inits.first() {
@@ -13597,12 +13599,12 @@ impl Codegen {
     fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
         let sub_count = match elem_ty {
             Type::Array(_, ArraySize::Const(n)) => *n,
-            Type::Struct(_, fields, _) => {
+            Type::Struct(_, fields, _, false) => {
                 // 注意: 首元素是结构体名 (String), 第二个才是字段列表;
                 // 匿名位域不可初始化, 不计入字段数
                 fields.iter().filter(|f| !(f.name.is_empty() && f.bit_width.is_some())).count()
             }
-            Type::Union(_, _, _) => 1,
+            Type::Union(_, _, _, _) => 1,
             _ => return inits.to_vec(),
         };
         if sub_count == 0 {
@@ -13649,7 +13651,7 @@ impl Codegen {
                 // 如 int a[2][3] = {1,2,3,4,5,6} → {{1,2,3},{4,5,6}}
                 let effective_inits;
                 if matches!(&elem_ty.base,
-                    Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _))
+                    Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                 {
                     // 检查是否需要 brace elision: 首个值是标量 (非 InitList)
                     let needs_elision = inits.iter().any(|item| {
@@ -13764,7 +13766,7 @@ impl Codegen {
                         }
                         if matches!(
                             &elem_ty.base,
-                            Type::Struct(_, _, _) | Type::Union(_, _, _)
+                            Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
                         ) {
                             // brace elision (C11 6.7.9p17): 字符串初始化
                             // 聚合元素 → 递归到聚合分支的字符串字段路径
@@ -13825,11 +13827,13 @@ impl Codegen {
                     }
                 }
             }
-            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+            Type::Struct(_, fields, _, reverse_sso) | Type::Union(_, fields, _, reverse_sso) => {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
                 // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
                 // 支持 C99 brace elision: struct { int f[4]; } s = {1,2,3,4}
                 // C99: 未显式初始化的字段应零填充
+                let reverse_sso = *reverse_sso;
+                eprintln!("[DBG] gen_init_list_at: reverse_sso={}, fields.len={}", reverse_sso, fields.len());
                 let struct_size = ty.size();
                 if struct_size > 0 && struct_size <= 128 {
                     // 零填充整个结构 (小结构逐字节, 大结构用 rep stosb)
@@ -13860,7 +13864,7 @@ impl Codegen {
                                 let f = &fields[field_idx];
                                 // Brace elision: 如果当前字段是聚合类型 (数组/结构体/联合体)
                                 // 但初始化值不是 InitList, 收集剩余标量值作为该字段的初始化器
-                                let is_agg_field = matches!(&f.ty, Type::Array(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _));
+                                let is_agg_field = matches!(&f.ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
                                 let is_plain_value = !matches!(e, Expr::InitList { .. });
                                 // 字符串 ↔ char 数组字段一对一 (C11 6.7.9p14):
                                 // 不能走 brace elision 的连续收集 —
@@ -13884,7 +13888,7 @@ impl Codegen {
                                 // 聚合字段被同类型聚合值初始化 (如 `struct A a = {2, b}` 中 b 是 struct B):
                                 // 直接复制整个聚合值, 不走 brace elision (后者将 b 误作标量初始化 b.x)
                                 let expr_ty = e.ty();
-                                let expr_is_agg = matches!(&expr_ty, Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Array(_, _));
+                                let expr_is_agg = matches!(&expr_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _));
                                 if is_agg_field && is_plain_value && !expr_is_agg {
                                     // 收集从这个字段开始的所有剩余标量 InitItem
                                     let mut collected = Vec::new();
@@ -13966,12 +13970,35 @@ impl Codegen {
                     }
                     if let Some(bw) = bit_w {
                         // ── 位域字段初始化: 读-改-写 ──
-                        // 首次使用此容器时先清零 (确保非本字域的位 = 0)
+                        // 计算容器大小: 使用结构体大小作为容器大小 (对于单容器结构体)
+                        // 或者扫描同 offset 的所有位域, 取最远 bit 位置
+                        let container_size = {
+                            // 对于简单情况, 使用结构体大小
+                            let struct_size = ty.size();
+                            // 但也检查位域实际占用的位数
+                            let mut container_bits_end = bit_o + bw;
+                            let mut fi = field_idx;
+                            while fi < fields.len() {
+                                let f = &fields[fi];
+                                if f.bit_width.is_some() && f.offset == off {
+                                    let fb = f.bit_width.unwrap();
+                                    let fo = f.bit_offset;
+                                    let end = fo + fb;
+                                    if end > container_bits_end { container_bits_end = end; }
+                                    fi += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let bitfield_bytes = ((container_bits_end + 7) / 8) as usize;
+                            // 使用较大的值: 结构体大小或位域实际占用大小
+                            struct_size.max(bitfield_bytes)
+                        };
+                        // 首次使用此容器时先清零整个容器 (确保非本字域的位 = 0)
                         if zeroed_containers.insert(off) {
                             self.mov_imm(0, 0); // rax = 0
-                            self.emit_store(0, store_off, sz);
+                            self.emit_store(0, store_off, container_size);
                         }
-                        let container_size = sz;
                         // 生成初始化值 → rax
                         self.gen_expr(value, 0);
                         // 保存值到栈临时槽: [r13-40]
@@ -14029,21 +14056,84 @@ impl Codegen {
                         }
                         // 合并: or rcx, rax
                         self.emit(&[0x48, 0x09, 0xC1]);
+                        // 保存更新后的容器值回 [r13-32]
+                        self.emit(&[0x49, 0x89, 0x4D, 0xe0]); // mov [r13-32], rcx
                         // 加载地址 → rdx
                         self.emit(&[0x49, 0x8B, 0x55, 0xe8]); // mov rdx, [r13-24]
-                        // 存储容器
-                        match container_size {
-                            4 => self.emit(&[0x89, 0x0A]),       // mov [rdx], ecx
-                            8 => self.emit(&[0x48, 0x89, 0x0A]), // mov [rdx], rcx
-                            2 => self.emit(&[0x66, 0x89, 0x0A]),
-                            1 => self.emit(&[0x88, 0x0A]),
-                            _ => {}
+                        // 存储容器 (如果是最后一个位域且 reverse_sso, 需要先字节序反转)
+                        // 检查是否还有后续位域在同一容器
+                        let has_more_bitfields_in_container = {
+                            let mut fi = field_idx;
+                            let mut found_more = false;
+                            while fi < fields.len() {
+                                let f = &fields[fi];
+                                if f.bit_width.is_some() && f.offset == off {
+                                    // 这是同一容器的位域
+                                    if fi > field_idx {
+                                        found_more = true;
+                                        break;
+                                    }
+                                } else if f.offset != off {
+                                    break;
+                                }
+                                fi += 1;
+                            }
+                            found_more
+                        };
+                        eprintln!("[DBG] Bitfield store: reverse_sso={}, has_more={}, container_size={}, field_idx={}", reverse_sso, has_more_bitfields_in_container, container_size, field_idx);
+                        if reverse_sso && !has_more_bitfields_in_container {
+                            // 最后一个位域: 字节序反转整个容器
+                            match container_size {
+                                2 => {
+                                    self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
+                                    self.emit(&[0x66, 0x0F, 0xBA, 0xE9, 0x08]); // rol cx, 8
+                                    self.emit(&[0x66, 0x89, 0x0A]); // mov [rdx], cx
+                                }
+                                3 => {
+                                    // 3字节容器: bswap 4字节然后右移8位
+                                    self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
+                                    self.emit(&[0x48, 0x0F, 0xC9]); // bswap rcx
+                                    self.emit(&[0x48, 0xC1, 0xE9, 0x08]); // shr rcx, 8
+                                    // 存储3字节 (用mov [rdx], ecx的低3字节)
+                                    self.emit(&[0x89, 0x0A]); // mov [rdx], ecx (实际只写3字节由后续处理)
+                                }
+                                4 => {
+                                    self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
+                                    self.emit(&[0x48, 0x0F, 0xC9]); // bswap rcx
+                                    self.emit(&[0x48, 0xC1, 0xE9, 0x20]); // shr rcx, 32
+                                    self.emit(&[0x89, 0x0A]); // mov [rdx], ecx
+                                }
+                                8 => {
+                                    self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
+                                    self.emit(&[0x48, 0x0F, 0xC9]); // bswap rcx
+                                    self.emit(&[0x48, 0x89, 0x0A]); // mov [rdx], rcx
+                                }
+                                _ => {
+                                    // 其他大小: 不反转 (1字节无需反转)
+                                    match container_size {
+                                        4 => self.emit(&[0x89, 0x0A]),       // mov [rdx], ecx
+                                        8 => self.emit(&[0x48, 0x89, 0x0A]), // mov [rdx], rcx
+                                        2 => self.emit(&[0x66, 0x89, 0x0A]),
+                                        1 => self.emit(&[0x88, 0x0A]),
+                                        3 => self.emit(&[0x89, 0x0A]), // 3字节也mov ecx
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        } else {
+                            match container_size {
+                                4 => self.emit(&[0x89, 0x0A]),       // mov [rdx], ecx
+                                8 => self.emit(&[0x48, 0x89, 0x0A]), // mov [rdx], rcx
+                                2 => self.emit(&[0x66, 0x89, 0x0A]),
+                                1 => self.emit(&[0x88, 0x0A]),
+                                _ => {}
+                            }
                         }
                     } else {
                         // 聚合字段被聚合值初始化 (struct/union 复制):
                         // 用 rep movsb 整块复制, 避免 gen_expr 只加载前 8 字节
                         let val_ty = value.ty();
-                        let val_is_agg = matches!(&val_ty, Type::Struct(_, _, _) | Type::Union(_, _, _));
+                        let val_is_agg = matches!(&val_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
                         if val_is_agg && sz > 0 {
                             let mut src_addr_ok = false;
                             if let Expr::Ident { name: src_name, .. } = value {
@@ -14100,6 +14190,21 @@ impl Codegen {
                                 }
                                 init_idx += 1;
                                 continue;
+                            }
+                        }
+                        // SSO reversed: byte-swap scalar value before writing
+                        if reverse_sso && sz > 1 {
+                            match sz {
+                                2 => {
+                                    self.emit(&[0x66, 0x0F, 0xBA, 0xE0, 0x08]); // rol ax, 8 (swap 2 bytes)
+                                }
+                                4 => {
+                                    self.emit(&[0x48, 0x0F, 0xC8]); // bswap eax
+                                }
+                                8 => {
+                                    self.emit(&[0x48, 0x0F, 0xC8]); // bswap rax
+                                }
+                                _ => {}
                             }
                         }
                         self.emit_store(0, store_off, sz);
@@ -14338,7 +14443,7 @@ impl Codegen {
                     }
                 }
             }
-            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                 let total_size = ty.size();
                 data.resize(total_size, 0);
                 let mut field_idx = 0;
@@ -14368,7 +14473,7 @@ impl Codegen {
                                 Some((o, s, ft)) => {
                                     // Look up bitfield info for designated field
                                     let bf_info = if let Designator::Field(ref name) = designator {
-                                        if let Type::Struct(_, fs, _) | Type::Union(_, fs, _) = ty {
+                                        if let Type::Struct(_, fs, _, _) | Type::Union(_, fs, _, false) = ty {
                                             find_field(fs.as_ref(), &name.name).and_then(|(f, extra)| {
                                                 f.bit_width.map(|bw| (f.bit_offset + (extra as u32) * 8, bw))
                                             })
@@ -15635,7 +15740,7 @@ impl Codegen {
                     expr_ty
                 };
                 match &target_ty {
-                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name)
                             .and_then(|(f, extra)| {
                                 f.bit_width.map(|bw| {
@@ -17333,7 +17438,7 @@ impl Codegen {
                     self.mov_imm(dst, ty.size() as i128);
                 }
             }
-            Type::Struct(_, fields, salign) => {
+            Type::Struct(_, fields, salign, false) => {
                 // VM struct (GCC 扩展 variable-sized struct): VLA 字段
                 // 之前的偏移是编译期布局 (parser 不受 VLA fallback 影响),
                 // 首个 VLA 字段起转入运行时累计: 字段偏移 =
@@ -17398,7 +17503,7 @@ impl Codegen {
                     self.emit(&(!m as u64 as u32).to_le_bytes());
                 }
             }
-            Type::Union(_, fields, _) => {
+            Type::Union(_, fields, _, false) => {
                 // VM union: sizeof = max(字段大小)。静态字段取 size(),
                 // VLA 字段运行时求值后取 64 位无符号 max。
                 // scratch 与 dst 互斥 (同 Struct 分支)
@@ -17455,7 +17560,7 @@ impl Codegen {
     /// 避免 gen_expr 的 scratch 破坏)。
     fn gen_vm_member_offset(&mut self, ty: &Type, field_name: &str, dst: u8) -> bool {
         let fields = match ty {
-            Type::Struct(_, fields, _) => fields,
+            Type::Struct(_, fields, _, false) => fields,
             _ => return false,
         };
         if self.vm_size_slot(ty).is_none() {
@@ -18431,7 +18536,7 @@ impl Codegen {
                     && matches!(t, Type::Enum(_, _, Some(u)) if Self::is_signed_int(&u.base));
                 // For struct/union types, treat as unsigned to avoid
                 // sign-extension loads that truncate the value.
-                let is_struct = matches!(t, Type::Struct(_, _, _) | Type::Union(_, _, _));
+                let is_struct = matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
                 (s, signed(t) && !is_struct, sn)
             }
             None => (8, true, false),
@@ -18440,7 +18545,7 @@ impl Codegen {
         // Structs may have sizes like 6 bytes, but we need to load the full
         // 8-byte register to preserve all fields.
         let is_struct_type = match self.var_map.get(name) {
-            Some((_, t)) => matches!(t, Type::Struct(_, _, _) | Type::Union(_, _, _)),
+            Some((_, t)) => matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)),
             None => false,
         };
         if is_struct_type {
@@ -21243,14 +21348,14 @@ impl Codegen {
                 let expr_ty = expr.ty();
                 let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
                 let field_off = match &target_ty {
-                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
                     }
                     _ => None,
                 };
                 // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
                 // pr82210): 偏移已加到 dst, 跳过静态偏移加法
-                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _))
+                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _, _))
                     && self.gen_vm_member_offset(&target_ty, &field.name, dst);
                 if vm_off_done {
                     return true;
@@ -22054,10 +22159,10 @@ impl Codegen {
     /// sizeof / 聚合拷贝 / 指针步长的运行时大小来源 (C11 6.2.4p7)。
     fn vm_size_slot(&self, ty: &Type) -> Option<i64> {
         match ty {
-            Type::Struct(tag, _, _) => {
+            Type::Struct(tag, _, _, false) => {
                 self.vm_struct_size_slots.get(&format!("struct:{}", tag)).copied()
             }
-            Type::Union(tag, _, _) => {
+            Type::Union(tag, _, _, false) => {
                 self.vm_struct_size_slots.get(&format!("union:{}", tag)).copied()
             }
             _ => None,
@@ -22069,7 +22174,7 @@ impl Codegen {
     fn emit_index_scale(&mut self, es: i32, arr: &Expr, elem_ty: &Type) {
         // Ptr(VM struct) 索引: 元素大小是运行时值 (sizeof 语义), 不能用
         // 编译期 size() 回退值; es==1 早退前先判定, 避免回退值 1 漏乘
-        if matches!(elem_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+        if matches!(elem_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
             && elem_ty.has_vla()
         {
             if let Some(slot) = self.vm_size_slot(elem_ty) {
@@ -22102,7 +22207,7 @@ impl Codegen {
         // [off+16]=声明时总大小 (sizeof/聚合拷贝取用)。
         // C11 6.2.4p7: 生命周期开始时类型大小固定, 不随后续维度变量
         // 改变 (20070919-1)
-        if matches!(v.ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
+        if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
             && Self::type_has_vla(&v.ty)
         {
             let off = self.var_offset(&v.name.name);
@@ -27449,7 +27554,7 @@ impl Codegen {
     /// 支持常量数组下标 (如 "b[2]" 或 "b[2][3]")
     fn compute_offset(ty: &Type, member: &str) -> usize {
         let fields = match ty {
-            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields,
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
             _ => return 0,
         };
         let parts: Vec<&str> = member.split('.').collect();
@@ -27488,7 +27593,7 @@ impl Codegen {
                     }
                 }
                 if i < parts.len() - 1 {
-                    if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
+                    if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
                         current_fields = sub.as_ref();
                     } else {
                         break;
@@ -27504,7 +27609,7 @@ impl Codegen {
     /// 查找 __builtin_offsetof 中字段的类型
     fn find_offsetof_field_type(ty: &Type, member: &str) -> Type {
         let fields = match ty {
-            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields,
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
             _ => return Type::Int,
         };
         let parts: Vec<&str> = member.split('.').collect();
@@ -27518,7 +27623,7 @@ impl Codegen {
             };
             if let Some((field, _)) = find_field(current_fields, name) {
                 result_ty = field.ty.clone();
-                if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
+                if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
                     current_fields = sub.as_ref();
                 }
             }

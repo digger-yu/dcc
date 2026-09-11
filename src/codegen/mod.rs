@@ -933,7 +933,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             byte_size: 0, // 未知大小，稍后解析
             kind: debug::DwarfTypeKind::Void, // 占位
         },
-        Type::Struct(name, fields, size) => {
+        Type::Struct(name, fields, size, _) => {
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {
@@ -957,7 +957,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                 kind: debug::DwarfTypeKind::Struct { members },
             }
         }
-        Type::Union(name, fields, size) => {
+        Type::Union(name, fields, size, _) => {
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {

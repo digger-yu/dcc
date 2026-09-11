@@ -1494,7 +1494,7 @@ fn type_has_vla_dim(t: &crate::ast::Type) -> bool {
     match t {
         crate::ast::Type::Array(_, sz) => matches!(sz, ArraySize::Var(_)),
         crate::ast::Type::Ptr(p) => type_has_vla_dim(&p.base),
-        crate::ast::Type::Struct(_, fields, _) | crate::ast::Type::Union(_, fields, _) => {
+        crate::ast::Type::Struct(_, fields, _, _) | crate::ast::Type::Union(_, fields, _, _) => {
             fields.iter().any(|f| type_has_vla_dim(&f.ty))
         }
         _ => false,
