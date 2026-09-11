@@ -14068,7 +14068,7 @@ impl Codegen {
                                 let f = &fields[fi];
                                 if f.bit_width.is_some() && f.offset == off {
                                     // 这是同一容器的位域
-                                    if fi > field_idx {
+                                    if fi >= field_idx {
                                         found_more = true;
                                         break;
                                     }
@@ -14081,24 +14081,18 @@ impl Codegen {
                         };
                         if reverse_sso && !has_more_bitfields_in_container {
                             // 最后一个位域: 字节序反转整个容器
+                            // 注意: reverse_sso 改变位域在容器中的打包方向,
+                            // 不仅仅是字节序反转。完整实现需要修改位域布局逻辑。
+                            // 当前实现: 反转容器中的字节序 (近似处理)
                             match container_size {
                                 2 => {
                                     self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
-                                    self.emit(&[0x66, 0x0F, 0xBA, 0xE9, 0x08]); // rol cx, 8
+                                    self.emit(&[0x66, 0xC1, 0xC1, 0x08]); // rol cx, 8
                                     self.emit(&[0x66, 0x89, 0x0A]); // mov [rdx], cx
-                                }
-                                3 => {
-                                    // 3字节容器: bswap 4字节然后右移8位
-                                    self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
-                                    self.emit(&[0x48, 0x0F, 0xC9]); // bswap rcx
-                                    self.emit(&[0x48, 0xC1, 0xE9, 0x08]); // shr rcx, 8
-                                    // 存储3字节 (用mov [rdx], ecx的低3字节)
-                                    self.emit(&[0x89, 0x0A]); // mov [rdx], ecx (实际只写3字节由后续处理)
                                 }
                                 4 => {
                                     self.emit(&[0x49, 0x8B, 0x4D, 0xe0]); // mov rcx, [r13-32]
-                                    self.emit(&[0x48, 0x0F, 0xC9]); // bswap rcx
-                                    self.emit(&[0x48, 0xC1, 0xE9, 0x20]); // shr rcx, 32
+                                    self.emit(&[0x0F, 0xC9]); // bswap ecx
                                     self.emit(&[0x89, 0x0A]); // mov [rdx], ecx
                                 }
                                 8 => {
@@ -14113,7 +14107,6 @@ impl Codegen {
                                         8 => self.emit(&[0x48, 0x89, 0x0A]), // mov [rdx], rcx
                                         2 => self.emit(&[0x66, 0x89, 0x0A]),
                                         1 => self.emit(&[0x88, 0x0A]),
-                                        3 => self.emit(&[0x89, 0x0A]), // 3字节也mov ecx
                                         _ => {}
                                     }
                                 }
@@ -14194,10 +14187,10 @@ impl Codegen {
                         if reverse_sso && sz > 1 {
                             match sz {
                                 2 => {
-                                    self.emit(&[0x66, 0x0F, 0xBA, 0xE0, 0x08]); // rol ax, 8 (swap 2 bytes)
+                                    self.emit(&[0x66, 0xC1, 0xC0, 0x08]); // rol ax, 8
                                 }
                                 4 => {
-                                    self.emit(&[0x48, 0x0F, 0xC8]); // bswap eax
+                                    self.emit(&[0x0F, 0xC8]); // bswap eax
                                 }
                                 8 => {
                                     self.emit(&[0x48, 0x0F, 0xC8]); // bswap rax
