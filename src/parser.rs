@@ -3971,25 +3971,16 @@ impl<'a> Parser<'a> {
                     self.nodiscard_fns.insert(name_for_decl.name.clone());
                 }
                 
-                // Debug: print alignment info
-                eprintln!("DEBUG parse_func_def: name={}", name_for_decl.name);
-                eprintln!("  attrs.alignment={:?}", attrs.alignment);
-                eprintln!("  func_alignments.get={:?}", self.func_alignments.get(&name_for_decl.name));
-                
                 // Pre-compute alignment before creating FuncDecl
                 let resolved_alignment = Some(self.func_alignments.get(&name_for_decl.name)
                     .map(|&forward_align| {
                         let def_align = attrs.alignment.unwrap_or(8).max(1);
-                        eprintln!("  Merging: forward={}, def={}", forward_align, def_align);
                         // Prefer larger alignment
                         forward_align.max(def_align)
                     })
                     .unwrap_or_else(|| {
-                        let default = attrs.alignment.unwrap_or(8).max(1);
-                        eprintln!("  Using default: {}", default);
-                        default
+                        attrs.alignment.unwrap_or(8).max(1)
                     }));
-                eprintln!("  resolved_alignment={:?}\n", resolved_alignment);
                 
                 Some(vec![Decl::Func(FuncDecl {
                     ret_ty: ty,

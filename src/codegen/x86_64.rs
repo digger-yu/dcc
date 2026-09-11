@@ -219,7 +219,12 @@ pub struct Codegen {
     /// 函数末尾插入 trap 指令 (ud2), 防止执行流落入后续代码
     current_is_noreturn: bool,
     static_chain_offset: i64,            // 静态链在当前帧中的偏移
-    upvar_offsets: HashMap<String, i64>, // upvar 名称 → 在父帧中的偏移
+    upvar_offsets: HashMap<String, i64>, // upvar 名称 → 在起源帧中的偏移
+    // upvar 名称 → 需要走多少层静态链到达起源帧 (1=父, 2=祖父, ...)
+    upvar_chain_depth: HashMap<String, u32>,
+    // upvar 名称 → 中间嵌套帧的 static_chain_offset 列表
+    // 对深度 1 为空; 对深度 2 包含 [父帧的 static_chain_offset]
+    upvar_intermediate_offsets: HashMap<String, Vec<i64>>,
     // &&label 地址引用: (disp32_pos, label_name)
     label_addr_refs: Vec<(u64, String)>,
     // register asm 变量绑定: 变量名 → 寄存器编号
@@ -1496,6 +1501,8 @@ impl Codegen {
             current_is_noreturn: false,
             static_chain_offset: 0,
             upvar_offsets: HashMap::new(),
+            upvar_chain_depth: HashMap::new(),
+            upvar_intermediate_offsets: HashMap::new(),
             label_addr_refs: vec![],
             reg_bindings: HashMap::new(),
             global_reg_bindings: HashMap::new(),
@@ -6945,6 +6952,12 @@ impl Codegen {
         // noreturn: 函数末尾插入 trap 指令
         self.current_is_noreturn = f.is_noreturn;
         self.upvar_offsets.clear();
+        // upvar_chain_depth / upvar_intermediate_offsets:
+        // 嵌套函数的父级 handler 在调用 compile_func 之前通过
+        // save→clear→set 预先填好这两个 map, 子 handler 负责
+        // save/restore. compile_func 不再清理它们以免覆盖.
+        // 顶层函数首次调用时 map 已为空 (new() 初始化), 后续
+        // 顶层调用前由最后一个嵌套 handler 的 restore 清理干净.
         self.trampoline_slots.clear();
         self.trampoline_total_size = 0;
         if f.is_nested {
@@ -7698,12 +7711,65 @@ impl Codegen {
         if !nested_decls.is_empty() {
             let parent_var_map = self.var_map.clone();
             let parent_name = f.name.name.clone();
+            let parent_static_chain_off = self.static_chain_offset;
+            // 父级 upvars: name → (origin_offset, chain_depth, intermediate_offsets)
+            let parent_upvar_info: HashMap<String, (i64, u32, Vec<i64>)> = f
+                .upvars
+                .iter()
+                .map(|(n, o)| {
+                    let off = *o;
+                    // 父函数的 upvar 深度 = 当前 upvar_chain_depth.get(n)?
+                    // 若无 (一级 upvar), 默认为 1, intermediate 为空
+                    let depth = self.upvar_chain_depth.get(n).copied().unwrap_or(1);
+                    let intermediates = self
+                        .upvar_intermediate_offsets
+                        .get(n)
+                        .cloned()
+                        .unwrap_or_default();
+                    (n.clone(), (off, depth, intermediates))
+                })
+                .collect();
             for mut nf_decl in nested_decls {
-                // 计算 upvar 偏移
+                // 计算 upvar 偏移 + 链深度 + 中间偏移
+                // intermediates 语义: load_upvar 先做一次
+                //   r11 = [child_r13 + child.chain_off] → 父帧
+                // 然后对每个 intermediate 做
+                //   r11 = [r11 + intermediate] → 再上溯一层
+                // 最后访问 [r11 + origin_off]
+                // depth=1 (直接父): intermediates = []  (父帧即起源帧)
+                // depth=2 (祖父): intermediates = [parent.chain_off]  (再上溯一次到祖父)
+                let mut new_upvars: Vec<(String, i64, u32, Vec<i64>)> = Vec::new();
                 for (name, off) in &mut nf_decl.upvars {
                     if let Some((parent_off, _)) = parent_var_map.get(name) {
+                        // 直接父级 upvar: depth=1, intermediates=[]
                         *off = *parent_off;
+                        new_upvars.push((name.clone(), *off, 1, vec![]));
+                    } else if let Some((origin_off, parent_depth, parent_intermediates)) =
+                        parent_upvar_info.get(name)
+                    {
+                        // 祖父级 upvar: depth+1, intermediates = [parent.chain_off] + parent_intermediates
+                        let mut intermediates = vec![parent_static_chain_off];
+                        intermediates.extend(parent_intermediates.iter().copied());
+                        *off = *origin_off;
+                        new_upvars.push((name.clone(), *off, parent_depth + 1, intermediates));
+                    } else {
+                        eprintln!(
+                            "[WARN] nested upvar {} not found in parent var_map or upvars",
+                            name
+                        );
                     }
+                }
+                // 写入新的 upvars + 临时设置 self 的链深度/中间偏移
+                nf_decl.upvars = new_upvars.iter().map(|(n, o, _, _)| (n.clone(), *o)).collect();
+                // 保存父级链状态, 设置子级链状态
+                let saved_upvar_chain_depth = self.upvar_chain_depth.clone();
+                let saved_upvar_intermediate = self.upvar_intermediate_offsets.clone();
+                self.upvar_chain_depth.clear();
+                self.upvar_intermediate_offsets.clear();
+                for (name, _off, depth, intermediates) in &new_upvars {
+                    self.upvar_chain_depth.insert(name.clone(), *depth);
+                    self.upvar_intermediate_offsets
+                        .insert(name.clone(), intermediates.clone());
                 }
                 // 从预注册的重命名映射中查找唯一名称
                 let orig_name = nf_decl.name.name.clone();
@@ -7717,6 +7783,9 @@ impl Codegen {
                 // 将嵌套函数加入 defined_funcs，这样 ELF 发射器知道它的符号
                 self.defined_funcs.insert(unique_name.clone());
                 self.compile_func(&nf_decl, prog);
+                // 恢复父级链状态 (父函数可能还有兄弟嵌套函数)
+                self.upvar_chain_depth = saved_upvar_chain_depth;
+                self.upvar_intermediate_offsets = saved_upvar_intermediate;
             }
         }
     }
@@ -9502,15 +9571,15 @@ impl Codegen {
                     && matches!(ty, Type::Int128 | Type::UInt128)
                 {
                     let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                    self.load_upvar(0, parent_off, 8);
-                    self.load_upvar(2, parent_off + 8, 8);
+                    self.load_upvar(0, parent_off, 8, &name.name);
+                    self.load_upvar(2, parent_off + 8, 8, &name.name);
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
                 } else if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name)
                 {
                     let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                    self.load_upvar(dst, parent_off, ty.size());
+                    self.load_upvar(dst, parent_off, ty.size(), &name.name);
                 } else {
                     // P1-4: __int128 变量加载 (两个 64 位槽)
                     if matches!(ty, Type::Int128 | Type::UInt128) {
@@ -10102,8 +10171,8 @@ impl Codegen {
                             {
                                 let parent_off =
                                     self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                                self.store_upvar(0, parent_off, 8);
-                                self.store_upvar(2, parent_off + 8, 8);
+                                self.store_upvar(0, parent_off, 8, &name.name);
+                                self.store_upvar(2, parent_off + 8, 8, &name.name);
                             } else {
                                 let off = self.var_offset(&name.name);
                                 self.store_stack(0, off);
@@ -10126,7 +10195,7 @@ impl Codegen {
                         {
                             let parent_off =
                                 self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                            self.store_upvar(dst, parent_off, l_ty.size());
+                            self.store_upvar(dst, parent_off, l_ty.size(), &name.name);
                         } else if matches!(l_ty, Type::Vector(_, _)) {
                             self.gen_vector_store(&name.name);
                         } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
@@ -15459,12 +15528,12 @@ impl Codegen {
                 // 副作用丢失 (pr22061-3 形参维度 ++N 就发生在序言)。
                 let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
                 let ty_sz = inner_ty.size().max(1);
-                self.load_upvar(dst, parent_off, ty_sz);
+                self.load_upvar(dst, parent_off, ty_sz, &name.name);
                 if !is_pre {
                     self.push(dst); // 后缀: 保存旧值
                 }
                 self.emit_inc_dec_reg(dst, is_inc, step as i32);
-                self.store_upvar(dst, parent_off, ty_sz);
+                self.store_upvar(dst, parent_off, ty_sz, &name.name);
                 if !is_pre {
                     self.pop(dst); // 后缀: 恢复旧值到 dst
                 }
@@ -17892,10 +17961,32 @@ impl Codegen {
         // g 读外层 VLA a, 无此分支会懒分配本帧垃圾槽)。
         if self.current_func_is_nested && self.upvar_offsets.contains_key(name) {
             let parent_off = self.upvar_offsets.get(name).copied().unwrap_or(0);
+            let intermediates: Vec<i64> = self
+                .upvar_intermediate_offsets
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            // 走到起源帧
+            self.load_stack(dst, self.static_chain_offset);
+            for &ioff in &intermediates {
+                if Self::fits_disp32(ioff) {
+                    let rex = 0x48u8 | if dst >= 8 { 0x05u8 } else { 0 };
+                    let modrm = 0x83 | ((dst & 7) << 3);
+                    self.emit(&[rex, 0x8B, modrm]);
+                    self.emit(&(ioff as i32).to_le_bytes());
+                } else {
+                    self.mov_imm(10, ioff as i128);
+                    self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+                }
+            }
             if Self::type_has_vla(arr_ty) {
-                self.load_upvar(dst, parent_off, 8);
+                // VLA: 起源帧[off] 是元数据槽, 槽内容是数据基址 (二次加载)
+                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                let modrm = 0x03 | ((dst & 7) << 3);
+                self.emit(&[rex, 0x8B, modrm]);
+                self.emit(&(parent_off as i32).to_le_bytes());
             } else {
-                self.load_stack(dst, self.static_chain_offset); // dst = 父帧
+                // 普通数组/向量: 起源帧 + parent_off 即数据地址
                 if parent_off != 0 {
                     let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
@@ -20789,9 +20880,28 @@ impl Codegen {
         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
     }
 
-    fn load_upvar(&mut self, reg: u8, parent_off: i64, size: usize) {
-        // r11 = 保存的父级 r13
+    fn load_upvar(&mut self, reg: u8, parent_off: i64, size: usize, upvar_name: &str) {
+        // r11 = 保存的父级 r13 (立即父帧)
         self.load_stack(11, self.static_chain_offset);
+        // 多层静态链上溯: 祖父级 upvar 需要继续上溯中间帧
+        let intermediates: Vec<i64> = self
+            .upvar_intermediate_offsets
+            .get(upvar_name)
+            .cloned()
+            .unwrap_or_default();
+        for &off in &intermediates {
+            if Self::fits_disp32(off) {
+                // mov r11, [r11 + off]  (REX.W.RB if r11>=8)
+                let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
+                let modrm = 0x83 | ((11 & 7) << 3);
+                self.emit(&[rex, 0x8B, modrm]);
+                self.emit(&(off as i32).to_le_bytes());
+            } else {
+                self.mov_imm(10, off as i128);
+                // lea r11, [r11 + r10]
+                self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+            }
+        }
         if Self::fits_disp32(parent_off) {
             let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
             let modrm = 0x83 | ((reg & 7) << 3);
@@ -20819,8 +20929,24 @@ impl Codegen {
         }
     }
 
-    fn store_upvar(&mut self, reg: u8, parent_off: i64, size: usize) {
+    fn store_upvar(&mut self, reg: u8, parent_off: i64, size: usize, upvar_name: &str) {
         self.load_stack(11, self.static_chain_offset);
+        let intermediates: Vec<i64> = self
+            .upvar_intermediate_offsets
+            .get(upvar_name)
+            .cloned()
+            .unwrap_or_default();
+        for &off in &intermediates {
+            if Self::fits_disp32(off) {
+                let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
+                let modrm = 0x83 | ((11 & 7) << 3);
+                self.emit(&[rex, 0x8B, modrm]);
+                self.emit(&(off as i32).to_le_bytes());
+            } else {
+                self.mov_imm(10, off as i128);
+                self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+            }
+        }
         if Self::fits_disp32(parent_off) {
             let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
             let modrm = 0x83 | ((reg & 7) << 3);
@@ -21059,10 +21185,29 @@ impl Codegen {
                         .get(&name.name)
                         .copied()
                         .unwrap_or(0);
+                    let intermediates: Vec<i64> = self
+                        .upvar_intermediate_offsets
+                        .get(&name.name)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.load_stack(dst, self.static_chain_offset);
+                    for &ioff in &intermediates {
+                        if Self::fits_disp32(ioff) {
+                            let rex = 0x48u8 | if dst >= 8 { 0x05u8 } else { 0 };
+                            let modrm = 0x83 | ((dst & 7) << 3);
+                            self.emit(&[rex, 0x8B, modrm]);
+                            self.emit(&(ioff as i32).to_le_bytes());
+                        } else {
+                            self.mov_imm(10, ioff as i128);
+                            self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+                        }
+                    }
                     if Self::type_has_vla(ty) {
-                        self.load_upvar(dst, parent_off, 8);
+                        let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                        let modrm = 0x03 | ((dst & 7) << 3);
+                        self.emit(&[rex, 0x8B, modrm]);
+                        self.emit(&(parent_off as i32).to_le_bytes());
                     } else {
-                        self.load_stack(dst, self.static_chain_offset);
                         if parent_off != 0 {
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
