@@ -290,8 +290,9 @@ pub struct Parser<'a> {
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: ScopeChain,                      // 分层作用域链 (替代单 HashMap + clone)
-    var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const检查用)
+    var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const 检查用)
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
+    func_alignments: HashMap<String, usize>,   // 函数名 → 对齐值 (from forward decl or def)
     nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
     in_function: bool,                         // 是否在函数体内
     current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
@@ -336,6 +337,7 @@ impl<'a> Parser<'a> {
             locals: ScopeChain::new(),
             var_quals: HashMap::new(),
             globals: HashMap::new(),
+            func_alignments: HashMap::new(),
             nodiscard_fns: HashSet::new(),
             in_function: false,
             current_function: None,
@@ -2789,7 +2791,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_decl(&mut self) -> Option<Vec<Decl>> {
-        // __GIMPLE: GCC 内部 IR 语法, 跳过整个函数声明
+        // __GIMPLE: GCC 内部 IR 语法，跳过整个函数声明
         // 检测: 如果当前声明包含 __GIMPLE, 跳过到函数体结束
         if self.cur.kind == TokKind::Ident && self.cur.text == "__GIMPLE" {
             // 向前扫描找到函数体 { ... } 并跳过
@@ -3866,7 +3868,13 @@ impl<'a> Parser<'a> {
                 vec![]
             };
             if !is_nested_func {
+                // Store both type and alignment for potential forward decl -> def merge
                 self.globals.insert(name_for_decl.name.clone(), func_ty.clone());
+                // Only set alignment from forward declaration if not already present
+                // (avoid overwriting with default from definition without attributes)
+                self.func_alignments
+                    .entry(name_for_decl.name.clone())
+                    .or_insert(attrs.alignment.unwrap_or(8).max(1));
             }
             // 非嵌套函数: 清空 locals, 让 lookup_ident_type 回退到 globals。
             // 嵌套函数: 保留父作用域链 — 函数体解析期间必须能看到父函数
@@ -3962,6 +3970,27 @@ impl<'a> Parser<'a> {
                 if attrs.is_nodiscard {
                     self.nodiscard_fns.insert(name_for_decl.name.clone());
                 }
+                
+                // Debug: print alignment info
+                eprintln!("DEBUG parse_func_def: name={}", name_for_decl.name);
+                eprintln!("  attrs.alignment={:?}", attrs.alignment);
+                eprintln!("  func_alignments.get={:?}", self.func_alignments.get(&name_for_decl.name));
+                
+                // Pre-compute alignment before creating FuncDecl
+                let resolved_alignment = Some(self.func_alignments.get(&name_for_decl.name)
+                    .map(|&forward_align| {
+                        let def_align = attrs.alignment.unwrap_or(8).max(1);
+                        eprintln!("  Merging: forward={}, def={}", forward_align, def_align);
+                        // Prefer larger alignment
+                        forward_align.max(def_align)
+                    })
+                    .unwrap_or_else(|| {
+                        let default = attrs.alignment.unwrap_or(8).max(1);
+                        eprintln!("  Using default: {}", default);
+                        default
+                    }));
+                eprintln!("  resolved_alignment={:?}\n", resolved_alignment);
+                
                 Some(vec![Decl::Func(FuncDecl {
                     ret_ty: ty,
                     name: name_for_decl,
@@ -3971,7 +4000,7 @@ impl<'a> Parser<'a> {
                     is_extern: storage.is_extern,
                     is_static: storage.is_static,
                     section: attrs.section,
-                    alignment: attrs.alignment,
+                    alignment: resolved_alignment,
                     is_weak: attrs.is_weak || pragma_weak,
                     visibility: attrs.visibility,
                     is_unused: attrs.is_unused,
@@ -4033,6 +4062,16 @@ impl<'a> Parser<'a> {
                 if attrs.is_nodiscard {
                     self.nodiscard_fns.insert(name_for_decl.name.clone());
                 }
+                
+                // Pre-compute alignment before creating FuncDecl
+                let resolved_alignment = Some(self.func_alignments.get(&name_for_decl.name)
+                    .map(|&forward_align| {
+                        let def_align = attrs.alignment.unwrap_or(8).max(1);
+                        // Prefer larger alignment
+                        forward_align.max(def_align)
+                    })
+                    .unwrap_or_else(|| attrs.alignment.unwrap_or(8).max(1)));
+                
                 Some(vec![Decl::Func(FuncDecl {
                     ret_ty: ty,
                     name: name_for_decl,
@@ -4042,7 +4081,7 @@ impl<'a> Parser<'a> {
                     is_extern: storage.is_extern,
                     is_static: storage.is_static,
                     section: attrs.section,
-                    alignment: attrs.alignment,
+                    alignment: resolved_alignment,
                     is_weak: attrs.is_weak || pragma_weak,
                     visibility: attrs.visibility,
                     is_unused: attrs.is_unused,
@@ -4838,6 +4877,12 @@ impl<'a> Parser<'a> {
                         self.locals.insert(nm.name.clone(), p.ty.clone());
                     }
                 }
+                
+                // Store forward declaration alignment if not present
+                // (similar to parse_top_stmt at line 3873-3877)
+                self.func_alignments
+                    .entry(name.name.clone())
+                    .or_insert(attrs.alignment.unwrap_or(8).max(1));
                 let body = if self.cur.kind == TokKind::LBrace {
                     self.advance();
                     let b = self.parse_block();
@@ -4857,6 +4902,16 @@ impl<'a> Parser<'a> {
                 self.current_function = saved_func;
                 let sp = name.span.clone();
                 self.leave_recursion();
+                
+                // Pre-compute alignment before moving `name`
+                let resolved_alignment = Some(self.func_alignments.get(&name.name)
+                    .map(|&forward_align| {
+                        let def_align = attrs.alignment.unwrap_or(8).max(1);
+                        // Prefer larger alignment
+                        forward_align.max(def_align)
+                    })
+                    .unwrap_or_else(|| attrs.alignment.unwrap_or(8).max(1)));
+                
                 return Some(vec![Decl::Func(FuncDecl {
                     ret_ty: outer_func,
                     name,
@@ -4866,7 +4921,7 @@ impl<'a> Parser<'a> {
                     is_extern: storage.is_extern,
                     is_static: storage.is_static,
                     section: attrs.section,
-                    alignment: attrs.alignment,
+                    alignment: resolved_alignment,
                     is_weak: attrs.is_weak,
                     visibility: attrs.visibility,
                     is_unused: attrs.is_unused,
@@ -4930,6 +4985,10 @@ impl<'a> Parser<'a> {
             if !self.in_function {
                 self.globals.insert(name.name.clone(), func_ty.clone());
             }
+            // Store forward declaration alignment (similar to other paths)
+            self.func_alignments
+                .entry(name.name.clone())
+                .or_insert(attrs.alignment.unwrap_or(8).max(1));
             let body = if self.cur.kind == TokKind::LBrace {
                 self.advance();
                 self.locals.load_globals(&self.globals);
@@ -4956,6 +5015,16 @@ impl<'a> Parser<'a> {
             };
             let sp = name.span.clone();
             self.leave_recursion();
+            
+            // Pre-compute alignment before moving `name`
+            let resolved_alignment = Some(self.func_alignments.get(&name.name)
+                .map(|&forward_align| {
+                    let def_align = attrs.alignment.unwrap_or(8).max(1);
+                    // Prefer larger alignment
+                    forward_align.max(def_align)
+                })
+                .unwrap_or_else(|| attrs.alignment.unwrap_or(8).max(1)));
+            
             return Some(vec![Decl::Func(FuncDecl {
                 ret_ty: ptr_ty,
                 name,
@@ -4965,7 +5034,7 @@ impl<'a> Parser<'a> {
                 is_extern: storage.is_extern,
                 is_static: storage.is_static,
                 section: attrs.section,
-                alignment: attrs.alignment,
+                alignment: resolved_alignment,
                 is_weak: attrs.is_weak,
                 visibility: attrs.visibility,
                 is_unused: attrs.is_unused,

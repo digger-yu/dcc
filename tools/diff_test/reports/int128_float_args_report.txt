@@ -1,0 +1,58 @@
+========================================
+   DIFFERENTIAL TEST REPORT
+========================================
+
+Test: int128_float_args
+Date: 2026-09-11T11:53:10+08:00
+
+========================================
+         SYMBOL TABLE COMPARISON
+========================================
+
+[1;33m[!] Symbols only in DCC:[0m
+  - another_main.0
+  - another_main.0
+
+[0;34m[i] Symbols only in GCC:[0m
+  - another.0
+  - __fixsfti
+  - int128_float_args.c
+  - __stack_chk_fail
+
+[0;32m[✓] Common symbols attribute comparison:[0m
+  [0;31m✗ main: SIZE(dcc=580 vs gcc=187)[0m
+  [0;31m✗ nested_call: SIZE(dcc=279 vs gcc=144)[0m
+  [0;31m✗ test_with_floats: SIZE(dcc=125 vs gcc=78)[0m
+  [0;32mAll common symbols match![0m
+
+Summary:
+  DCC-only symbols: 2
+  GCC-only symbols: 4
+  Attribute mismatches: 0
+
+========================================
+       RELOCATION TABLE COMPARISON
+========================================
+
+Relocations by symbol:
+
+  [0;31m✗ another_main.0: count mismatch (dcc=2 vs gcc=0)[0m
+  [0;31m✗ __fixsfti: count mismatch (dcc=0 vs gcc=2)[0m
+  [0;31m✗ .rodata: count mismatch (dcc=3 vs gcc=5)[0m
+  [0;31m✗ __stack_chk_fail: count mismatch (dcc=0 vs gcc=1)[0m
+  [0;31m✗ .text: count mismatch (dcc=0 vs gcc=4)[0m
+
+Detailed relocation type analysis:
+
+Relocation type distribution:
+  DCC:
+    5 x R_X86_64_PC32
+    2 x R_X86_64_PLT32
+  GCC:
+    9 x R_X86_64_PC32
+    5 x R_X86_64_PLT32
+
+Summary:
+  Total DCC relocations: 7
+  Total GCC relocations: 14
+
