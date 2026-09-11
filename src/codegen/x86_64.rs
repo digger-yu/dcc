@@ -11205,44 +11205,49 @@ impl Codegen {
                     match item {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
                             // 最后一条表达式语句: 结果放入 dst
-                            self.gen_expr(e, dst);
-                            // 聚合类型 (struct/union) 由函数调用寄存器返回时,
-                            // rax:rdx 含值本身而非地址。物化到临时槽使 rax = 地址,
-                            // 与 gen_aggregate_assign 的 StmtExpr 地址约定一致。
                             let e_ty = e.ty();
-                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
-                                && !Self::needs_memory_return(&e_ty)
-                                && matches!(e, Expr::Call { .. })
-                            {
+                            // 聚合类型 (struct/union) 的 StmtExpr 最后一条处理:
+                            // - lvalue (Ident/Member/Index/Deref): 取地址 + 整体拷贝到 sret 临时槽
+                            //   (不能 gen_expr 加载前 8 字节值, 调用方期望地址:
+                            //    pr c/5354: ({ struct S s; s.a=1; s; }).a)
+                            // - Call: SysV ABI >16B 返回已走 sret 约定 (rax=buffer 地址),
+                            //   否则物化寄存器返回值到临时槽
+                            // - 标量/其他: 正常 gen_expr
+                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _)) {
                                 let sz = e_ty.size();
-                                let temp_off = self.alloc_sret_slot(sz);
-                                // Store rax:rdx to temp slot based on size
-                                if sz <= 8 {
-                                    self.store_stack(0, temp_off);
+                                if self.gen_lvalue_addr(e, 6) {
+                                    // lvalue 路径: 整体拷贝到 sret 临时槽
+                                    // rsi 已 = 源地址 (gen_lvalue_addr 放到 dst=6 即 rsi)
+                                    let temp_off = self.alloc_sret_slot(sz);
+                                    self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
+                                    self.mov_imm(1, sz as i128);    // rcx = size
+                                    self.emit(&[0xFC]);               // cld
+                                    self.emit(&[0xF3, 0xA4]);        // rep movsb
+                                    self.emit_lea_r13(dst, temp_off);
+                                } else if Self::needs_memory_return(&e_ty) {
+                                    // Call + >16B: SysV ABI sret, rax 已是返回地址
+                                    self.gen_expr(e, dst);
+                                } else if matches!(e, Expr::Call { .. }) {
+                                    // Call + <=16B: 寄存器返回, 物化到临时槽
+                                    self.gen_expr(e, 0);
+                                    let temp_off = self.alloc_sret_slot(sz);
+                                    if sz <= 8 {
+                                        self.store_stack(0, temp_off);
+                                    } else {
+                                        self.store_stack(0, temp_off);
+                                        self.store_stack(2, temp_off + 8);
+                                    }
+                                    self.emit_lea_r13(dst, temp_off);
                                 } else {
-                                    self.store_stack(0, temp_off);
-                                    self.store_stack(2, temp_off + 8);
+                                    // 其他非 lvalue 聚合 (CompoundLit 等): 让 gen_expr 自己处理
+                                    self.gen_expr(e, dst);
                                 }
-                                self.emit_lea_r13(dst, temp_off);
+                            } else {
+                                self.gen_expr(e, dst);
                             }
                         }
                         BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
                             self.gen_expr(e, dst);
-                            let e_ty = e.ty();
-                            if matches!(e_ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
-                                && !Self::needs_memory_return(&e_ty)
-                                && matches!(e, Expr::Call { .. })
-                            {
-                                let sz = e_ty.size();
-                                let temp_off = self.alloc_sret_slot(sz);
-                                if sz <= 8 {
-                                    self.store_stack(0, temp_off);
-                                } else {
-                                    self.store_stack(0, temp_off);
-                                    self.store_stack(2, temp_off + 8);
-                                }
-                                self.emit_lea_r13(dst, temp_off);
-                            }
                         }
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
