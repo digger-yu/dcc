@@ -13833,7 +13833,6 @@ impl Codegen {
                 // 支持 C99 brace elision: struct { int f[4]; } s = {1,2,3,4}
                 // C99: 未显式初始化的字段应零填充
                 let reverse_sso = *reverse_sso;
-                eprintln!("[DBG] gen_init_list_at: reverse_sso={}, fields.len={}", reverse_sso, fields.len());
                 let struct_size = ty.size();
                 if struct_size > 0 && struct_size <= 128 {
                     // 零填充整个结构 (小结构逐字节, 大结构用 rep stosb)
@@ -14080,7 +14079,6 @@ impl Codegen {
                             }
                             found_more
                         };
-                        eprintln!("[DBG] Bitfield store: reverse_sso={}, has_more={}, container_size={}, field_idx={}", reverse_sso, has_more_bitfields_in_container, container_size, field_idx);
                         if reverse_sso && !has_more_bitfields_in_container {
                             // 最后一个位域: 字节序反转整个容器
                             match container_size {
