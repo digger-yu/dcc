@@ -4982,6 +4982,25 @@ impl Preprocessor {
                                     LineMap::Scalar(map.line(nl)),
                                 );
                                 out.push_str(&rescanned);
+                            } else if ident == "va_start" && raw_args.len() == 1 && params.len() == 2 {
+                                // C23 va_start(ap) 允许在 2 参数定义下调用 (兼容旧 stdarg.h)。
+                                // 补齐第二个参数为 "0"，对 __builtin_va_start 无影响。
+                                let mut args = raw_args.clone();
+                                args.push("0".to_string());
+                                let substituted = self.substitute_params(
+                                    &def.body,
+                                    params,
+                                    &args,
+                                    def.variadic,
+                                );
+                                let mut new_disabled = disabled.clone();
+                                new_disabled.insert(ident.clone());
+                                let rescanned = self.expand_with_disabled(
+                                    &substituted,
+                                    &new_disabled,
+                                    LineMap::Scalar(map.line(nl)),
+                                );
+                                out.push_str(&rescanned);
                             } else if params.is_empty() && raw_args.is_empty() {
                                 // PREFETCH() 这类无参函数宏
                                 let mut new_disabled = disabled.clone();
