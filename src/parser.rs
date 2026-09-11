@@ -6613,6 +6613,22 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex || is_imaginary {
+            // C99 6.7.2: `_Complex` alone (no base type, no unsigned/long/short)
+            // defaults to `_Complex double`. `_Imaginary` alone defaults to
+            // `_Imaginary double`. But `_Complex unsigned`, `_Complex long`,
+            // `_Complex short` must NOT default to double — they need an
+            // integer base. resolve_base already handles the implicit int
+            // rule for those cases.
+            let base = if base.is_none()
+                && (is_complex || is_imaginary)
+                && !is_unsigned
+                && is_long == 0
+                && !is_short
+            {
+                Some(Type::Double)
+            } else {
+                base
+            };
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
             // __attribute__((mode(...))): 在 vector_size 之前应用到基类型
             // 例如: int __attribute__((mode(DI))) __attribute__((vector_size(16)))
