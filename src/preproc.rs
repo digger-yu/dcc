@@ -1343,15 +1343,6 @@ pub fn preprocess(
             variadic: false,
         },
     );
-    // barrier
-    pp.macros.insert(
-        "barrier".to_string(),
-        MacroDef {
-            params: Some(vec![]),
-            body: "".to_string(),
-            variadic: false,
-        },
-    );
     // MODULE_LICENSE/AUTHOR/DESCRIPTION/ALIAS 等模块宏
     // 展开为 .modinfo section 的字符串变量
     pp.macros.insert("MODULE_LICENSE".to_string(), MacroDef {
