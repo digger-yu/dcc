@@ -7809,14 +7809,54 @@ impl Codegen {
                     let toff = self.vector_temp_base(0, effective_ty.size());
                     self.emit_lea_r13(0, toff);
                 }
-                // 2. 逐 8 字节块装入 rcx 并暂存
+                let vec_sz = effective_ty.size() as i64;
+                // 2. 逐块装入 rcx 并暂存
+                // 关键: vector < 8B 时必须按实际大小读, 不能固定 mov rcx,[rax]
+                // (会读到 vector 存储之外的栈垃圾, 如 pr rtl-optimization/16104)
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     let disp = (chunk * 8) as i32;
-                    if disp < 128 {
-                        self.emit(&[0x48, 0x8B, 0x48, disp as u8]); // mov rcx, [rax+disp8]
-                    } else {
-                        self.emit(&[0x48, 0x8B, 0x88]); // mov rcx, [rax+disp32]
-                        self.emit(&disp.to_le_bytes());
+                    let remaining = vec_sz - (chunk * 8) as i64;
+                    let chunk_sz = remaining.min(8);
+                    // zero-extend chunk_sz 字节到 rcx (寄存器 1)
+                    // xor rcx, rcx; movzx ecx/ecx, [rax+disp]
+                    self.emit(&[0x48, 0x31, 0xD1]); // xor rcx, rcx
+                    match chunk_sz {
+                        1 => {
+                            // movzx ecx, byte [rax+disp]
+                            if disp < 128 {
+                                self.emit(&[0x0F, 0xB6, 0x48, disp as u8]);
+                            } else {
+                                self.emit(&[0x0F, 0xB6, 0x88]);
+                                self.emit(&disp.to_le_bytes());
+                            }
+                        }
+                        2 => {
+                            // movzx ecx, word [rax+disp]
+                            if disp < 128 {
+                                self.emit(&[0x0F, 0xB7, 0x48, disp as u8]);
+                            } else {
+                                self.emit(&[0x0F, 0xB7, 0x88]);
+                                self.emit(&disp.to_le_bytes());
+                            }
+                        }
+                        4 => {
+                            // mov ecx, dword [rax+disp] (自动 zero-extend 到 64 位)
+                            if disp < 128 {
+                                self.emit(&[0x8B, 0x48, disp as u8]);
+                            } else {
+                                self.emit(&[0x8B, 0x88]);
+                                self.emit(&disp.to_le_bytes());
+                            }
+                        }
+                        _ => {
+                            // 8字节块: mov rcx, [rax+disp]
+                            if disp < 128 {
+                                self.emit(&[0x48, 0x8B, 0x48, disp as u8]);
+                            } else {
+                                self.emit(&[0x48, 0x8B, 0x88]);
+                                self.emit(&disp.to_le_bytes());
+                            }
+                        }
                     }
                     match *loc {
                         ArgLoc::Stack(off) => self.store_rsp_qword(1, off),
@@ -11354,46 +11394,46 @@ impl Codegen {
                         return;
                     }
                 }
-                // 向量→标量整数 (同尺寸): 从向量内存加载低 64 位到 GP 寄存器
+                // 向量→标量整数 (同尺寸): 从向量内存加载到 GP 寄存器
+                // 关键: vector 可能 < 8B, 不能固定 movq 读 8 字节 (读到垃圾).
+                // 改为按 vector 实际 size 直接 load 到 GP, 再 zero-extend 到 64 位.
                 if let Type::Vector(_, _) = src_ty {
                     if src_ty.size() == ty.size()
                         && ty.size() <= 8
                         && ty.is_int()
                     {
-                        // 对 lvalue 向量: 取地址 + movq 从内存到 xmm0 + movq 到 rax
-                        // 对 rvalue 向量: 已在临时槽, 从槽 movq
-                        if self.gen_lvalue_addr(e, dst) {
-                            // dst = 向量地址; movq xmm0, [dst]: F3 [REX.B] 0F 7E /r
-                            // F3 前缀 (非 66) 用于 load 语义 (mem → xmm)
-                            let rex = if dst >= 8 { 0x41 } else { 0 };
-                            // ModRM: mod=00, reg=xmm0(000), r/m=dst
-                            let xmm0_reg = 0u8;
-                            let modrm = (xmm0_reg << 3) | (dst & 7);
-                            if rex != 0 { self.emit(&[0xF3, rex, 0x0F, 0x7E, modrm]); }
-                            else { self.emit(&[0xF3, 0x0F, 0x7E, modrm]); }
-                            // movq rax, xmm0: 66 REX.W 0F 7E C0
-                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
-                        } else {
-                            self.gen_expr(e, dst);
-                            // 向量结果约定在临时槽 0, 加载到 xmm0
+                        // 取 vector 地址到 rax (rvalue 先物化到临时槽)
+                        if !self.gen_lvalue_addr(e, 0) {
+                            self.gen_expr(e, 0);
                             let toff = self.vector_temp_base(0, src_ty.size());
-                            // movq xmm0, [r13+toff]: F3 REX.W 0F 7E /r (load from memory)
-                            // REX.B needed for r13 base register
-                            // Use 32-bit displacement if offset doesn't fit in 8 bits
-                            if toff >= -128 && toff <= 127 {
-                                // mod=01 (8-bit disp), reg=xmm0(000), r/m=100(SIB)+base=r13
-                                self.emit(&[0xF3, 0x49, 0x0F, 0x7E, 0x44, 0x25]);
-                                self.emit(&[toff as u8]);
-                            } else {
-                                // mod=10 (32-bit disp), reg=xmm0(000), r/m=100(SIB)+base=r13
-                                self.emit(&[0xF3, 0x49, 0x0F, 0x7E, 0x84, 0x25]);
-                                self.emit(&(toff as i32).to_le_bytes());
+                            self.emit_lea_r13(0, toff);
+                        }
+                        // rax = vector 内存地址, 按实际 size 加载到 rax
+                        let sz = src_ty.size();
+                        match sz {
+                            1 => {
+                                // movzx eax, byte [rax]
+                                self.emit(&[0x0F, 0xB6, 0x00]);
                             }
-                            // movq rax, xmm0: 66 REX.W 0F 7E C0
-                            self.emit(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+                            2 => {
+                                // movzx eax, word [rax]
+                                self.emit(&[0x0F, 0xB7, 0x00]);
+                            }
+                            4 => {
+                                // mov eax, dword [rax] (自动 zero-extend 到 64 位)
+                                self.emit(&[0x8B, 0x00]);
+                            }
+                            8 => {
+                                // mov rax, qword [rax] (64 位无 truncation)
+                                self.emit(&[0x48, 0x8B, 0x00]);
+                            }
+                            _ => {
+                                // 更大? 不可能, 条件已限定 <= 8
+                                self.emit(&[0x48, 0x8B, 0x00]);
+                            }
                         }
                         if dst != 0 {
-                            self.mov(0, dst);
+                            self.mov(dst, 0);
                         }
                         return;
                     }
