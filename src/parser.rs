@@ -9804,10 +9804,26 @@ impl<'a> Parser<'a> {
                         if !self.expect(TokKind::RParen, "')'") {
                             return None;
                         }
-                        Some(Expr::AlignofExpr {
+                        // __alignof__(func) where func has aligned(N) attribute:
+                        // fold to the attribute value directly.  const_eval only
+                        // looks at Type::align(), which has no link to the
+                        // per-function func_alignments table.
+                        let lit = match &e {
+                            Expr::Ident { name, .. } => {
+                                self.func_alignments
+                                    .get(&name.name)
+                                    .map(|a| Expr::Int {
+                                        v: *a as i128,
+                                        span: sp.clone(),
+                                        ty: Type::UInt,
+                                    })
+                            }
+                            _ => None,
+                        };
+                        Some(lit.unwrap_or_else(|| Expr::AlignofExpr {
                             e: Box::new(e),
                             span: sp,
-                        })
+                        }))
                     }
                 } else {
                     self.err_here(
