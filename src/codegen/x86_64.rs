@@ -1940,7 +1940,15 @@ impl Codegen {
 
     fn alloc_sret_slot(&mut self, size: usize) -> i64 {
         self.sret_depth += 1;
-        -8 - (self.expr_depth as i64 * 8) - (self.sret_depth as i64 * ((size as i64 + 15) & !15))
+        let padded = ((size as i64 + 15) & !15);
+        // Allocate sret slots inside the frame, starting after vec_reserve(512)
+        // + bf_rmw_reserve(32) + padding(56). This lands in the trampoline
+        // reserve area, well below parameter/local save slots near r13.
+        // Previously used -8 - expr_depth*8 - sret_depth*padded, which placed
+        // sret slots directly on top of parameter save slots (e.g. rdi at -72
+        // and sret slot 2 at -104..-56 overlap in pr51877).
+        let base = self.vec_temp_off + 600;
+        base - (self.sret_depth as i64 - 1) * padded
     }
 
     fn store_xmm128_stack(&mut self, xmm: u8, off: i64) {
