@@ -53,6 +53,8 @@ pub struct Target {
     pub patchable_function_entry: Option<(usize, usize)>,
     /// ftrace instrumentation mode
     pub ftrace_mode: crate::cli::FtraceMode,
+    /// -finstrument-functions
+    pub instrument_functions: bool,
     /// Stack protector guard register
     pub stack_protector_guard_reg: StackGuardReg,
     /// -fstack-clash-protection
@@ -199,6 +201,7 @@ impl Target {
             indirect_branch_thunk_extern: false,
             patchable_function_entry: None,
             ftrace_mode: crate::cli::FtraceMode::None,
+            instrument_functions: false,
             stack_protector_guard_reg: StackGuardReg::Fs,
             stack_clash_protection: false,
             strict_aliasing: true,

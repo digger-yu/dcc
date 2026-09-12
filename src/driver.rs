@@ -989,6 +989,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
     target.patchable_function_entry = cfg.patchable_function_entry;
     target.ftrace_mode = cfg.ftrace_mode;
+    target.instrument_functions = cfg.instrument_functions;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
     target.stack_clash_protection = cfg.stack_clash_protection;
     // -fno-strict-aliasing: 优化器当前不做类型双关假设 (TBAA), 标志

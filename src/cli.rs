@@ -167,6 +167,8 @@ pub struct Config {
     pub linker_script: Option<PathBuf>,
     /// ftrace 插桩模式 (-pg/-mfentry/-mrecord-mcount)
     pub ftrace_mode: FtraceMode,
+    /// -finstrument-functions: 函数入口/出口插桩
+    pub instrument_functions: bool,
     /// 栈保护 guard 寄存器 (-mstack-protector-guard-reg=)
     pub stack_protector_guard_reg: StackGuardReg,
     /// -fstack-clash-protection: 大块栈分配逐页探测
@@ -1297,6 +1299,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut vdso: Option<PathBuf> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut ftrace_mode = FtraceMode::None;
+    let mut instrument_functions = false;
     let mut stack_protector_guard_reg = StackGuardReg::Fs;
     let mut stack_clash_protection = false;
     let mut strict_aliasing = true;
@@ -2348,6 +2351,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-pg" => ftrace_mode = FtraceMode::MCount,
             "-mfentry" => ftrace_mode = FtraceMode::FEntry,
             "-mrecord-mcount" => ftrace_mode = FtraceMode::RecordMCount,
+            "-finstrument-functions" => instrument_functions = true,
+            "-fno-instrument-functions" => instrument_functions = false,
             // Stack protector guard register
             "-mstack-protector-guard-reg=gs" => {
                 stack_protector_guard_reg = StackGuardReg::Gs;
@@ -3006,6 +3011,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             vdso: vdso.clone(),
             linker_script: linker_script.clone(),
             ftrace_mode,
+            instrument_functions,
             stack_protector_guard_reg,
             stack_clash_protection,
             strict_aliasing,
@@ -3131,6 +3137,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             vdso,
             linker_script,
             ftrace_mode,
+            instrument_functions,
             stack_protector_guard_reg,
             stack_clash_protection,
             strict_aliasing,
