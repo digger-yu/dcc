@@ -7180,13 +7180,25 @@ impl Codegen {
                                         gp_idx += 1;
                                         self.variadic_named_gp += 1;
                                     }
-                                    AbiClass::Sse | AbiClass::SseUp => {
+                                    AbiClass::Integer => {
+                                        param_stores.push((arg_regs[gp_idx], chunk_off));
+                                        gp_idx += 1;
+                                        self.variadic_named_gp += 1;
+                                    }
+                                    AbiClass::Sse => {
                                         xmm_param_stores.push((
                                             fp_idx as u8,
                                             chunk_off,
                                             p.ty.clone(),
                                         ));
                                         fp_idx += 1;
+                                        self.variadic_named_fp += 1;
+                                    }
+                                    AbiClass::SseUp => {
+                                        // SseUp 与前面的 Sse 共用同一个 xmm 寄存器
+                                        // (占高 8 字节)。Sse 路径已用 store_xmm128
+                                        // 存完完整 16 字节, 这里不再 push, 仅
+                                        // 增加 variadic_named_fp (va_arg 需要)
                                         self.variadic_named_fp += 1;
                                     }
                                     _ => unreachable!(),
@@ -7428,6 +7440,9 @@ impl Codegen {
                         }
                     }
                     self.store_xmm32_stack(xmm, off);
+                } else if ty.size() == 16 && matches!(ty, Type::Vector(_, _)) {
+                    // 128-bit vector 参数 (如 __int128 vector): 保存完整 16 字节
+                    self.store_xmm128_stack(xmm, off);
                 } else {
                     self.store_xmm64_stack(xmm, off);
                 }
@@ -8070,15 +8085,30 @@ impl Codegen {
                 stack += chunks * 8;
             } else {
                 let mut arg_locs = Vec::new();
+                // 只有 Vector 类型的 SseUp 才与 Sse 共用同一个 xmm 寄存器
+                // (Vector 是真正的 16 字节整数组, 需要一次 movups 传递)。
+                // 其他类型 (_Complex double、16B aggregate scalar 等)
+                // 的 SseUp 是独立的 eightbyte, 应单独分配 xmm 寄存器。
+                let is_vector_ty = matches!(&effective_ty, Type::Vector(_, _));
                 for class in classes {
                     match class {
                         AbiClass::Integer => {
                             arg_locs.push(ArgLoc::Gp(gp_regs[gp]));
                             gp += 1;
                         }
-                        AbiClass::Sse | AbiClass::SseUp => {
+                        AbiClass::Sse => {
                             arg_locs.push(ArgLoc::Xmm(fp as u8));
                             fp += 1;
+                        }
+                        AbiClass::SseUp => {
+                            if is_vector_ty {
+                                // Vector: SseUp 与 Sse 共用 xmm, 不推进 fp
+                                arg_locs.push(ArgLoc::Xmm((fp - 1) as u8));
+                            } else {
+                                // 非 Vector: SseUp 是独立 eightbyte, 正常推进 fp
+                                arg_locs.push(ArgLoc::Xmm(fp as u8));
+                                fp += 1;
+                            }
                         }
                         AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
                             unreachable!()
@@ -8559,10 +8589,30 @@ impl Codegen {
         if let Some(slot) = sret_stage {
             self.load_rsp_qword(7, slot);
         }
-        for (loc, slot, is_float) in staged {
+        for i in 0..staged.len() {
+            let (loc, slot, is_float) = staged[i];
             match loc {
                 ArgLoc::Gp(reg) => self.load_rsp_qword(reg, slot),
                 ArgLoc::Xmm(reg) => {
+                    // 检查下一个 staged 是否也是同一个 xmm 寄存器 (SseUp 延续,
+                    // 如 16 字节 vector 参数). 如果是, 合并为一条 movups 加载
+                    // 避免 movsd 清零高 8 字节导致数据丢失 (pr105613).
+                    // 注意: _Complex double 有两个独立 SSE (xmm0, xmm1),
+                    // 不会误合并因为寄存器编号不同.
+                    if i + 1 < staged.len() {
+                        let (next_loc, next_slot, _) = staged[i + 1];
+                        if matches!(next_loc, ArgLoc::Xmm(nr) if nr == reg && next_slot == slot + 8) {
+                            // movups xmm_reg, [rsp+slot]  (0F 10 /u)
+                            self.emit(&[0x0F, 0x10]);
+                            if slot < 128 {
+                                self.emit(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]);
+                            } else {
+                                self.emit(&[0x84 | ((reg & 7) << 3), 0x24]);
+                                self.emit(&slot.to_le_bytes());
+                            }
+                            continue;
+                        }
+                    }
                     let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                     self.emit_xmm_load_rsp(pfx, reg, slot);
                 }
@@ -8707,17 +8757,6 @@ impl Codegen {
                                         if ret_sz > 8 {
                                             self.load_stack(2, off + 8); // rdx = 后 8 字节
                                         }
-                                    }
-                                } else if matches!(ret_ty, Type::Vector(_, _)) {
-                                    // vector 返回: lvalue 直接取地址, rvalue 先物化到临时槽
-                                    if self.gen_lvalue_addr(e, 0) {
-                                        self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
-                                        self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
-                                    } else {
-                                        self.gen_expr(e, 0); // 物化到向量临时槽 0
-                                        let toff = self.vector_temp_base(0, ret_sz);
-                                        self.load_stack(0, toff);
-                                        self.load_stack(2, toff + 8);
                                     }
                                 } else {
                                     // CompoundLit/InitList 等: gen_expr 返回地址 (CompoundLit)
@@ -16553,6 +16592,15 @@ impl Codegen {
             self.vector_op_slot = saved_op_slot;
             return;
         }
+        // __int128 / 16-byte 整数元素: GP 寄存器无法承载, 用 XMM 处理
+        // (pr105613: unsigned __int128 vector 比较)
+        if elem_size == 16 && !is_float && !is_double {
+            self.gen_vector_binop_int128(
+                op, l, r, result_slot, result_off, &elem_ty, count, elem_size,
+                l_is_vec, r_is_vec, saved_op_slot,
+            );
+            return;
+        }
         for i in 0..count {
             // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
             // l 值经栈暂存 (push/pop): r 求值 (嵌套 binop/调用) 会
@@ -16837,6 +16885,127 @@ impl Codegen {
         // movdqu [r13 + result_off], xmm0
         self.emit_movdqu_xmm_to_r13(0, result_off);
         true
+    }
+
+    /// 128-bit 整数 (__int128/unsigned __int128) 向量 binop:
+    /// GP 寄存器无法承载 16 字节元素, 必须用 XMM 打包指令处理.
+    /// 支持比较 (EqEq/Ne) 和按位运算 (And/Or/Xor).
+    /// 有标量操作数时, 标量通过 gen_expr 求值后存入临时槽再广播.
+    fn gen_vector_binop_int128(
+        &mut self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        result_slot: usize,
+        result_off: i64,
+        elem_ty: &Type,
+        count: usize,
+        elem_size: usize,
+        l_is_vec: bool,
+        r_is_vec: bool,
+        saved_op_slot: usize,
+    ) {
+        let vec_size = elem_size * count;
+        self.vector_op_slot = result_slot + 1;
+
+        // 物化操作数到临时槽
+        let l_slot = result_slot + 1;
+        let r_slot = result_slot + 2;
+        let l_off: i64;
+        let r_off: i64;
+
+        if l_is_vec {
+            self.gen_vector_load_into_slot(l, l_slot);
+            l_off = self.vector_temp_base(l_slot, vec_size);
+        } else {
+            self.gen_expr(l, 0);
+            let t_off = self.vector_temp_base(l_slot, 16);
+            self.emit_store(0, t_off, 8);            // [r13+t_off] = rax (low)
+            self.emit_store(2, t_off + 8, 8);        // [r13+t_off+8] = rdx (high)
+            l_off = t_off;
+        }
+
+        if r_is_vec {
+            self.gen_vector_load_into_slot(r, r_slot);
+            r_off = self.vector_temp_base(r_slot, vec_size);
+        } else {
+            self.gen_expr(r, 0);
+            let t_off = self.vector_temp_base(r_slot, 16);
+            self.emit_store(0, t_off, 8);
+            self.emit_store(2, t_off + 8, 8);
+            r_off = t_off;
+        }
+
+        for _i in 0..count {
+            // 加载操作数到 GP 寄存器对:
+            // rax:rdx = left (low:high), rcx:r8 = right (low:high)
+            self.load_stack(0, l_off);       // rax = left low 64-bit
+            self.load_stack(2, l_off + 8);   // rdx = left high 64-bit
+            self.load_stack(1, r_off);       // rcx = right low 64-bit
+            self.load_stack(8, r_off + 8);   // r8 = right high 64-bit
+
+            match op {
+                // === 比较操作 (EqEq/Ne): 顺序 setcc + AND, 无需跳转 ===
+                BinOp::EqEq | BinOp::Ne => {
+                    // 比较低 64-bit
+                    self.emit(&[0x48, 0x39, 0xC1]);    // cmp rax, rcx
+                    self.emit(&[0x0F, 0x94, 0xC0]);    // sete al (al=1 if low equal)
+                    // 比较高 64-bit
+                    self.emit(&[0x4C, 0x39, 0xC2]);    // cmp rdx, r8
+                    self.emit(&[0x0F, 0x94, 0xC4]);    // sete ah (ah=1 if high equal)
+                    // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
+                    // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
+                    self.emit(&[0x20, 0xE0]);
+                    // 零扩展到 rax
+                    self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzbq rax, al
+                    // rax = 1 (两 chunk 都相等 → a==b) 或 0 (至少一个不等 → a!=b)
+
+                    if matches!(op, BinOp::Ne) {
+                        // 取反: rax = !rax (0→1, 1→0)
+                        self.emit(&[0x48, 0x83, 0xF0, 0x01]); // xor rax, 1
+                    }
+
+                    // neg rax → 0/1 映射到 0/全1 (向量真值)
+                    self.emit(&[0x48, 0xF7, 0xD8]);        // neg rax
+                    // 复制 rax 到 rdx (让两个 64-bit 半部分都是相同值)
+                    self.emit(&[0x48, 0x89, 0xC2]);        // mov rdx, rax
+                    // 结果在 rax:rdx → 存回
+                    self.store_stack(0, result_off);
+                    self.store_stack(2, result_off + 8);
+                }
+                // === 按位运算: 逐 chunk GP 运算, 结果在 rcx (low), r8 (high) ===
+                BinOp::And => {
+                    self.emit(&[0x48, 0x21, 0xC1]);    // and rcx, rax (low &= left)
+                    self.emit(&[0x4C, 0x21, 0xD0]);    // and r8, rdx (high &= left)
+                    // mov rax, rcx; mov rdx, r8
+                    self.emit(&[0x48, 0x89, 0xC8]);
+                    self.emit(&[0x4C, 0x89, 0xC2]);
+                    self.store_stack(0, result_off);
+                    self.store_stack(2, result_off + 8);
+                }
+                BinOp::Or => {
+                    self.emit(&[0x48, 0x09, 0xC1]);    // or rcx, rax
+                    self.emit(&[0x4C, 0x09, 0xD0]);    // or r8, rdx
+                    self.emit(&[0x48, 0x89, 0xC8]);
+                    self.emit(&[0x4C, 0x89, 0xC2]);
+                    self.store_stack(0, result_off);
+                    self.store_stack(2, result_off + 8);
+                }
+                BinOp::Xor => {
+                    self.emit(&[0x48, 0x31, 0xC1]);    // xor rcx, rax
+                    self.emit(&[0x4C, 0x31, 0xD0]);    // xor r8, rdx
+                    self.emit(&[0x48, 0x89, 0xC8]);
+                    self.emit(&[0x4C, 0x89, 0xC2]);
+                    self.store_stack(0, result_off);
+                    self.store_stack(2, result_off + 8);
+                }
+                _ => {
+                    // 暂不支持, 结果槽保持未定义
+                }
+            }
+        }
+
+        self.vector_op_slot = saved_op_slot;
     }
 
     /// movdqu xmm, [r13 + off]: 自动选择 disp8 或 disp32 编码
@@ -17147,6 +17316,9 @@ impl Codegen {
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
         let temp_off = self.vector_temp_base(temp_slot, vec_size);
+        // 128-bit integer (__int128) 元素: GP 寄存器无法承载, 用 movdqu 处理
+        let is_int128_elem = elem_size == 16
+            && !matches!(elem_ty, Type::Float | Type::Double);
         match e {
             Expr::Ident { name, .. } => {
                 if self.is_global_var(&name.name) {
@@ -17158,6 +17330,12 @@ impl Codegen {
                     return;
                 }
                 let var_off = self.var_offset(&name.name);
+                if is_int128_elem {
+                    // 从栈上 movdqu 到临时槽
+                    self.emit_movdqu_r13_to_xmm(0, var_off);
+                    self.emit_movdqu_xmm_to_r13(0, temp_off);
+                    return;
+                }
                 let is_float_elem = matches!(elem_ty, Type::Float);
                 let is_double_elem = matches!(elem_ty, Type::Double);
                 for i in 0..count {
