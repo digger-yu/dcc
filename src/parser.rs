@@ -9418,7 +9418,18 @@ impl<'a> Parser<'a> {
                         | BinOp::AndAnd
                         | BinOp::OrOr
                 ) {
-                    int_t()
+                    // 向量比较 (GCC 扩展): 结果类型同向量操作数, 逐元素
+                    // 比较得到全 1 / 全 0 (原实现无条件返回 int_t, 向量
+                    // 比较 + ~ 触发 scalar 路径, gen_vector_unary_into_slot
+                    // 不被调用 → pr110817-1: ~((V){} <= 0) 中 not 作用
+                    // rax 寄存器而非内存槽, v 未被取反)
+                    if matches!(&lt, Type::Vector(_, _)) {
+                        lt
+                    } else if matches!(&rt, Type::Vector(_, _)) {
+                        rt
+                    } else {
+                        int_t()
+                    }
                 } else {
                     let is_ca = matches!(&lt, Type::Complex(_));
                     let is_cb = matches!(&rt, Type::Complex(_));

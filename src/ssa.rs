@@ -2826,6 +2826,13 @@ fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
 fn infer_binop_type(l: &Expr, r: &Expr) -> Type {
     let lt = l.ty();
     let rt = r.ty();
+    // 向量操作: 结果类型与向量操作数相同 (比较也返回向量, 全 1/0 每元素)
+    if matches!(&lt, Type::Vector(_, _)) {
+        return lt.clone();
+    }
+    if matches!(&rt, Type::Vector(_, _)) {
+        return rt.clone();
+    }
     if matches!(&lt, Type::Float | Type::Double | Type::LongDouble)
         || matches!(&rt, Type::Float | Type::Double | Type::LongDouble)
     {
@@ -2865,12 +2872,21 @@ fn inst_to_expr_resolved(
                 ty: binop_ty,
             }
         }
-        InstKind::Un { op, e } => Expr::Unary {
-            op: *op,
-            e: Box::new(resolve_operand(e, &fake_env, subst)),
-            span: sp.clone(),
-            ty: Type::Int,
-        },
+        InstKind::Un { op, e } => {
+            let inner = resolve_operand(e, &fake_env, subst);
+            // 向量 UnOp: 结果类型同内部表达式 (Neg/BitNot 在向量上逐元素)
+            let ty = if matches!(inner.ty(), Type::Vector(_, _)) {
+                inner.ty()
+            } else {
+                Type::Int
+            };
+            Expr::Unary {
+                op: *op,
+                e: Box::new(inner),
+                span: sp.clone(),
+                ty,
+            }
+        }
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
             e: Box::new(resolve_operand(e, &fake_env, subst)),
