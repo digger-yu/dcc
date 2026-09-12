@@ -14148,12 +14148,8 @@ impl Codegen {
                     }
                     if let Some(bw) = bit_w {
                         // ── 位域字段初始化: 读-改-写 ──
-                        // 计算容器大小: 使用结构体大小作为容器大小 (对于单容器结构体)
-                        // 或者扫描同 offset 的所有位域, 取最远 bit 位置
+                        // 计算容器大小: 扫描同 offset 的所有位域, 取最远 bit 位置
                         let container_size = {
-                            // 对于简单情况, 使用结构体大小
-                            let struct_size = ty.size();
-                            // 但也检查位域实际占用的位数
                             let mut container_bits_end = bit_o + bw;
                             let mut fi = field_idx;
                             while fi < fields.len() {
@@ -14169,8 +14165,13 @@ impl Codegen {
                                 }
                             }
                             let bitfield_bytes = ((container_bits_end + 7) / 8) as usize;
-                            // 使用较大的值: 结构体大小或位域实际占用大小
-                            struct_size.max(bitfield_bytes)
+                            // container 是单个位域组, 不是整个 struct.
+                            // 原代码用 struct_size.max(bitfield_bytes) 导致
+                            // pr98366: struct S { int a,b; c:7,d:8,e:17 } 中
+                            // 位域组 container_size 被算成 12 (struct 大小)
+                            // 而非 4, 后续 switch 只处理 1/2/4/8, 12 走 default
+                            // 分支不加载容器值 → 位域初始化丢失.
+                            bitfield_bytes.max(1)
                         };
                         // 首次使用此容器时先清零整个容器 (确保非本字域的位 = 0)
                         if zeroed_containers.insert(off) {
