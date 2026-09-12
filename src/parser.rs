@@ -313,6 +313,9 @@ pub struct Parser<'a> {
     shadow_counter: i32, // 嵌套块遮蔽重命名计数器
     parse_depth: u32,    // 递归深度计数器 (防止栈溢出)
     paren_decl_ty: Option<Type>, // 括号化声明符的类型 (如 int *(p[25]))
+    in_switch_depth: u32,        // switch 嵌套深度 (>0 表示在 switch 体内)
+    block_ended_with_case: bool,  // parse_block 是否因 case/default 而终止
+    pending_close_brace: u32,     // 未消费的内层 '}' 计数 (Duff's device)
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -359,6 +362,9 @@ impl<'a> Parser<'a> {
             shadow_counter: 0,
             parse_depth: 0,
             paren_decl_ty: None,
+            in_switch_depth: 0,
+            block_ended_with_case: false,
+            pending_close_brace: 0,
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
         // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
@@ -7959,6 +7965,14 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof {
                 break;
             }
+            // Duff's device: 在 switch 体内, case/default 可能出现在嵌套块中.
+            // parse_block 在此中断, 让 parse_cases 处理 case 标签.
+            if self.in_switch_depth > 0
+                && matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault)
+            {
+                self.block_ended_with_case = true;
+                break;
+            }
             // C23 [[attributes]]: 在块级作用域出现，静默跳过
             if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                 self.parse_std_attributes();
@@ -8533,10 +8547,18 @@ impl<'a> Parser<'a> {
                 self.locals.push_scope();
                 let b = self.parse_block();
                 self.locals.pop_scope();
-                if !self.expect(TokKind::RBrace, "'}'") {
-                    return None;
+                if self.block_ended_with_case {
+                    // Duff's device: 块因 case/default 而提前终止.
+                    // 不消费 '}' (留给 parse_cases 处理).
+                    self.block_ended_with_case = false;
+                    self.pending_close_brace += 1;
+                    Some(Stmt::Block { b, span: sp })
+                } else {
+                    if !self.expect(TokKind::RBrace, "'}'") {
+                        return None;
+                    }
+                    Some(Stmt::Block { b, span: sp })
                 }
-                Some(Stmt::Block { b, span: sp })
             }
             TokKind::KwIf => {
                 self.advance();
@@ -8658,7 +8680,9 @@ impl<'a> Parser<'a> {
                 }
                 if self.cur.kind == TokKind::LBrace {
                     self.advance();
+                    self.in_switch_depth += 1;
                     let cases = self.parse_cases();
+                    self.in_switch_depth -= 1;
                     if !self.expect(TokKind::RBrace, "'}'") {
                         return None;
                     }
@@ -8669,9 +8693,9 @@ impl<'a> Parser<'a> {
                     })
                 } else {
                     // switch (expr) statement without braces
-                    // Parse case/default labels and statements until we hit
-                    // something that ends the switch scope.
+                    self.in_switch_depth += 1;
                     let cases = self.parse_cases_no_brace();
+                    self.in_switch_depth -= 1;
                     Some(Stmt::Switch {
                         expr,
                         cases,
@@ -8891,7 +8915,20 @@ impl<'a> Parser<'a> {
 
     fn parse_cases(&mut self) -> Vec<Case> {
         let mut cases = vec![];
-        while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
+        loop {
+            // Duff's device: 如果当前 '}' 是内层块的 (因 case 标签中断而未消费),
+            // 消费它并继续解析, 而不是终止 switch.
+            if self.cur.kind == TokKind::RBrace {
+                if self.pending_close_brace > 0 {
+                    self.pending_close_brace -= 1;
+                    self.advance(); // consume the nested block's '}'
+                    continue;
+                }
+                break; // switch body's '}'
+            }
+            if self.cur.kind == TokKind::Eof {
+                break;
+            }
             let sp = self.cur.span.clone();
             let (val, range_end) = if self.cur.kind == TokKind::KwCase {
                 self.advance();
@@ -8926,6 +8963,12 @@ impl<'a> Parser<'a> {
                             self.advance();
                             continue;
                         }
+                        // Duff's device: pending close brace from nested block
+                        if self.pending_close_brace > 0 {
+                            self.pending_close_brace -= 1;
+                            self.advance();
+                            continue;
+                        }
                         break; // switch 体的 }
                     }
                     // 在花括号内，继续跳过
@@ -8942,10 +8985,19 @@ impl<'a> Parser<'a> {
                 continue;
             };
             let mut items = vec![];
-            while !matches!(
-                self.cur.kind,
-                TokKind::KwCase | TokKind::KwDefault | TokKind::RBrace | TokKind::Eof
-            ) {
+            loop {
+                // Duff's device: pending close brace from nested block
+                if self.cur.kind == TokKind::RBrace {
+                    if self.pending_close_brace > 0 {
+                        self.pending_close_brace -= 1;
+                        self.advance(); // consume the nested block's '}'
+                        continue; // continue parsing case body
+                    }
+                    break; // switch body's '}'
+                }
+                if matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault | TokKind::Eof) {
+                    break;
+                }
                 // C23 [[attributes]] in case body (e.g. [[fallthrough]])
                 if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                     self.parse_std_attributes();

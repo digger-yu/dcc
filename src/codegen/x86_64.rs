@@ -214,6 +214,7 @@ pub struct Codegen {
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
     current_func_is_nested: bool, // 当前编译的函数是否是嵌套函数
+    local_labels: std::collections::HashSet<String>, // 当前函数体内定义的标签名集合
     /// 当前函数标了 __attribute__((returns_nonnull)): 返回时需检查 rax 非空
     current_returns_nonnull: bool,
     /// 当前函数标了 __attribute__((noreturn)) / _Noreturn:
@@ -1498,6 +1499,7 @@ impl Codegen {
             real_global_names: std::collections::HashSet::new(),
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
+            local_labels: std::collections::HashSet::new(),
             current_returns_nonnull: false,
             current_is_noreturn: false,
             current_no_instrument: false,
@@ -6964,6 +6966,15 @@ impl Codegen {
         // 顶层调用前由最后一个嵌套 handler 的 restore 清理干净.
         self.trampoline_slots.clear();
         self.trampoline_total_size = 0;
+        // 收集当前函数体内定义的标签 (用于嵌套函数的 non-local goto 检测)
+        self.local_labels.clear();
+        if let Some(body) = &f.body {
+            for item in &body.items {
+                if let BlockItem::Stmt(s) = item {
+                    Self::collect_local_labels_stmt(s, &mut self.local_labels);
+                }
+            }
+        }
         if f.is_nested {
             for (name, off) in &f.upvars {
                 self.upvar_offsets.insert(name.clone(), *off as i64);
@@ -9058,6 +9069,21 @@ impl Codegen {
                 // goto 可能跳出含 VLA 的块或回跳到声明前, 跳转前统一
                 // 恢复动态栈基, 防止回跳循环累积泄漏 (栈耗尽段错误)
                 self.emit_vla_restore();
+                // Non-local goto: 嵌套函数 goto 到父函数中的标签.
+                // 标签不在当前函数体内定义 → 需要恢复父帧指针.
+                // r10 (静态链) 指向父帧, 将其加载到 r13 (帧指针).
+                let is_nonlocal = self.current_func_is_nested
+                    && !self.local_labels.contains(&target.name);
+                if is_nonlocal {
+                    // mov r13, r10  (恢复父帧指针)
+                    // 编码: 4D 89 D5
+                    //   REX.WRB = 0x4D (W=1, R=1 for r10, B=1 for r13)
+                    //   opcode  = 0x89 (mov r/m64, r64)
+                    //   ModRM   = 0xD5 (mod=11, reg=r10&7=010, r/m=r13&7=101)
+                    self.code.push(0x4D);
+                    self.code.push(0x89);
+                    self.code.push(0xD5);
+                }
                 let lbl = Self::c_label_to_asm(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
             }
@@ -23793,6 +23819,46 @@ impl Codegen {
             }
             Stmt::For { body, .. } => Self::stmt_contains_label(body),
             _ => false,
+        }
+    }
+
+    /// Collect all label names defined in a statement tree.
+    /// Used for non-local goto detection in nested functions.
+    fn collect_local_labels_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+        match stmt {
+            Stmt::Label { name, stmt, .. } => {
+                out.insert(name.name.clone());
+                Self::collect_local_labels_stmt(stmt, out);
+            }
+            Stmt::Block { b, .. } => {
+                for item in &b.items {
+                    match item {
+                        BlockItem::Stmt(s) => Self::collect_local_labels_stmt(s, out),
+                        _ => {}
+                    }
+                }
+            }
+            Stmt::If { then_, else_, .. } => {
+                Self::collect_local_labels_stmt(then_, out);
+                if let Some(e) = else_ {
+                    Self::collect_local_labels_stmt(e, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+                Self::collect_local_labels_stmt(body, out);
+            }
+            Stmt::For { body, .. } => Self::collect_local_labels_stmt(body, out),
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    for item in &c.body.items {
+                        match item {
+                            BlockItem::Stmt(s) => Self::collect_local_labels_stmt(s, out),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
