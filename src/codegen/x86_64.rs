@@ -8284,11 +8284,30 @@ impl Codegen {
                     }
                 } else if let Expr::Ident { name, .. } = arg {
                     // Ident aggregate: load data from variable slots
+                    let is_vla_local = !self.is_global_not_local(&name.name)
+                        && self.vla_offsets.contains_key(&name.name);
+                    if is_vla_local {
+                        // VLA 变量: var_offset 指向元数据区, 首槽存基址.
+                        // 先加载基址到 rcx, 再从 [rcx + chunk*8] 取数据.
+                        let base_off = self.var_offset(&name.name);
+                        self.load_stack(1, base_off); // rcx = base addr
+                    }
                     for (chunk, loc) in arg_locs.iter().enumerate() {
                         if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(11, &name.name);
                             self.emit(&[0x49, 0x8B, 0x83]);
                             self.emit(&((chunk * 8) as i32).to_le_bytes());
+                        } else if is_vla_local {
+                            // VLA: mov rax, [rcx + chunk*8]
+                            let disp = (chunk * 8) as i32;
+                            if disp == 0 {
+                                self.emit(&[0x48, 0x8B, 0x01]);
+                            } else if disp < 128 {
+                                self.emit(&[0x48, 0x8B, 0x41, disp as u8]);
+                            } else {
+                                self.emit(&[0x48, 0x8B, 0x81]);
+                                self.emit(&disp.to_le_bytes());
+                            }
                         } else {
                             let var_off = self.var_offset(&name.name) + (chunk * 8) as i64;
                             self.load_stack(0, var_off);
@@ -12899,8 +12918,11 @@ impl Codegen {
             Expr::VaArg { ap, ty: arg_ty, .. } => {
                 // 聚合 va_arg: 物化到临时槽, rax = 槽地址 (与 sret Call
                 // 约定一致), 供调用方 gen_aggregate_assign 以 rax 为源拷贝
+                // VLA 类型编译时 size 为 8 (ArraySize::Var 退化为指针),
+                // 但实际运行时大小动态, 必须走 gen_va_arg_struct 路径
+                // 用运行时大小进行正确复制 (20020412-1)
                 if matches!(arg_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
-                    && arg_ty.size() > 8
+                    && (arg_ty.size() > 8 || Self::type_has_vla(arg_ty))
                 {
                     let slot = self.alloc_sret_slot(arg_ty.size());
                     let va_addr = self.resolve_va_list_addr(ap);
@@ -21615,12 +21637,16 @@ impl Codegen {
         // >16B 聚合会截断/污染, 必须绕开。
         if let Expr::VaArg { ap, ty: arg_ty, .. } = r {
             if matches!(arg_ty, Type::Struct { .. } | Type::Union { .. })
-                && arg_ty.size() > 8
+                && (arg_ty.size() > 8 || Self::type_has_vla(arg_ty))
             {
                 let va_addr = self.resolve_va_list_addr(ap);
                 // 设置 rdi = 目标地址 (resolve 之后, 避免被 scratch 覆盖)
                 if is_global_dst {
                     self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
+                } else if let Some(&vla_off) = self.vla_offsets.get(dst_name) {
+                    // VLA/VM struct 目标: var_offset 指向元数据区,
+                    // 首槽存数据基址, 必须先加载到 rdi
+                    self.load_stack(7, vla_off);
                 } else {
                     self.emit_lea_r13(7, dst_off); // rdi = 目标地址
                 }
@@ -22290,6 +22316,8 @@ impl Codegen {
             self.emit_store_rax_r13(off + 16);
             self.mov_imm(0, 0i128);
             self.emit_store_rax_r13(off + 8); // stride 槽占位 0
+            // 重新加载 size 到 rax (mov_imm 覆盖了 rax)
+            self.emit_mov_mem_r13(0, off + 16);
             // 对齐 16 字节后 sub rsp 分配数据区, 基址存入 [off]
             // (与 VLA 数组同一约定, gen_lvalue_addr/load_stack 统一读)
             self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
