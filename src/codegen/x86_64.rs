@@ -8194,7 +8194,11 @@ impl Codegen {
                 // 1. 取 vector 数据地址到 rax
                 if !self.gen_lvalue_addr(arg, 0) {
                     // rvalue: 先物化到向量临时槽 0 再取地址
-                    self.gen_expr(arg, 0);
+                    // 注意: 必须用 gen_vector_load_into_slot (而非 gen_expr),
+                    // 后者对 CompoundLit/Cast 等 Vector rvalue 只会留下一个
+                    // 临时值 (如 mov rax, 5) 却不存入 vector_temp 槽,
+                    // 导致后续从 vector_temp 读时读到栈垃圾 (pr105613).
+                    self.gen_vector_load_into_slot(arg, 0);
                     let toff = self.vector_temp_base(0, effective_ty.size());
                     self.emit_lea_r13(0, toff);
                 }
@@ -8589,10 +8593,15 @@ impl Codegen {
         if let Some(slot) = sret_stage {
             self.load_rsp_qword(7, slot);
         }
-        for i in 0..staged.len() {
+        // 用 while 循环以便在合并时跳过下一个 entry (手动递增 i)
+        let mut i = 0;
+        while i < staged.len() {
             let (loc, slot, is_float) = staged[i];
             match loc {
-                ArgLoc::Gp(reg) => self.load_rsp_qword(reg, slot),
+                ArgLoc::Gp(reg) => {
+                    self.load_rsp_qword(reg, slot);
+                    i += 1;
+                }
                 ArgLoc::Xmm(reg) => {
                     // 检查下一个 staged 是否也是同一个 xmm 寄存器 (SseUp 延续,
                     // 如 16 字节 vector 参数). 如果是, 合并为一条 movups 加载
@@ -8601,20 +8610,25 @@ impl Codegen {
                     // 不会误合并因为寄存器编号不同.
                     if i + 1 < staged.len() {
                         let (next_loc, next_slot, _) = staged[i + 1];
-                        if matches!(next_loc, ArgLoc::Xmm(nr) if nr == reg && next_slot == slot + 8) {
-                            // movups xmm_reg, [rsp+slot]  (0F 10 /u)
-                            self.emit(&[0x0F, 0x10]);
-                            if slot < 128 {
-                                self.emit(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]);
-                            } else {
-                                self.emit(&[0x84 | ((reg & 7) << 3), 0x24]);
-                                self.emit(&slot.to_le_bytes());
+                        match next_loc {
+                            ArgLoc::Xmm(nr) if nr == reg && next_slot == slot + 8 => {
+                                // 合并: movups xmm_reg, [rsp+slot]
+                                self.emit(&[0x0F, 0x10]);
+                                if slot < 128 {
+                                    self.emit(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]);
+                                } else {
+                                    self.emit(&[0x84 | ((reg & 7) << 3), 0x24]);
+                                    self.emit(&slot.to_le_bytes());
+                                }
+                                i += 2; // 跳过下一个 entry
+                                continue;
                             }
-                            continue;
+                            _ => {}
                         }
                     }
                     let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                     self.emit_xmm_load_rsp(pfx, reg, slot);
+                    i += 1;
                 }
                 ArgLoc::Stack(_) => unreachable!(),
             }
@@ -8733,6 +8747,26 @@ impl Codegen {
                                     }
                                 }
                             } else {
+                                // Vector 返回值 (16B): SysV ABI 全在 xmm0,
+                                // 不走 rax/rdx → xmm0/xmm1 拆分路径.
+                                // 直接 movups 16B 到 xmm0.
+                                if matches!(&ret_ty, Type::Vector(_, _)) && ret_sz > 8 {
+                                    // 先用 gen_expr 物化结果 (落到 frame bottom temp),
+                                    // 再从 frame bottom temp 整体 movups 到 xmm0.
+                                    // 统一用 frame bottom temp, 避免 vector_temp 槽
+                                    // 与内部递归求值冲突 (如 Cast/Binop 等).
+                                    self.gen_expr(e, 0);
+                                    let slot_off = -self.frame_size + 8;
+                                    // movups xmm0, [r13 + slot_off]
+                                    let off_bytes = slot_off.to_le_bytes();
+                                    let in_disp8 = slot_off >= -128 && slot_off <= 127;
+                                    self.emit(&[0x41, 0x0F, 0x10]);
+                                    if in_disp8 {
+                                        self.emit(&[0x45, off_bytes[0]]);
+                                    } else {
+                                        self.emit(&[0x85, off_bytes[0], off_bytes[1], off_bytes[2], off_bytes[3]]);
+                                    }
+                                } else {
                                 // struct 返回: 加载到 rax[:rdx]
                                 if let Expr::Ident { name, .. } = &e {
                                     if self.is_global_not_local(&name.name) {
@@ -8790,6 +8824,7 @@ impl Codegen {
                                         self.emit_movq_gp_to_xmm(c as u8, src);
                                     }
                                 }
+                                } // end else (non-Vector agg return)
                             }
                         } else {
                             self.gen_expr(e, 0);
@@ -11470,16 +11505,15 @@ impl Codegen {
                     }
                 }
                 // vector 返回值: 存入向量临时槽 0
-                // <=8B: SSE 类, 被调方在 xmm0 返回, 需存入临时槽
-                // >8B (<=16B): 被调方按 rax:rdx 返回
+                // <=16B: SSE 类, 被调方在 xmm0 返回, 需存入临时槽
                 if matches!(ty, Type::Vector(_, _)) && sret_off.is_none() {
                     let toff = self.vector_temp_base(0, ty.size());
                     if ty.size() <= 8 {
                         // xmm0 → 临时槽 0
                         self.store_xmm64_stack(0, toff);
                     } else {
-                        self.store_stack(0, toff);
-                        self.store_stack(2, toff + 8);
+                        // 16B Vector: xmm0 (全 16B) → 临时槽 0
+                        self.store_xmm128_stack(0, toff);
                     }
                 }
                 // _Complex 返回值统一物化: 返回端按 SysV ABI 传值
@@ -13692,6 +13726,12 @@ impl Codegen {
                 self.store_xmm32_stack(0, off);
             } else if matches!(elem_ty, Type::Double) {
                 self.store_xmm64_stack(0, off);
+            } else if elem_size == 16 {
+                // 128-bit 元素 (__int128/__uint128): rax=低64, rdx=高64
+                // 若来自 InitList 的标量 (如 0), 需确保 rdx=0
+                self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx (安全覆盖垃圾高字节)
+                self.store_stack(0, off);
+                self.store_stack(2, off + 8);
             } else {
                 self.emit_store(0, off, elem_size);
             }
@@ -16921,6 +16961,8 @@ impl Codegen {
             self.gen_expr(l, 0);
             let t_off = self.vector_temp_base(l_slot, 16);
             self.emit_store(0, t_off, 8);            // [r13+t_off] = rax (low)
+            // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
+            self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8);        // [r13+t_off+8] = rdx (high)
             l_off = t_off;
         }
@@ -16932,6 +16974,7 @@ impl Codegen {
             self.gen_expr(r, 0);
             let t_off = self.vector_temp_base(r_slot, 16);
             self.emit_store(0, t_off, 8);
+            self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8);
             r_off = t_off;
         }
