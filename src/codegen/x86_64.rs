@@ -207,6 +207,7 @@ pub struct Codegen {
     nested_func_rename_counter: u32,
     current_func_name: String, // 当前正在编译的函数名
     current_func_ret_ty: Type, // 当前函数的返回类型
+    current_no_instrument: bool, // 当前函数标了 __attribute__((no_instrument_function))
     /// 静态局部变量分析 pass 的结果 (由 compile() 预计算, 后端消费)
     static_local_map: crate::static_locals::StaticLocalMap,
     real_global_names: std::collections::HashSet<String>, // 真实全局变量名 (不含 static local), 用于避免 static local 覆盖真实全局
@@ -1499,6 +1500,7 @@ impl Codegen {
             current_func_is_nested: false,
             current_returns_nonnull: false,
             current_is_noreturn: false,
+            current_no_instrument: false,
             static_chain_offset: 0,
             upvar_offsets: HashMap::new(),
             upvar_chain_depth: HashMap::new(),
@@ -6951,6 +6953,8 @@ impl Codegen {
         self.current_returns_nonnull = f.returns_nonnull;
         // noreturn: 函数末尾插入 trap 指令
         self.current_is_noreturn = f.is_noreturn;
+        // 记录当前函数是否标记 no_instrument_function
+        self.current_no_instrument = f.no_instrument;
         self.upvar_offsets.clear();
         // upvar_chain_depth / upvar_intermediate_offsets:
         // 嵌套函数的父级 handler 在调用 compile_func 之前通过
@@ -7542,6 +7546,10 @@ impl Codegen {
             self.emit_mprotect_for_stack();
             self.emit_trampoline_to_stack();
         }
+        // -finstrument-functions: 在函数序言后插入 __cyg_profile_func_enter 调用
+        if self.target.instrument_functions && !self.current_no_instrument {
+            self.emit_instrument_func_enter();
+        }
         let ends_ret = if let Some(body) = &f.body {
             for item in &body.items {
                 match item {
@@ -7915,6 +7923,38 @@ impl Codegen {
                 is_push_imm: false,
             });
         }
+    }
+
+    /// -finstrument-functions: 插入函数入口插桩调用
+    /// void __cyg_profile_func_enter(void *func_addr, void *caller_addr);
+    fn emit_instrument_func_enter(&mut self) {
+        // 获取当前函数地址 (lea rdi, [rip+0])
+        // 实际地址需要回补到函数起始位置
+        let lea_pos = self.pos();
+        self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
+        // 将此 lea 作为函数地址引用，回补到函数开始
+        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone()));
+        
+        // 获取调用者地址 (mov rsi, [rsp])
+        self.emit(&[0x48, 0x8B, 0x34, 0x24]); // mov rsi, [rsp]
+        
+        // call __cyg_profile_func_enter
+        self.call_label("__cyg_profile_func_enter");
+    }
+
+    /// -finstrument-functions: 插入函数退出插桩调用
+    /// void __cyg_profile_func_exit(void *func_addr, void *caller_addr);
+    fn emit_instrument_func_exit(&mut self) {
+        // 获取当前函数地址 (lea rdi, [rip+0])
+        let lea_pos = self.pos();
+        self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
+        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone()));
+        
+        // 获取调用者地址: 返回地址在 [r13+8]
+        self.emit(&[0x49, 0x8B, 0x75, 0x08]); // mov rsi, [r13+8]
+        
+        // call __cyg_profile_func_exit
+        self.call_label("__cyg_profile_func_exit");
     }
 
     /// Record a call site address for -mrecord-mcount __mcount_loc section.
@@ -8854,6 +8894,10 @@ impl Codegen {
                     }
                 } else {
                     self.emit(&[0x31, 0xc0]);
+                }
+                // return 语句: 在 epilogue 前先插入函数退出插桩
+                if self.target.instrument_functions && !self.current_no_instrument {
+                    self.emit_instrument_func_exit();
                 }
                 self.emit_func_epilogue();
             }

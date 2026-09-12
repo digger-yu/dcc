@@ -297,6 +297,7 @@ pub struct Parser<'a> {
     var_quals: HashMap<String, QualifierFlags>, // 变量名 → 限定符 (const 检查用)
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
     func_alignments: HashMap<String, usize>,   // 函数名 → 对齐值 (from forward decl or def)
+    func_decl_attrs: HashMap<String, ParsedAttrs>, // 函数名 → 声明时的属性 (用于继承到定义)
     nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
     in_function: bool,                         // 是否在函数体内
     current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
@@ -342,6 +343,7 @@ impl<'a> Parser<'a> {
             var_quals: HashMap::new(),
             globals: HashMap::new(),
             func_alignments: HashMap::new(),
+            func_decl_attrs: HashMap::new(),
             nodiscard_fns: HashSet::new(),
             in_function: false,
             current_function: None,
@@ -3869,7 +3871,21 @@ impl<'a> Parser<'a> {
             };
             // 函数声明后: 解析 __attribute__ 和 __asm__ 标签
             let post_attrs = self.skip_post_decl_modifiers();
-            let attrs = Self::merge_attrs(pre_attrs, post_attrs);
+            let mut attrs = Self::merge_attrs(pre_attrs, post_attrs);
+            
+            // 如果是函数定义(有函数体)，从之前的声明中继承属性
+            // 特别是 no_instrument 等关键属性必须从声明继承到定义
+            if let Some(prev_attrs) = self.func_decl_attrs.get(&name_for_decl.name) {
+                // 从声明继承关键属性（如果定义时没有显式设置）
+                if !attrs.no_instrument && prev_attrs.no_instrument {
+                    attrs.no_instrument = true;
+                }
+                // 可以继承其他关键属性...
+            }
+            
+            // 保存或更新函数声明的属性（用于后续定义继承）
+            self.func_decl_attrs.insert(name_for_decl.name.clone(), attrs.clone());
+            
             // 进入函数: 从全局变量表恢复, 清除局部变量
             let func_ty = Type::Func(
                 Box::new(ty.clone().into()),
