@@ -10948,10 +10948,31 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RBracket, "']'") {
                         return None;
                     }
-                    let ty = Self::index_result_type(&e);
+                    // C11 6.5.2.1: `a[b]` ≡ `*((a)+(b))`. Either operand may
+                    // be the pointer; the other is integer. If the first is
+                    // a scalar but the second is a pointer/array, swap them
+                    // so downstream codegen always sees `arr=pointer, idx=int`.
+                    // (pr22061-1: `N[(char*)x]` — reversed subscript)
+                    let (arr_expr, idx_expr, ty) = {
+                        let e_is_ptr = matches!(
+                            e.ty(),
+                            Type::Ptr(_) | Type::Array(_, _) | Type::Vector(_, _)
+                        );
+                        let idx_is_ptr = matches!(
+                            idx.ty(),
+                            Type::Ptr(_) | Type::Array(_, _) | Type::Vector(_, _)
+                        );
+                        if !e_is_ptr && idx_is_ptr {
+                            let ty = Self::index_result_type(&idx);
+                            (idx, e, ty)
+                        } else {
+                            let ty = Self::index_result_type(&e);
+                            (e, idx, ty)
+                        }
+                    };
                     e = Expr::Index {
-                        arr: Box::new(e),
-                        idx: Box::new(idx),
+                        arr: Box::new(arr_expr),
+                        idx: Box::new(idx_expr),
                         span: sp.clone(),
                         ty,
                     };
