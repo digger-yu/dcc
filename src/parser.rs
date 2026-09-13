@@ -4196,6 +4196,19 @@ impl<'a> Parser<'a> {
             let mut arr_attrs = pre_attrs.clone();
             arr_attrs.merge(self.parse_attributes());
             self.skip_asm_label(); // asm 标签
+            // 初始化器可引用当前声明符自身 (如 E e[2] = { {0, &e[1]}, ... })。
+            // 必须在 parse_expr_bp 之前注册类型, 否则 lookup_ident_type
+            // 查不到 "e" 返回默认 int_t(), 导致 &e[1] 中 Index 元素类型被
+            // 当作 int, stride=4 而非 struct E 的 16 字节 (pr39100)。
+            if !name_for_decl.name.is_empty() {
+                self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
+                let var_q = if matches!(arr_ty, Type::Ptr(_)) {
+                    self.decl_quals
+                } else {
+                    self.spec_quals | self.decl_quals
+                };
+                self.var_quals.insert(name_for_decl.name.clone(), var_q);
+            }
             let init = if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
                 // C23 允许省略 '=' 的大括号初始化: int a[] {1,2,3}
                 // 注意: '{' 不能在这里吃掉, 必须交给 parse_expr 的 InitList 分支处理
