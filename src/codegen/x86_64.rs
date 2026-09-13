@@ -29432,6 +29432,10 @@ impl Codegen {
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
         let mut idx = 0usize;
+        // x87 FPU 栈加载需要按 st() 从高到低顺序执行 (fld 推栈,
+        // 最后一次 fld 才是 st(0)). 收集所有 x87 operand, 统一在
+        // outputs+inputs 都处理完后再排序加载.
+        let mut pending_x87: Vec<(u8, &Expr)> = Vec::new();
 
         // 内部占位: 每个操作数分配状态
         enum Slot {
@@ -29573,7 +29577,7 @@ impl Codegen {
                 let xmm_w = if st_idx == 0 { 200u8 } else { 201 };
                 let name: &'static str = if st_idx == 0 { "st" } else { "%st(1)" };
                 if is_inout {
-                    self.prepare_asm_x87_binding(op, st_idx);
+                    pending_x87.push((st_idx, op));
                 }
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(st_idx, name));
@@ -29697,11 +29701,17 @@ impl Codegen {
                     if let Slot::Reg(r, name) = slot {
                         let nreg = *r;
                         let nname = *name;
-                        let is_xmm = meta
+                        let mwidth = meta
                             .get(n as usize)
-                            .map(|m| m.1 != 0 && m.1 < 200)
-                            .unwrap_or(false);
-                        if is_xmm {
+                            .map(|m| m.1)
+                            .unwrap_or(0);
+                        let is_xmm = mwidth != 0 && mwidth < 200;
+                        let is_x87 = mwidth == 200 || mwidth == 201;
+                        if is_x87 {
+                            // x87 栈寄存器复用: defer fld, 等所有 operand 处理
+                            // 完后再按 st() 从高到低统一加载.
+                            pending_x87.push((nreg, op));
+                        } else if is_xmm {
                             self.prepare_asm_xmm_binding(op, nreg, is_inout);
                         } else {
                             // 对当前操作数 (输入) 调 prepare, 把值加载到复用寄存器
@@ -29710,10 +29720,10 @@ impl Codegen {
                         map.insert(format!("%{idx}"), nname.to_string());
                         if is_xmm {
                             planner.reserve_xmm(nreg, AsmRegUse::Input);
-                        } else {
+                        } else if !is_x87 {
                             planner.reserve_gp(nreg, AsmRegUse::Input);
                         }
-                        meta.push((nreg, if is_xmm { 128 } else { 0 }, false, false, 0));
+                        meta.push((nreg, mwidth, false, false, 0));
                         slots.push(Slot::Reg(nreg, nname));
                         idx += 1;
                         continue;
@@ -29769,11 +29779,12 @@ impl Codegen {
                 }
             }
 
-            // x87 FPU 约束 (f/t/u)
+            // x87 FPU 约束 (f/t/u) — 延迟加载, 等全部 operand 处理完
+            // 后按 st() 从高到低顺序统一 fld.
             if let Some(st_idx) = Self::asm_constraint_wants_x87(raw) {
                 let xmm_w = if st_idx == 0 { 200u8 } else { 201 };
                 let name: &'static str = if st_idx == 0 { "st" } else { "%st(1)" };
-                self.prepare_asm_x87_binding(op, st_idx);
+                pending_x87.push((st_idx, op));
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(st_idx, name));
                 meta.push((st_idx, xmm_w, false, false, 0));
@@ -30009,6 +30020,16 @@ impl Codegen {
                 map.insert(key, new_name.to_string());
                 slots[i] = Slot::Reg(cand, new_name);
                 meta[i] = (cand, 0, true, false, flags);
+            }
+        }
+
+        // x87 FPU 栈加载: 所有 operand 已登记到 slots/meta, 现在按
+        // st() 从高到低顺序统一 fld — 保证最后一次 fld 落在 st(0),
+        // 前一次落在 st(1), 以此类推.
+        if !pending_x87.is_empty() {
+            pending_x87.sort_by(|a, b| b.0.cmp(&a.0)); // st_idx 降序
+            for (st_idx, expr) in pending_x87 {
+                self.prepare_asm_x87_binding(expr, st_idx);
             }
         }
 
@@ -30278,8 +30299,11 @@ impl Codegen {
     }
 
     /// 将 asm 约束表达式加载到 x87 FPU 栈 (f/t/u 约束)
-    /// st_idx: 0=st(0), 1=st(1)
+    /// st_idx: 0=st(0), 1=st(1). 仅执行一次 fld 推栈;
+    /// 调用方需按 st_idx 从高到低顺序调用 (保证最终:
+    /// 最后一次 fld → st(0), 前一次 → st(1), 以此类推).
     fn prepare_asm_x87_binding(&mut self, expr: &Expr, st_idx: u8) {
+        let _ = st_idx; // 仅作注释, 不影响本函数行为
         if let Expr::Ident { name, ty, .. } = expr {
             let off = self.var_offset(&name.name);
             if self.is_global_var(&name.name) {
@@ -30298,28 +30322,6 @@ impl Codegen {
                 } else {
                     self.emit(&[0x85]);
                     self.emit(&(off as i32).to_le_bytes());
-                }
-            }
-            // 对于 st(1): 需要再次 fld 使 st(0)→st(1), 新值成为 st(0)
-            // 但这会推栈, 使 st(0) 变为 st(1)。对于“u”约束, GCC 假定
-            // st(1) 是第二个操作数, 需要在 st(0) 之后再压一个值。
-            // 简化处理: st_idx==1 时再压一次同一值 (实践中很少使用)
-            if st_idx == 1 {
-                if self.is_global_var(&name.name) {
-                    self.emit_global_addr(0, &name.name);
-                    let is_float = matches!(ty, Type::Float);
-                    let opcode = if is_float { 0xD9 } else { 0xDD };
-                    self.emit(&[opcode, 0x00]);
-                } else {
-                    let is_float = matches!(ty, Type::Float);
-                    let opcode = if is_float { 0xD9 } else { 0xDD };
-                    self.emit(&[0x41, opcode]);
-                    if off.abs() < 128 {
-                        self.emit(&[0x45, off as i8 as u8]);
-                    } else {
-                        self.emit(&[0x85]);
-                        self.emit(&(off as i32).to_le_bytes());
-                    }
                 }
             }
             return;
