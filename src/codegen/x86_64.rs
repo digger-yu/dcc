@@ -12999,6 +12999,9 @@ impl Codegen {
             Expr::CompoundLit { ty, inits, .. } => {
                 if let Type::Vector(elem_ty, n) = ty {
                     self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
+                    let vec_size = elem_ty.base.size() * n;
+                    let temp_off = self.vector_temp_base(0, vec_size);
+                    self.emit_lea_r13(dst, temp_off);
                     return;
                 }
                 // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
@@ -13432,6 +13435,15 @@ impl Codegen {
         let slot_off = self.vector_temp_base(2, src_ty.size().max(to.size()));
         self.materialize_bits_to_slot(from, slot_off);
         self.load_bits_from_slot(to, slot_off, dst);
+        // 向量 bitcast 后, 结果在 slot 0 (temp slot), 需返回地址给 rax —
+        // 否则 Index/Call 等后续消费者拿到垃圾 rax 会段错误 (pr70903).
+        if matches!(to, Type::Vector(_, _)) {
+            let vec_off = self.vector_temp_base(0, to.size());
+            self.emit_lea_r13(0, vec_off);
+            if dst != 0 {
+                self.mov(dst, 0);
+            }
+        }
         true
     }
 
@@ -16786,13 +16798,17 @@ impl Codegen {
                             | Type::Long
                             | Type::LongLong
                     );
-                    if matches!(op, BinOp::Shr) && signed {
-                        // sar rcx, cl (但我们需要 rax 为目标)
-                        // sar rax, cl: 0x48, 0xD3, 0xF8
-                        self.emit(&[0x48, 0xD3, 0xF8]);
-                    } else {
-                        // shl rax, cl: 0x48, 0xD3, 0xE0
-                        self.emit(&[0x48, 0xD3, 0xE0]);
+                    match op {
+                        BinOp::Shl => {
+                            self.emit(&[0x48, 0xD3, 0xE0]); // shl rax, cl
+                        }
+                        BinOp::Shr if signed => {
+                            self.emit(&[0x48, 0xD3, 0xF8]); // sar rax, cl
+                        }
+                        BinOp::Shr => {
+                            self.emit(&[0x48, 0xD3, 0xE8]); // shr rax, cl (unsigned)
+                        }
+                        _ => unreachable!(),
                     }
                     self.mov(1, 0); // mov rcx, rax
                 }
@@ -17225,24 +17241,24 @@ impl Codegen {
 
     /// 向量 compound literal / Cast+InitList 的初始化列表
     fn vector_init_from_expr(e: &Expr) -> Option<(&Type, usize, &[InitItem])> {
-        match e {
-            Expr::CompoundLit {
-                ty: Type::Vector(elem, n),
-                inits,
-                ..
-            } => Some((&elem.base, *n, inits.as_slice())),
-            Expr::Cast {
-                ty: Type::Vector(elem, n),
-                e: inner,
-                ..
-            } => {
-                if let Expr::InitList { inits, .. } = inner.as_ref() {
+        // 递归剥掉 Cast 包装: (V2SI_d)(V2SI_u){0,1} → Cast → Cast → InitList
+        let mut cur = e;
+        loop {
+            break match cur {
+                Expr::CompoundLit {
+                    ty: Type::Vector(elem, n),
+                    inits,
+                    ..
+                } => Some((&elem.base, *n, inits.as_slice())),
+                Expr::InitList { inits, ty: Type::Vector(elem, n), .. } => {
                     Some((&elem.base, *n, inits.as_slice()))
-                } else {
-                    None
                 }
-            }
-            _ => None,
+                Expr::Cast { e: inner, .. } => {
+                    cur = inner.as_ref();
+                    continue;
+                }
+                _ => None,
+            };
         }
     }
 
@@ -21838,23 +21854,37 @@ impl Codegen {
                     // 寄存器返回: 按 abi_classes 存储
                     // (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
                     self.emit_sysv_call(Some(&name.name), None, args, None);
+                    // 128-bit SSE 向量: abi_classes 生成 [Sse, SseUp] 两个
+                    // eightbyte, 但完整向量存在一个 xmm 寄存器, 不能拆分
+                    // 用 store_xmm64(xmm0)+store_xmm64(xmm1), 必须用
+                    // store_xmm128_stack 一次性存 128bit (pr92618).
+                    let is_sse_vector_128 = matches!(call_ty, Type::Vector(_, _))
+                        && call_ty.size() == 16
+                        && {
+                            let c = Self::abi_classes(call_ty);
+                            c.len() == 2 && c.iter().all(|x| matches!(x, AbiClass::Sse | AbiClass::SseUp))
+                        };
                     if is_global_dst {
                         // Global destination: dst_off=0 is invalid for
                         // store_stack (would corrupt return address).
                         // Store to sret temp, then rep movsb to global.
                         let temp_off = self.alloc_sret_slot(call_ty.size());
-                        let ret_classes = Self::abi_classes(call_ty);
-                        for (c, cls) in ret_classes.iter().enumerate() {
-                            let off = temp_off + (c as i64) * 8;
-                            match cls {
-                                AbiClass::Integer => {
-                                    let reg = if c == 0 { 0u8 } else { 2u8 };
-                                    self.store_stack(reg, off);
+                        if is_sse_vector_128 {
+                            self.store_xmm128_stack(0, temp_off);
+                        } else {
+                            let ret_classes = Self::abi_classes(call_ty);
+                            for (c, cls) in ret_classes.iter().enumerate() {
+                                let off = temp_off + (c as i64) * 8;
+                                match cls {
+                                    AbiClass::Integer => {
+                                        let reg = if c == 0 { 0u8 } else { 2u8 };
+                                        self.store_stack(reg, off);
+                                    }
+                                    AbiClass::Sse | AbiClass::SseUp => {
+                                        self.store_xmm64_stack(c as u8, off);
+                                    }
+                                    _ => unreachable!(),
                                 }
-                                AbiClass::Sse | AbiClass::SseUp => {
-                                    self.store_xmm64_stack(c as u8, off);
-                                }
-                                _ => unreachable!(),
                             }
                         }
                         self.emit_lea_r13(6, temp_off); // rsi = src
@@ -21862,6 +21892,10 @@ impl Codegen {
                         // rep movsb handled below
                         call_sret_handled = true;
                     } else {
+                        if is_sse_vector_128 {
+                            self.store_xmm128_stack(0, dst_off);
+                            return;
+                        }
                         let ret_classes = Self::abi_classes(call_ty);
                         for (c, cls) in ret_classes.iter().enumerate() {
                             let off = dst_off + (c as i64) * 8;
@@ -24774,7 +24808,7 @@ impl Codegen {
                 true
             }
             // Vector 操作: placeholder (返回 0)
-            "__builtin_shufflevector" | "__builtin_convertvector" => {
+            "__builtin_convertvector" => {
                 self.mov_imm(dst, 0);
                 true
             }
@@ -25992,17 +26026,17 @@ impl Codegen {
                                                 // 7. 存储截断结果到 *ptr
                 match result_size {
                     4 => {
-                        self.emit(&[0x49, 0x89, 0x02]);
-                    } // mov [r10], eax
+                        self.emit(&[0x41, 0x89, 0x02]); // mov [r10], eax
+                    }
                     2 => {
-                        self.emit(&[0x49, 0x89, 0x02]);
-                    } // mov [r10], eax (低 16 位)
+                        self.emit(&[0x66, 0x41, 0x89, 0x02]); // mov [r10], ax
+                    }
                     1 => {
-                        self.emit(&[0x49, 0x89, 0x02]);
-                    } // mov [r10], eax (低 8 位)
+                        self.emit(&[0x41, 0x88, 0x02]); // mov [r10], al
+                    }
                     _ => {
-                        self.emit(&[0x49, 0x89, 0x02]);
-                    } // mov [r10], rax
+                        self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                    }
                 }
                 // 8. dst = 溢出标志
                 self.emit(&[0x0f, 0xb6, 0xc2]); // movzx eax, dl
@@ -27215,12 +27249,74 @@ impl Codegen {
                 }
                 true
             }
-            // __builtin_shuffle: vector shuffle (stub: return first arg)
+            // __builtin_shuffle(vec, mask): GCC SIMD shuffle — 标量逐元素回退
+            // __builtin_shufflevector(vec1, vec2, idx...) = clang 风格, 复用同逻辑
             "__builtin_shuffle" | "__builtin_shufflevector" => {
-                if !args.is_empty() {
-                    self.gen_expr(&args[0], dst);
-                } else {
+                if args.len() < 2 {
                     self.mov_imm(dst, 0);
+                    return true;
+                }
+                let src_ty = args[0].ty();
+                let (elem_ty, count) = match src_ty {
+                    Type::Vector(ref elem, n) => (elem.base.clone(), n),
+                    _ => {
+                        self.gen_expr(&args[0], dst);
+                        return true;
+                    }
+                };
+                let elem_size = elem_ty.size();
+                let vec_size = elem_size * count;
+                self.gen_vector_load_into_slot(&args[0], 0);
+                self.gen_vector_load_into_slot(&args[1], 1);
+                let src_off = self.vector_temp_base(0, vec_size);
+                let mask_off = self.vector_temp_base(1, vec_size);
+                let result_slot = 2usize;
+                let dst_off = self.vector_temp_base(result_slot, vec_size);
+                let count_mask = count - 1;
+                let is_float = matches!(elem_ty, Type::Float);
+                let is_double = matches!(elem_ty, Type::Double);
+                // rsi = &src[0] (caller-saved, vec/mask 已物化完毕)
+                self.emit_lea_r13(6, src_off);
+                for i in 0..count {
+                    // 1. 读 mask[i] → rax (mask 为整型向量, 用 GP load)
+                    let mi_off = mask_off + (i * elem_size) as i64;
+                    self.emit_lea_r13(0, mi_off);
+                    self.emit_load_mem(elem_size);
+                    // 2. rax = (rax & count_mask) * elem_size → byte offset
+                    self.emit(&[0x48, 0x25]);
+                    self.emit(&(count_mask as i32).to_le_bytes());
+                    if elem_size == 1 {
+                    } else if elem_size.is_power_of_two() {
+                        let shift = elem_size.trailing_zeros();
+                        self.emit(&[0x48, 0xC1, 0xE0, shift as u8]);
+                    } else {
+                        self.mov_imm(10, elem_size as i128);
+                        self.emit(&[0x48, 0x0F, 0xAF, 0xD0]); // imul rax, r10
+                    }
+                    // 3. rax = rsi + rax → &src[j]
+                    self.emit(&[0x48, 0x01, 0xF0]); // add rax, rsi
+                    // 4. 读 *rax → xmm0 (标量, 只加载 elem_size 字节)
+                    if is_double {
+                        self.emit(&[0xF2, 0x0F, 0x10, 0x00]); // movsd xmm0, [rax] (8B)
+                    } else if is_float {
+                        self.emit(&[0xF3, 0x0F, 0x10, 0x00]); // movss xmm0, [rax] (4B)
+                    } else {
+                        self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                    }
+                    // 5. 写 dst[i]
+                    let ri_off = dst_off + (i * elem_size) as i64;
+                    if is_double {
+                        self.store_xmm64_stack(0, ri_off);
+                    } else if is_float {
+                        self.store_xmm32_stack(0, ri_off);
+                    } else {
+                        self.emit_store(0, ri_off, elem_size);
+                    }
+                }
+                // 6. 把结果从 slot 2 复制回 slot 0, 然后 load 到 xmm0
+                self.copy_r13_bytes(dst_off, src_off, vec_size);
+                if vec_size == 16 {
+                    self.emit_movdqu_r13_to_xmm(0, src_off);
                 }
                 true
             }
