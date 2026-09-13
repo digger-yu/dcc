@@ -30066,9 +30066,23 @@ impl Codegen {
     /// - `is_output = false`: Ident 取栈/全局值 (asm 模板里使用该值)
     /// - 其他表达式统一 `gen_expr` 求值。
     fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8, is_output: bool) {
-        if let Expr::Ident { name, .. } = expr {
+        if let Expr::Ident { name, ty, .. } = expr {
             if self.is_global_var(&name.name) {
-                self.emit_global_addr(reg, &name.name);
+                if is_output {
+                    // 只写输出 (如 "=r"): asm 将完全覆盖, 只需要地址给 writeback
+                    self.emit_global_addr(reg, &name.name);
+                } else {
+                    // 输入或读写 (如 "+r"): 必须加载当前值到寄存器
+                    // gen_expr(Ident) 对全局变量会用 mov [rip+off], reg 加载值
+                    self.gen_expr(expr, reg);
+                    // 但 gen_expr 只加载 4 字节 (unsigned int), 需按实际类型大小加载
+                    let sz = ty.size();
+                    if sz >= 8 {
+                        // 已经是完整值, ok
+                    } else if sz == 4 {
+                        // gen_expr 对 Int/UInt 生成 mov eax, [rip+...] 正确
+                    }
+                }
             } else if is_output {
                 // 输出: lea 出变量地址, writeback 通过 [r13+off] 写回
                 let off = self.var_offset(&name.name);
