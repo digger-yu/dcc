@@ -239,6 +239,10 @@ pub struct Codegen {
     // rodata 节内部重定位: rodata 里的 CompoundLit 结构体指针字段
     // 引用另一个 rodata 里的匿名 CompoundLit。(offset_in_rodata, symbol_name, rel_type, addend)
     pending_rodata_rels: Vec<(u64, String, u32, i64)>,
+    // data 节内 label 地址差值: 表达式 `&&A - &&B` 在静态初始化式中
+    // 出现时, 编译器尚未知 label 偏移, 先写占位并在函数编译完后
+    // 用 self.labels 里的已知偏移回填. (data_off, label_A, label_B, width_bytes)
+    pending_label_diff_rels: Vec<(u64, String, String, usize)>,
     // data 节最终重定位条目
     pub data_relocations: Vec<ElfRela>,
     // cleanup 属性变量: (变量名, 清理函数名)
@@ -1512,6 +1516,7 @@ impl Codegen {
             global_reg_bindings: HashMap::new(),
             pending_data64_rels: vec![],
             pending_rodata_rels: vec![],
+            pending_label_diff_rels: vec![],
             data_relocations: vec![],
             cleanup_vars: vec![],
             extra_rela_sections: vec![],
@@ -1985,6 +1990,46 @@ impl Codegen {
     /// Prefixing with `.Ll_` makes labels local and prevents the collision.
     fn c_label_to_asm(name: &str) -> String {
         format!(".Ll_{}", name)
+    }
+
+    /// 从表达式中提取 label 名 (若表达式可归约为 `&&label`).
+    /// 剥离 Cast 包装: (int)&&foo → Some("foo").
+    fn extract_label_addr(e: &Expr) -> Option<String> {
+        let mut cur = e;
+        loop {
+            match cur {
+                Expr::LabelAddr { label, .. } => return Some(label.name.clone()),
+                Expr::Cast { e: inner, .. } => cur = inner.as_ref(),
+                _ => return None,
+            }
+        }
+    }
+
+    /// 修补 data_section 里的 label 地址差值: drain
+    /// `pending_label_diff_rels`, 用 self.labels 计算字节差值,
+    /// 按小端序写入 data_section 对应偏移.
+    /// 必须在 emit_functions 之后调用 (此时 self.labels 完整).
+    fn patch_label_diff_rels(&mut self) {
+        for (data_off, label_a, label_b, width) in
+            self.pending_label_diff_rels.drain(..)
+        {
+            if let (Some(&off_a), Some(&off_b)) =
+                (self.labels.get(&label_a), self.labels.get(&label_b))
+            {
+                let diff = (off_a as i64) - (off_b as i64);
+                let p = data_off as usize;
+                if p + width <= self.data_section.len() {
+                    let bytes = match width {
+                        1 => (diff as i8).to_le_bytes().to_vec(),
+                        2 => (diff as i16).to_le_bytes().to_vec(),
+                        4 => (diff as i32).to_le_bytes().to_vec(),
+                        _ => diff.to_le_bytes()[..width.min(8)].to_vec(),
+                    };
+                    self.data_section[p..p + bytes.len()]
+                        .copy_from_slice(&bytes);
+                }
+            }
+        }
     }
 
     /// 发射 NOP 填充到对齐边界 (x86_64: 0x90 = NOP)
@@ -3689,6 +3734,10 @@ impl Codegen {
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
         self.emit_functions(prog);
+        // 修补 data_section 里的 label 地址差值
+        // (`&&A - &&B` 在静态初始化式中出现, 编译期 label 未知,
+        // 函数编译完后 self.labels 已填充, 用 offset 差值回填).
+        self.patch_label_diff_rels();
         // 对齐 code 到 8 字节 (ELF 的 .rodata 也按 8 对齐)
         while !self.code.len().is_multiple_of(8) {
             self.code.push(0);
@@ -4939,6 +4988,8 @@ impl Codegen {
         self.pre_register_static_locals();
         // 生成函数代码 (无 _start)
         self.emit_functions(prog);
+        // 修补 data_section 里的 label 地址差值 (同 compile_exec 路径)
+        self.patch_label_diff_rels();
 
         // 填充反汇编符号表 (全局变量 RIP-relative 引用)
         for (p, name) in &self.pending_data_rels {
@@ -15074,6 +15125,21 @@ impl Codegen {
                 );
             }
             return vec![0u8; size];
+        }
+        // &&label_a - &&label_b: label address difference (computed goto tables).
+        // 编译期尚不知 label 偏移, 记录待回填, 函数编译完后用 self.labels
+        // 已知偏移计算差值. 同时处理 Cast 包装: (int)&&lab_a - (int)&&lab_b.
+        if let Expr::Binop { op: crate::ast::BinOp::Sub, l, r, .. } = e {
+            let (la, lb) = (Self::extract_label_addr(l), Self::extract_label_addr(r));
+            if let (Some(label_a), Some(label_b)) = (la, lb) {
+                let prefixed_a = Self::c_label_to_asm(&label_a);
+                let prefixed_b = Self::c_label_to_asm(&label_b);
+                if let Some((off, _sec)) = rel {
+                    let size = width.max(4);
+                    self.pending_label_diff_rels.push((off, prefixed_a, prefixed_b, size));
+                }
+                return vec![0u8; width.max(4)];
+            }
         }
         // &(T){...} / &{...}: 嵌套 AddrOf+CompoundLit 路径
         // (gen_global_init_list 处理 struct 指针字段时走 eval_const_expr,
