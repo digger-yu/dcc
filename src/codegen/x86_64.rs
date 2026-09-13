@@ -21657,7 +21657,7 @@ impl Codegen {
                     }
                     return true;
                 }
-                if self.is_global_var(&name.name) {
+                if self.is_global_not_local(&name.name) {
                     self.emit_global_addr(dst, &name.name);
                 } else if self.vla_offsets.contains_key(&name.name) {
                     // VLA: 基址存储在变量栈槽中

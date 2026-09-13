@@ -8120,25 +8120,105 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 收集块内声明的所有变量名 (含 extern, 不含 static local 全局定义).
+    /// 用于在向内层块传播 shadow_map 时过滤掉被本块遮蔽的映射.
+    fn collect_block_declared_names(items: &[BlockItem]) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    // extern 声明也会遮蔽外层同名变量 (引用全局而非外层 local)
+                    names.insert(v.name.name.clone());
+                }
+                BlockItem::Decl(Decl::StructDef(sd)) => {
+                    names.insert(sd.name.name.clone());
+                }
+                BlockItem::Decl(Decl::UnionDef(ud)) => {
+                    names.insert(ud.name.name.clone());
+                }
+                BlockItem::Decl(Decl::EnumDef(ed)) => {
+                    names.insert(ed.name.name.clone());
+                }
+                BlockItem::Stmt(stmt) => {
+                    // 递归进入嵌套语句 (块、循环、if 等) 收集声明
+                    names.extend(Self::collect_stmt_declared_names(stmt));
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn collect_stmt_declared_names(stmt: &Stmt) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        match stmt {
+            Stmt::Block { b, .. } => {
+                names.extend(Self::collect_block_declared_names(&b.items));
+            }
+            Stmt::If { then_, else_, .. } => {
+                names.extend(Self::collect_stmt_declared_names(then_));
+                if let Some(e) = else_ {
+                    names.extend(Self::collect_stmt_declared_names(e));
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+                names.extend(Self::collect_stmt_declared_names(body));
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(s) = init {
+                    names.extend(Self::collect_stmt_declared_names(s));
+                }
+                names.extend(Self::collect_stmt_declared_names(body));
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    names.extend(Self::collect_block_declared_names(&case.body.items));
+                }
+            }
+            Stmt::Label { stmt, .. } => {
+                names.extend(Self::collect_stmt_declared_names(stmt));
+            }
+            _ => {}
+        }
+        names
+    }
+
     /// 应用遮蔽映射到语句
     fn apply_shadow_map_stmt(stmt: &mut Stmt, map: &[(String, String)]) {
         match stmt {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::apply_shadow_map_expr(e, map);
             }
-            Stmt::Block { .. } => {
-                // 不进入嵌套块，它们自行处理遮蔽
+            Stmt::Block { b, .. } => {
+                // 嵌套块的 parse_block 有独立的 shadow_map (从空开始),
+                // 不会继承外层 shadow_map. 因此必须在此显式传播.
+                // 但本块可能声明了同名变量 (含 extern), 这些声明会遮蔽
+                // 外层变量 — 必须过滤掉被本块遮蔽的映射, 否则会错误地
+                // 把 extern 声明/引用也重命名为外层 shadow 名.
+                let local_names = Self::collect_block_declared_names(&b.items);
+                let filtered_map: Vec<(String, String)> = map.iter()
+                    .filter(|(old, _)| !local_names.contains(old))
+                    .cloned()
+                    .collect();
+                for item in &mut b.items {
+                    match item {
+                        BlockItem::Stmt(s) => Self::apply_shadow_map_stmt(s, &filtered_map),
+                        BlockItem::Decl(d) => Self::apply_shadow_map_decl(d, &filtered_map),
+                    }
+                }
             }
-            Stmt::If { cond, .. } => {
+            Stmt::If { cond, then_, else_, .. } => {
                 Self::apply_shadow_map_expr(cond, map);
-                // 不进入 then_/else_ 块
+                Self::apply_shadow_map_stmt(then_, map);
+                if let Some(e) = else_ {
+                    Self::apply_shadow_map_stmt(e, map);
+                }
             }
-            Stmt::While { cond, .. } | Stmt::Do { cond, .. } => {
+            Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
                 Self::apply_shadow_map_expr(cond, map);
+                Self::apply_shadow_map_stmt(body, map);
             }
-            Stmt::For {
-                init, cond, step, ..
-            } => {
+            Stmt::For { init, cond, step, body, .. } => {
                 if let Some(s) = init {
                     Self::apply_shadow_map_stmt(s, map);
                 }
@@ -8148,9 +8228,28 @@ impl<'a> Parser<'a> {
                 if let Some(e) = step {
                     Self::apply_shadow_map_expr(e, map);
                 }
+                Self::apply_shadow_map_stmt(body, map);
             }
-            Stmt::Switch { expr, .. } => {
+            Stmt::Switch { expr, cases, .. } => {
                 Self::apply_shadow_map_expr(expr, map);
+                for case in cases {
+                    let local_names = Self::collect_block_declared_names(&case.body.items);
+                    let filtered_map: Vec<(String, String)> = map.iter()
+                        .filter(|(old, _)| !local_names.contains(old))
+                        .cloned()
+                        .collect();
+                    for item in &mut case.body.items {
+                        match item {
+                            BlockItem::Stmt(s) => Self::apply_shadow_map_stmt(s, &filtered_map),
+                            BlockItem::Decl(d) => Self::apply_shadow_map_decl(d, &filtered_map),
+                        }
+                    }
+                }
+            }
+            Stmt::Goto { .. } | Stmt::Continue { .. } | Stmt::Break { .. } | Stmt::Return { val: None, .. } => {}
+            Stmt::GotoIndirect { .. } | Stmt::AsmGoto { .. } => {}
+            Stmt::Label { stmt, .. } => {
+                Self::apply_shadow_map_stmt(stmt, map);
             }
             _ => {}
         }
