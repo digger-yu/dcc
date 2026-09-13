@@ -62,6 +62,35 @@ should_skip() {
 TMPDIR_TORTURE=$(mktemp -d /tmp/dcc-torture-execute.XXXXXX)
 trap 'rm -rf "$TMPDIR_TORTURE"' EXIT
 
+# ── 提取 GCC dg-options 指令 (仅保留 dcc 支持的选项) ──
+# 从 /* { dg-options "..." } */ 和 /* { dg-additional-options "..." } */ 中提取选项
+extract_dg_options() {
+    local src="$1"
+    local raw_opts=""
+    local dg_opts
+    dg_opts=$(grep -oP '\{ dg-options "\K[^"]+' "$src" 2>/dev/null | head -1)
+    if [[ -n "$dg_opts" ]]; then
+        raw_opts="$dg_opts"
+    fi
+    local add_opts
+    add_opts=$(grep -oP '\{ dg-additional-options "\K[^"]+' "$src" 2>/dev/null | head -1)
+    if [[ -n "$add_opts" ]]; then
+        raw_opts="$raw_opts $add_opts"
+    fi
+    # 只保留 dcc 支持的选项
+    local filtered=""
+    local opt
+    for opt in $raw_opts; do
+        case "$opt" in
+            -finstrument-functions|-fno-instrument-functions|-std=gnu89)
+                filtered="$filtered $opt"
+                ;;
+        esac
+    done
+    echo "$filtered"
+}
+export -f extract_dg_options
+
 # ── execute 测试函数 ──
 run_execute_test() {
     local src="$1"
@@ -69,7 +98,10 @@ run_execute_test() {
     name="$(basename "$src" .c)"
     local exe="$TMPDIR_TORTURE/${name}.exe"
 
-    if ! "$DCC" -std=gnu11 -lm -o "$exe" "$src" 2>/dev/null; then
+    local extra_opts
+    extra_opts=$(extract_dg_options "$src")
+
+    if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
         echo "COMPILE_FAIL"
         return
     fi

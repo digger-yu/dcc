@@ -166,7 +166,7 @@ pub struct Codegen {
     pub relocations: Vec<ElfRela>,
     pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
     pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转: 通用 code relocation
-    pending_func_addr_rels: Vec<(u64, String)>, // 函数地址取址 (GOTPCREL)
+    pending_func_addr_rels: Vec<(u64, String, bool)>, // (code_offset, func_name, is_lea: true=PC32, false=GOTPCREL)
     defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
     error_attr_fns: HashSet<String>,       // __attribute__((error)) 函数名 (调用时发射 ud2)
     pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
@@ -1401,7 +1401,7 @@ struct FuncEmitChunk {
     x87_float_refs: Vec<(u64, u64)>,
     pending_func_rels: Vec<(u64, String)>,
     pending_code_rels: Vec<PendingCodeRel>,
-    pending_func_addr_rels: Vec<(u64, String)>,
+    pending_func_addr_rels: Vec<(u64, String, bool)>,
     pending_data_rels: Vec<(u64, String)>,
     pending_sib_data_rels: Vec<(u64, String)>,
     label_addr_refs: Vec<(u64, String)>,
@@ -5675,11 +5675,10 @@ impl Codegen {
             }
         }
         let mut implicit_und: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (_, name) in self
-            .pending_func_rels
-            .iter()
-            .chain(self.pending_func_addr_rels.iter())
-        {
+        // 收集所有需要符号表的函数名
+        let mut all_func_names: Vec<&String> = self.pending_func_rels.iter().map(|(_, n)| n).collect();
+        all_func_names.extend(self.pending_func_addr_rels.iter().map(|(_, n, _)| n));
+        for name in all_func_names {
             if name == "__dcc_tls_base" {
                 continue;
             }
@@ -5975,14 +5974,21 @@ impl Codegen {
             });
         }
 
-        // 解析函数地址重定位 (GOT 间接寻址: MOV + GOTPCREL)
-        for (code_off, func_name) in self.pending_func_addr_rels.drain(..) {
+        // 解析函数地址重定位:
+        // - LEA 指令 (instrument hook): 直接计算函数地址 → PC32
+        // - MOV 指令 (外部函数 GOT 间接加载): GOTPCREL
+        for (code_off, func_name, is_lea) in self.pending_func_addr_rels.drain(..) {
             let resolved = self.asm_label_map.get(&func_name).cloned().unwrap_or(func_name);
             let sym_idx = self.sym_index.get(&resolved).copied().unwrap_or(0);
+            let rel_type = if is_lea {
+                elf::R_X86_64_PC32
+            } else {
+                elf::R_X86_64_GOTPCREL
+            };
             self.relocations.push(ElfRela {
                 offset: code_off,
                 sym_index: sym_idx,
-                rel_type: elf::R_X86_64_GOTPCREL,
+                rel_type,
                 addend: -4,
             });
         }
@@ -6614,8 +6620,8 @@ impl Codegen {
             rel.offset += base;
             self.pending_code_rels.push(rel);
         }
-        for (pos, sym) in chunk.pending_func_addr_rels {
-            self.pending_func_addr_rels.push((base + pos, sym));
+        for (pos, sym, is_lea) in chunk.pending_func_addr_rels {
+            self.pending_func_addr_rels.push((base + pos, sym, is_lea));
         }
         for (pos, sym) in chunk.pending_sib_data_rels {
             self.pending_sib_data_rels.push((base + pos, sym));
@@ -7738,6 +7744,11 @@ impl Codegen {
             if f.name.name == "main" && matches!(f.ret_ty, Type::Int) {
                 self.emit(&[0xB8, 0, 0, 0, 0]); // mov eax, 0
             }
+            // -finstrument-functions: 自然结尾的函数也需要 exit hook
+            // (之前只在 Stmt::Return 路径发射, fallthrough 到函数末尾时遗漏)
+            if self.target.instrument_functions && !self.current_no_instrument {
+                self.emit_instrument_func_exit();
+            }
             self.emit_func_epilogue();
         }
         // 记录函数大小
@@ -7966,12 +7977,14 @@ impl Codegen {
         // 实际地址需要回补到函数起始位置
         let lea_pos = self.pos();
         self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
-        // 将此 lea 作为函数地址引用，回补到函数开始
-        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone()));
-        
-        // 获取调用者地址 (mov rsi, [rsp])
-        self.emit(&[0x48, 0x8B, 0x34, 0x24]); // mov rsi, [rsp]
-        
+        // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
+        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone(), true));
+
+        // 获取调用者地址: 返回地址在 [r13+8]
+        // (call 压入返回地址 → push r13 后 r13 指向 saved r13 →
+        //  返回地址就在 r13+8, 无论中间 sub rsp 多少都不变)
+        self.emit(&[0x49, 0x8B, 0x75, 0x08]); // mov rsi, [r13+8]
+
         // call __cyg_profile_func_enter
         self.call_label("__cyg_profile_func_enter");
     }
@@ -7982,11 +7995,12 @@ impl Codegen {
         // 获取当前函数地址 (lea rdi, [rip+0])
         let lea_pos = self.pos();
         self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
-        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone()));
-        
+        // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
+        self.pending_func_addr_rels.push((lea_pos + 3, self.current_func_name.clone(), true));
+
         // 获取调用者地址: 返回地址在 [r13+8]
         self.emit(&[0x49, 0x8B, 0x75, 0x08]); // mov rsi, [r13+8]
-        
+
         // call __cyg_profile_func_exit
         self.call_label("__cyg_profile_func_exit");
     }
@@ -25687,6 +25701,9 @@ impl Codegen {
                     self.gen_expr(&args[0], 6); // rsi = result block
                     self.emit(&[0x48, 0x8B, 0x06]); // mov rax, [rsi]
                 }
+                if self.target.instrument_functions && !self.current_no_instrument {
+                    self.emit_instrument_func_exit();
+                }
                 self.emit_func_epilogue();
                 true
             }
@@ -27800,8 +27817,9 @@ impl Codegen {
             // 外部/未定义函数 (small model): MOV dst, [RIP+disp32] → GOT 间接
             self.emit(&[rex_base, 0x8B, modrm, 0, 0, 0, 0]);
             let disp32_pos = self.pos() - 4;
+            // MOV 指令加载 GOT 条目地址 → GOTPCREL
             self.pending_func_addr_rels
-                .push((disp32_pos, name.to_string()));
+                .push((disp32_pos, name.to_string(), false));
         }
     }
 

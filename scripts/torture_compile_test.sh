@@ -62,6 +62,33 @@ should_skip() {
 TMPDIR_TORTURE=$(mktemp -d /tmp/dcc-torture-compile.XXXXXX)
 trap 'rm -rf "$TMPDIR_TORTURE"' EXIT
 
+# ── 提取 GCC dg-options 指令 (仅保留 dcc 支持的选项) ──
+extract_dg_options() {
+    local src="$1"
+    local raw_opts=""
+    local dg_opts
+    dg_opts=$(grep -oP '\{ dg-options "\K[^"]+' "$src" 2>/dev/null | head -1)
+    if [[ -n "$dg_opts" ]]; then
+        raw_opts="$dg_opts"
+    fi
+    local add_opts
+    add_opts=$(grep -oP '\{ dg-additional-options "\K[^"]+' "$src" 2>/dev/null | head -1)
+    if [[ -n "$add_opts" ]]; then
+        raw_opts="$raw_opts $add_opts"
+    fi
+    local filtered=""
+    local opt
+    for opt in $raw_opts; do
+        case "$opt" in
+            -finstrument-functions|-fno-instrument-functions|-std=gnu89)
+                filtered="$filtered $opt"
+                ;;
+        esac
+    done
+    echo "$filtered"
+}
+export -f extract_dg_options
+
 # ── compile 测试函数 ──
 run_compile_test() {
     local src="$1"
@@ -69,8 +96,11 @@ run_compile_test() {
     name="$(basename "$src")"
     local out="$TMPDIR_TORTURE/${name}.o"
 
+    local extra_opts
+    extra_opts=$(extract_dg_options "$src")
+
     local rc=0
-    timeout 30 "$DCC" -c -std=gnu11 -o "$out" "$src" 2>/dev/null || rc=$?
+    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null || rc=$?
     if [[ $rc -eq 0 ]]; then
         rm -f "$out"
         echo "PASS" 
