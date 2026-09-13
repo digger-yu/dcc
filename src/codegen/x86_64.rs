@@ -13954,7 +13954,13 @@ impl Codegen {
                                     self.emit_store(0, dst_off + j as i64, 1);
                                 }
                             }
-                            covered = covered.max(i + 1);
+                            // 字符串字面量填充的是 char 数组的多个元素, 不是 1 个.
+                            // data 长度含终止符, blk_sz 是 char 数组总字节数 = 元素数.
+                            // 例如 char a[3] = "12" 填充 3 个元素 (1,2,\0),
+                            // covered 必须反映已覆盖的元素数, 否则 zero_fill_tail
+                            // 会错误清零已写入的字符 (本 bug: '2' 被清零).
+                            let filled = data.len().min(blk_sz);
+                            covered = covered.max(i + filled);
                             continue;
                         }
                         if matches!(
