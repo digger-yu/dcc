@@ -14148,30 +14148,32 @@ impl Codegen {
                     }
                     if let Some(bw) = bit_w {
                         // ── 位域字段初始化: 读-改-写 ──
-                        // 计算容器大小: 扫描同 offset 的所有位域, 取最远 bit 位置
+                        // 计算容器大小: 扫描同 offset 的所有位域,
+                        // 取 ceil(total_bits/8) 与 max_ty_size 的较大值,
+                        // 再对齐到 {1,2,4,8} (下游 load/store switch
+                        // 只处理这四种大小).
                         let container_size = {
-                            let mut container_bits_end = bit_o + bw;
-                            let mut fi = field_idx;
+                            let mut max_ty_size = sz;
+                            let mut bits_end = bit_o + bw;
+                            let mut fi = field_idx + 1;
                             while fi < fields.len() {
-                                let f = &fields[fi];
-                                if f.bit_width.is_some() && f.offset == off {
-                                    let fb = f.bit_width.unwrap();
-                                    let fo = f.bit_offset;
-                                    let end = fo + fb;
-                                    if end > container_bits_end { container_bits_end = end; }
+                                let nf = &fields[fi];
+                                if nf.bit_width.is_some() && nf.offset == off {
+                                    let ts = nf.ty.size();
+                                    if ts > max_ty_size { max_ty_size = ts; }
+                                    let end = nf.bit_offset + nf.bit_width.unwrap();
+                                    if end > bits_end { bits_end = end; }
                                     fi += 1;
                                 } else {
                                     break;
                                 }
                             }
-                            let bitfield_bytes = ((container_bits_end + 7) / 8) as usize;
-                            // container 是单个位域组, 不是整个 struct.
-                            // 原代码用 struct_size.max(bitfield_bytes) 导致
-                            // pr98366: struct S { int a,b; c:7,d:8,e:17 } 中
-                            // 位域组 container_size 被算成 12 (struct 大小)
-                            // 而非 4, 后续 switch 只处理 1/2/4/8, 12 走 default
-                            // 分支不加载容器值 → 位域初始化丢失.
-                            bitfield_bytes.max(1)
+                            let bytes_for_container = (bits_end + 7) / 8;
+                            let raw = (bytes_for_container as usize).max(max_ty_size);
+                            if raw <= 1 { 1 }
+                            else if raw <= 2 { 2 }
+                            else if raw <= 4 { 4 }
+                            else { 8 }
                         };
                         // 首次使用此容器时先清零整个容器 (确保非本字域的位 = 0)
                         if zeroed_containers.insert(off) {
