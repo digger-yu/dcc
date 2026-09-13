@@ -24546,9 +24546,12 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], dst);
                 // abs: test dst, dst; jns skip; neg dst; skip:
+                // rex 必带 W 位 (0x48), neg 始终是 3 字节, skip offset = 3.
+                // 之前硬编码 4 导致跳转越过 neg 的末尾 1 字节, 落到
+                // 下一条指令的中间, 触发 mid-instruction decode.
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]); // test dst, dst
-                self.emit(&[0x79, 0x04]); // jns +4
+                self.emit(&[0x79, 0x03]); // jns +3 (跳过 neg, 含 1 字节 W REX)
                 self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]); // neg dst
                 true
             }
