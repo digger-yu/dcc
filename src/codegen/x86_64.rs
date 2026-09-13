@@ -8105,6 +8105,7 @@ impl Codegen {
         let mut fp = 0usize;
         let mut stack = 0usize;
         let mut locs: Vec<Vec<ArgLoc>> = Vec::with_capacity(args.len());
+        let mut max_force_align = 8usize; // force_mem 区起始对齐 (至少 8)
 
         for (arg_idx, arg) in args.iter().enumerate() {
             let param_ty = direct
@@ -8152,8 +8153,13 @@ impl Codegen {
             let force_mem = classes.iter().any(|c| matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87))
                 || (is_agg && (gp + need_gp > gp_regs.len() || fp + need_fp > 8));
             if force_mem {
-                // SysV ABI: 栈参数按类型对齐 (long double/__int128/聚合 16, 标量 8)
+                // caller 与 callee 必须用相同的 force_mem 栈参数对齐规则:
+                // 命名参数 (gen_params) 用 agg_align = ty.align().max(8),
+                // 变参 (gen_va_arg_struct overflow) 也做相同对齐.
+                // 这里 caller 继续按 type 声明对齐放置 force_mem 栈参数,
+                // 同时确保 force_mem 区起点 (sub 后 rsp) 对齐到最大对齐值.
                 let align = (effective_ty.align() as usize).max(8);
+                max_force_align = max_force_align.max(align);
                 let aligned = (stack + align - 1) & !(align - 1);
                 stack = aligned;
                 let size = effective_ty.size().max(8);
@@ -8219,7 +8225,30 @@ impl Codegen {
             .count();
         let hidden_slots = usize::from(sret_off.is_some()) + usize::from(direct.is_none());
         let stage_base = (stack + 7) & !7;
-        let frame_bytes = (stage_base + (register_pieces + hidden_slots) * 8 + 15) & !15;
+        // force_mem 区起点 (sub 后 rsp) 必须对齐到 force_mem 参数的最大对齐值.
+        // 否则 align=32 的 agg 会在 16 对齐的地址上错位.
+        let frame_align = max_force_align.max(16); // 至少 16 (SysV ABI call 对齐)
+        let frame_bytes = (stage_base + (register_pieces + hidden_slots) * 8 + frame_align - 1)
+            & !(frame_align - 1);
+        // call 前 rsp 只保证 16 对齐 (SysV ABI). 若 force_mem 区需要 32 对齐,
+        // 先 sub 一个 padding 让 call 前 rsp 向上对齐到 frame_align.
+        // padding = (call_rsp + frame_align - 1) & ~(frame_align - 1) - call_rsp
+        if frame_align > 16 {
+            // call 前 rsp 向上对齐到 frame_align.
+            // padding = (rsp + frame_align - 1) & ~(frame_align - 1) - rsp
+            // lea rax, [rsp + frame_align - 1] (disp8 形式)
+            self.emit(&[0x48, 0x8D, 0x44, 0x24]);
+            self.emit(&[(frame_align - 1) as u8]);
+            // and rax, ~(frame_align - 1) → 向上对齐
+            self.emit(&[0x48, 0x83, 0xE0]);
+            self.emit(&[!(frame_align - 1) as u8]);
+            // sub rax, rsp → rax = rsp - 对齐后 = -padding
+            self.emit(&[0x48, 0x29, 0xC4]);
+            // neg rax → rax = padding
+            self.emit(&[0x48, 0xF7, 0xD8]);
+            // sub rsp, rax → rsp -= padding
+            self.emit(&[0x48, 0x29, 0xC4]);
+        }
         self.emit_sub_rsp(frame_bytes as i64);
 
         let mut stage = stage_base;
@@ -10935,7 +10964,7 @@ impl Codegen {
                                 // Ident RHS: struct variable address via LEA
                                 if let Expr::Ident { name, .. } = &**r {
                                     if self.is_global_not_local(&name.name) {
-                                        self.emit_global_addr(0, &name.name); // rsi = global addr
+                                        self.emit_global_addr(6, &name.name); // rsi = global addr
                                     } else {
                                         let src_off = self.var_offset(&name.name);
                                         self.emit_lea_r13(6, src_off); // rsi = local addr
@@ -11002,6 +11031,11 @@ impl Codegen {
                                         2 => self.emit(&[0x66, 0x89, 0x01]),
                                         4 => self.emit(&[0x89, 0x01]),
                                         8 => self.emit(&[0x48, 0x89, 0x01]),
+                                        16 => {
+                                            // __int128: rax:rdx → [rcx]:[rcx+8]
+                                            self.emit(&[0x48, 0x89, 0x01]);       // mov [rcx], rax
+                                            self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -11011,6 +11045,10 @@ impl Codegen {
                                     2 => self.emit(&[0x66, 0x89, 0x01]),
                                     4 => self.emit(&[0x89, 0x01]),
                                     8 => self.emit(&[0x48, 0x89, 0x01]),
+                                    16 => {
+                                        self.emit(&[0x48, 0x89, 0x01]);       // mov [rcx], rax
+                                        self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
+                                    }
                                     _ => {}
                                 }
                             }
@@ -23524,21 +23562,26 @@ impl Codegen {
             self.jmp_rel32(&regs, JumpKind::Jmp);
         }
 
-        // ---- 溢出区路径: 对齐 → rep movsb 复制 → 推进 ----
+        // ---- 溢出区路径: 对齐 + rep movsb + 推进 ----
+        // SysV ABI: caller (emit_sysv_call) force_mem 的参数按其声明对齐放置.
+        // callee 必须在 overflow_arg_area 上做相同对齐, 否则中间有 padding
+        // 时 (如 align=16 的 agg 前面有 force_mem int) 会错位.
         self.label(&overflow);
         if align > 8 {
-            // r8 = (r8 + align-1) & ~(align-1)
-            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
+            // r8 = (r8 + align - 1) & ~(align - 1)  — 向上对齐到 agg align
+            self.emit(&[0x49, 0x81, 0xC0]);
             self.emit(&(align - 1).to_le_bytes());
-            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
-            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
-            self.emit(&(!(align - 1)).to_le_bytes());
+            let mask: i32 = !(align - 1);
+            self.emit(&[0x49, 0x81, 0xE0]);
+            self.emit(&mask.to_le_bytes());
         }
         self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
         self.emit(&[0xFC]); // cld
         self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
         self.emit(&(sz as u32).to_le_bytes());
         self.emit(&[0xF3, 0xA4]); // rep movsb
+        // 推进 overflow_arg_area: 当前对齐位置 + step, 再对齐到下一步
+        // 这样 callee 能跳过 caller 可能插入的 padding
         self.emit(&[0x49, 0x81, 0xC0]); // add r8, step
         self.emit(&step.to_le_bytes());
         self.emit(&[0x4D, 0x89, 0x85]); // mov [r13+disp32], r8
