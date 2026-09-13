@@ -8144,9 +8144,13 @@ impl Codegen {
                 .iter()
                 .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
                 .count();
+            // Struct/union 类型走 gen_va_arg_struct, 不支持混合 reg_save_area +
+            // overflow_arg_area 路径, 所以仍然强制溢出时整类型上栈。
+            // 标量类型 (__int128, long long 等) 走 gen_va_arg, 支持三路径,
+            // 允许单个 chunk 溢出时落到 overflow_arg_area。
+            let is_agg = matches!(effective_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
             let force_mem = classes.iter().any(|c| matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87))
-                || gp + need_gp > gp_regs.len()
-                || fp + need_fp > 8;
+                || (is_agg && (gp + need_gp > gp_regs.len() || fp + need_fp > 8));
             if force_mem {
                 // SysV ABI: 栈参数按类型对齐 (long double/__int128/聚合 16, 标量 8)
                 let align = (effective_ty.align() as usize).max(8);
@@ -8166,21 +8170,36 @@ impl Codegen {
                 for class in classes {
                     match class {
                         AbiClass::Integer => {
-                            arg_locs.push(ArgLoc::Gp(gp_regs[gp]));
-                            gp += 1;
+                            if gp < gp_regs.len() {
+                                arg_locs.push(ArgLoc::Gp(gp_regs[gp]));
+                                gp += 1;
+                            } else {
+                                arg_locs.push(ArgLoc::Stack(stack));
+                                stack += 8;
+                            }
                         }
                         AbiClass::Sse => {
-                            arg_locs.push(ArgLoc::Xmm(fp as u8));
-                            fp += 1;
-                        }
-                        AbiClass::SseUp => {
-                            if is_vector_ty {
-                                // Vector: SseUp 与 Sse 共用 xmm, 不推进 fp
-                                arg_locs.push(ArgLoc::Xmm((fp - 1) as u8));
-                            } else {
-                                // 非 Vector: SseUp 是独立 eightbyte, 正常推进 fp
+                            if fp < 8 {
                                 arg_locs.push(ArgLoc::Xmm(fp as u8));
                                 fp += 1;
+                            } else {
+                                arg_locs.push(ArgLoc::Stack(stack));
+                                stack += 8;
+                            }
+                        }
+                        AbiClass::SseUp => {
+                            if fp < 8 {
+                                if is_vector_ty {
+                                    // Vector: SseUp 与 Sse 共用 xmm, 不推进 fp
+                                    arg_locs.push(ArgLoc::Xmm((fp - 1) as u8));
+                                } else {
+                                    // 非 Vector: SseUp 是独立 eightbyte, 正常推进 fp
+                                    arg_locs.push(ArgLoc::Xmm(fp as u8));
+                                    fp += 1;
+                                }
+                            } else {
+                                arg_locs.push(ArgLoc::Stack(stack));
+                                stack += 8;
                             }
                         }
                         AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
@@ -23159,13 +23178,13 @@ impl Codegen {
     
     /// __int128 / unsigned __int128 从栈上 overflow_arg_area 读取双 64 位
     fn emit_va_arg_int128_from_overflow(&mut self, ap_off: i32, dst: u8) {
-        // rax = overflow_arg_area (从 va_list + 8 读取)
-        self.emit(&[0x48, 0x8B, 0x85]);
-        self.emit(&((ap_off + 8) as i32).to_le_bytes()); // mov rax, [rbp+disp]
+        // rax = overflow_arg_area (从 va_list + 8 读取, r13 相对寻址)
+        self.emit(&[0x49, 0x8B, 0x85]);
+        self.emit(&((ap_off + 8) as i32).to_le_bytes()); // mov rax, [r13+disp]
             
         // 从栈读取双 64 位：rax=[overflow], rdx=[overflow+8]
         self.emit(&[0x4C, 0x8B, 0x10]); // mov r10, [rax] (用 r10 暂存低 64 位)
-        self.emit(&[0x4C, 0x8B, 0x50, 0x08]); // mov r11, [rax+8] (用 r11 暂存高 64 位)
+        self.emit(&[0x4C, 0x8B, 0x58, 0x08]); // mov r11, [rax+8] (用 r11 暂存高 64 位)
         
         // 对于 __int128，dcc 期望结果在 rdx:rax (SysV AMD64 ABI convention)
         // dst 通常是 rax，但我们需要把高 64 位也放进去
@@ -23173,7 +23192,7 @@ impl Codegen {
             // 如果 dst=0，说明不需要返回值寄存器，仅推进 va_list
             // 但仍需推进 overflow_arg_area
             self.emit(&[0x48, 0x83, 0xC0, 0x10]); // add rax, 16
-            self.emit(&[0x48, 0x89, 0x85]);
+            self.emit(&[0x49, 0x89, 0x85]);
             self.emit(&((ap_off + 8) as i32).to_le_bytes());
         } else {
             // 将 r10(低 64 位) -> dst
@@ -23185,7 +23204,7 @@ impl Codegen {
             
             // 推进 overflow_arg_area by 16
             self.emit(&[0x48, 0x83, 0xC0, 0x10]); // add rax, 16
-            self.emit(&[0x48, 0x89, 0x85]);
+            self.emit(&[0x49, 0x89, 0x85]);
             self.emit(&((ap_off + 8) as i32).to_le_bytes());
         }
     }
@@ -23216,32 +23235,93 @@ impl Codegen {
             self.gen_va_arg_long_double(ap_name, dst);
             return;
         }
-        // __int128 / unsigned __int128: 强制走溢出路径以确保双 64 位加载正确
-        // 避免 reg_save_area 的 gp_offset 寻址限制（只能访问前 48 字节）
+        // __int128 / unsigned __int128: 三路径 SysV va_arg
+        //  - reg2:   gp_offset + 16 <= 48 → 两半均在 reg_save_area
+        //  - hybrid: gp_offset == 40 → 低半在 reg_save_area[40], 高半在 overflow[0]
+        //  - ovf:    gp_offset >= 48 → 两半均在 overflow_arg_area
         if matches!(arg_ty, Type::Int128 | Type::UInt128) {
             let ap_off = self.var_offset(ap_name) as i32;
-            
-            // 首先推进 gp_offset by 16 (__int128 占两个 gp slots)
+            let reg2 = self.fresh_label();
+            let hybrid = self.fresh_label();
+            let ovf = self.fresh_label();
+            let done = self.fresh_label();
+
+            // eax = gp_offset
             self.emit(&[0x41, 0x8B, 0x85]);
             self.emit(&(ap_off as i32).to_le_bytes());
-            self.emit(&[0x83, 0xC0, 0x10]); // add eax, 16
-            self.emit(&[0x41, 0x89, 0x85]);
+
+            // if gp_offset >= 48 → ovf
+            self.emit(&[0x83, 0xF8, 0x30]); // cmp $48, %eax
+            self.jmp_rel32(&ovf, JumpKind::Jge);
+
+            // if gp_offset == 40 → hybrid
+            self.emit(&[0x83, 0xF8, 0x28]); // cmp $40, %eax
+            self.jmp_rel32(&hybrid, JumpKind::Je);
+
+            // ===== reg2 path: both halves in reg_save_area =====
+            // rcx = reg_save_area
+            self.emit(&[0x49, 0x8B, 0x8D]);
+            self.emit(&((ap_off + 16) as i32).to_le_bytes());
+            // r10 = low: [rcx + rax*1] — r10 reg2+R, mod=00, rm=100, SIB base=rcx(1), idx=rax(0)
+            self.emit(&[0x4C, 0x8B, 0x14, 0x01]); // mov r10, [rcx+rax]
+            // r11 = high: [rcx + rax*1 + 8] — r11 reg3+R, mod=01, rm=100, SIB+disp8
+            self.emit(&[0x4C, 0x8B, 0x5C, 0x01, 0x08]); // mov r11, [rcx+rax+8]
+            // advance gp_offset by 16
+            self.emit(&[0x41, 0x83, 0x85]);
             self.emit(&(ap_off as i32).to_le_bytes());
-            
-            // 从当前的 overflow_arg_area (va_list + 8) 读取
-            self.emit(&[0x48, 0x8B, 0x85]);
-            self.emit(&((ap_off + 8) as i32).to_le_bytes()); // rax = overflow_arg_area
-            
-            // 读取双 64 位：r10=[rax] (low), r11=[rax+8] (high)
-            self.emit(&[0x4C, 0x8B, 0x10]); // mov r10, [rax]
-            self.emit(&[0x4C, 0x8B, 0x50, 0x08]); // mov r11, [rax+8]
-            
-            // 将低 64 位复制到 dst
-            if dst != 0 {
-                self.mov(dst, 10);
-            }
-            
-            // TODO: 高 64 位需要存储在适当位置（dcc 内部可能只用低 64 位）
+            self.emit(&[0x10]);
+            self.jmp_rel32(&done, JumpKind::Jmp);
+
+            // ===== hybrid path: low in reg_save_area[40], high in overflow[0] =====
+            self.label(&hybrid);
+            // rcx = reg_save_area
+            self.emit(&[0x49, 0x8B, 0x8D]);
+            self.emit(&((ap_off + 16) as i32).to_le_bytes());
+            // r10 = low: [rcx + 40] (rax already = 40)
+            self.emit(&[0x4C, 0x8B, 0x14, 0x01]); // mov r10, [rcx+rax]
+            // rax = overflow_arg_area
+            self.emit(&[0x49, 0x8B, 0x85]);
+            self.emit(&((ap_off + 8) as i32).to_le_bytes());
+            // r11 = high: [rax] — r11 reg3+R, mod=00, rm=000(rax)
+            self.emit(&[0x4C, 0x8B, 0x18]); // mov r11, [rax]
+            // advance gp_offset by 16
+            self.emit(&[0x41, 0x83, 0x85]);
+            self.emit(&(ap_off as i32).to_le_bytes());
+            self.emit(&[0x10]);
+            // advance overflow_arg_area by 8
+            self.emit(&[0x48, 0x83, 0xC0, 0x08]); // add rax, 8
+            self.emit(&[0x49, 0x89, 0x85]);
+            self.emit(&((ap_off + 8) as i32).to_le_bytes());
+            self.jmp_rel32(&done, JumpKind::Jmp);
+
+            // ===== ovf path: both in overflow_arg_area =====
+            self.label(&ovf);
+            // eax = gp_offset - 48
+            self.emit(&[0x83, 0xE8, 0x30]); // sub eax, 48
+            // ecx = overflow offset
+            self.emit(&[0x89, 0xC1]); // mov ecx, eax
+            // rax = overflow_arg_area
+            self.emit(&[0x49, 0x8B, 0x85]);
+            self.emit(&((ap_off + 8) as i32).to_le_bytes());
+            // r10 = low: [rax + rcx*1] — SIB: base=rax(0), idx=rcx(1) → 0x08
+            self.emit(&[0x4C, 0x8B, 0x14, 0x08]); // mov r10, [rax+rcx]
+            // r11 = high: [rax + rcx*1 + 8] — r11 reg3+R, mod=01, rm=100
+            self.emit(&[0x4C, 0x8B, 0x5C, 0x08, 0x08]); // mov r11, [rax+rcx+8]
+            // advance gp_offset by 16
+            self.emit(&[0x41, 0x83, 0x85]);
+            self.emit(&(ap_off as i32).to_le_bytes());
+            self.emit(&[0x10]);
+            // advance overflow_arg_area by 16
+            self.emit(&[0x48, 0x83, 0xC0, 0x10]); // add rax, 16
+            self.emit(&[0x49, 0x89, 0x85]);
+            self.emit(&((ap_off + 8) as i32).to_le_bytes());
+
+            // ===== done: r10=low, r11=high =====
+            self.label(&done);
+            // __int128 va_arg always returns in rdx:rax (SysV ABI convention).
+            // r10 (low) → rax, r11 (high) → rdx.
+            self.mov(0, 10);  // mov rax, r10
+            self.mov(2, 11);  // mov rdx, r11
             return;
         }
             
