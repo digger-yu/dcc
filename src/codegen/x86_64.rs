@@ -8250,13 +8250,18 @@ impl Codegen {
         let frame_align = max_force_align.max(16); // 至少 16 (SysV ABI call 对齐)
         let frame_bytes = (stage_base + (register_pieces + hidden_slots) * 8 + frame_align - 1)
             & !(frame_align - 1);
-        // call 前 rsp 只保证 16 对齐 (SysV ABI). 外部代码可能 push
-        // 临时值破坏入口对齐, 导致 force_mem 参数 (含 align=16 的
-        // struct) 错位. 统一在 frame_align >= 16 时做入口对齐,
-        // 保证 force_mem 区起点对齐到 frame_align.
-        if frame_align >= 16 {
+        // call 前 rsp 只保证 16 对齐 (SysV ABI). 若 force_mem 区需要 32 对齐,
+        // 先 sub 一个 padding 让 call 前 rsp 向上对齐到 frame_align.
+        // padding = (call_rsp + frame_align - 1) & ~(frame_align - 1) - call_rsp
+        if frame_align > 16 {
             // call 前 rsp 向上对齐到 frame_align.
             // padding = ((rsp + frame_align - 1) & ~(frame_align - 1)) - rsp
+            // 原实现先 sub rax, rsp (AT&T: rsp -= rax) 再 neg rax 再 sub,
+            // 但中间 sub 错误地破坏了 rsp, 最终 rsp 回到原值, 对齐完全
+            // 白做. 结果 32B-aligned 栈参数错位 (pr92904).
+            // 修复: 保存 rsp_old 到 r10, 算 aligned 到 rax,
+            // padding = aligned - rsp_old = -((rsp_old - aligned)),
+            // 再 sub rsp, padding.
             let r10: u8 = 10; // caller-saved scratch
             // mov r10, rsp: REX.W=1 B=1; 0x89 mov r/m, r; modrm 0xE2 (mod=3, reg=4=rsp, r/m=2=r10 low)
             self.emit(&[0x49, 0x89, 0xE2]);
@@ -8270,16 +8275,8 @@ impl Codegen {
             self.emit(&[0x49, 0x29, 0xC2]);
             // neg r10 (padding = aligned - rsp_old): 0xF7 group 3, /5=NEG; REX.WB; modrm 0xDA (reg=101, r/m=2)
             self.emit(&[0x49, 0xF7, 0xDA]);
-            // 保存 padding 到 r13 帧底临时槽, 末尾加回 (padding + frame_bytes)
-            let padding_save = -self.frame_size;
-            self.store_stack(10, padding_save);
             // sub rsp, r10 (应用 padding): 0x29 sub r/m, r; REX.WR; modrm 0xD4 (mod=3, reg=2=r10 low, r/m=4=rsp)
             self.emit(&[0x4C, 0x29, 0xD4]);
-        } else {
-            // 标记 padding 为 0, 避免末尾动态计算
-            let padding_save = -self.frame_size;
-            self.mov_imm(10, 0);
-            self.store_stack(10, padding_save);
         }
         self.emit_sub_rsp(frame_bytes as i64);
 
@@ -8816,12 +8813,7 @@ impl Codegen {
                 self.emit(&[0x49, 0xFF, 0xD3]);
             }
         }
-        // 加回 padding + frame_bytes. padding 保存在 r13 + (-frame_size) 槽.
-        let padding_save = -self.frame_size;
-        self.load_stack(10, padding_save); // r10 = padding
-        self.emit(&[0x49, 0x81, 0xC2]); // add r10, imm32
-        self.emit(&(frame_bytes as i32).to_le_bytes());
-        self.emit(&[0x4C, 0x01, 0xD4]); // add rsp, r10
+        self.emit_add_rsp(frame_bytes as i64);
     }
 
     // 生成表达式值, 数组标识符衰减为指针 (arr → &arr[0])

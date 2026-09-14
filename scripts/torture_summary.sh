@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # scripts/torture_summary.sh — 解析 torture 测试日志并输出 GitHub Actions Summary
 #
 # 用法:
@@ -25,7 +25,7 @@ parse_stats() {
         return
     fi
     local line
-    line=$(grep -E '^total=' "$log" | tail -1)
+    line=$(grep -E '^[[:space:]]*total=' "$log" | tail -1)
     if [[ -z "$line" ]]; then
         echo "0 0 0 0"
         return

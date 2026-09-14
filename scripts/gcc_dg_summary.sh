@@ -26,7 +26,7 @@ parse_stats() {
         return
     fi
     local line
-    line=$(grep -E '^total=' "$log" | tail -1)
+    line=$(grep -E '^[[:space:]]*total=' "$log" | tail -1)
     if [[ -z "$line" ]]; then
         echo "0 0 0 0"
         return
