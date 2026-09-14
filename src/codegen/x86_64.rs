@@ -10228,6 +10228,13 @@ impl Codegen {
                 self.expr_depth -= 1;
                 // 对整数操作数乘以指针所指类型大小 (跳过 char* 和 ptr-ptr)
                 if scale > 1 {
+                    // 有符号 32 位或更小整数需先符号扩展到 64 位, 否则
+                    // 负值零扩展后成为大正数, 乘积错误 (pr44575 类 bug)
+                    let r_ty = r.ty();
+                    if Self::is_signed_int(&r_ty) && r_ty.size() <= 4 {
+                        // movslq %ecx, %rcx: 48 63 C9
+                        self.emit(&[0x48, 0x63, 0xC9]);
+                    }
                     self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
                     self.emit(&(scale as i32).to_le_bytes());
                 }
@@ -11890,6 +11897,12 @@ impl Codegen {
                         if let Type::Array(elem, _) = &cur_ty {
                             // 计算下标值到 rcx
                             self.gen_expr(idx_expr, 1); // rcx = idx
+                            // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
+                            let idx_ty = idx_expr.ty();
+                            if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
+                                // movslq %ecx, %rcx: 48 63 C9
+                                self.emit(&[0x48, 0x63, 0xC9]);
+                            }
                             // 计算 stride = sizeof(elem) 并乘到 rcx
                             if Self::type_has_vla(&elem.base) {
                                 // VLA: 运行时计算 stride 到 r11
