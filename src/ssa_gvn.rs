@@ -172,7 +172,13 @@ fn coalesce_block(block: &mut Block) {
     for item in &block.items {
         if let BlockItem::Decl(Decl::Var(v)) = item {
             if let Some(Expr::Ident { name, .. }) = &v.init {
-                if !assigned.contains(&v.name.name) {
+                // 1954327: 源变量也在 assigned 时不能 coalesce
+                // ——源变量在初始化之后被重新赋值, 合并会把
+                // "old = p; p = g0; old+p" 错误变成 "p = g0; p+p",
+                // 语义改变 (pr126405-3, pr123625 的 V16DI O2 abort)
+                if !assigned.contains(&v.name.name)
+                    && !assigned.contains(&name.name)
+                {
                     // Don't alias pointer to array/struct/union: array-to-pointer
                     // decay computes address at each use site, but aliasing would
                     // make codegen treat the array name as a pre-computed pointer,
