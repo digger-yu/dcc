@@ -20,6 +20,9 @@ Thumbs.db
 # Qoder IDE
 .qoder/
 
+# Trae IDE workspace
+.trae/
+
 # GCC C Torture Suite (populated by scripts/setup_torture.sh)
 tests/gcc-torture/
 
@@ -86,3 +89,11 @@ scripts/dump_*.py
 scripts/grep_pp.py
 scripts/compare_pp_ti.py
 examples/simd_debug.c
+
+# Debug scratch files / one-off reports
+debug-*.md
+*-refactor_plan.md
+*.canvas.tsx
+
+# Ephemeral test dirs
+tmp_tests/
