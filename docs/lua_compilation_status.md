@@ -5,11 +5,13 @@
 ### Summary
 All 33 Lua 5.5.1 source files compile successfully with dcc.
 The generated .o files link without errors.
-However, the resulting binary crashes with SIGSEGV at runtime due to
-multiple dcc code generation bugs discovered during analysis.
+The runtime crash moved from luaS_new to insertkey after fixes.
+Binary search identified 5 files with remaining dcc codegen bugs:
+lapi.c, ltable.c, lgc.c, llex.c, lcode.c.
+Replacing these 5 with gcc-compiled objects makes Lua work,
+confirming the Lua source is correct and bugs are in dcc.
 
-A gcc-compiled build with the same source runs correctly, confirming
-the Lua source code is not at fault.
+A gcc-compiled build with the same source runs correctly.
 
 ### DCC Bug Fixes Applied
 
@@ -33,40 +35,46 @@ the Codegen struct. Populated during `compile()` by scanning
 definitions when the type has empty fields. Applied at all 4 call
 sites of `member_target_ty`.
 
+#### Fix 2: Struct Member Multi-Dim Array Dimension Order
+**File**: `src/parser.rs`
+
+**Root Cause**: In `parse_fields()`, struct member array dimensions
+were wrapped without reversal. For `int g[2][3]` as a struct
+member, dcc produced `Array(Array(int, 2), 3)` (3 elements of
+int[2]) instead of the correct `Array(Array(int, 3), 2)` (2
+elements of int[3]). Variable declarations already reversed
+correctly in `parse_decl_specifiers`.
+
+This caused `TString *strcache[53][2]` to have stride 424
+(53*8) instead of 16 (2*8) for `strcache[i]`.
+
+**Fix**: Collect all dimensions into a Vec, reverse, then wrap
+(matching the variable declaration path).
+
+#### Fix 3: element_stride Semantic Layer
+**File**: `src/semantics.rs`
+
+**Root Cause**: `element_stride()` returned `inner.size()` for
+`Type::Array(inner, _)` instead of `elem_ty.size()`. For
+`Array(Ptr(TString), Const(2))`, it returned 8 (pointer size)
+instead of 16 (2 * 8).
+
+**Fix**: Return `elem_ty.size()` directly.
+
 ### DCC Bugs Discovered (Not Yet Fixed)
 
-#### Bug 2: Stack Slot Collision
-**Symptom**: In `luaS_new`, the temporary for `L->l_G` and the
-local variable `i` share the same stack slot (-0x58(%r13)).
-The computation of `i` overwrites the saved `g` pointer.
-Later code loads the corrupted `g` and computes wrong addresses.
+#### Bug 4: Code Generation Failures in 5 Core Files
+**Evidence**: Binary search replacing dcc .o files with gcc
+versions identified 5 files with codegen bugs:
+- lapi.c, ltable.c, lgc.c, llex.c, lcode.c
 
-**Evidence**: GDB watchpoint shows -0x58(%r13) changes from
-valid `g` (0x55555562cb38) to garbage (0x555500000010) after
-`i = point2uint(str) % STRCACHE_N` is stored.
+Replacing all 5 with gcc-compiled objects makes Lua run
+correctly. The remaining 28 dcc-compiled .o files work fine.
 
-**Impact**: Affects `luaS_new` and likely many other functions
-that use `G(L)` macro alongside local variables.
-
-#### Bug 3: Address-of Struct Member (`&(ts)->contents`)
-**Symptom**: `rawgetshrstr(ts) = (char*)(&(ts)->contents)` should
-return `ts + offsetof(TString, contents)` = `ts + 24`. Instead dcc
-generates code that dereferences `contents` as a pointer and adds
-offset 11 (shrlen offset), producing garbage.
-
-**Evidence**: Assembly shows `add $0xb,%rax; movsbq (%rax),%rax`
-instead of `add $0x18,%rax` (24 = offsetof(TString, contents)).
-
-**Impact**: All short string operations crash because `getstr()`
-returns garbage pointers.
-
-#### Bug 4: Systematic Code Generation Failures
-**Evidence**: When compiling Lua with dcc, only `lstate.c` produces
-a working .o file. All other 31 files produce .o files that crash
-at runtime. The same source compiled with gcc -O0 works perfectly.
-
-This suggests a fundamental issue in dcc's code generation that
-affects most non-trivial C code.
+Symptoms include:
+- insertkey: mainpositionTV returns wrong node address
+- luaH_setint: wrong argument passing or computation
+- Various crashes in string/table operations
 
 ### Verification
 ```bash

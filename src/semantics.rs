@@ -414,13 +414,10 @@ fn element_info_from_type(ty: &Type) -> ElementInfo {
 }
 
 /// 计算元素 stride (一个元素占多少字节)。
-/// 对于数组类型, stride = 内层元素大小 (不是整个数组大小)。
+/// stride = 元素类型的完整大小 (含内层数组维度)。
+/// 如 elem_ty = int[3] (从 int[2][3] 索引后), stride = 12 (3*4)。
 pub fn element_stride(elem_ty: &Type) -> usize {
-    match elem_ty {
-        Type::Array(inner, _) => inner.size(),
-        Type::Vector(inner, _) => inner.size(),
-        _ => elem_ty.size(),
-    }
+    elem_ty.size()
 }
 
 /// 计算结构体/联合体成员字段的字节偏移。

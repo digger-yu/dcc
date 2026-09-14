@@ -7215,7 +7215,9 @@ impl<'a> Parser<'a> {
                     None
                 };
                 ty = {
-                    let mut arr_ty = ty;
+                    // 多维数组从内向外结合 (C11 6.7.6.2p4): 与变量声明
+                    // 一致, 收集全部维度后反转再逐层包裹.
+                    let mut arr_sizes = Vec::new();
                     while self.cur.kind == TokKind::LBracket {
                         self.advance();
                         let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -7236,7 +7238,11 @@ impl<'a> Parser<'a> {
                             ArraySize::Const(0)
                         };
                         let _ = self.expect(TokKind::RBracket, "']'");
-                        arr_ty = Type::Array(Box::new(arr_ty.into()), arr_size);
+                        arr_sizes.push(arr_size);
+                    }
+                    let mut arr_ty = ty;
+                    for sz in arr_sizes.into_iter().rev() {
+                        arr_ty = Type::Array(Box::new(arr_ty.into()), sz);
                     }
                     arr_ty
                 };
