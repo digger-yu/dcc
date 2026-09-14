@@ -30,11 +30,10 @@ jobs:
       - name: Download GCC torture suite
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
-            https://gcc.gnu.org/git/gcc.git tests/gcc-torture
+            https://github.com/gcc-mirror/gcc.git tests/gcc-torture
           cd tests/gcc-torture && git sparse-checkout set \
             gcc/testsuite/gcc.c-torture/execute \
-            gcc/testsuite/gcc.c-torture/compile \
-            gcc/testsuite/gcc.dg
+            gcc/testsuite/gcc.c-torture/compile
 
       - name: Run compile tests
         run: |

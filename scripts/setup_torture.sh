@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TORTURE_DIR="$REPO_ROOT/tests/gcc-torture"
-GCC_URL="https://gcc.gnu.org/git/gcc.git"
+GCC_URL="https://github.com/gcc-mirror/gcc.git"
 
 # ── 参数处理 ──
 force=false
@@ -62,8 +62,7 @@ git clone --depth 1 --filter=blob:none --sparse \
 cd "$TORTURE_DIR"
 git sparse-checkout set \
     gcc/testsuite/gcc.c-torture/execute \
-    gcc/testsuite/gcc.c-torture/compile \
-    gcc/testsuite/gcc.dg
+    gcc/testsuite/gcc.c-torture/compile
 
 # ── 统计 ──
 execute=$(find gcc/testsuite/gcc.c-torture/execute -maxdepth 1 -name '*.c' | wc -l)

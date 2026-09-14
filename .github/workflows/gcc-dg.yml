@@ -30,7 +30,7 @@ jobs:
       - name: Download GCC testsuite (gcc.dg only)
         run: |
           git clone --depth 1 --filter=blob:none --sparse \
-            https://gcc.gnu.org/git/gcc.git tests/gcc-torture
+            https://github.com/gcc-mirror/gcc.git tests/gcc-torture
           cd tests/gcc-torture && git sparse-checkout set \
             gcc/testsuite/gcc.dg
 
