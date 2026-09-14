@@ -50,21 +50,21 @@ Program received signal SIGSEGV, Segmentation fault.
 - Test program with external function calls works perfectly after linking
 - Symbol table and relocation entries are correctly generated
 
-**Current Hypothesis**: ✅ **ROOT CAUSE FOUND**
+**Current Hypothesis**: ✅ **INVESTIGATION IN PROGRESS**
 
-**BUG FOUND**: Wrong constant value passed to function pointer call
-- Location: `lstate.c:345` - `(*f)(ud, NULL, LUA_TTHREAD, sizeof(global_State))`
-- Expected: LUA_TTHREAD = 8 (from lua.h)
-- Actual: DCC generates code passing 0 instead of 8
-- Assembly evidence:
-  ```asm
-  209c: mov $0x0,%rax      # Should be $0x8 for LUA_TTHREAD!
-  20a3: mov %rax,0x10(%rsp) # 3rd argument slot
-  ```
-- This causes lua_Alloc to receive wrong type parameter, leading to incorrect memory allocation
-- Result: lua_newstate returns garbage pointer, causing immediate crash when dereferenced
+**Findings so far**:
+- Function pointer calls work correctly (verified with test programs)
+- Parameter passing is correct (ud, NULL, LUA_TTHREAD=8, sizeof(global_State)=0x658)
+- luaL_alloc returns valid pointer (0x5555556442a0)
+- lua_newstate returns valid pointer (0x7709189a0)
+- Crash occurs in internshrstr() very early in Lua initialization
 
-**Status**: Bug identified - need to fix DCC's constant handling in function pointer calls
+**Next steps**:
+- Need to trace exact crash location with more detailed debugging
+- May be related to how Lua initializes internal data structures
+- Possible issue with struct layout or member access in DCC-generated code
+
+**Status**: Active debugging - external calls verified correct, investigating internal Lua state corruption
 
 #### 2. Previous Bug Fix Applied
 **Issue**: Function pointer identifier arguments in aggregate calls were not generating store instructions.
