@@ -26,22 +26,45 @@ lua.c ✓ luac.c ✓
 
 ### Known Issues
 
-#### 1. CRITICAL: External Function Calls Generate Wrong Offset
-**Symptom**: When compiling code that calls external functions, DCC generates `call` instructions with offset = 0.
+#### 1. Runtime Segmentation Fault (Under Investigation)
+**Symptom**: After successful compilation and linking, running `./lua -v` causes immediate segmentation fault.
 
-**Evidence**:
-```bash
-$ objdump -d /tmp/test_call.o | grep "call"
-56:    e8 00 00 00 00   call   5b <main+0x23>
+**GDB Analysis**:
+```
+Program received signal SIGSEGV, Segmentation fault.
+0x00005555555b30b0 in internshrstr ()
+#0  0x00005555555b30b0 in internshrstr ()
+#1  0x00007fffffffbf48 in ?? ()
+#2  0x00007ffff7cad8f2 in __GI___libc_malloc ()
+#3  0x00007ffff7c2a28b in __libc_start_main_impl (main=0x555555568f00 <main>, argc=-7680, argv=0x1, ...)
 ```
 
-The call instruction at address 0x56 should call address 0x6 (the helper function), but instead uses relative offset 0x0, causing it to call the wrong location (0x5b, which is inside main).
+**Key Observations**:
+- Crash occurs in `internshrstr()` (string interning function)
+- `argc=-7680` in libc_start_main suggests stack corruption or incorrect parameter passing
+- The crash happens very early, likely during Lua state initialization
 
-**Impact**: **This is a showstopper for compiling real programs!** All library function calls (like `luaL_newstate`, `malloc`, etc.) will be broken because the relocations are not properly generated during compilation.
+**External Function Calls**: ✅ **VERIFIED CORRECT**
+- DCC generates proper ELF relocations (R_X86_64_PLT32) for external function calls
+- Linker correctly resolves call targets
+- Test program with external function calls works perfectly after linking
+- Symbol table and relocation entries are correctly generated
 
-**Root Cause**: DCC's codegen likely does not emit proper relocation entries for undefined symbol references. The assembler/linker cannot fix up the calls because no relocation information exists in the object file.
+**Current Hypothesis**: ✅ **ROOT CAUSE FOUND**
 
-**Status**: This explains the runtime crash! When lua.c calls `luaL_newstate()`, the call goes nowhere useful, and L gets garbage (or main's return address), causing immediate crash when dereferenced.
+**BUG FOUND**: Wrong constant value passed to function pointer call
+- Location: `lstate.c:345` - `(*f)(ud, NULL, LUA_TTHREAD, sizeof(global_State))`
+- Expected: LUA_TTHREAD = 8 (from lua.h)
+- Actual: DCC generates code passing 0 instead of 8
+- Assembly evidence:
+  ```asm
+  209c: mov $0x0,%rax      # Should be $0x8 for LUA_TTHREAD!
+  20a3: mov %rax,0x10(%rsp) # 3rd argument slot
+  ```
+- This causes lua_Alloc to receive wrong type parameter, leading to incorrect memory allocation
+- Result: lua_newstate returns garbage pointer, causing immediate crash when dereferenced
+
+**Status**: Bug identified - need to fix DCC's constant handling in function pointer calls
 
 #### 2. Previous Bug Fix Applied
 **Issue**: Function pointer identifier arguments in aggregate calls were not generating store instructions.
