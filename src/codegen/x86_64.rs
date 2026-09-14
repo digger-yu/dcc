@@ -8493,13 +8493,18 @@ impl Codegen {
                                 self.emit(&disp.to_le_bytes());
                             }
                         } else {
+                            // 普通局部标识符：从栈帧加载数据
                             let var_off = self.var_offset(&name.name) + (chunk * 8) as i64;
-                            self.load_stack(0, var_off);
+                            self.load_stack(11, var_off); // r11 = data
                         }
                         match *loc {
-                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            ArgLoc::Stack(off) => {
+                                // 直接存储到调用者栈槽
+                                self.store_rsp_qword(11, off);
+                            },
                             _ => {
-                                self.store_rsp_qword(0, stage);
+                                // 暂存到 staging area 以便后续传参
+                                self.store_rsp_qword(11, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
                             }
