@@ -1,0 +1,27 @@
+# GCC dg Test Suite — dcc 手动跳过列表
+#
+# 每行一个文件名或相对路径（相对 gcc.dg 目录）。
+# 支持 prefix* glob 和精确匹配。
+# 以 # 开头的行为注释。
+#
+# 由 scripts/gcc_dg_test.sh 读取。
+#
+# 注意: dg-require-effective-target 不为 x86_64 的测试会被
+# 脚本自动跳过，不需要在此文件中列出。
+# dg-skip-if 也会被自动处理。
+
+# ── dcc 暂不支持的特性 ──
+
+# VLA (可变长度数组) — dcc 尚未实现完整 VLA 支持
+# 例如: vla-*.c
+
+# 复杂 inline asm — dcc 的 mini-asm 只支持已知 x86 指令子集
+# 会自动失败的可以在这里跳过
+
+# 多文件测试框架 — dg 需要配合其他 .c 文件
+# 这些测试涉及多个源文件，暂不处理
+
+# ── 示例格式 (按需取消注释) ──
+# c/pr12345.c
+# vla-*.c
+# target/i386/avx-*.c

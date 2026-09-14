@@ -143,10 +143,12 @@ if [[ $total -eq 0 ]]; then
 fi
 
 # 过滤跳过列表
+declare -a skipped_names=()
 while IFS= read -r src; do
     name="$(basename "$src")"
     if should_skip "$name"; then
         skip=$((skip + 1))
+        skipped_names+=("$name")
     else
         echo "$src" >> "$TMPDIR_TORTURE/run_list.txt"
     fi
@@ -198,6 +200,13 @@ if [[ ${#failures[@]} -gt 0 ]]; then
     echo "Failures:"
     for f in "${failures[@]}"; do
         echo "  FAIL  $f"
+    done
+fi
+
+if [[ ${#skipped_names[@]} -gt 0 ]]; then
+    echo "Skipped:"
+    for s in "${skipped_names[@]}"; do
+        echo "  SKIP  $s"
     done
 fi
 

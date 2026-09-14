@@ -1,0 +1,57 @@
+name: GCC dg Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gcc-dg-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build dcc
+        run: cargo build --release
+
+      - name: Download GCC testsuite (gcc.dg only)
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://gcc.gnu.org/git/gcc.git tests/gcc-torture
+          cd tests/gcc-torture && git sparse-checkout set \
+            gcc/testsuite/gcc.dg
+
+      - name: Run gcc.dg compile tests
+        run: |
+          bash scripts/gcc_dg_test.sh compile 2>&1 | tee dg_compile.log || true
+
+      - name: Run gcc.dg run tests
+        run: |
+          bash scripts/gcc_dg_test.sh run 2>&1 | tee dg_run.log || true
+
+      - name: Generate summary
+        if: always()
+        run: bash scripts/gcc_dg_summary.sh dg_compile.log dg_run.log >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcc-dg-test-logs
+          path: |
+            dg_compile.log
+            dg_run.log
+          retention-days: 7

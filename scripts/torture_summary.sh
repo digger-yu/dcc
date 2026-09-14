@@ -4,7 +4,8 @@
 # 用法:
 #   scripts/torture_summary.sh <compile_log> <execute_log>
 #
-# 输出 Markdown 格式的测试汇总，包含测试总数、通过/失败数、失败列表、通过率。
+# 输出 Markdown 格式的测试汇总，包含测试总数、通过/失败/跳过数、
+# 失败列表、跳过列表、通过率。
 set -euo pipefail
 
 COMPILE_LOG="${1:-}"
@@ -47,6 +48,16 @@ parse_failures() {
     grep -E '^\s+FAIL\s+' "$log" | sed 's/^\s*FAIL\s\+//' || true
 }
 
+# ── 从日志中提取跳过列表 ──
+parse_skips() {
+    local log="$1"
+    if [[ ! -f "$log" ]]; then
+        return
+    fi
+    # 匹配 "  SKIP  filename" 行
+    grep -E '^\s+SKIP\s+' "$log" | sed 's/^\s*SKIP\s\+//' || true
+}
+
 # ── 计算通过率 ──
 calc_rate() {
     local total="$1" pass="$2"
@@ -71,6 +82,12 @@ c_rate=$(calc_rate "$c_total" "$c_pass")
 e_rate=$(calc_rate "$e_total" "$e_pass")
 g_rate=$(calc_rate "$g_total" "$g_pass")
 
+# ── 提取失败和跳过列表 ──
+compile_failures=$(parse_failures "$COMPILE_LOG")
+execute_failures=$(parse_failures "$EXECUTE_LOG")
+compile_skips=$(parse_skips "$COMPILE_LOG")
+execute_skips=$(parse_skips "$EXECUTE_LOG")
+
 # ── 输出 Markdown ──
 echo "# GCC Torture Test Results"
 echo ""
@@ -84,9 +101,6 @@ echo "| **Total**| **$g_total** | **$g_pass** | **$g_fail** | **$g_skip** | **$g
 echo ""
 
 # ── 失败列表 ──
-compile_failures=$(parse_failures "$COMPILE_LOG")
-execute_failures=$(parse_failures "$EXECUTE_LOG")
-
 if [[ -n "$compile_failures" || -n "$execute_failures" ]]; then
     echo "## Failures"
     echo ""
@@ -109,4 +123,28 @@ if [[ -n "$compile_failures" || -n "$execute_failures" ]]; then
 else
     echo "All tests passed!"
     echo ""
+fi
+
+# ── 跳过列表 ──
+if [[ -n "$compile_skips" || -n "$execute_skips" ]]; then
+    echo "## Skipped Tests"
+    echo ""
+    echo "See [torture_skip.txt](tests/torture_skip.txt) for skip reasons."
+    echo ""
+    if [[ -n "$compile_skips" ]]; then
+        echo "### Compile (${c_skip} skipped)"
+        echo ""
+        echo '```'
+        echo "$compile_skips"
+        echo '```'
+        echo ""
+    fi
+    if [[ -n "$execute_skips" ]]; then
+        echo "### Execute (${e_skip} skipped)"
+        echo ""
+        echo '```'
+        echo "$execute_skips"
+        echo '```'
+        echo ""
+    fi
 fi
