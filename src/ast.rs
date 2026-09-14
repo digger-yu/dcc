@@ -1090,7 +1090,7 @@ pub struct EnumDef {
 }
 
 impl Type {
-    fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
+    pub fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
         // Packed union 哨兵: 零宽度位域字段名 "\0__packed__" 表示该
         // union 使用了 __attribute__((packed)). 此时对齐为 1.
         if fields.iter().any(|f| f.name == "\0__packed__") {

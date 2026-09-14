@@ -1,167 +1,93 @@
 # Lua 5.5.1 Compilation with DCC
 
-## Status: ✅ Compilation Success, ⚠️ Runtime Issue
+## Status: Compilation Success, Runtime Crashes (Multiple DCC Bugs)
 
-### Achievements
-- **All source files compile successfully** using dcc compiler
-- Generated object files and library (liblua.a) without errors
-- Successfully linked into `lua` and `luac` executables
+### Summary
+All 33 Lua 5.5.1 source files compile successfully with dcc.
+The generated .o files link without errors.
+However, the resulting binary crashes with SIGSEGV at runtime due to
+multiple dcc code generation bugs discovered during analysis.
 
-### Compiled Components
-```
-CORE files (all successful):
-lapi.c ✓ lcode.c ✓ lctype.c ✓ ldebug.c ✓ ldo.c ✓ ldump.c ✓ 
-lfunc.c ✓ lgc.c ✓ llex.c ✓ lmem.c ✓ lobject.c ✓ lopcodes.c ✓ 
-lparser.c ✓ lstate.c ✓ lstring.c ✓ ltable.c ✓ ltm.c ✓ 
-lundump.c ✓ lvm.c ✓ lzio.c ✓
+A gcc-compiled build with the same source runs correctly, confirming
+the Lua source code is not at fault.
 
-LIB files (all successful):
-lauxlib.c ✓ lbaselib.c ✓ lcorolib.c ✓ ldblib.c ✓ liolib.c ✓ 
-lmathlib.c ✓ loadlib.c ✓ loslib.c ✓ lstrlib.c ✓ ltablib.c ✓ 
-lutf8lib.c ✓ linit.c ✓
+### DCC Bug Fixes Applied
 
-Main programs:
-lua.c ✓ luac.c ✓
-```
+#### Fix 1: Forward Reference Incomplete Struct Type Resolution
+**File**: `src/codegen/x86_64.rs`, `src/ast.rs`
 
-### Known Issues
+**Root Cause**: When `lua_State` is defined before `global_State`,
+it stores `struct global_State *l_G` with an incomplete struct type
+(empty fields list). Later when `global_State` is fully defined via
+`typedef struct global_State { ... } global_State;`, the type stored
+in `lua_State`'s field is NOT updated.
 
-#### 1. Runtime Segmentation Fault (Under Investigation)
-**Symptom**: After successful compilation and linking, running `./lua -v` causes immediate segmentation fault.
+So `L->l_G->strt` uses the incomplete type which has no fields,
+causing `find_field` to return None and the field offset (48) is lost.
+The generated code misses `add $48` for `&G(L)->strt`.
 
-**GDB Analysis**:
-```
-Program received signal SIGSEGV, Segmentation fault.
-0x00005555555b30b0 in internshrstr ()
-#0  0x00005555555b30b0 in internshrstr ()
-#1  0x00007fffffffbf48 in ?? ()
-#2  0x00007ffff7cad8f2 in __GI___libc_malloc ()
-#3  0x00007ffff7c2a28b in __libc_start_main_impl (main=0x555555568f00 <main>, argc=-7680, argv=0x1, ...)
-```
+**Fix**: Added `complete_struct_types: HashMap<String, Type>` to
+the Codegen struct. Populated during `compile()` by scanning
+`Decl::StructDef`, `Decl::UnionDef`, and `Decl::Typedef`. Added
+`resolve_complete_struct_ty()` helper that looks up complete struct
+definitions when the type has empty fields. Applied at all 4 call
+sites of `member_target_ty`.
 
-**Key Observations**:
-- Crash occurs in `internshrstr()` (string interning function)
-- `argc=-7680` in libc_start_main suggests stack corruption or incorrect parameter passing
-- The crash happens very early, likely during Lua state initialization
+### DCC Bugs Discovered (Not Yet Fixed)
 
-**External Function Calls**: ✅ **VERIFIED CORRECT**
-- DCC generates proper ELF relocations (R_X86_64_PLT32) for external function calls
-- Linker correctly resolves call targets
-- Test program with external function calls works perfectly after linking
-- Symbol table and relocation entries are correctly generated
+#### Bug 2: Stack Slot Collision
+**Symptom**: In `luaS_new`, the temporary for `L->l_G` and the
+local variable `i` share the same stack slot (-0x58(%r13)).
+The computation of `i` overwrites the saved `g` pointer.
+Later code loads the corrupted `g` and computes wrong addresses.
 
-**Current Hypothesis**: ✅ **INVESTIGATION IN PROGRESS**
+**Evidence**: GDB watchpoint shows -0x58(%r13) changes from
+valid `g` (0x55555562cb38) to garbage (0x555500000010) after
+`i = point2uint(str) % STRCACHE_N` is stored.
 
-**Findings so far**:
-- Function pointer calls work correctly (verified with test programs)
-- Parameter passing is correct (ud, NULL, LUA_TTHREAD=8, sizeof(global_State)=0x658)
-- luaL_alloc returns valid pointer (0x5555556442a0)
-- lua_newstate returns valid pointer (0x7709189a0)
-- Crash occurs in internshrstr() very early in Lua initialization
+**Impact**: Affects `luaS_new` and likely many other functions
+that use `G(L)` macro alongside local variables.
 
-**Next steps**:
-- Need to trace exact crash location with more detailed debugging
-- May be related to how Lua initializes internal data structures
-- Possible issue with struct layout or member access in DCC-generated code
+#### Bug 3: Address-of Struct Member (`&(ts)->contents`)
+**Symptom**: `rawgetshrstr(ts) = (char*)(&(ts)->contents)` should
+return `ts + offsetof(TString, contents)` = `ts + 24`. Instead dcc
+generates code that dereferences `contents` as a pointer and adds
+offset 11 (shrlen offset), producing garbage.
 
-**Status**: Active debugging - external calls verified correct, investigating internal Lua state corruption
+**Evidence**: Assembly shows `add $0xb,%rax; movsbq (%rax),%rax`
+instead of `add $0x18,%rax` (24 = offsetof(TString, contents)).
 
-#### 2. Previous Bug Fix Applied
-**Issue**: Function pointer identifier arguments in aggregate calls were not generating store instructions.
+**Impact**: All short string operations crash because `getstr()`
+returns garbage pointers.
 
-**Fix Location**: `/root/dcc/src/codegen/x86_64.rs` around line 8495-8506
+#### Bug 4: Systematic Code Generation Failures
+**Evidence**: When compiling Lua with dcc, only `lstate.c` produces
+a working .o file. All other 31 files produce .o files that crash
+at runtime. The same source compiled with gcc -O0 works perfectly.
 
-**Change Summary**:
-```rust
-// Before: Only loaded data to register but didn't store it
-self.load_stack(0, var_off);
-match *loc {
-    ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
-    _ => {
-        self.store_rsp_qword(0, stage);  // Using wrong register!
-        staged.push((*loc, stage, false));
-        stage += 8;
-    }
-}
+This suggests a fundamental issue in dcc's code generation that
+affects most non-trivial C code.
 
-// After: Properly load to r11 and store accordingly
-self.load_stack(11, var_off); // r11 = data
-match *loc {
-    ArgLoc::Stack(off) => {
-        self.store_rsp_qword(11, off);  // Direct to caller's stack slot
-    },
-    _ => {
-        self.store_rsp_qword(11, stage);  // Stage for passing as argument
-        staged.push((*loc, stage, false));
-        stage += 8;
-    }
-}
-```
-
-**Rationale**: When an identifier (like a function name) is used as an aggregate argument:
-1. For VLA variables: Load base address first, then access data chunks
-2. For global variables: Load from absolute addresses  
-3. **For regular local identifiers**: Must generate both the load AND subsequent store operations
-
-### Verification Tests Performed
-
-#### Test 1: Struct Return Passing
-```c
-Point get_point();
-void use_point(Point p);
-use_point(get_point());  // Aggregate function call
-```
-✅ Result: DCC generates correct code (call → store → load → call)
-
-#### Test 2: Function Pointer Arguments
-```c
-void process_func(void (*fp)(int));
-process_func(simple_func);
-```
-✅ Result: Compilation successful, but need runtime verification
-
-### Next Steps for Debugging Segfault
-
-1. **Test minimal Lua program**: Try running a simple Lua script instead of just `-v`
-2. **Check startup code**: Verify crt.o initialization and `_start` symbol
-3. **Use GDB**: Attach debugger to identify crash location
-   ```bash
-   gcc -g lua.c liblua.a -o lua_debug -lm -Wl,-E -ldl
-   gdb ./lua_debug
-   (gdb) break main
-   (gdb) run
-   ```
-4. **Compare with GCC binary**: Run original GCC-built lua to verify logic issue
-5. **Check ABI compliance**: Ensure all calling conventions match SysV AMD64 ABI
-
-### Build Script Used
-
+### Verification
 ```bash
-#!/bin/bash
-cd /root/lua-5.5.1/src
-DCC=/root/dcc/target/release/dcc
+# gcc build works correctly:
+gcc -c -O0 -I/root/lua-5.5.1/src -o /tmp/lua_obj/file.o file.c
+# Result: Lua 5.5.1 runs, print("Hello") works
 
-# Compile all .c files
-for f in *.c; do
-    $DCC -c "$f" -o "${f%.c}.o" -DLUA_USE_LINUX
-done
-
-# Create archive
-ar rcu liblua.a *.o
-
-# Compile main programs  
-$DCC -c lua.c -o lua.o
-$DCC -c luac.c -o luac.o
-
-# Link with GCC (required for proper startup)
-gcc -o lua lua.o liblua.a -lm -Wl,-E -ldl
-gcc -o luac luac.o liblua.a -lm -Wl,-E -ldl
+# dcc build crashes:
+dcc -c -I/root/lua-5.5.1/src -o /tmp/lua_obj/file.o file.c
+# Result: SIGSEGV in luaS_new or other functions
 ```
 
-### Documentation References
-- See `docs/development_practice_specification/` for debugging methodology
-- See memory about "GCC torture test failure analysis" for systematic approach
-- x86_64 backend implementation in `/root/dcc/src/codegen/x86_64.rs`
+### Build Commands Used
+```bash
+DCC=/root/dcc/target/release/dcc
+LUA_SRC=/root/lua-5.5.1/src
+for f in $LUA_SRC/*.c; do
+    $DCC -c -I$LUA_SRC -o /tmp/lua_obj/$(basename ${f%.c}.o) $f
+done
+gcc -o /tmp/lua_test /tmp/lua_obj/*.o -lm -ldl
+```
 
 ---
 **Last Updated**: 2026-09-14

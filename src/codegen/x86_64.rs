@@ -336,6 +336,10 @@ pub struct Codegen {
     trampoline_slots: HashMap<String, i64>,
     /// trampoline 代码大小 (每函数 32 字节)
     trampoline_total_size: i32,
+    /// 完整 struct/union 定义映射: 名称 → 完整类型 (含字段列表).
+    /// 用于解析前向引用导致的不完整类型 (如 `struct S *p` 在 S 定义前声明,
+    /// 后续 `p->field` 需要完整字段列表来计算偏移).
+    complete_struct_types: HashMap<String, Type>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1568,8 +1572,10 @@ impl Codegen {
             // 嵌套函数 trampoline
             trampoline_slots: HashMap::new(),
             trampoline_total_size: 0,
-            // Function alignment lookup for __alignof__(func)
+            // Function Alignment lookup for __alignof__(func)
             func_alignments: HashMap::new(),
+            // 完整 struct/union 定义映射 (前向引用解析)
+            complete_struct_types: HashMap::new(),
         }
     }
 
@@ -1817,6 +1823,25 @@ impl Codegen {
             Type::Array(elem, _) => elem.base.clone(),
             _ => expr_ty,
         }
+    }
+
+    /// 解析不完整 struct/union 类型到完整定义.
+    /// 当前向引用导致类型中的字段列表为空时, 从 complete_struct_types 查找完整版本.
+    fn resolve_complete_struct_ty(&self, ty: Type) -> Type {
+        match &ty {
+            Type::Struct(name, fields, _, _) if fields.is_empty() => {
+                if let Some(complete_ty) = self.complete_struct_types.get(name) {
+                    return complete_ty.clone();
+                }
+            }
+            Type::Union(name, fields, _, _) if fields.is_empty() => {
+                if let Some(complete_ty) = self.complete_struct_types.get(name) {
+                    return complete_ty.clone();
+                }
+            }
+            _ => {}
+        }
+        ty
     }
 
     /// 如果表达式是位域成员访问, 返回位域宽度; 否则返回 None.
@@ -3453,6 +3478,47 @@ impl Codegen {
         self.fenv_access = prog.fenv_access;
         self.fp_contract = prog.fp_contract;
         self.cx_limited_range = prog.cx_limited_range;
+        // 构建完整 struct/union 定义映射 (用于解析前向引用导致的不完整类型)
+        self.complete_struct_types.clear();
+        for decl in &prog.decls {
+            match decl {
+                Decl::StructDef(sd) if !sd.fields.is_empty() => {
+                    let fields: Arc<Vec<Field>> = Arc::new(sd.fields.clone());
+                    let align = Type::aggregate_align_from_offsets(&sd.fields);
+                    self.complete_struct_types.insert(
+                        sd.name.name.clone(),
+                        Type::Struct(sd.name.name.clone(), fields, align, false),
+                    );
+                }
+                Decl::UnionDef(sd) if !sd.fields.is_empty() => {
+                    let fields: Arc<Vec<Field>> = Arc::new(sd.fields.clone());
+                    let align = Type::aggregate_align_from_offsets(&sd.fields);
+                    self.complete_struct_types.insert(
+                        sd.name.name.clone(),
+                        Type::Union(sd.name.name.clone(), fields, align, false),
+                    );
+                }
+                Decl::Typedef { ty, .. } => {
+                    // typedef struct S { ... } S; 形式: 提取内层 struct/union
+                    if let Type::Struct(name, fields, align, _) = ty {
+                        if !fields.is_empty() {
+                            self.complete_struct_types.insert(
+                                name.clone(),
+                                Type::Struct(name.clone(), fields.clone(), *align, false),
+                            );
+                        }
+                    } else if let Type::Union(name, fields, align, _) = ty {
+                        if !fields.is_empty() {
+                            self.complete_struct_types.insert(
+                                name.clone(),
+                                Type::Union(name.clone(), fields.clone(), *align, false),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
         // 如果函数体中调用了这些函数，发射诊断信息
         let diag_fns: Vec<AttrDiagFn> = prog
@@ -5955,10 +6021,11 @@ impl Codegen {
                 offset: code_pos + 3,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                // addend = str_off - 4: LEA 7 字节指令, disp32 在 byte 3.
-                // rip = code_pos + 7, P = code_pos + 3, 差 4 字节.
-                // R_X86_64_PC32: disp32 = S + A - P, target = rip + disp32 = S + A + 4.
-                // 要 target = S + str_off, addend = str_off - 4.
+                // LEA 7 bytes, disp32 at byte 3.
+                // RIP = code_pos+7, P = code_pos+3.
+                // R_X86_64_PC32: disp32 = S + A - P.
+                // effective addr = RIP + disp32 = S + A + 4.
+                // target = S + str_off, so A = str_off - 4.
                 addend: str_off - 4,
             });
         }
@@ -5969,8 +6036,9 @@ impl Codegen {
                 offset: code_pos + 4,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                // addend = rodata_off - 4: movsd/movss 8 字节, disp32 在 byte 4.
-                // rip = code_pos + 8, P = code_pos + 4, 差 4 字节. 同上.
+                // movsd/movss 8 bytes, disp32 at byte 4.
+                // RIP = code_pos+8, P = code_pos+4.
+                // effective addr = S + A + 4, A = rodata_off - 4.
                 addend: rodata_off as i64 - 4,
             });
         }
@@ -5980,7 +6048,9 @@ impl Codegen {
                 offset: code_pos + 2,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                // rip = code_pos + 6, P = code_pos + 2, 差 4 字节.
+                // fld 6 bytes, disp32 at byte 2.
+                // RIP = code_pos+6, P = code_pos+2.
+                // effective addr = S + A + 4, A = rodata_off - 4.
                 addend: rodata_off as i64 - 4,
             });
         }
@@ -5994,6 +6064,8 @@ impl Codegen {
                 offset: code_pos + 3,
                 sym_index: data_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
+                // LEA 7 bytes, disp32 at byte 3.
+                // effective addr = S + A + 4, A = data_off - 4.
                 addend: data_off as i64 - 4,
             });
         }
@@ -10785,7 +10857,7 @@ impl Codegen {
                     // 1. 查找字段信息 (支持匿名 struct/union)
                     //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
                     let expr_ty = expr.ty();
-                    let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
+                    let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -12729,7 +12801,7 @@ impl Codegen {
                     }
                     // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                     let expr_ty = expr.ty();
-                    let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
+                    let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -12918,7 +12990,7 @@ impl Codegen {
                 // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
                 //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
                 let expr_ty = expr.ty();
-                let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
+                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                 let field_info = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| {
@@ -21903,7 +21975,7 @@ impl Codegen {
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
-                let target_ty = Self::member_target_ty(expr_ty, *is_arrow);
+                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                 let field_off = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
