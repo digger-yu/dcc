@@ -2122,7 +2122,7 @@ pub fn cross_function_dce_with_roots(
     funcs.len() != before
 }
 
-fn collect_func_refs(f: &FuncDecl, func_names: &HashSet<String>) -> (Vec<String>, HashSet<String>) {
+pub fn collect_func_refs(f: &FuncDecl, func_names: &HashSet<String>) -> (Vec<String>, HashSet<String>) {
     let body = match &f.body {
         Some(b) => b,
         None => return (Vec::new(), HashSet::new()),
@@ -2212,6 +2212,12 @@ fn walk_stmt_refs(
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr_refs(e, func_names, calls, address_taken);
             }
+        }
+        Stmt::Label { stmt, .. } => {
+            walk_stmt_refs(stmt, func_names, calls, address_taken);
+        }
+        Stmt::GotoIndirect { expr, .. } => {
+            walk_expr_refs(expr, func_names, calls, address_taken);
         }
         _ => {}
     }

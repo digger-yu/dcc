@@ -9989,6 +9989,15 @@ impl Codegen {
                 }
             }
             Expr::Binop { op, l, r, ty: binop_ty, .. } => {
+                // 常量折叠: 若两个操作数都是整数常量, 直接在编译期求值,
+                // 避免为 `1 << 6` 等常量表达式生成运行时计算代码.
+                // 这也能规避嵌套 BinOp 在特定寄存器分配下的 codegen bug.
+                if !matches!(op, BinOp::AndAnd | BinOp::OrOr) {
+                    if let Ok(val) = const_eval::eval(e) {
+                        self.mov_imm(dst, val);
+                        return;
+                    }
+                }
                 // 逻辑与/或优先于浮点路径：比较结果为 int，但操作数可为浮点
                 if matches!(op, BinOp::AndAnd | BinOp::OrOr) {
                     let l_false = self.fresh_label();
