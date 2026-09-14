@@ -26,18 +26,22 @@ lua.c ✓ luac.c ✓
 
 ### Known Issues
 
-#### 1. Runtime Segmentation Fault
-**Symptom**: After successful compilation and linking, running `./lua -v` causes immediate segmentation fault.
+#### 1. CRITICAL: External Function Calls Generate Wrong Offset
+**Symptom**: When compiling code that calls external functions, DCC generates `call` instructions with offset = 0.
 
-**Root Cause Analysis Required**: 
-- This is a **runtime bug**, not a compilation error
-- All symbol tables show correct definitions (verified via `nm`)
-- Linking succeeds without undefined reference errors
+**Evidence**:
+```bash
+$ objdump -d /tmp/test_call.o | grep "call"
+56:    e8 00 00 00 00   call   5b <main+0x23>
+```
 
-**Status**: Needs further debugging - may be related to:
-- Stack alignment or frame management
-- Calling convention for struct returns
-- Memory initialization before main()
+The call instruction at address 0x56 should call address 0x6 (the helper function), but instead uses relative offset 0x0, causing it to call the wrong location (0x5b, which is inside main).
+
+**Impact**: **This is a showstopper for compiling real programs!** All library function calls (like `luaL_newstate`, `malloc`, etc.) will be broken because the relocations are not properly generated during compilation.
+
+**Root Cause**: DCC's codegen likely does not emit proper relocation entries for undefined symbol references. The assembler/linker cannot fix up the calls because no relocation information exists in the object file.
+
+**Status**: This explains the runtime crash! When lua.c calls `luaL_newstate()`, the call goes nowhere useful, and L gets garbage (or main's return address), causing immediate crash when dereferenced.
 
 #### 2. Previous Bug Fix Applied
 **Issue**: Function pointer identifier arguments in aggregate calls were not generating store instructions.
