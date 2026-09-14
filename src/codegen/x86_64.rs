@@ -7175,8 +7175,9 @@ impl Codegen {
             let mut fp_idx = 0usize;
             let mut stack_arg_off: i64 = 0;
             for p in f.params.iter() {
-                if let Some(nm) = &p.name {
-                    // VLA 形参检测: 记录维度表达式, 序言中求值并存 stride 槽
+                let nm_opt = p.name.as_ref();
+                // VLA 形参检测: 记录维度表达式, 序言中求值并存 stride 槽
+                if let Some(nm) = nm_opt {
                     if let Type::Ptr(q) = &p.ty {
                         if let Type::Array(elem, ArraySize::Var(se)) = &q.base {
                             vla_param_dims.push((
@@ -7189,167 +7190,173 @@ impl Codegen {
                     if let Some(se) = &p.vla_dim {
                         param_dim_effects.push((**se).clone());
                     }
-                    // __int128 / 聚合体按 8 字节块占用 GP 寄存器或栈槽
-                    // 所有 struct/union/array 均走聚合路径, 确保 SSE 类
-                    // 小结构体 (<=8B) 也能正确从 XMM 寄存器接收.
-                    let is_agg_param =
-                        matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
-                            || matches!(
-                                &p.ty,
-                                Type::Struct(_, _, _, _)
-                                    | Type::Union(_, _, _, _)
-                                    | Type::Array(_, ArraySize::Const(_))
-                                    | Type::Atomic(_)
-                                    | Type::Vector(_, _)
-                            );
-                    if is_agg_param {
-                        let classes = Self::abi_classes(&p.ty);
-                        let chunks = p.ty.size().div_ceil(8);
-                        let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-                        let need_fp = classes
-                            .iter()
-                            .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
-                            .count();
-                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
-                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
-                        // 会少算 chunks 导致参数间重叠。
-                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
-                        let used = param_used_total;
-                        // 多块参数同 register_var: off 下移 (chunks-1)*8
-                        let hdr = 48i64 + temp_slots as i64 * 8;
-                        let off = -(used + hdr) - (chunks as i64 - 1) * 8;
-                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        // 更新累加值: 聚合参数占 chunks * 8 字节
-                        param_used_total += (p.ty.size().div_ceil(8) * 8) as i64;
-                        // SysV: 按 abi_classes 逐 chunk 分配 GP/XMM/栈。
-                        // MEMORY/X87 类或寄存器不足时整个参数按类型对齐
-                        // 放栈 (revert 语义), 游标不推进。
-                        let agg_align = (p.ty.align() as i64).max(8);
-                        let mem_class = classes.iter().any(|c| {
-                            matches!(
-                                c,
-                                AbiClass::Memory
-                                    | AbiClass::X87
-                                    | AbiClass::X87Up
-                                    | AbiClass::ComplexX87
-                            )
-                        });
-                        if gp_idx + need_gp <= 6 && fp_idx + need_fp <= 8 && !mem_class {
+                }
+                // __int128 / 聚合体按 8 字节块占用 GP 寄存器或栈槽
+                // 所有 struct/union/array 均走聚合路径, 确保 SSE 类
+                // 小结构体 (<=8B) 也能正确从 XMM 寄存器接收.
+                //
+                // 关键: gp_idx / fp_idx / stack_arg_off / param_used_total
+                // 必须在有/无名字参数上**一致推进**, 因为 SysV ABI 的
+                // 寄存器分配不看参数是否有名字 — 无名字参数 (如原型
+                // `f(uint32_t, int32_t *r)`) 也要占 rdi, 后续有名字参数
+                // 才会落到正确的寄存器 (rsi). 之前这些推进逻辑全部包
+                // 在 `if let Some(nm)` 里, 导致 pr103209 / simple7 中
+                // 有名字参数被错误地分配到前一个无名字参数应占据的寄
+                // 存器, 栈槽里是垃圾值.
+                let is_agg_param =
+                    matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
+                        || matches!(
+                            &p.ty,
+                            Type::Struct(_, _, _, _)
+                                | Type::Union(_, _, _, _)
+                                | Type::Array(_, ArraySize::Const(_))
+                                | Type::Atomic(_)
+                                | Type::Vector(_, _)
+                        );
+                if is_agg_param {
+                    let classes = Self::abi_classes(&p.ty);
+                    let chunks = p.ty.size().div_ceil(8);
+                    let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
+                    let need_fp = classes
+                        .iter()
+                        .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+                        .count();
+                    let agg_align = (p.ty.align() as i64).max(8);
+                    let mem_class = classes.iter().any(|c| {
+                        matches!(
+                            c,
+                            AbiClass::Memory
+                                | AbiClass::X87
+                                | AbiClass::X87Up
+                                | AbiClass::ComplexX87
+                        )
+                    });
+                    let used_before = param_used_total;
+                    param_used_total += (p.ty.size().div_ceil(8) * 8) as i64;
+                    if gp_idx + need_gp <= 6 && fp_idx + need_fp <= 8 && !mem_class {
+                        // 先算好 gp/fp 增量, 统一推进索引 (总是执行).
+                        let mut gp_off = 0usize;
+                        let mut fp_off = 0usize;
+                        for c in 0..chunks {
+                            let cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
+                            match cls {
+                                AbiClass::Integer => gp_off += 1,
+                                AbiClass::Sse => fp_off += 1,
+                                AbiClass::SseUp => {}
+                                _ => unreachable!(),
+                            }
+                        }
+                        let saved_gp = gp_idx;
+                        let saved_fp = fp_idx;
+                        gp_idx += gp_off;
+                        fp_idx += fp_off;
+                        // 有名字才注册 var_map + push param_stores.
+                        if let Some(nm) = nm_opt {
+                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let off = -(used_before + hdr) - (chunks as i64 - 1) * 8;
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                            let mut local_gp = saved_gp;
+                            let mut local_fp = saved_fp;
                             for c in 0..chunks {
                                 let cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
                                 let chunk_off = off + c as i64 * 8;
                                 match cls {
                                     AbiClass::Integer => {
-                                        param_stores.push((arg_regs[gp_idx], chunk_off));
-                                        gp_idx += 1;
+                                        param_stores.push((arg_regs[local_gp], chunk_off));
                                         self.variadic_named_gp += 1;
-                                    }
-                                    AbiClass::Integer => {
-                                        param_stores.push((arg_regs[gp_idx], chunk_off));
-                                        gp_idx += 1;
-                                        self.variadic_named_gp += 1;
+                                        local_gp += 1;
                                     }
                                     AbiClass::Sse => {
                                         xmm_param_stores.push((
-                                            fp_idx as u8,
+                                            local_fp as u8,
                                             chunk_off,
                                             p.ty.clone(),
                                         ));
-                                        fp_idx += 1;
                                         self.variadic_named_fp += 1;
+                                        local_fp += 1;
                                     }
                                     AbiClass::SseUp => {
-                                        // SseUp 与前面的 Sse 共用同一个 xmm 寄存器
-                                        // (占高 8 字节)。Sse 路径已用 store_xmm128
-                                        // 存完完整 16 字节, 这里不再 push, 仅
-                                        // 增加 variadic_named_fp (va_arg 需要)
                                         self.variadic_named_fp += 1;
                                     }
                                     _ => unreachable!(),
                                 }
                             }
-                        } else {
-                            // 寄存器不足: SysV revert 语义, 整个参数放栈,
-                            // 游标不推进; 按类型对齐 (pr44942)
-                            let aligned =
-                                (stack_arg_off + agg_align - 1) & !(agg_align - 1);
+                        }
+                    } else {
+                        // 寄存器不足: revert 语义, 整个参数放栈.
+                        let aligned =
+                            (stack_arg_off + agg_align - 1) & !(agg_align - 1);
+                        stack_arg_off = aligned + chunks as i64 * 8;
+                        if let Some(nm) = nm_opt {
+                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let off = -(used_before + hdr) - (chunks as i64 - 1) * 8;
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             for c in 0..chunks {
                                 stack_param_stores
                                     .push((aligned + c as i64 * 8, off + c as i64 * 8));
                             }
-                            stack_arg_off = aligned + chunks as i64 * 8;
                             self.variadic_named_gp += need_gp as i32;
                             self.variadic_named_fp += need_fp as i32;
                         }
-                    } else if matches!(&p.ty, Type::LongDouble) && self.target.sse {
-                        // A2: long double 为 SysV Memory 类 — 16 字节整体在栈上传递
-                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
-                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
-                        // 会少算 chunks 导致参数间重叠。
-                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
-                        let used = param_used_total;
+                    }
+                } else if matches!(&p.ty, Type::LongDouble) && self.target.sse {
+                    let used_before = param_used_total;
+                    param_used_total += 16;
+                    let aligned = (stack_arg_off + 15) & !15;
+                    stack_arg_off = aligned + 16;
+                    if let Some(nm) = nm_opt {
                         let hdr = 48i64 + temp_slots as i64 * 8;
-                        let off = -(used + hdr) - 8; // 数据占 [off, off+16)
+                        let off = -(used_before + hdr) - 8;
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        // 更新累加值: long double 占 16 字节
-                        param_used_total += 16;
-                        // long double 16 字节对齐 (SysV ABI, pr44942)
-                        let aligned = (stack_arg_off + 15) & !15;
                         stack_param_stores.push((aligned, off));
                         stack_param_stores.push((aligned + 8, off + 8));
-                        stack_arg_off = aligned + 16;
-                    } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
-                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
-                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
-                        // 会少算 chunks 导致参数间重叠。
-                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
-                        let used = param_used_total;
-                        let hdr = 48i64 + temp_slots as i64 * 8;
-                        let off = -(used + hdr);
-                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        // 更新累加值: float/double 占 8 字节
-                        param_used_total += 8;
-                        if fp_idx < 8 {
-                            xmm_param_stores.push((fp_idx as u8, off, p.ty.clone()));
-                            fp_idx += 1;
-                            self.variadic_named_fp += 1;
-                        } else {
-                            stack_param_stores.push((stack_arg_off, off));
-                            stack_arg_off += 8;
+                    }
+                } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
+                    let used_before = param_used_total;
+                    param_used_total += 8;
+                    if fp_idx < 8 {
+                        let saved_fp = fp_idx;
+                        fp_idx += 1;
+                        if let Some(nm) = nm_opt {
+                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let off = -(used_before + hdr);
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                            xmm_param_stores.push((saved_fp as u8, off, p.ty.clone()));
                             self.variadic_named_fp += 1;
                         }
-                    } else if gp_idx < 6 {
-                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
-                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
-                        // 会少算 chunks 导致参数间重叠。
-                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
-                        let used = param_used_total;
-                        let hdr = 48i64 + temp_slots as i64 * 8;
-                        let off = -(used + hdr);
-                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        // 更新累加值: 标量参数占 8 字节
-                        param_used_total += 8;
-                        param_stores.push((arg_regs[gp_idx], off));
-                        gp_idx += 1;
-                        self.variadic_named_gp += 1;
                     } else {
-                        // 与 pre_register_vars 实际占用口径对齐: 按类型字节计,
-                        // VLA 条目按其实际条目数计 (见上)。Void 为变量 pad 占位, 0 字节。
-                        // 注: 不能按条目×8 计 — 聚合参数只插 1 条目 (无 pad),
-                        // 会少算 chunks 导致参数间重叠。
-                        // 使用累加值避免 O(n²) 线性扫描 (limits-fndefn.c).
-                        let used = param_used_total;
-                        let hdr = 48i64 + temp_slots as i64 * 8;
-                        let off = -(used + hdr);
-                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        // 更新累加值: 标量参数占 8 字节
-                        param_used_total += 8;
-                        stack_param_stores.push((stack_arg_off, off));
+                        let my_stack_off = stack_arg_off;
                         stack_arg_off += 8;
+                        if let Some(nm) = nm_opt {
+                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let off = -(used_before + hdr);
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                            stack_param_stores.push((my_stack_off, off));
+                            self.variadic_named_fp += 1;
+                        }
+                    }
+                } else if gp_idx < 6 {
+                    let used_before = param_used_total;
+                    let reg = arg_regs[gp_idx];
+                    param_used_total += 8;
+                    gp_idx += 1;
+                    if let Some(nm) = nm_opt {
+                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let off = -(used_before + hdr);
+                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        param_stores.push((reg, off));
+                        self.variadic_named_gp += 1;
+                    }
+                } else {
+                    let used_before = param_used_total;
+                    param_used_total += 8;
+                    let my_stack_off = stack_arg_off;
+                    stack_arg_off += 8;
+                    if let Some(nm) = nm_opt {
+                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let off = -(used_before + hdr);
+                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        stack_param_stores.push((my_stack_off, off));
                         self.variadic_named_gp += 1;
                     }
                 }
@@ -8235,19 +8242,28 @@ impl Codegen {
         // padding = (call_rsp + frame_align - 1) & ~(frame_align - 1) - call_rsp
         if frame_align > 16 {
             // call 前 rsp 向上对齐到 frame_align.
-            // padding = (rsp + frame_align - 1) & ~(frame_align - 1) - rsp
-            // lea rax, [rsp + frame_align - 1] (disp8 形式)
+            // padding = ((rsp + frame_align - 1) & ~(frame_align - 1)) - rsp
+            // 原实现先 sub rax, rsp (AT&T: rsp -= rax) 再 neg rax 再 sub,
+            // 但中间 sub 错误地破坏了 rsp, 最终 rsp 回到原值, 对齐完全
+            // 白做. 结果 32B-aligned 栈参数错位 (pr92904).
+            // 修复: 保存 rsp_old 到 r10, 算 aligned 到 rax,
+            // padding = aligned - rsp_old = -((rsp_old - aligned)),
+            // 再 sub rsp, padding.
+            let r10: u8 = 10; // caller-saved scratch
+            // mov r10, rsp: REX.W=1 B=1; 0x89 mov r/m, r; modrm 0xE2 (mod=3, reg=4=rsp, r/m=2=r10 low)
+            self.emit(&[0x49, 0x89, 0xE2]);
+            // lea rax, [rsp + frame_align - 1]; and rax, ~(frame_align - 1)
             self.emit(&[0x48, 0x8D, 0x44, 0x24]);
             self.emit(&[(frame_align - 1) as u8]);
-            // and rax, ~(frame_align - 1) → 向上对齐
             self.emit(&[0x48, 0x83, 0xE0]);
             self.emit(&[!(frame_align - 1) as u8]);
-            // sub rax, rsp → rax = rsp - 对齐后 = -padding
-            self.emit(&[0x48, 0x29, 0xC4]);
-            // neg rax → rax = padding
-            self.emit(&[0x48, 0xF7, 0xD8]);
-            // sub rsp, rax → rsp -= padding
-            self.emit(&[0x48, 0x29, 0xC4]);
+            // rax = aligned, r10 = rsp_old
+            // sub r10, rax (r10 -= rax, 结果为负): 0x29 sub r/m, r; REX.WB; modrm 0xC2 (reg=0=rax, r/m=2=r10 low)
+            self.emit(&[0x49, 0x29, 0xC2]);
+            // neg r10 (padding = aligned - rsp_old): 0xF7 group 3, /5=NEG; REX.WB; modrm 0xDA (reg=101, r/m=2)
+            self.emit(&[0x49, 0xF7, 0xDA]);
+            // sub rsp, r10 (应用 padding): 0x29 sub r/m, r; REX.WR; modrm 0xD4 (mod=3, reg=2=r10 low, r/m=4=rsp)
+            self.emit(&[0x4C, 0x29, 0xD4]);
         }
         self.emit_sub_rsp(frame_bytes as i64);
 
@@ -10337,6 +10353,7 @@ impl Codegen {
                             | Type::Union(_, _, _, _)
                             | Type::Array(_, ArraySize::Const(_))
                             | Type::Atomic(_)
+                            | Type::Vector(_, _)
                     ) && (sz > 8
                         || matches!(r.as_ref(), Expr::CompoundLit { .. })
                         || l_ty.has_vla());
@@ -10731,6 +10748,13 @@ impl Codegen {
                             _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
                         }
                     }
+                    // pop(1) 把 rcx 覆盖成目标地址, store 后结果值仍在 rax.
+                    // 调用方若要求 dst=rcx (如 shift amount), 这里必须
+                    // 重新把 rax 搬到 rcx, 否则 shift 操作会用错误的
+                    // 移位计数 (之前是目标地址的低字节).
+                    if dst == 1 {
+                        self.mov(1, 0); // mov rcx, rax
+                    }
                     }
                 } else if let Expr::Member {
                     expr,
@@ -11124,6 +11148,7 @@ impl Codegen {
                         Type::Struct(_, _, _, _)
                             | Type::Union(_, _, _, _)
                             | Type::Array(_, _)
+                            | Type::Vector(_, _)
                     ) && assign_sz > 8;
                     // _Complex 浮点赋值到 Index/Deref/Cast lvalue: 取目标
                     // 地址后逐分量写入 (实部 + 虚部)。RHS 的虚部按 complex
@@ -14125,6 +14150,7 @@ impl Codegen {
                 // SIMD 向量初始化: v4si a = {1, 2, 3, 4}
 
                 let elem_size = elem_ty.size();
+                let mut covered = 0usize;
                 for (i, item) in inits.iter().enumerate() {
 
                     if i >= *n {
@@ -14144,7 +14170,10 @@ impl Codegen {
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
+                    covered = covered.max(i + 1);
                 }
+                // C 标准: 初始化器不足时剩余元素零填充
+                self.zero_fill_tail(base, ty, covered);
             }
             Type::Struct(_, fields, _, reverse_sso) | Type::Union(_, fields, _, reverse_sso) => {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
@@ -14554,15 +14583,18 @@ impl Codegen {
 
     // 数组尾部零填充: C 标准要求初始化器不足时剩余元素为零
     fn zero_fill_tail(&mut self, base_off: i64, arr_ty: &Type, init_count: usize) {
-        if let Type::Array(elem_ty, ArraySize::Const(n)) = arr_ty {
-            if init_count >= *n {
-                return;
-            }
-            let elem_size = elem_ty.size();
-            self.mov_imm(0, 0); // rax = 0 (补零源)
-            for i in init_count..*n {
-                self.zero_mem(base_off + (i * elem_size) as i64, elem_size);
-            }
+        let (elem_ty, n) = match arr_ty {
+            Type::Array(elem_ty, ArraySize::Const(n)) => (elem_ty, *n),
+            Type::Vector(elem_ty, n) => (elem_ty, *n),
+            _ => return,
+        };
+        if init_count >= n {
+            return;
+        }
+        let elem_size = elem_ty.size();
+        self.mov_imm(0, 0); // rax = 0 (补零源)
+        for i in init_count..n {
+            self.zero_mem(base_off + (i * elem_size) as i64, elem_size);
         }
     }
 
@@ -14843,7 +14875,7 @@ impl Codegen {
                             // 字段 (C 标准 6.7.9p14: "abc" 等价于 {'a','b','c','\0'})
                             let is_aggregate = matches!(
                                 &field_ty,
-                                Some(Type::Array(..) | Type::Struct(..) | Type::Union(..))
+                                Some(Type::Array(..) | Type::Struct(..) | Type::Union(..) | Type::Vector(..))
                             );
                             if is_aggregate
                                 && matches!(item, InitItem::Expr(_))
@@ -16689,6 +16721,9 @@ impl Codegen {
         // 有标量操作数时走下方逐元素广播路径
         if l_is_vec && r_is_vec && vec_size == 16
             && self.try_vector_binop_xmm(op, l, r, result_slot, result_off, &elem_ty, count, elem_size, is_float, is_double) {
+                // SIMD 快速路径: 结果已写入 result_off, rax = &result[0]
+                self.emit(&[0x49, 0x8D, 0x85]);
+                self.emit(&(result_off as i32).to_le_bytes());
                 return;
             }
 
@@ -16744,6 +16779,8 @@ impl Codegen {
                     self.emit_store(0, off, elem_size);
                 }
                 self.vector_op_slot = saved_op_slot;
+                self.emit(&[0x49, 0x8D, 0x85]);
+                self.emit(&(result_off as i32).to_le_bytes());
                 return;
             }
             let (prefix, opcode) = match op {
@@ -16796,6 +16833,8 @@ impl Codegen {
                 );
             }
             self.vector_op_slot = saved_op_slot;
+            self.emit(&[0x49, 0x8D, 0x85]);
+            self.emit(&(result_off as i32).to_le_bytes());
             return;
         }
         // __int128 / 16-byte 整数元素: GP 寄存器无法承载, 用 XMM 处理
@@ -16805,6 +16844,8 @@ impl Codegen {
                 op, l, r, result_slot, result_off, &elem_ty, count, elem_size,
                 l_is_vec, r_is_vec, saved_op_slot,
             );
+            self.emit(&[0x49, 0x8D, 0x85]);
+            self.emit(&(result_off as i32).to_le_bytes());
             return;
         }
         for i in 0..count {
@@ -16995,6 +17036,10 @@ impl Codegen {
             self.emit_store(1, off, elem_size);
         }
         self.vector_op_slot = saved_op_slot;
+        // rax = &result[0]: 聚合/向量返回值需要调用者能拿到结果地址
+        // (gen_expr → gen_sret_return 兜底分支用 rax 作为 rep movsq 源指针)
+        self.emit(&[0x49, 0x8D, 0x85]);
+        self.emit(&(result_off as i32).to_le_bytes());
     }
 
     /// SIMD 快速路径: 128-bit 向量使用 XMM 打包指令
@@ -18567,10 +18612,23 @@ impl Codegen {
             }
             if Self::type_has_vla(arr_ty) {
                 // VLA: 起源帧[off] 是元数据槽, 槽内容是数据基址 (二次加载)
-                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                let modrm = 0x03 | ((dst & 7) << 3);
-                self.emit(&[rex, 0x8B, modrm]);
-                self.emit(&(parent_off as i32).to_le_bytes());
+                // 指令: mov dst, [dst + parent_off]  (dst 已指向起源帧)
+                // modrm: mod=10(disp32), reg=dst, rm=dst
+                // 原 bug 用 0x03 (mod=00, rm=rbx) 导致 mov (%rbx), dst +
+                // 垃圾字节被后续指令流误解析 → SIGILL.
+                if Self::fits_disp32(parent_off) {
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    let modrm = 0x80 | ((dst & 7) << 3) | (dst & 7);
+                    self.emit(&[rex, 0x8B, modrm]);
+                    self.emit(&(parent_off as i32).to_le_bytes());
+                } else {
+                    self.mov_imm(10, parent_off as i128);
+                    // lea dst, [dst + r10]
+                    self.emit(&[0x4D, 0x8D, 0x1C, 0xD0 | (dst & 7)]);
+                    // mov dst, [dst]
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    self.emit(&[rex, 0x8B, 0x00 | (dst & 7)]);
+                }
             } else {
                 // 普通数组/向量: 起源帧 + parent_off 即数据地址
                 if parent_off != 0 {
@@ -24588,11 +24646,22 @@ impl Codegen {
 
     fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
-            // __builtin_expect(expr, val): 分支预测提示, 直接返回 expr
+            // __builtin_expect(cond, hint): 返回 cond 的值 (第二参数是分支预测
+            // hint, ABI 规定它的 side effect 也必须执行, 即 args[1] 不能跳过)。
+            // GCC 实现: 先完整求值 args[1] (side effect 保留), 再求值 args[0]
+            // 并把它作为整个 builtin 的值返回。pr85156 中 z++ 就是这样被丢的
+            // —— 旧代码只 gen_expr(&args[0], dst), hint 参数从未被发射。
             "__builtin_expect" | "__builtin_expect_with_probability" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
+                }
+                // 先发射 hint 参数 side effect (值丢弃)
+                if args.len() >= 2 {
+                    // args[1] 可能有 side effect 但值不需要, 用 rcx 作 scratch.
+                    // 注意 gen_expr 到非 rax 寄存器时若 args[1] 本身又依赖
+                    // rax (少见, 一般是 ++/-- 或 Call), rcx 是安全的 scratch.
+                    self.gen_expr(&args[1], 1 /* rcx */);
                 }
                 self.gen_expr(&args[0], dst);
                 true
