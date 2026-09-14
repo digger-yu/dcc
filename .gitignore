@@ -97,3 +97,13 @@ debug-*.md
 
 # Ephemeral test dirs
 tmp_tests/
+
+t_*.c
+_*.c
+_*.s
+*.html
+dcc_out/
+gcc_out/
+perf.data.*
+*.dis.txt
+*.disasm
