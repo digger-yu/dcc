@@ -10715,47 +10715,12 @@ impl<'a> Parser<'a> {
                                 }
                             }
                         }
-                        // __builtin_expect(cond, expect): 提示分支预测
-                        // __builtin_expect_with_probability(cond, expect, prob):
-                        //   同样为提示, 编译期折叠为 cond 的值 (与 GCC 行为一致)
-                        if name.name == "__builtin_expect"
-                            || name.name == "__builtin_expect_with_probability"
-                        {
-                            if let TokKind::Number = self.cur.kind {
-                                let lit = self.cur.text.clone();
-                                self.advance();
-                                if self.cur.kind == TokKind::Comma {
-                                    self.advance();
-                                }
-                                // 跳过 expect 表达式 (简单形式: 标识符或数字)
-                                while self.cur.kind != TokKind::RParen
-                                    && self.cur.kind != TokKind::Eof
-                                {
-                                    self.advance();
-                                }
-                                // with_probability 多一个 probability 实参
-                                if name.name == "__builtin_expect_with_probability" {
-                                    if self.cur.kind == TokKind::Comma {
-                                        self.advance();
-                                    }
-                                    while self.cur.kind != TokKind::RParen
-                                        && self.cur.kind != TokKind::Eof
-                                    {
-                                        self.advance();
-                                    }
-                                }
-                                if self.expect(TokKind::RParen, "')'") {
-                                    if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
-                                        e = Expr::Int {
-                                            v,
-                                            span: sp.clone(),
-                                            ty: int_t(),
-                                        };
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
+                        // __builtin_expect / __builtin_expect_with_probability:
+                        // 不再在 parser 层做折叠。旧实现用 advance() 跳过 hint
+                        // 参数, 会把 hint 里的 side effect (如 z++) 直接丢掉
+                        // (pr85156)。统一交给 codegen 的 gen_builtin 处理,
+                        // 那里会先发射 args[1] 的 side effect, 再发射 args[0]
+                        // 作为返回值, 语义与 GCC 一致。
                         // __builtin_popcount / __builtin_popcountl / __builtin_popcountll
                         if matches!(
                             name.name.as_str(),
