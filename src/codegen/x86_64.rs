@@ -1710,8 +1710,19 @@ impl Codegen {
     pub fn emit(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
     }
+    /// SysV AMD64 ABI: 返回值最多占用 rax + rdx 两个寄存器槽.
+    /// 超出时用 sret (隐藏 rdi 指向调用方缓冲区).
     fn needs_memory_return(ty: &Type) -> bool {
-        Self::abi_classes(ty) == vec![AbiClass::Memory]
+        let classes = Self::abi_classes(ty);
+        // 分类强制 Memory/X87 → 必须 sret
+        if classes.iter().any(|c| {
+            matches!(c, AbiClass::Memory | AbiClass::X87
+                | AbiClass::X87Up | AbiClass::ComplexX87)
+        }) {
+            return true;
+        }
+        // 超过 2 个 eightbyte 无法放入 rax+rdx → sret
+        classes.len() > 2
     }
 
     /// 判断是否为有符号整数类型 (用于 -ftrapv 等检查)
@@ -2075,8 +2086,10 @@ impl Codegen {
         if size == 0 {
             return Vec::new();
         }
-        // Linux 调用约定: long double 为 Memory 类 (16 字节栈传)
-        if size > 16 || matches!(ty, Type::LongDouble) {
+        // SysV AMD64 ABI: 超过 64 字节的聚合类型无法放入寄存器集
+        // (6 GP + 8 XMM 共 64 字节), 直接强制 Memory 类.
+        // long double (x86 80-bit) 也强制 Memory.
+        if size > 64 || matches!(ty, Type::LongDouble) {
             return vec![AbiClass::Memory];
         }
         let num_eightbytes = size.div_ceil(8);
