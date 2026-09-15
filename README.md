@@ -364,16 +364,15 @@ cargo test --test integration  # 765 集成测试
 
 ### GCC Torture Test
 
-dcc 通过 GCC torture test suite 验证 C 语言标准的兼容性。测试集包含 1697 个 execute 测试和 2016 个 compile 测试。
+dcc 通过 GCC torture test suite 验证 C 语言标准的兼容性。
 
-**当前通过率 (execute tests):**
+**GCC Torture Test Results (commit 95f53f7)**
 
-| 指标 | 数量 | 百分比 |
-|------|------|--------|
-| 通过 | 1073 | 63.2% |
-| 编译失败 | 62 | 3.7% |
-| 运行时失败 | 488 | 28.8% |
-| 超时 | 73 | 4.3% |
+| Category | Total | Pass | Fail | Skip | Pass Rate |
+|----------|-------|------|------|------|-----------|
+| Compile  | 2016  | 2014 | 0    | 2    | 99.90%    |
+| Execute  | 1698  | 1696 | 2    | 0    | 99.88%    |
+| **Total**| 3714  | 3710 | 2    | 2    | 99.89%    |
 
 运行 torture test:
 

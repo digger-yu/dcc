@@ -10646,7 +10646,128 @@ impl Codegen {
                 } = lv
                 {
                     // arr[i] = val
+                    // 先尝试语义层路径计算地址
+                    use crate::semantics::{
+                        compute_lvalue_address, AddressContext, MaterializeAction,
+                    };
+                    let ctx = AddressContext {
+                        is_nested: self.current_func_is_nested,
+                    };
+
+                    // 嵌套运行时索引: 退回旧路径 (语义层会丢失第二个运行时偏移)
+                    let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
+                        && crate::const_eval::eval(idx).is_err()
+                        && match arr.as_ref() {
+                            Expr::Index { idx: inner_idx, .. } => {
+                                crate::const_eval::eval(inner_idx).is_err()
+                            }
+                            _ => false,
+                        };
+
+                    let desc = if !is_nested_runtime_index {
+                        Some(compute_lvalue_address(self, lv, &ctx))
+                    } else {
+                        None
+                    };
+
                     let es = elem_ty.size() as i32;
+
+                    // 聚合元素赋值 (VM struct / >8B struct): rep movsb
+                    // 整体拷贝。标量 store 会把聚合 rvalue (地址约定)
+                    // 或 8 字节内容截断写入, 语义都错 (20070919-1)
+                    let is_agg_elem = matches!(
+                        elem_ty,
+                        Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _)
+                            | Type::Array(_, ArraySize::Const(_))
+                            | Type::Atomic(_)
+                    ) && (es > 8 || elem_ty.has_vla());
+
+                    if let Some(ref desc) = desc {
+                        if is_agg_elem {
+                            // 聚合元素: 用语义层计算地址到 rax, 然后 push + gen_agg_elem_store
+                            if self.materialize_address(
+                                desc,
+                                MaterializeAction::TakeAddress,
+                                Some(idx),
+                                lv,
+                                Some(arr),
+                                0,
+                            ) {
+                                self.push(0); // save addr
+                                self.gen_agg_elem_store(r, elem_ty, es, dst);
+                                return;
+                            }
+                        } else if matches!(elem_ty, Type::Complex(ref c)
+                            if matches!(&c.base,
+                                Type::Float | Type::Double | Type::LongDouble))
+                        {
+                            // _Complex 浮点元素: 用语义层计算地址到 rax, 然后 store_complex_at_rcx
+                            if self.materialize_address(
+                                desc,
+                                MaterializeAction::TakeAddress,
+                                Some(idx),
+                                lv,
+                                Some(arr),
+                                0,
+                            ) {
+                                self.push(0); // save addr
+                                self.gen_expr(r, 0); // rax = val (complex)
+                                self.pop(1); // rcx = addr
+                                if let Type::Complex(ref cinner) = elem_ty {
+                                    self.store_complex_at_rcx(r, &cinner.base);
+                                }
+                                return;
+                            }
+                        } else if matches!(
+                            elem_ty,
+                            Type::Float | Type::Double | Type::LongDouble
+                        ) {
+                            // 浮点元素: 用语义层计算地址, 然后存储
+                            if self.materialize_address(
+                                desc,
+                                MaterializeAction::TakeAddress,
+                                Some(idx),
+                                lv,
+                                Some(arr),
+                                0,
+                            ) {
+                                self.push(0); // save addr
+                                self.gen_expr(r, 0); // rax = val
+                                self.pop(1); // rcx = addr
+                                self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
+                                if matches!(elem_ty, Type::Float) {
+                                    self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                                } else {
+                                    self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                                }
+                                return;
+                            }
+                        } else {
+                            // 标量元素: 用语义层计算地址, 然后存储
+                            if self.materialize_address(
+                                desc,
+                                MaterializeAction::TakeAddress,
+                                Some(idx),
+                                lv,
+                                Some(arr),
+                                0,
+                            ) {
+                                self.push(0); // save addr
+                                self.gen_expr(r, 0); // rax = val
+                                self.pop(1); // rcx = addr
+                                match es {
+                                    1 => self.emit(&[0x88, 0x01]),
+                                    2 => self.emit(&[0x66, 0x89, 0x01]),
+                                    4 => self.emit(&[0x89, 0x01]),
+                                    _ => self.emit(&[0x48, 0x89, 0x01]),
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    // Fallback: 旧路径 (语义层无法处理时使用)
                     if let Expr::Ident {
                         name: arr_name,
                         ty: arr_ty,
@@ -10663,16 +10784,6 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
-                        // 聚合元素赋值 (VM struct / >8B struct): rep movsb
-                        // 整体拷贝。标量 store 会把聚合 rvalue (地址约定)
-                        // 或 8 字节内容截断写入, 语义都错 (20070919-1)
-                        let is_agg_elem = matches!(
-                            elem_ty,
-                            Type::Struct(_, _, _, _)
-                                | Type::Union(_, _, _, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Atomic(_)
-                        ) && (es > 8 || elem_ty.has_vla());
                         if is_agg_elem {
                             self.gen_agg_elem_store(r, elem_ty, es, dst);
                             return;
@@ -10723,14 +10834,6 @@ impl Codegen {
                         self.push(0);
                         self.gen_expr(r, 0);
                         self.pop(1);
-                        // 聚合元素赋值: rep movsb 整体拷贝 (同 Ident arr 路径)
-                        let is_agg_elem = matches!(
-                            elem_ty,
-                            Type::Struct(_, _, _, _)
-                                | Type::Union(_, _, _, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Atomic(_)
-                        ) && (es > 8 || elem_ty.has_vla());
                         if is_agg_elem {
                             self.gen_agg_elem_store(r, elem_ty, es, dst);
                             return;
@@ -12637,6 +12740,101 @@ impl Codegen {
                 span,
                 ..
             } => {
+                // Step 1: 语义层计算地址描述符
+                use crate::semantics::{
+                    compute_lvalue_address, determine_action, AddressBase, AddressContext,
+                    ByteOffset, MaterializeAction,
+                };
+
+                let ctx = AddressContext {
+                    is_nested: self.current_func_is_nested,
+                };
+
+                // 检查是否为嵌套运行时索引: 语义层的 add_byte_offsets 会丢失
+                // 第二个运行时偏移, 这种情况退回旧路径。
+                // 常量内部索引可以正确合并 (Constant + Runtime = Runtime with addend)。
+                let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
+                    && crate::const_eval::eval(idx).is_err()
+                    && match arr.as_ref() {
+                        Expr::Index { idx: inner_idx, .. } => {
+                            crate::const_eval::eval(inner_idx).is_err()
+                        }
+                        _ => false,
+                    };
+
+                if !is_nested_runtime_index {
+                    let desc = compute_lvalue_address(self, e, &ctx);
+
+                    // Step 2: 确定物化动作
+                    let action = determine_action(elem_ty, true);
+
+                    // Step 3: SIB 快速路径优化 (仅全局数组 + 标量加载 + 运行时索引)
+                    // 这是在语义层解析之后的优化: 使用已解析的 symbol_key
+                    if matches!(action, MaterializeAction::LoadScalar)
+                        && matches!(&desc.base, AddressBase::GlobalSymbolAddr { .. })
+                        && matches!(&desc.offset, ByteOffset::Runtime { addend: 0, .. })
+                    {
+                        if let AddressBase::GlobalSymbolAddr { symbol_key } = &desc.base {
+                            if let ByteOffset::Runtime { stride, addend: 0 } = &desc.offset {
+                                let es = *stride as u8;
+                                // 只有 1/2/4/8 字节元素能用 SIB scale
+                                if *stride == 1 || *stride == 2 || *stride == 4 || *stride == 8 {
+                                    self.gen_expr(idx, 1);
+                                    self.emit_load_global_indexed(dst, 1, symbol_key, es, elem_ty);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 4: 通用路径 - 通过语义层物化
+                    // 数组元素衰减: 元素是数组时返回地址 (ArrayDecay)
+                    if matches!(action, MaterializeAction::ArrayDecay) {
+                        if self.materialize_address(
+                            &desc,
+                            MaterializeAction::TakeAddress,
+                            Some(idx),
+                            e,
+                            Some(arr),
+                            dst,
+                        ) {
+                            return;
+                        }
+                    } else if matches!(action, MaterializeAction::AggregateLoad) {
+                        // 聚合元素: 返回地址供调用方使用
+                        if self.materialize_address(
+                            &desc,
+                            MaterializeAction::TakeAddress,
+                            Some(idx),
+                            e,
+                            Some(arr),
+                            dst,
+                        ) {
+                            return;
+                        }
+                    } else if matches!(action, MaterializeAction::LoadScalar) {
+                        // 标量加载: 先做 bounds check, 再加载
+                        // 注意: bounds check 需要在索引求值后、地址计算前插入
+                        // 为简化实现, 我们先尝试语义层路径, 失败则退回旧路径
+                        if self.bounds_check {
+                            // bounds check 模式: 退回旧路径 (保证边界检查正确)
+                            // TODO: 将 bounds check 集成到 materialize_address 中
+                        } else {
+                            if self.materialize_address(
+                                &desc,
+                                action,
+                                Some(idx),
+                                e,
+                                Some(arr),
+                                dst,
+                            ) {
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: 旧路径 (语义层无法处理时使用)
                 // 数组类型的元素作为值使用时退化为指向首元素的指针
                 // (C11 6.3.2.1p3): 如 words[1] (char words[][6]) 作函数参数
                 // 时应传 &words[1] 地址, 而非对元素做标量加载。
@@ -18906,6 +19104,313 @@ impl Codegen {
         true
     }
 
+    /// 扩展版: 处理含运行时偏移的 AddressDescriptor。
+    /// index_expr 用于求值运行时索引 (rcx = index value)。
+    /// 基址计算到 dst (rax), 索引在 rcx, 最终地址 = base + index*stride + addend。
+    fn emit_address_descriptor_with_index(
+        &mut self,
+        desc: &crate::semantics::AddressDescriptor,
+        index_expr: &Expr,
+        dst: u8,
+    ) -> bool {
+        use crate::semantics::{AddressBase, ByteOffset};
+
+        // 先尝试常量偏移快速路径
+        if matches!(&desc.offset, ByteOffset::Constant(_)) {
+            return self.emit_address_descriptor(desc, index_expr, dst);
+        }
+        // Upvar 暂未实现
+        if matches!(&desc.base, AddressBase::UpvarLoad { .. }) {
+            return false;
+        }
+
+        // Step 1: 发射基址计算到 dst
+        match &desc.base {
+            AddressBase::StackFrame { offset } => {
+                self.emit_lea_r13(dst, *offset);
+            }
+            AddressBase::StackSlotLoad { offset } => {
+                self.load_stack(dst, *offset);
+            }
+            AddressBase::GlobalSymbolAddr { symbol_key } => {
+                self.emit_global_addr(dst, symbol_key);
+            }
+            AddressBase::GlobalSymbolLoad { symbol_key } => {
+                self.emit_global_load(dst, symbol_key);
+            }
+            AddressBase::UpvarLoad { .. } => {
+                return false;
+            }
+            AddressBase::ExprAddr { sub } => {
+                // 递归: 子描述符也可能有运行时偏移, 但我们只处理一层
+                // (两层运行时偏移需要额外临时寄存器, 暂退回 false)
+                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }) {
+                    return false;
+                }
+                if !self.emit_address_descriptor(sub, index_expr, dst) {
+                    return false;
+                }
+            }
+        }
+
+        // Step 2: 处理运行时偏移
+        match &desc.offset {
+            ByteOffset::Constant(_) => {
+                // 已在上面快速路径处理
+            }
+            ByteOffset::Runtime { stride, addend } => {
+                // 保存基址, 求值索引到 rcx, 恢复基址, 加偏移
+                self.push(dst);
+                self.gen_expr(index_expr, 1); // rcx = index
+                self.pop(dst);
+                // rcx *= stride
+                if *stride != 1 {
+                    let stride_i32 = *stride as i32;
+                    self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
+                    self.emit(&stride_i32.to_le_bytes());
+                }
+                // add rcx, addend
+                if *addend != 0 {
+                    self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
+                    self.emit(&(*addend as i32).to_le_bytes());
+                }
+                // dst += rcx
+                if dst != 0 {
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    self.emit(&[rex, 0x01, 0xC8 | (dst & 7)]); // add dst, rcx
+                } else {
+                    self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
+                }
+            }
+            ByteOffset::VlaRuntime { addend } => {
+                // VLA: stride 在运行时确定, 需要从 VLA 元数据槽加载
+                // 先找 VLA stride slot
+                let stride_slot = self.find_vla_stride_slot_from_desc(desc);
+                if stride_slot.is_none() {
+                    return false;
+                }
+                let slot = stride_slot.unwrap();
+                self.push(dst);
+                self.gen_expr(index_expr, 1); // rcx = index
+                // mov rdx, [r13+slot]; imul rcx, rdx
+                self.emit_mov_mem_r13(2, slot);
+                self.emit(&[0x48, 0x0F, 0xAF, 0xCA]); // imul rcx, rdx
+                self.pop(dst);
+                if *addend != 0 {
+                    self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
+                    self.emit(&(*addend as i32).to_le_bytes());
+                }
+                // dst += rcx
+                if dst != 0 {
+                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    self.emit(&[rex, 0x01, 0xC8 | (dst & 7)]);
+                } else {
+                    self.emit(&[0x48, 0x01, 0xC8]);
+                }
+            }
+        }
+
+        true
+    }
+
+    /// 从 AddressDescriptor 回溯找到 VLA stride 槽位置。
+    /// 仅支持 Ident 基址的 VLA (最常见情况), 复杂情况返回 None。
+    fn find_vla_stride_slot_from_desc(&self, desc: &crate::semantics::AddressDescriptor) -> Option<i64> {
+        use crate::semantics::AddressBase;
+        match &desc.base {
+            AddressBase::StackSlotLoad { offset } => {
+                // VLA 变量: [offset] 是数据基址槽, stride 在 offset+8
+                // 需要确认这是 VLA (通过 vla_offsets 查找)
+                // 这里我们用一个启发式: 检查 offset 是否在 vla_offsets 中
+                for (_, &vla_off) in &self.vla_offsets {
+                    if vla_off == *offset {
+                        return Some(offset + 8);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Layer 3 物化入口: 根据 MaterializeAction 将 AddressDescriptor 物化为代码。
+    ///
+    /// - TakeAddress / ArrayDecay / AggregateLoad / AggregateStore: 地址在 dst
+    /// - LoadScalar / ComplexLoad: 值在 dst (标量) 或 xmm0 (浮点)
+    /// - StoreScalar / ComplexStore: 存储值到地址 (值来自 rax/xmm0)
+    ///
+    /// index_expr: 运行时索引表达式 (用于 Runtime/VlaRuntime 偏移)
+    /// original_expr: 原始表达式 (用于 bounds checking 的 span 等)
+    /// arr_expr: 数组表达式 (用于 bounds checking 的数组类型)
+    fn materialize_address(
+        &mut self,
+        desc: &crate::semantics::AddressDescriptor,
+        action: crate::semantics::MaterializeAction,
+        index_expr: Option<&Expr>,
+        original_expr: &Expr,
+        arr_expr: Option<&Expr>,
+        dst: u8,
+    ) -> bool {
+        use crate::semantics::MaterializeAction as MA;
+
+        // Step 1: 计算地址到 dst (rax)
+        let addr_ok = if let Some(idx) = index_expr {
+            self.emit_address_descriptor_with_index(desc, idx, dst)
+        } else {
+            self.emit_address_descriptor(desc, original_expr, dst)
+        };
+        if !addr_ok {
+            return false;
+        }
+
+        // Step 2: 根据动作执行加载/存储
+        let elem_size = desc.element_info.size;
+        match action {
+            MA::TakeAddress | MA::ArrayDecay | MA::AggregateLoad | MA::AggregateStore => {
+                // 地址就是结果, 已经在 dst 中
+            }
+            MA::LoadScalar => {
+                // 从地址加载标量值
+                if dst != 0 {
+                    // 地址在 dst, 需要移到 rax 再加载
+                    self.push(dst);
+                    self.pop(0); // rax = addr
+                }
+                let elem_ty = original_expr.ty();
+                self.emit_load_mem_typed(elem_size, &elem_ty);
+                if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
+                    self.mov(dst, 0);
+                }
+            }
+            MA::StoreScalar => {
+                // 存储标量值到地址
+                // 值在 rax, 地址在 dst; 需要地址在 rcx, 值在 rax
+                if dst != 1 {
+                    // 把地址移到 rcx
+                    if dst == 0 {
+                        self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                    } else {
+                        self.push(dst);
+                        self.pop(1); // rcx = addr
+                    }
+                }
+                let elem_ty = original_expr.ty();
+                if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                    // 值在 xmm0, 存储到 [rcx]
+                    if matches!(elem_ty, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                    }
+                } else {
+                    match elem_size {
+                        1 => self.emit(&[0x88, 0x01]),
+                        2 => self.emit(&[0x66, 0x89, 0x01]),
+                        4 => self.emit(&[0x89, 0x01]),
+                        _ => self.emit(&[0x48, 0x89, 0x01]),
+                    }
+                }
+            }
+            MA::ComplexLoad => {
+                // 复数加载: 地址在 dst, 加载到临时槽并返回地址
+                if dst != 0 {
+                    // 地址在 dst, 需要移到 rax
+                    self.push(dst);
+                    self.pop(0); // rax = addr
+                }
+                let elem_ty = original_expr.ty();
+                let result_off = -self.frame_size + 8;
+                if let Type::Complex(ref inner) = elem_ty {
+                    let inner_sz = inner.base.size();
+                    let pfx = if matches!(inner.base, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    let base_off = result_off;
+                    // 加载实部: [rax] → xmm0
+                    self.emit(&[0x48, 0x89, 0xc6]); // mov rsi, rax
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x10, 0x06]); // movss xmm0, [rsi]
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x10, 0x06]); // movsd xmm0, [rsi]
+                    }
+                    // 保存实部 → [r13 + base_off]
+                    self.emit_lea_r13(7, base_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], base_off);
+                    // 加载虚部: [rax + inner_sz] → xmm0
+                    let inner_sz_i64 = inner_sz as i64;
+                    self.emit(&[0x48, 0x81, 0xc0, 0x00]); // add rax, inner_sz
+                    self.emit(&inner_sz_i64.to_le_bytes());
+                    self.emit(&[0x48, 0x89, 0xc6]); // mov rsi, rax
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x10, 0x06]); // movss xmm0, [rsi]
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x10, 0x06]); // movsd xmm0, [rsi]
+                    }
+                    // 保存虚部 → [r13 + base_off + inner_sz]
+                    self.emit_lea_r13(7, base_off + inner_sz_i64);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], base_off + inner_sz_i64);
+                    // 恢复 xmm0 到实部
+                    self.emit_lea_r13(6, base_off);
+                    self.emit(&[pfx, 0x49, 0x0F, 0x10, 0xf0]); // movss xmm0, [r13 + off]
+                    // 返回地址在 rax/dst
+                    self.emit_lea_r13(0, base_off);
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                }
+            }
+            MA::ComplexStore => {
+                // 复数存储: 地址在 dst, 值来自 rvalue 的临时槽
+                // 值已经在内存的临时槽，只需要拷贝到目标地址
+                if dst != 1 {
+                    // 把地址移到 rcx
+                    if dst == 0 {
+                        self.emit(&[0x48, 0x89, 0xc1]); // mov rcx, rax
+                    } else {
+                        self.push(dst);
+                        self.pop(1); // rcx = addr
+                    }
+                }
+                let elem_ty = original_expr.ty();
+                if let Type::Complex(ref inner) = elem_ty {
+                    // rvalue 已经在 result_off 生成，直接拷贝
+                    let inner_sz = inner.base.size();
+                    let result_off = -self.frame_size + 8;
+                    self.emit_lea_r13(6, result_off); // rsi = source
+                    let pfx = if matches!(inner.base, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    // 存储实部: xmm0 → [rcx]
+                    self.emit(&[0x48, 0x89, 0xf2]); // mov rdx, rsi
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x10, 0x02]); // movss xmm0, [rdx]
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x10, 0x02]); // movsd xmm0, [rdx]
+                    }
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                    }
+                    // 存储虚部: [rdx + inner_sz] → [rcx + inner_sz]
+                    let inner_sz_i64 = inner_sz as i64;
+                    self.emit(&[0x48, 0x81, 0xc2, 0x00]); // add rdx, inner_sz
+                    self.emit(&inner_sz_i64.to_le_bytes());
+                    self.emit(&[0x48, 0x81, 0xc1, 0x00]); // add rcx, inner_sz
+                    self.emit(&inner_sz_i64.to_le_bytes());
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x10, 0x02]); // movss xmm0, [rdx]
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x10, 0x02]); // movsd xmm0, [rdx]
+                    }
+                    if matches!(inner.base, Type::Float) {
+                        self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
     /// 全局变量 RIP-relative 加载: reg = [global_var]
     /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_load(&mut self, reg: u8, name: &str) {
@@ -22066,8 +22571,41 @@ impl Codegen {
                 ty: elem_ty,
                 ..
             } => {
-                // Phase 3-4: 语义层通过 emit_ident_base_addr 在 gen_expr/gen_assign
-                // 的 Index 处理中已集成。gen_lvalue_addr 保持原始路径。
+                // 语义层路径: compute_lvalue_address + TakeAddress
+                use crate::semantics::{
+                    compute_lvalue_address, AddressContext, MaterializeAction,
+                };
+
+                let ctx = AddressContext {
+                    is_nested: self.current_func_is_nested,
+                };
+
+                // 嵌套运行时索引: 退回旧路径 (语义层会丢失第二个运行时偏移)
+                let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
+                    && crate::const_eval::eval(idx).is_err()
+                    && match arr.as_ref() {
+                        Expr::Index { idx: inner_idx, .. } => {
+                            crate::const_eval::eval(inner_idx).is_err()
+                        }
+                        _ => false,
+                    };
+
+                if !is_nested_runtime_index {
+                    let desc = compute_lvalue_address(self, e, &ctx);
+
+                    if self.materialize_address(
+                        &desc,
+                        MaterializeAction::TakeAddress,
+                        Some(idx),
+                        e,
+                        Some(arr),
+                        dst,
+                    ) {
+                        return true;
+                    }
+                }
+
+                // Fallback: 旧路径
                 let es = elem_ty.size().max(1) as i32;
                 let arr_ty = arr.ty();
                 if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
