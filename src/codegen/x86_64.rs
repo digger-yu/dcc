@@ -10888,7 +10888,7 @@ impl Codegen {
                     // 2. 计算目标地址
                     if *is_arrow {
                         self.gen_expr(expr, 0); // rax = 指针值
-                    } else if let Expr::Ident { name, .. } = expr.as_ref() {
+                    } else if let Expr::Ident { name, ty: ref ident_ty, .. } = expr.as_ref() {
                         if self.is_global_not_local(&name.name) {
                             // 全局结构体: RIP-relative LEA
                             self.emit_global_addr(0, &name.name);
@@ -10897,7 +10897,12 @@ impl Codegen {
                             // VLA/VM struct 变量: [off] 存数据基址, 须加载
                             // 而非 lea 槽地址 (否则寻址到元数据槽,
                             // pr82210: s.a[i].c 写坏基址槽)
-                            if self.vla_offsets.contains_key(&name.name) {
+                            // 指针类型变量 (通常来自宏展开如 (ptr)->field
+                            // 被解析为 ptr.field 且 is_arrow=false):
+                            // 须加载指针值而非 LEA 槽地址.
+                            if self.vla_offsets.contains_key(&name.name)
+                                || matches!(ident_ty, Type::Ptr(_))
+                            {
                                 self.load_stack(0, off);
                             } else {
                                 // LEA rax, [r13 + off]
@@ -21927,6 +21932,98 @@ impl Codegen {
         self.load_frame_via_chain(10, hops, offs);
     }
 
+    // Helper for (ptr->union_field).member address computation.
+    // Recursively computes the address of an expression whose outermost
+    // access is an arrow into a union field. Unlike gen_expr which loads
+    // the union content (possibly a pointer), this computes the ADDRESS
+    // of the union field, avoiding a spurious extra dereference.
+    // Cases:
+    //   Ident (e.g. L): dst = &L (lea r13+off)
+    //   Arrow on non-union (e.g. L->ci): dst = *(&L+off) = L->ci (pointer value)
+    //   Arrow on union (e.g. ci->func where func is StkIdRel union):
+    //     dst = address of union field (pointer + inner_offset)
+    //   Dot on union-arrow (e.g. x->y.z where y is union):
+    //     recurse on x, add inner field offset
+    fn gen_lvalue_addr_union_arrow_addr(&mut self, e: &Expr, dst: u8) -> bool {
+        match e {
+            Expr::Ident { .. } => {
+                // Base is a variable: load its VALUE (pointer to struct).
+                // gen_lvalue_addr would compute &var (address of the variable
+                // slot), but we need the variable's value (the pointer).
+                self.gen_expr(e, dst);
+                true
+            }
+            Expr::Member { expr, field, is_arrow, .. } => {
+                if *is_arrow {
+                    let target_ty = self.resolve_complete_struct_ty(
+                        Self::member_target_ty(expr.ty(), true));
+                    if let Type::Union(_, ref fields, _, _) = target_ty {
+                        if let Some((f, extra)) = find_field(fields, &field.name) {
+                            if matches!(f.ty, Type::Union(_, _, _, false)) {
+                                // Arrow into union field: compute address
+                                if !self.gen_lvalue_addr_union_arrow_addr(expr, dst) {
+                                    return false;
+                                }
+                                let off = (f.offset + extra) as i32;
+                                if off != 0 {
+                                    let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                                    self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                                    self.emit(&off.to_le_bytes());
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                    // Non-union field: load pointer value (normal arrow behavior)
+                    self.gen_expr(expr, dst);
+                    // Add field offset
+                    let field_off = match &target_ty {
+                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                            find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                        }
+                        _ => None,
+                    };
+                    if let Some(off) = field_off {
+                        let off = off as i32;
+                        if off != 0 {
+                            let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&off.to_le_bytes());
+                        }
+                    }
+                    true
+                } else {
+                    // Dot access: recurse to compute base address
+                    if !self.gen_lvalue_addr_union_arrow_addr(expr, dst) {
+                        return false;
+                    }
+                    // Add this field's offset
+                    let target_ty = self.resolve_complete_struct_ty(
+                        Self::member_target_ty(expr.ty(), false));
+                    let field_off = match &target_ty {
+                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                            find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                        }
+                        _ => None,
+                    };
+                    if let Some(off) = field_off {
+                        let off = off as i32;
+                        if off != 0 {
+                            let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&off.to_le_bytes());
+                        }
+                    }
+                    true
+                }
+            }
+            _ => {
+                // Fallback: use gen_lvalue_addr
+                self.gen_lvalue_addr(e, dst)
+            }
+        }
+    }
+
     /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
     /// 支持 Ident / Member / Index / Deref / Cast 递归组合, 例如
     /// `s.i[k]`, `p->arr[i].f`, `(*q).buf[n]`. 返回 false 表示无法处理.
@@ -21992,8 +22089,49 @@ impl Codegen {
             } => {
                 if *is_arrow {
                     self.gen_expr(expr, dst);
-                } else if !self.gen_lvalue_addr(expr, dst) {
-                    return false;
+                } else {
+                    // Fix: (ptr->union_field).member — ptr->union_field 加载
+                    // union 内容 (可能是指针), 再被 gen_lvalue_addr 当作地址
+                    // 解引用, 导致多余一次 mov (e.g. StkIdRel union 的 .p
+                    // 成员访问: L->top.p / ci->func.p 多一次解引用).
+                    // 解决: 直接计算 union 字段地址而非加载其值.
+                    // 若 union 字段本身是指针类型 (如 StkId p), 需额外
+                    // 加载指针值 (否则偏移加到了 union 地址而非指针值上).
+                    let mut handled = false;
+                    if let Expr::Member { expr: inner_expr, field: inner_field, is_arrow: true, .. } = expr.as_ref() {
+                        let inner_target = self.resolve_complete_struct_ty(
+                            Self::member_target_ty(inner_expr.ty(), true));
+                        if let Type::Union(_, ref fields, _, _) = inner_target {
+                            if let Some((f, extra)) = find_field(fields, &inner_field.name) {
+                                let is_union_field = matches!(f.ty, Type::Union(_, _, _, false));
+                                let is_ptr_field = matches!(f.ty, Type::Ptr(_));
+                                if is_union_field || is_ptr_field {
+                                    // 递归计算内部地址: 先算 ptr->union 的地址,
+                                    // 再加内层 union 字段偏移.
+                                    if self.gen_lvalue_addr_union_arrow_addr(inner_expr, dst) {
+                                        let u_off = (f.offset + extra) as i32;
+                                        if u_off != 0 {
+                                            let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                                            self.emit(&u_off.to_le_bytes());
+                                        }
+                                        // 若 union 字段是指针类型, 须加载指针值
+                                        // (e.g. L->top.p: dst = &L->top, 须
+                                        // 加载 L->top 中存储的 StkId 指针值)
+                                        if is_ptr_field {
+                                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                                            let modrm = 0x00 | ((dst & 7) << 3) | (dst & 7);
+                                            self.emit(&[rex, 0x8B, modrm]);
+                                        }
+                                    }
+                                    handled = true;
+                                }
+                            }
+                        }
+                    }
+                    if !handled && !self.gen_lvalue_addr(expr, dst) {
+                        return false;
+                    }
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
@@ -24375,19 +24513,24 @@ impl Codegen {
                         v.ty.size()
                     };
                     let slots = ((alloc_sz.saturating_add(7) / 8).max(1)) as i64;
-                    let used = total_slots.saturating_mul(8);
-                    let hdr = 48i64 + temp_slots as i64 * 8;
-                    let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
-                    var_map
-                        .entry(v.name.name.clone())
-                        .or_insert((off, v.ty.clone()));
-                    *total_slots = total_slots.saturating_add(slots);
-                    let rz_slots = kasan_rz_slots as i64;
-                    *total_slots = total_slots.saturating_add(rz_slots);
-                    for j in 0..kasan_rz_slots {
-                        let rz_name = format!("__kasan_rz_{}_{}", v.name.name, j);
-                        let rz_off = off - slots * 8 - j as i64 * 8;
-                        var_map.entry(rz_name).or_insert((rz_off, Type::Void));
+                    // 只在变量名尚未存在时插入并递增 total_slots.
+                    // 同名变量在不同作用域出现多次 (如 if/else 两个分支
+                    // 各声明 io) 时, or_insert 不插入但 total_slots 仍
+                    // 递增会导致后续变量/参数的偏移计算错误, 引发槽位
+                    // 碰撞 (x_ 和 L 被分配到同一偏移, lua_pushcclosure 崩溃).
+                    if !var_map.contains_key(&v.name.name) {
+                        let used = total_slots.saturating_mul(8);
+                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
+                        var_map.insert(v.name.name.clone(), (off, v.ty.clone()));
+                        *total_slots = total_slots.saturating_add(slots);
+                        let rz_slots = kasan_rz_slots as i64;
+                        *total_slots = total_slots.saturating_add(rz_slots);
+                        for j in 0..kasan_rz_slots {
+                            let rz_name = format!("__kasan_rz_{}_{}", v.name.name, j);
+                            let rz_off = off - slots * 8 - j as i64 * 8;
+                            var_map.entry(rz_name).or_insert((rz_off, Type::Void));
+                        }
                     }
                 }
                 BlockItem::Stmt(s) => {
