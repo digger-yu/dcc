@@ -98,8 +98,10 @@ pub enum AddressBase {
     GlobalSymbolLoad { symbol_key: String },
     /// Upvar 加载: base = LOAD(FP + upvar_offset)
     UpvarLoad { offset: i64 },
-    /// 来自另一个表达式的地址 (递归, 如 (*p)[i], s.arr[i])
+    /// 来自另一个表达式的地址 (递归, 如 s.arr[i])
     ExprAddr { sub: Box<AddressDescriptor> },
+    /// 子表达式是指针 lvalue: 先取其地址并加载指针值作为基址。
+    PointerValue { sub: Box<AddressDescriptor> },
 }
 
 /// 字节偏移: 可能是编译期常量, 也可能含运行时分量。
@@ -209,8 +211,18 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
         }
 
         Expr::Index { arr, idx, ty: elem_ty, .. } => {
-            // arr[i] 的地址 = arr 的基址 + i * sizeof(elem_ty)
-            let base_addr = compute_lvalue_address(resolver, arr, ctx);
+            // 数组/向量对象下标: 基址就是对象地址。
+            // 指针成员下标 (如 s.p[i]): 先读取成员中保存的指针值。
+            let mut base_addr = compute_lvalue_address(resolver, arr, ctx);
+            if matches!(arr.as_ref(), Expr::Member { .. }) && matches!(arr.ty(), Type::Ptr(_)) {
+                base_addr = AddressDescriptor {
+                    base: AddressBase::PointerValue {
+                        sub: Box::new(base_addr),
+                    },
+                    offset: ByteOffset::Constant(0),
+                    element_info: element_info_from_type(elem_ty),
+                };
+            }
             let idx_offset = compute_index_offset(idx, elem_ty);
             combine_address(base_addr, idx_offset, elem_ty)
         }
@@ -245,7 +257,6 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
 
         Expr::Deref { e, ty, .. } => {
             // *p: p 的值就是目标地址。
-            // 先计算 p 的地址, 然后加载指针值。
             let ptr_addr = compute_lvalue_address(resolver, e, ctx);
             AddressDescriptor {
                 base: AddressBase::ExprAddr {

@@ -19151,6 +19151,19 @@ impl Codegen {
             AddressBase::ExprAddr { sub } => {
                 return self.emit_address_descriptor(sub, original_expr, dst);
             }
+            AddressBase::PointerValue { sub } => {
+                if !self.emit_address_descriptor(sub, original_expr, dst) {
+                    return false;
+                }
+                if dst == 0 {
+                    self.emit_load_mem(8);
+                } else {
+                    self.push(dst);
+                    self.pop(0);
+                    self.emit_load_mem(8);
+                    self.mov(dst, 0);
+                }
+            }
         }
 
         // Step 2: 发射常量偏移
@@ -19223,6 +19236,15 @@ impl Codegen {
                 if !self.emit_address_descriptor(sub, index_expr, BASE) {
                     return false;
                 }
+            }
+            AddressBase::PointerValue { sub } => {
+                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }) {
+                    return false;
+                }
+                if !self.emit_address_descriptor(sub, index_expr, BASE) {
+                    return false;
+                }
+                self.emit_load_mem(8);
             }
         }
 
