@@ -58,7 +58,8 @@ impl ConstValue {
 
 pub fn eval(expr: &Expr) -> ConstEvalResult {
     // 旧 API: 永远返回整数; 浮点截断, 其他返回 NotConstant
-    match eval_full(expr) {
+    // fenv_access false for backwards compatibility with old call sites
+    match eval_full(expr, false) {
         Ok(ConstValue::Int(v)) => Ok(v),
         Ok(ConstValue::Float(f)) => Ok(f as i128),
         Ok(_) => Err(ConstEvalError::NotConstant),
@@ -66,7 +67,7 @@ pub fn eval(expr: &Expr) -> ConstEvalResult {
     }
 }
 
-pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
+pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match expr {
         Expr::Int { v, .. } => Ok(ConstValue::Int(*v)),
         Expr::Char { v, .. } => Ok(ConstValue::Int(*v)),
@@ -114,7 +115,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 if *is_arrow {
                     // Arrow form: ptr->field is (*ptr).field
                     // Evaluate the pointer as an address constant
-                    let base_addr = match eval_full(expr)? {
+                    let base_addr = match eval_full(expr, fenv_access)? {
                         ConstValue::Addr { name, offset } => (name, offset),
                         _ => return Err(ConstEvalError::NotConstant),
                     };
@@ -145,7 +146,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     e: expr.clone(),
                     ty: Type::Ptr(Box::new(crate::ast::QualType::new(expr.ty()))),
                     span: crate::diagnostics::Span::point("", 0, 0),
-                })? {
+                }, fenv_access)? {
                     ConstValue::Addr { name, offset } => (name, offset),
                     _ => return Err(ConstEvalError::NotConstant),
                 };
@@ -185,7 +186,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         Expr::AlignofTy { ty, .. } => Ok(ConstValue::Int(ty.align() as i128)),
         Expr::AlignofExpr { e, .. } => Ok(ConstValue::Int(e.ty().align() as i128)),
         Expr::Unary { op, e, .. } => {
-            let v = eval_full(e)?;
+            let v = eval_full(e, fenv_access)?;
             match op {
                 UnOp::Neg => match v {
                     ConstValue::Int(i) => {
@@ -210,7 +211,12 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                                 .ok_or(ConstEvalError::Overflow)
                         }
                     }
-                    ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
+                    ConstValue::Float(f) => {
+                        if fenv_access {
+                            return Err(ConstEvalError::NotConstant);
+                        }
+                        Ok(ConstValue::Float(-f))
+                    },
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Not => match v {
@@ -242,7 +248,12 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     }
                     _ => Err(ConstEvalError::NotConstant),
                 },
-                UnOp::Plus => Ok(v),
+                UnOp::Plus => {
+                    if matches!(v, ConstValue::Float(_)) && fenv_access {
+                        return Err(ConstEvalError::NotConstant);
+                    }
+                    Ok(v)
+                },
             }
         }
         Expr::Binop { op, l, r, ty: ref binop_ty, .. } => {
@@ -270,8 +281,8 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 let l_ptr = matches!(l.ty(), Type::Ptr(_) | Type::Array(_, _));
                 let r_ptr = matches!(r.ty(), Type::Ptr(_) | Type::Array(_, _));
                 if l_ptr && !r_ptr {
-                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(l) {
-                        let n = eval_full(r)?
+                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(l, fenv_access) {
+                        let n = eval_full(r, fenv_access)?
                             .as_int()
                             .ok_or(ConstEvalError::NotConstant)?;
                         let scale = pointee_byte_scale(&l.ty())
@@ -287,8 +298,8 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                         });
                     }
                 } else if r_ptr && !l_ptr {
-                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(r) {
-                        let n = eval_full(l)?
+                    if let Ok(ConstValue::Addr { name, offset }) = eval_full(r, fenv_access) {
+                        let n = eval_full(l, fenv_access)?
                             .as_int()
                             .ok_or(ConstEvalError::NotConstant)?;
                         let scale = pointee_byte_scale(&r.ty())
@@ -300,19 +311,19 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     }
                 }
             }
-            let lv = eval_full(l)?;
-            let rv = eval_full(r)?;
+            let lv = eval_full(l, fenv_access)?;
+            let rv = eval_full(r, fenv_access)?;
             // 整数算术/比较统一走类型感知路径 (arith_binop_values):
             // 按 binop_ty 做无符号重解释/规范化, 比较按操作数自身
             // 类型宽度与符号性 (C99 6.3.1.8)。
             match op {
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
-                _ => arith_binop_values(*op, binop_ty, l, r, lv, rv),
+                _ => arith_binop_values(*op, binop_ty, l, r, lv, rv, fenv_access),
             }
         }
         Expr::Cast { ty, e, .. } => {
             // 强制类型转换: 数值保留, 指针转换产生 NotConstant
-            let v = eval_full(e)?;
+            let v = eval_full(e, fenv_access)?;
             // 整数类型间: 根据目标类型位宽截断/零扩展/符号扩展
             // (否则 `~0U` 转为 u64 会保持 -1, 与 C 语义不符)
             if let ConstValue::Int(i) = v {
@@ -381,14 +392,14 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             cond, then_, else_, ..
         } => {
             if eval(cond)? != 0 {
-                eval_full(then_)
+                eval_full(then_, fenv_access)
             } else {
-                eval_full(else_)
+                eval_full(else_, fenv_access)
             }
         }
         Expr::Comma { l, r, .. } => {
             eval(l)?;
-            eval_full(r)
+            eval_full(r, fenv_access)
         }
         Expr::ComplexLit { real, imag, .. } => {
             // 复数字面量: 返回虚部值 (实部在 __real__ 提取时使用)
@@ -406,7 +417,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         }
         Expr::Real { e, .. } => {
             // __real__ expr: 提取实部
-            match eval_full(e)? {
+            match eval_full(e, false)? {
                 ConstValue::Float(f) => {
                     // 如果内部是 ComplexLit, 实部已在 eval_full 中编码
                     // 对于纯复数字面量, 直接返回 real 字段
@@ -423,7 +434,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         }
         Expr::Imag { e, .. } => {
             // __imag__ expr: 提取虚部
-            match eval_full(e)? {
+            match eval_full(e, false)? {
                 ConstValue::Float(f) => {
                     if let Expr::ComplexLit { real: _, imag, .. } = e.as_ref() {
                         Ok(ConstValue::Float(*imag))
@@ -592,12 +603,12 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
         match item {
             BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                 // 中间语句: 必须是可求值的常量表达式 (结果丢弃)
-                eval_with_env(e, &env)?;
+                eval_with_env(e, &env, false)?;
             }
             BlockItem::Decl(Decl::Var(v)) => {
                 // Track variable binding: evaluate init and store in env
                 if let Some(init) = &v.init {
-                    let val = eval_with_env(init, &env)?;
+                    let val = eval_with_env(init, &env, false)?;
                     env.insert(v.name.name.clone(), val);
                 }
             }
@@ -606,17 +617,17 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
     }
     // 最后一个语句的值即为语句表达式的值
     match items.last().unwrap() {
-        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_with_env(e, &env),
+        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_with_env(e, &env, false),
         _ => Err(ConstEvalError::NotConstant),
     }
 }
 
 /// Like eval_full but with a variable environment for looking up
 /// identifiers bound within statement expressions.
-fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<ConstValue, ConstEvalError> {
-    // Check if this is a simple identifier lookup in the env
+fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+    // Check if this is a simple identifier lookup in the ctx
     if let Expr::Ident { name, .. } = expr {
-        if let Some(val) = env.get(&name.name) {
+        if let Some(val) = ctx.get(&name.name) {
             return Ok(val.clone());
         }
     }
@@ -624,8 +635,8 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
     // then apply the same operation logic as eval_full
     match expr {
         Expr::Binop { op, l, r, ty, .. } => {
-            let lv = eval_with_env(l, env)?;
-            let rv = eval_with_env(r, env)?;
+            let lv = eval_with_env(l, ctx, fenv_access)?;
+            let rv = eval_with_env(r, ctx, fenv_access)?;
             match op {
                 BinOp::AndAnd => {
                     Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 { 0 }
@@ -635,11 +646,11 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                     (lv.as_int().unwrap_or(0) != 0 || rv.as_int().unwrap_or(0) != 0) as i128,
                 )),
                 // 算术/比较统一走类型感知路径 (与 eval_binop 共用)
-                _ => arith_binop_values(*op, ty, l, r, lv, rv),
+                _ => arith_binop_values(*op, ty, l, r, lv, rv, fenv_access),
             }
         }
         Expr::Unary { op, e, .. } => {
-            let v = eval_with_env(e, env)?;
+            let v = eval_with_env(e, ctx, fenv_access)?;
             match op {
                 UnOp::Neg => match v {
                     ConstValue::Int(i) => {
@@ -661,7 +672,12 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                             i.checked_neg().map(ConstValue::Int).ok_or(ConstEvalError::Overflow)
                         }
                     }
-                    ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
+                    ConstValue::Float(f) => {
+                        if fenv_access {
+                            return Err(ConstEvalError::NotConstant);
+                        }
+                        Ok(ConstValue::Float(-f))
+                    },
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Not => match v {
@@ -691,11 +707,16 @@ fn eval_with_env(expr: &Expr, env: &HashMap<String, ConstValue>) -> Result<Const
                     }
                     _ => Err(ConstEvalError::NotConstant),
                 },
-                UnOp::Plus => Ok(v),
+                UnOp::Plus => {
+                    if matches!(v, ConstValue::Float(_)) && fenv_access {
+                        return Err(ConstEvalError::NotConstant);
+                    }
+                    Ok(v)
+                },
             }
         }
-        Expr::Cast { e, .. } => eval_with_env(e, env),
-        _ => eval_full(expr),
+        Expr::Cast { e, .. } => eval_with_env(e, ctx, fenv_access),
+        _ => eval_full(expr, fenv_access),
     }
 }
 
@@ -768,12 +789,13 @@ fn arith_binop_values(
     r: &Expr,
     lv: ConstValue,
     rv: ConstValue,
+    fenv_access: bool,
 ) -> Result<ConstValue, ConstEvalError> {
     let is_signed = !is_unsigned_int_ty(binop_ty);
     match op {
-        BinOp::Add => add_values(lv, rv),
-        BinOp::Sub => sub_values(lv, rv),
-        BinOp::Mul => mul_values(lv, rv),
+        BinOp::Add => add_values(lv, rv, fenv_access),
+        BinOp::Sub => sub_values(lv, rv, fenv_access),
+        BinOp::Mul => mul_values(lv, rv, fenv_access),
         BinOp::Div | BinOp::Mod => {
             if let (ConstValue::Int(a), ConstValue::Int(b)) = (&lv, &rv) {
                 let (a, b) = (*a, *b);
@@ -795,9 +817,9 @@ fn arith_binop_values(
                 };
                 val.map(ConstValue::Int).ok_or(ConstEvalError::Overflow)
             } else if op == BinOp::Div {
-                div_values(lv, rv)
+                div_values(lv, rv, fenv_access)
             } else {
-                mod_values(lv, rv)
+                mod_values(lv, rv, fenv_access)
             }
         }
         BinOp::And => match (lv, rv) {
@@ -895,47 +917,107 @@ fn pointee_byte_scale(ty: &Type) -> Option<i128> {
     }
 }
 
-fn add_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+fn add_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_add(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a + b)),
-        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 + b)),
-        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a + b as f64)),
+        (ConstValue::Float(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a + b))
+        },
+        (ConstValue::Int(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a as f64 + b))
+        },
+        (ConstValue::Float(a), ConstValue::Int(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a + b as f64))
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn sub_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+fn sub_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_sub(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a - b)),
-        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 - b)),
-        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a - b as f64)),
+        (ConstValue::Float(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a - b))
+        },
+        (ConstValue::Int(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a as f64 - b))
+        },
+        (ConstValue::Float(a), ConstValue::Int(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a - b as f64))
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn mul_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+fn mul_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_mul(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a * b)),
-        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 * b)),
-        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a * b as f64)),
+        (ConstValue::Float(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a * b))
+        },
+        (ConstValue::Int(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a as f64 * b))
+        },
+        (ConstValue::Float(a), ConstValue::Int(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a * b as f64))
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn div_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+fn div_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
         (ConstValue::Int(a), ConstValue::Int(b)) => a
             .checked_div(b)
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
-        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a / b)),
-        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 / b)),
-        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a / b as f64)),
+        (ConstValue::Float(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a / b))
+        },
+        (ConstValue::Int(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a as f64 / b))
+        },
+        (ConstValue::Float(a), ConstValue::Int(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
+            Ok(ConstValue::Float(a / b as f64))
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn mod_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+fn mod_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
         (ConstValue::Int(a), ConstValue::Int(b)) => a
@@ -943,13 +1025,15 @@ fn mod_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
+            if fenv_access {
+                return Err(ConstEvalError::NotConstant);
+            }
             // C fmod semantics: a - trunc(a/b) * b
             // Rust f64 % f64 matches C fmod()
             if b == 0.0 {
                 return Err(ConstEvalError::DivisionByZero);
             }
-            Ok(ConstValue::Float(a % b))
-        }
+            Ok(ConstValue::Float(a % b))        }
         _ => Err(ConstEvalError::NotConstant),
     }
 }
@@ -1373,21 +1457,21 @@ mod tests {
     fn float_arithmetic_eval() {
         // 浮点 + 浮点
         let a = bin_f(BinOp::Add, 1.5, 2.25, Type::Double, Type::Double);
-        assert_eq!(eval_full(&a), Ok(ConstValue::Float(3.75)));
+        assert_eq!(eval_full(&a, false), Ok(ConstValue::Float(3.75)));
         // 浮点 * 浮点
         let m = bin_f(BinOp::Mul, 2.0, 3.0, Type::Double, Type::Double);
-        assert_eq!(eval_full(&m), Ok(ConstValue::Float(6.0)));
+        assert_eq!(eval_full(&m, false), Ok(ConstValue::Float(6.0)));
         // 浮点 / 0 返回有限 NaN/inf, 不报错 (符合 IEEE 754)
         let d = bin_f(BinOp::Div, 1.0, 0.0, Type::Double, Type::Double);
-        assert!(matches!(eval_full(&d), Ok(ConstValue::Float(_))));
+        assert!(matches!(eval_full(&d, false), Ok(ConstValue::Float(_))));
     }
 
     #[test]
     fn float_comparison_eval() {
         let a = bin_f(BinOp::Lt, 1.0, 2.0, Type::Double, Type::Double);
-        assert_eq!(eval_full(&a), Ok(ConstValue::Int(1)));
+        assert_eq!(eval_full(&a, false), Ok(ConstValue::Int(1)));
         let b = bin_f(BinOp::Ge, 2.0, 2.0, Type::Double, Type::Double);
-        assert_eq!(eval_full(&b), Ok(ConstValue::Int(1)));
+        assert_eq!(eval_full(&b, false), Ok(ConstValue::Int(1)));
     }
 
     #[test]
@@ -1400,7 +1484,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&e), Ok(ConstValue::Float(3.5)));
+        assert_eq!(eval_full(&e, false), Ok(ConstValue::Float(3.5)));
     }
 
     fn bin_f(op: BinOp, l: f64, r: f64, lt: Type, rt: Type) -> Expr {
@@ -1420,7 +1504,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Char.into())),
         };
-        match eval_full(&s) {
+        match eval_full(&s, false) {
             Ok(ConstValue::Str { data, label }) => {
                 assert_eq!(data, b"hello\0");
                 assert!(label.starts_with(".L.str.const."));
@@ -1444,7 +1528,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Int.into())),
         };
-        match eval_full(&addr) {
+        match eval_full(&addr, false) {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "arr");
                 assert_eq!(offset, 0);
@@ -1475,7 +1559,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Char.into())),
         };
-        match eval_full(&addr) {
+        match eval_full(&addr, false) {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "buf");
                 assert_eq!(offset, 4);
@@ -1494,7 +1578,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Void,
         };
-        match eval_full(&e) {
+        match eval_full(&e, false) {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "my_label");
                 assert_eq!(offset, 0);
@@ -1524,7 +1608,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&r), Ok(ConstValue::Float(3.0)));
+        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(3.0)));
     }
 
     #[test]
@@ -1541,7 +1625,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&im), Ok(ConstValue::Float(4.0)));
+        assert_eq!(eval_full(&im, false), Ok(ConstValue::Float(4.0)));
     }
 
     #[test]
@@ -1553,7 +1637,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&r), Ok(ConstValue::Float(5.0)));
+        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(5.0)));
     }
 
     #[test]
@@ -1565,7 +1649,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Int,
         };
-        assert_eq!(eval_full(&im), Ok(ConstValue::Int(0)));
+        assert_eq!(eval_full(&im, false), Ok(ConstValue::Int(0)));
     }
 
     #[test]
@@ -1583,7 +1667,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Int,
         };
-        assert_eq!(eval_full(&se), Ok(ConstValue::Int(42)));
+        assert_eq!(eval_full(&se, false), Ok(ConstValue::Int(42)));
     }
 
     #[test]
@@ -1607,7 +1691,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Int,
         };
-        assert_eq!(eval_full(&se), Ok(ConstValue::Int(12)));
+        assert_eq!(eval_full(&se, false), Ok(ConstValue::Int(12)));
     }
 
     #[test]
@@ -1622,6 +1706,6 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Void,
         };
-        assert_eq!(eval_full(&se), Ok(ConstValue::Int(0)));
+        assert_eq!(eval_full(&se, false), Ok(ConstValue::Int(0)));
     }
 }

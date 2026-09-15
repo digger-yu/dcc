@@ -577,7 +577,7 @@ fn asm_constraint_is_immediate(constraint: &str) -> bool {
 }
 
 fn asm_expr_can_be_immediate(expr: &Expr) -> bool {
-    match const_eval::eval_full(expr) {
+    match const_eval::eval_full(expr, false) {
         Ok(ConstValue::Int(_)) | Ok(ConstValue::Float(_)) | Ok(ConstValue::Addr { .. }) => true,
         Ok(ConstValue::Str { .. }) | Ok(ConstValue::Bytes { .. }) => true,
         Err(_) => false,

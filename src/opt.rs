@@ -693,7 +693,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 let binop_expr = Expr::Binop {
                     op, l: l.clone(), r: r.clone(), span: span.clone(), ty: ty.clone(),
                 };
-                if let Ok(v) = const_eval::eval_full(&binop_expr) {
+                if let Ok(v) = const_eval::eval_full(&binop_expr, fenv_access) {
                     if let Some(iv) = v.as_int() {
                         return Expr::Int { v: iv, span, ty };
                     }
@@ -726,7 +726,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 let unary_expr = Expr::Unary {
                     op, e: e.clone(), span: span.clone(), ty: ty.clone(),
                 };
-                if let Ok(v) = const_eval::eval_full(&unary_expr) {
+                if let Ok(v) = const_eval::eval_full(&unary_expr, fenv_access) {
                     if let Some(iv) = v.as_int() {
                         return Expr::Int { v: iv, span, ty };
                     }

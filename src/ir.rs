@@ -1508,7 +1508,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
     // 地址常量 (ConstValue::Addr): 指针算术/成员偏移折叠成功即为
     // 链接期可重定位常量 (C11 6.6p9), 如 &((arr + 1)->field)
     if matches!(
-        const_eval::eval_full(expr),
+        const_eval::eval_full(expr, false),
         Ok(const_eval::ConstValue::Addr { .. })
     ) {
         return true;

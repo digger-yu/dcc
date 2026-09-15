@@ -2114,7 +2114,8 @@ impl Codegen {
         // SysV AMD64 ABI: 超过 64 字节的聚合类型无法放入寄存器集
         // (6 GP + 8 XMM 共 64 字节), 直接强制 Memory 类.
         // long double (x86 80-bit) 也强制 Memory.
-        if size > 64 || matches!(ty, Type::LongDouble) {
+        // Complex: any complex type is returned via memory regardless of size.
+        if size > 64 || matches!(ty, Type::LongDouble) || matches!(ty, Type::Complex(_)) {
             return vec![AbiClass::Memory];
         }
         let num_eightbytes = size.div_ceil(8);
@@ -4014,7 +4015,7 @@ impl Codegen {
         match e {
             Expr::ComplexLit { real, imag, .. } => Some((*real, *imag)),
             Expr::Imag { e: inner, .. } => {
-                Some((0.0, const_eval::eval_full(inner).ok()?.as_float()?))
+                Some((0.0, const_eval::eval_full(inner, false).ok()?.as_float()?))
             }
             Expr::Float { v, .. } => Some((*v, 0.0)),
             Expr::Int { v, .. } => Some((*v as f64, 0.0)),
@@ -4142,7 +4143,7 @@ impl Codegen {
             }
         }
         if is_float {
-            match const_eval::eval_full(init).ok()? {
+            match const_eval::eval_full(init, false).ok()? {
                 const_eval::ConstValue::Float(f) => {
                     if sz == 4 {
                         Some((f as f32).to_bits().to_le_bytes().to_vec())
@@ -4271,7 +4272,7 @@ impl Codegen {
     /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等
     /// 统一走 const_eval 的 ConstValue::Addr (符号 + 字节偏移)。
     fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
-        match const_eval::eval_full(init) {
+        match const_eval::eval_full(init, false) {
             Ok(const_eval::ConstValue::Addr { name, offset }) => {
                 Some((name, offset as i64))
             }
@@ -10016,7 +10017,16 @@ impl Codegen {
                 // 常量折叠: 若两个操作数都是整数常量, 直接在编译期求值,
                 // 避免为 `1 << 6` 等常量表达式生成运行时计算代码.
                 // 这也能规避嵌套 BinOp 在特定寄存器分配下的 codegen bug.
-                if !matches!(op, BinOp::AndAnd | BinOp::OrOr) {
+                // 折叠仅限整型 Binop: 浮点/复数/向量运算必须走下方 SSE
+                // 路径。const_eval::eval 是整型 API, 会忽略 fenv_access 并
+                // 把浮点结果截断为整数 (1.0/3.0 → 0); FENV_ACCESS ON 时
+                // 浮点运算须按运行时舍入模式求值。浮点常量折叠由 opt.rs
+                // 在 fenv_access=OFF 时于优化阶段完成。
+                if !matches!(op, BinOp::AndAnd | BinOp::OrOr)
+                    && Self::is_integer_type(&l.ty())
+                    && Self::is_integer_type(&r.ty())
+                    && Self::is_integer_type(binop_ty)
+                {
                     if let Ok(val) = const_eval::eval(e) {
                         self.mov_imm(dst, val);
                         return;
@@ -13883,14 +13893,15 @@ impl Codegen {
         self.gen_expr(e, 0);
         match src_ty {
             Type::Complex(ref inner) if matches!(&inner.base, Type::Float | Type::Double) => {
-                let pfx = if matches!(&inner.base, Type::Float) {
-                    0xF3
-                } else {
-                    0xF2
-                };
-                self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off);
-                self.gen_complex_imag_into_xmm0(e, &inner.base);
-                self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off + inner.size() as i64);
+                // After gen_expr for complex returned via memory, rax (0) has the address
+                // Just copy all bytes from *rax to the destination slot, preserves bit pattern
+                let sz = src_ty.size();
+                // rsi = source address (rax), rdi = destination address (r13 + dst_off)
+                // rcx = size in bytes
+                self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
+                self.emit_lea_r13(7, dst_off); // lea rdi, [r13 + dst_off]
+                self.mov_imm(1, sz as i128); // mov rcx, sz
+                self.emit(&[0xFC, 0xF3, 0xA4]); // rep movsb
             }
             Type::Float => self.store_xmm32_stack(0, dst_off),
             Type::Double | Type::LongDouble => self.store_xmm64_stack(0, dst_off),
@@ -15624,7 +15635,7 @@ impl Codegen {
                 }
             }
         }
-        if let Ok(cv) = const_eval::eval_full(e) {
+        if let Ok(cv) = const_eval::eval_full(e, false) {
             match cv {
                 const_eval::ConstValue::Float(f) => {
                     // 按目标宽度截断: 窄元素 (char/short) 数组不能用表达式
@@ -19248,7 +19259,7 @@ impl Codegen {
         action: crate::semantics::MaterializeAction,
         index_expr: Option<&Expr>,
         original_expr: &Expr,
-        arr_expr: Option<&Expr>,
+        _arr_expr: Option<&Expr>,
         dst: u8,
     ) -> bool {
         use crate::semantics::MaterializeAction as MA;
@@ -19375,7 +19386,6 @@ impl Codegen {
                     let inner_sz = inner.base.size();
                     let result_off = -self.frame_size + 8;
                     self.emit_lea_r13(6, result_off); // rsi = source
-                    let pfx = if matches!(inner.base, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     // 存储实部: xmm0 → [rcx]
                     self.emit(&[0x48, 0x89, 0xf2]); // mov rdx, rsi
                     if matches!(inner.base, Type::Float) {
@@ -31494,7 +31504,7 @@ impl Codegen {
 
     /// 求值 asm 操作数 (用于 "i" 约束的立即数/符号替换)
     fn eval_asm_operand(expr: &Expr) -> Option<String> {
-        match const_eval::eval_full(expr) {
+        match const_eval::eval_full(expr, false) {
             Ok(ConstValue::Int(v)) => return Some(v.to_string()),
             Ok(ConstValue::Float(f)) => return Some((f as i128).to_string()),
             Ok(ConstValue::Addr { name, offset }) => {

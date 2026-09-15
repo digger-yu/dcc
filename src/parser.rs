@@ -4339,7 +4339,7 @@ impl<'a> Parser<'a> {
                 let init = self.parse_expr_bp(2)?;
                 // C23 constexpr 变量: 初始化器必须是编译期常量
                 if attrs.is_constexpr {
-                    match const_eval::eval_full(&init) {
+                    match const_eval::eval_full(&init, self.opts.fenv_access) {
                         Ok(_) => {} // 常量表达式, OK
                         Err(_) => {
                             self.err_here(
@@ -7200,7 +7200,7 @@ impl<'a> Parser<'a> {
                             }
                             Err(_) => {
                                 // 非整型常量: 尝试浮点截断 (GCC 兼容)
-                                match crate::const_eval::eval_full(&e) {
+                                match crate::const_eval::eval_full(&e, self.opts.fenv_access) {
                                     Ok(crate::const_eval::ConstValue::Float(f)) if f >= 0.0 => {
                                         Some(f as u32)
                                     }
@@ -10116,7 +10116,13 @@ impl<'a> Parser<'a> {
                 // 然后吃掉一个 *, 直到遇到 ( 或 ).
                 loop {
                     while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                        self.skip_attributes();
+                        let attrs = self.parse_attributes();
+                        // 应用 vector_size: 将基类型包装为 Vector
+                        if let Some(vsize) = attrs.vector_size {
+                            let elem_size = ty.size().max(1);
+                            let count = vsize / elem_size;
+                            ty = Type::Vector(Box::new(ty.into()), count);
+                        }
                     }
                     // 跳过地址空间限定符 (如 __seg_gs), 它们出现在类型和 * 之间
                     self.skip_ptr_qualifiers();
