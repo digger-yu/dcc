@@ -8315,8 +8315,9 @@ impl Codegen {
             .flatten()
             .filter(|l| !matches!(l, ArgLoc::Stack(_)))
             .count();
-        let hidden_slots = usize::from(sret_off.is_some()) + usize::from(direct.is_none());
+        let hidden_slots = usize::from(sret_off.is_some());
         let stage_base = (stack + 7) & !7;
+        // indirect call callee stored separately from parameter staging
         // force_mem 区起点 (sub 后 rsp) 必须对齐到 force_mem 参数的最大对齐值.
         // 否则 align=32 的 agg 会在 16 对齐的地址上错位.
         let frame_align = max_force_align.max(16); // 至少 16 (SysV ABI call 对齐)
@@ -8353,7 +8354,7 @@ impl Codegen {
         self.emit_sub_rsp(frame_bytes as i64);
 
         let mut stage = stage_base;
-        let sret_stage = if let Some(off) = sret_off {
+        let sret_slot = if let Some(off) = sret_off {
             self.emit_lea_r13(0, off);
             self.store_rsp_qword(0, stage);
             let slot = stage;
@@ -8362,12 +8363,14 @@ impl Codegen {
         } else {
             None
         };
-        let callee_stage = if direct.is_none() {
+        // For indirect calls, callee is stored in a separate scratch area,
+        // not in the parameter staging area (which is used for register-passed args).
+        // Callee scratch starts after all parameters.
+        let callee_scratch = if direct.is_none() {
+            let scratch_start = stage_base + ((register_pieces + hidden_slots) * 8 + 7) & !7;
             self.gen_expr(callee.expect("indirect call expression"), 0);
-            self.store_rsp_qword(0, stage);
-            let slot = stage;
-            stage += 8;
-            Some(slot)
+            self.store_rsp_qword(0, scratch_start);
+            Some(scratch_start)
         } else {
             None
         };
@@ -8817,7 +8820,7 @@ impl Codegen {
             }
         }
 
-        if let Some(slot) = sret_stage {
+        if let Some(slot) = sret_slot {
             self.load_rsp_qword(7, slot);
         }
         // 用 while 循环以便在合并时跳过下一个 entry (手动递增 i)
@@ -8883,7 +8886,7 @@ impl Codegen {
             let resolved_name = self.resolve_asm_label(&effective_name).to_string();
             self.call_label(&resolved_name);
         } else {
-            self.load_rsp_qword(11, callee_stage.unwrap());
+            self.load_rsp_qword(11, callee_scratch.unwrap());
             if self.target.indirect_branch_thunk_extern {
                 self.call_label("__x86_indirect_call_thunk_r11");
             } else {
