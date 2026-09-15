@@ -310,21 +310,29 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
 /// 根据存储信息确定基址 (Layer 1 -> Layer 2 的桥梁)。
 fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
     let base = match (&storage.class, ty) {
-        // 栈上数组: 取地址 (LEA FP+offset)
-        (StorageClass::Stack, Type::Array(_, _)) | (StorageClass::Stack, Type::Vector(_, _)) => {
-            AddressBase::StackFrame {
-                offset: storage.stack_offset.unwrap_or(0),
-            }
-        }
+        // 栈上数组/向量/结构体/联合体: 槽位即对象地址, 取地址 (LEA FP+offset)。
+        // 聚合是 lvalue, 标识符的值约定为其栈槽地址 (见 x86_64 gen_lvalue_addr
+        // 的 Ident 分支)。若误走 StackSlotLoad 会把槽内数据当指针解引用
+        // (如 s.v[0] 对含向量字段的结构体参数访问时段错误)。
+        (StorageClass::Stack, Type::Array(_, _))
+        | (StorageClass::Stack, Type::Vector(_, _))
+        | (StorageClass::Stack, Type::Struct(_, _, _, _))
+        | (StorageClass::Stack, Type::Union(_, _, _, _)) => AddressBase::StackFrame {
+            offset: storage.stack_offset.unwrap_or(0),
+        },
         // 栈上标量/指针: 需要加载值 (LOAD [FP+offset])
         (StorageClass::Stack, _) => AddressBase::StackSlotLoad {
             offset: storage.stack_offset.unwrap_or(0),
         },
-        // 全局数组: 取符号地址 (RIP-relative LEA)
+        // 全局数组/聚合: 取符号地址 (RIP-relative LEA)
         (StorageClass::GlobalData, Type::Array(_, _))
         | (StorageClass::GlobalData, Type::Vector(_, _))
+        | (StorageClass::GlobalData, Type::Struct(_, _, _, _))
+        | (StorageClass::GlobalData, Type::Union(_, _, _, _))
         | (StorageClass::GlobalTLS, Type::Array(_, _))
-        | (StorageClass::GlobalTLS, Type::Vector(_, _)) => AddressBase::GlobalSymbolAddr {
+        | (StorageClass::GlobalTLS, Type::Vector(_, _))
+        | (StorageClass::GlobalTLS, Type::Struct(_, _, _, _))
+        | (StorageClass::GlobalTLS, Type::Union(_, _, _, _)) => AddressBase::GlobalSymbolAddr {
             symbol_key: storage.symbol_key.unwrap_or_default(),
         },
         // 全局标量/指针: 加载符号值

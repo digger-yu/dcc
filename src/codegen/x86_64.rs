@@ -1731,6 +1731,18 @@ impl Codegen {
         classes.len() > 2
     }
 
+    /// SysV ABI: 16 字节且分类恰为 [Sse, SseUp] 的聚合整体在**一个** xmm
+    /// 寄存器中返回/传递 (SseUp 是同一 xmm 的高 64 位)。涵盖独立的
+    /// __m128 向量, 以及含单个 16B 向量字段 (或对齐填充) 的小结构体。
+    /// 注意区别于 [Sse, Sse] (如 struct{double,double}): 那是两个独立
+    /// 字段, 分别占 xmm0、xmm1, 不应整体当作 128 位处理。
+    fn is_sseup_128_aggregate(ty: &Type) -> bool {
+        ty.size() == 16 && {
+            let c = Self::abi_classes(ty);
+            c.len() == 2 && c[0] == AbiClass::Sse && c[1] == AbiClass::SseUp
+        }
+    }
+
     /// 判断是否为有符号整数类型 (用于 -ftrapv 等检查)
     fn is_signed_int(ty: &Type) -> bool {
         matches!(
@@ -2121,19 +2133,31 @@ impl Codegen {
         let num_eightbytes = size.div_ceil(8);
         let mut classes = vec![AbiClass::NoClass; num_eightbytes];
         Self::classify_field(ty, 0, &mut classes);
-        // Post-merger pass 1: NoClass → Memory
-        for c in classes.iter_mut() {
-            if *c == AbiClass::NoClass {
+        // Post-merger pass 1: 结构体**尾部之外**的 NoClass (即超过类型真实
+        // 大小、仅因 num_eightbytes 向上取整产生的槽) 保持 NoClass, 不参与
+        // 寄存器传递 (SysV ABI: 尾部填充不占 eightbyte)。这里无需转换。
+        // 注意: 历史实现把所有 NoClass 统一改成 Memory, 再在 pass 2 里升级为
+        // SseUp, 导致 16B 对齐但只含 8B double 的 aligned_d 被误判成
+        // [Sse, SseUp], 多出一个本不存在的高 8 字节。
+        // 仅当该 eightbyte 确实落在类型大小范围内才补 Memory (正常不会出现,
+        // 因为 struct 内的洞由字段重叠分类覆盖)。
+        for (i, c) in classes.iter_mut().enumerate() {
+            if *c == AbiClass::NoClass && i * 8 < size {
                 *c = AbiClass::Memory;
             }
         }
         // Post-merger pass 2: SSE 规则
-        // 若首个 eightbyte 为 SSE, 检查其余:
-        //   - SSE/SSEUP 或无数据填充 → 填充转 SSEUP
+        // 若首个 eightbyte 为 SSE, 检查其余**有数据的** eightbyte:
+        //   - SSE/SSEUP → 保留
         //   - 含非 SSE/SSEUP 数据 → 全部转 MEMORY
+        // 结构体尾部填充 (NoClass, i*8 >= size) 不参与判断, 也不升级为 SSEUP。
         if num_eightbytes > 1 && classes[0] == AbiClass::Sse {
             let mut all_sse_compatible = true;
             for (i, class) in classes.iter().enumerate().skip(1) {
+                if i * 8 >= size {
+                    // 尾部填充: 忽略
+                    continue;
+                }
                 if *class != AbiClass::Sse && *class != AbiClass::SseUp {
                     // 检查该 eightbyte 是否有字段数据
                     let lo = i * 8;
@@ -2145,12 +2169,9 @@ impl Codegen {
                 }
             }
             if all_sse_compatible {
-                for class in classes.iter_mut().skip(1) {
-                    if *class == AbiClass::Memory {
-                        // NoClass 填充 → SSEUP (向量延续)
-                        *class = AbiClass::SseUp;
-                    }
-                }
+                // 不做任何 NoClass→SseUp 转换: 真正的向量延续已由
+                // classify_field 的 Type::Vector 分支标为 SseUp; 尾部填充
+                // 必须保持 NoClass。
             } else {
                 for c in classes.iter_mut() {
                     *c = AbiClass::Memory;
@@ -2160,6 +2181,11 @@ impl Codegen {
         // 归一化: 全 Memory 时压缩为单元素, 保证 needs_memory_return 判断正确
         if classes.len() > 1 && classes.iter().all(|c| *c == AbiClass::Memory) {
             classes.truncate(1);
+        }
+        // 丢弃尾部 NoClass: 那只是 num_eightbytes 向上取整产生的对齐填充,
+        // 不构成实际传递的 eightbyte (如 16B 对齐的 8B double → 仅一个 Sse)。
+        while classes.last() == Some(&AbiClass::NoClass) {
+            classes.pop();
         }
         classes
     }
@@ -7247,7 +7273,9 @@ impl Codegen {
                 self.variadic_named_gp = 1;
             }
             let mut param_stores: Vec<(u8, i64)> = Vec::new(); // (gp reg, offset)
-            let mut xmm_param_stores: Vec<(u8, i64, Type)> = Vec::new(); // (xmm reg, offset, ty)
+            // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
+            // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
+            let mut xmm_param_stores: Vec<(u8, i64, Type, bool)> = Vec::new();
             // (栈上字节偏移, var offset)。SysV 栈参数按类型对齐:
             // long double / __int128 / 16 字节对齐聚合体须落在 16 的
             // 倍数上, 否则 callee 读取位置与 caller 布局错位 (pr44942)。
@@ -7298,10 +7326,9 @@ impl Codegen {
                     let classes = Self::abi_classes(&p.ty);
                     let chunks = p.ty.size().div_ceil(8);
                     let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-                    let need_fp = classes
-                        .iter()
-                        .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
-                        .count();
+                    // SseUp 是前一个 Sse 所在 xmm 高 64 位的延续, 不单独占用
+                    // 寄存器, 故寄存器计数只数 Sse (SysV ABI 3.2.3)。
+                    let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
                     let agg_align = (p.ty.align() as i64).max(8);
                     let used_before = param_used_total;
                     param_used_total += (p.ty.size().div_ceil(8) * 8) as i64;
@@ -7315,6 +7342,9 @@ impl Codegen {
                     }
                     let mut local_gp = gp_idx;
                     let mut local_fp = fp_idx;
+                    // 上一个 Sse chunk 的位置, SseUp 复用之 (同一 xmm 的高半)。
+                    // Some((reg, off)): 在寄存器; Some((None, off)): 在栈。
+                    let mut prev_sse: Option<(Option<u8>, i64)> = None;
                     for c in 0..chunks {
                         let cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
                         let chunk_off = base_off + c as i64 * 8;
@@ -7339,16 +7369,26 @@ impl Codegen {
                                 }
                             }
                             AbiClass::Sse => {
+                                // 下一 chunk 是否为 SseUp: 若是, 本 Sse 与它共用
+                                // 同一 xmm, 标记 wide128 一次性保存 16 字节。
+                                let next_up = classes.get(c + 1)
+                                    .copied() == Some(AbiClass::SseUp);
                                 if local_fp < 8 {
-                                    // 通过 XMM 寄存器传递
+                                    // 通过 XMM 寄存器传递。仅当类型真正占满
+                                    // 16 字节 (而非 16B 对齐但只含 8B double
+                                    // 的 aligned_d) 时, 才与 SseUp 合并做一次
+                                    // 128 位保存, 否则高半是相邻栈槽, 会被覆盖。
+                                    let wide128 = next_up && p.ty.size() == 16;
                                     if nm_opt.is_some() {
                                         xmm_param_stores.push((
                                             local_fp as u8,
                                             chunk_off,
                                             p.ty.clone(),
+                                            wide128,
                                         ));
                                         self.variadic_named_fp += 1;
                                     }
+                                    prev_sse = Some((Some(local_fp as u8), chunk_off));
                                     local_fp += 1;
                                 } else {
                                     // XMM 寄存器不足，通过栈传递
@@ -7359,25 +7399,28 @@ impl Codegen {
                                         stack_param_stores.push((aligned, chunk_off));
                                         self.variadic_named_fp += 1;
                                     }
+                                    prev_sse = Some((None, aligned));
                                 }
                             }
                             AbiClass::SseUp => {
-                                if local_fp < 8 {
-                                    // 通过 XMM 寄存器传递（高 64 位）
-                                    if nm_opt.is_some() {
-                                        self.variadic_named_fp += 1;
+                                // SseUp 不占新寄存器: 它复用前一个 Sse 的同一
+                                // xmm 的高 64 位。寄存器情形已由 Sse 以 wide128
+                                // 一次性 movups 保存, 这里不再推进 fp、不发 store;
+                                // 仅当 Sse 落在栈上时, 高 8 字节位于相邻栈槽。
+                                match prev_sse {
+                                    Some((Some(_), _)) => {
+                                        // 寄存器: 无需额外动作 (wide128 已覆盖)
                                     }
-                                    local_fp += 1;
-                                } else {
-                                    // XMM 寄存器不足，通过栈传递
-                                    let aligned =
-                                        (stack_arg_off + agg_align - 1) & !(agg_align - 1);
-                                    stack_arg_off = aligned + 8;
-                                    if nm_opt.is_some() {
-                                        stack_param_stores.push((aligned, chunk_off));
-                                        self.variadic_named_fp += 1;
+                                    Some((None, prev_aligned)) => {
+                                        if nm_opt.is_some() {
+                                            stack_param_stores
+                                                .push((prev_aligned + 8, chunk_off));
+                                        }
+                                        stack_arg_off = prev_aligned + 16;
                                     }
+                                    None => {}
                                 }
+                                // 计数需要与 caller 一致: SseUp 不增加已用 xmm。
                             }
                             AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
                                 // 强制内存类：整个参数通过栈传递
@@ -7422,7 +7465,7 @@ impl Codegen {
                             let hdr = 48i64 + temp_slots as i64 * 8;
                             let off = -(used_before + hdr);
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                            xmm_param_stores.push((saved_fp as u8, off, p.ty.clone()));
+                            xmm_param_stores.push((saved_fp as u8, off, p.ty.clone(), false));
                             self.variadic_named_fp += 1;
                         }
                     } else {
@@ -7596,7 +7639,7 @@ impl Codegen {
             for (reg, off) in param_stores {
                 self.store_stack(reg, off);
             }
-            for (xmm, off, ty) in xmm_param_stores {
+            for (xmm, off, ty, wide128) in xmm_param_stores {
                 if matches!(ty, Type::Float) {
                     // K&R / 无原型函数: float 参数经默认提升后以 double 传入.
                     // callee 必须先将 xmm 中的 double 转为 float 再存储.
@@ -7613,8 +7656,10 @@ impl Codegen {
                         }
                     }
                     self.store_xmm32_stack(xmm, off);
-                } else if ty.size() == 16 && matches!(ty, Type::Vector(_, _)) {
-                    // 128-bit vector 参数 (如 __int128 vector): 保存完整 16 字节
+                } else if wide128 || (ty.size() == 16 && matches!(ty, Type::Vector(_, _))) {
+                    // 128-bit vector 参数 (如 __int128 vector), 或聚合中
+                    // [Sse, SseUp] 共用同一 xmm 的 16 字节 (如含向量字段的
+                    // 结构体): 保存完整 16 字节。
                     self.store_xmm128_stack(xmm, off);
                 } else {
                     self.store_xmm64_stack(xmm, off);
@@ -8249,10 +8294,8 @@ impl Codegen {
             }
             let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-            let need_fp = classes
-                .iter()
-                .filter(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
-                .count();
+            // SseUp 是前一个 Sse 所在 xmm 的高 64 位延续, 不单独占用寄存器。
+            let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
             // Struct/union 类型走 gen_va_arg_struct, 不支持混合 reg_save_area +
             // overflow_arg_area 路径, 所以仍然强制溢出时整类型上栈。
             // 标量类型 (__int128, long long 等) 走 gen_va_arg, 支持三路径,
@@ -8276,11 +8319,13 @@ impl Codegen {
                 stack += chunks * 8;
             } else {
                 let mut arg_locs = Vec::new();
-                // 只有 Vector 类型的 SseUp 才与 Sse 共用同一个 xmm 寄存器
-                // (Vector 是真正的 16 字节整数组, 需要一次 movups 传递)。
-                // 其他类型 (_Complex double、16B aggregate scalar 等)
-                // 的 SseUp 是独立的 eightbyte, 应单独分配 xmm 寄存器。
-                let is_vector_ty = matches!(&effective_ty, Type::Vector(_, _));
+                // SysV ABI: SseUp 永远是前一个 Sse 所在 xmm 高 64 位的延续,
+                // 不单独分配寄存器。记录上一个 Sse chunk 分到的 ArgLoc,
+                // SseUp 直接复用之 (寄存器 → 同一 xmm; 栈 → 相邻栈槽)。
+                // 适用于一切 16 字节 [Sse, SseUp] 聚合 (含向量字段的结构体、
+                // 独立 __m128 向量等); 两个独立 double 字段产出的是
+                // [Sse, Sse] (两个不同 xmm), 不会进入此复用路径。
+                let mut prev_sse_loc: Option<ArgLoc> = None;
                 for class in classes {
                     match class {
                         AbiClass::Integer => {
@@ -8291,29 +8336,38 @@ impl Codegen {
                                 arg_locs.push(ArgLoc::Stack(stack));
                                 stack += 8;
                             }
+                            prev_sse_loc = None;
                         }
                         AbiClass::Sse => {
-                            if fp < 8 {
-                                arg_locs.push(ArgLoc::Xmm(fp as u8));
+                            let loc = if fp < 8 {
+                                let l = ArgLoc::Xmm(fp as u8);
                                 fp += 1;
+                                l
                             } else {
-                                arg_locs.push(ArgLoc::Stack(stack));
+                                let l = ArgLoc::Stack(stack);
                                 stack += 8;
-                            }
+                                l
+                            };
+                            prev_sse_loc = Some(loc);
+                            arg_locs.push(loc);
                         }
                         AbiClass::SseUp => {
-                            if fp < 8 {
-                                if is_vector_ty {
-                                    // Vector: SseUp 与 Sse 共用 xmm, 不推进 fp
-                                    arg_locs.push(ArgLoc::Xmm((fp - 1) as u8));
-                                } else {
-                                    // 非 Vector: SseUp 是独立 eightbyte, 正常推进 fp
-                                    arg_locs.push(ArgLoc::Xmm(fp as u8));
-                                    fp += 1;
+                            // 复用前一个 Sse 的位置, 不推进 fp/stack。
+                            match prev_sse_loc {
+                                Some(loc @ ArgLoc::Xmm(_)) => {
+                                    arg_locs.push(loc);
                                 }
-                            } else {
-                                arg_locs.push(ArgLoc::Stack(stack));
-                                stack += 8;
+                                Some(ArgLoc::Stack(prev)) => {
+                                    // 高 8 字节在相邻栈槽
+                                    let hi = ArgLoc::Stack(prev + 8);
+                                    stack = prev + 16;
+                                    arg_locs.push(hi);
+                                }
+                                _ => {
+                                    // 防御性回退: 不应发生
+                                    arg_locs.push(ArgLoc::Stack(stack));
+                                    stack += 8;
+                                }
                             }
                         }
                         AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
@@ -8999,10 +9053,11 @@ impl Codegen {
                                     }
                                 }
                             } else {
-                                // Vector 返回值 (16B): SysV ABI 全在 xmm0,
-                                // 不走 rax/rdx → xmm0/xmm1 拆分路径.
+                                // 16B [Sse, SseUp] 聚合返回值 (独立向量或含
+                                // 16B 向量字段/对齐填充的小结构体): SysV ABI
+                                // 全在 xmm0, 不走 rax/rdx → xmm0/xmm1 拆分.
                                 // 直接 movups 16B 到 xmm0.
-                                if matches!(&ret_ty, Type::Vector(_, _)) && ret_sz > 8 {
+                                if Self::is_sseup_128_aggregate(&ret_ty) {
                                     // 先用 gen_expr 物化结果 (落到 frame bottom temp),
                                     // 再从 frame bottom temp 整体 movups 到 xmm0.
                                     // 统一用 frame bottom temp, 避免 vector_temp 槽
@@ -19135,19 +19190,26 @@ impl Codegen {
             return false;
         }
 
-        // Step 1: 发射基址计算到 dst
+        // 基址恒算到 rax (寄存器 0), 索引进 rcx (寄存器 1)。
+        // 不能把基址直接算到 dst: 当 dst==1 时它与索引寄存器 rcx 重合,
+        // 保存/恢复基址的 push/pop 会覆盖刚求出的索引, 使地址被错算成
+        // base*stride (见 loop_opt sum_array 的 arr[i] 段错误)。
+        const BASE: u8 = 0; // rax
+        const INDEX: u8 = 1; // rcx
+
+        // Step 1: 发射基址计算到 rax
         match &desc.base {
             AddressBase::StackFrame { offset } => {
-                self.emit_lea_r13(dst, *offset);
+                self.emit_lea_r13(BASE, *offset);
             }
             AddressBase::StackSlotLoad { offset } => {
-                self.load_stack(dst, *offset);
+                self.load_stack(BASE, *offset);
             }
             AddressBase::GlobalSymbolAddr { symbol_key } => {
-                self.emit_global_addr(dst, symbol_key);
+                self.emit_global_addr(BASE, symbol_key);
             }
             AddressBase::GlobalSymbolLoad { symbol_key } => {
-                self.emit_global_load(dst, symbol_key);
+                self.emit_global_load(BASE, symbol_key);
             }
             AddressBase::UpvarLoad { .. } => {
                 return false;
@@ -19158,22 +19220,22 @@ impl Codegen {
                 if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }) {
                     return false;
                 }
-                if !self.emit_address_descriptor(sub, index_expr, dst) {
+                if !self.emit_address_descriptor(sub, index_expr, BASE) {
                     return false;
                 }
             }
         }
 
-        // Step 2: 处理运行时偏移
+        // Step 2: 处理运行时偏移, 偏移结果放在 rcx
         match &desc.offset {
             ByteOffset::Constant(_) => {
                 // 已在上面快速路径处理
             }
             ByteOffset::Runtime { stride, addend } => {
-                // 保存基址, 求值索引到 rcx, 恢复基址, 加偏移
-                self.push(dst);
-                self.gen_expr(index_expr, 1); // rcx = index
-                self.pop(dst);
+                // 保存基址, 求值索引到 rcx, 恢复基址到 rax, 计算偏移到 rcx
+                self.push(BASE);
+                self.gen_expr(index_expr, INDEX); // rcx = index
+                self.pop(BASE); // rax = base (不能 pop 回 rcx, 否则覆盖索引)
                 // rcx *= stride
                 if *stride != 1 {
                     let stride_i32 = *stride as i32;
@@ -19185,13 +19247,7 @@ impl Codegen {
                     self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
                     self.emit(&(*addend as i32).to_le_bytes());
                 }
-                // dst += rcx
-                if dst != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                    self.emit(&[rex, 0x01, 0xC8 | (dst & 7)]); // add dst, rcx
-                } else {
-                    self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
-                }
+                self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
             }
             ByteOffset::VlaRuntime { addend } => {
                 // VLA: stride 在运行时确定, 需要从 VLA 元数据槽加载
@@ -19201,24 +19257,23 @@ impl Codegen {
                     return false;
                 }
                 let slot = stride_slot.unwrap();
-                self.push(dst);
-                self.gen_expr(index_expr, 1); // rcx = index
+                self.push(BASE);
+                self.gen_expr(index_expr, INDEX); // rcx = index
                 // mov rdx, [r13+slot]; imul rcx, rdx
                 self.emit_mov_mem_r13(2, slot);
                 self.emit(&[0x48, 0x0F, 0xAF, 0xCA]); // imul rcx, rdx
-                self.pop(dst);
+                self.pop(BASE); // rax = base
                 if *addend != 0 {
                     self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
                     self.emit(&(*addend as i32).to_le_bytes());
                 }
-                // dst += rcx
-                if dst != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                    self.emit(&[rex, 0x01, 0xC8 | (dst & 7)]);
-                } else {
-                    self.emit(&[0x48, 0x01, 0xC8]);
-                }
+                self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
             }
+        }
+
+        // 最终地址在 rax, 按需搬到调用方要求的 dst
+        if dst != BASE {
+            self.mov(dst, BASE);
         }
 
         true
