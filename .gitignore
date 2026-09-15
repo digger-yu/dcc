@@ -23,8 +23,9 @@ Thumbs.db
 # Trae IDE workspace
 .trae/
 
-# GCC C Torture Suite (populated by scripts/setup_torture.sh)
+# GCC torture and dg Test Suites (populated by scripts/setup_torture.sh and gcc-dg.yml workflow)
 tests/gcc-torture/
+tests/gcc-dg/
 
 # Autotools / configure artifacts
 config.log

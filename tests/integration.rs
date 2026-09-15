@@ -1579,6 +1579,28 @@ fn switch_range_comparison_correctness() {
 }
 
 #[test]
+#[cfg(unix)]
+fn indirect_call_assignment_preserves_lvalue_address() {
+    let src = r#"
+struct S { int (*fp)(void); int status; };
+static int ret3(void) { return 3; }
+int main(void) {
+    struct S s;
+    s.fp = ret3;
+    s.status = 0;
+    s.status = (*s.fp)();
+    return s.status == 3 ? 0 : 1;
+}
+"#;
+    let (out, exe) = run_compile_and_run("indirect-call-assign", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "indirect call assign compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "indirect call assignment failed (rc={rc})");
+}
+
+#[test]
 fn debug_sections_emitted_with_g_flag() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-debug-{}.c", std::process::id()));

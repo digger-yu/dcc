@@ -2498,7 +2498,8 @@ impl Aarch64Codegen {
     /// AAPCS64 变参规则:
     /// - HFA (齐次浮点聚合): 从 FP 保存区读取, fp_offset 预算 64 字节
     /// - 非 HFA 且整体适合 GP: 从 GP 保存区读取, gp_offset 预算 64 字节
-    /// - 超出预算或 > 16 字节: 从 overflow_arg_area 读取
+    /// - 超出预算或 > 16 字节：从 overflow_arg_area 读取
+    ///
     /// 结果在 x0 = 栈槽地址 (与 sret 调用约定一致)
     fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &ValueType) {
         let ap_off = match self.locals.get(ap_name) {
@@ -2507,7 +2508,7 @@ impl Aarch64Codegen {
         };
         let size = aggregate_size(arg_ty).unwrap_or(8);
         let hfa = classify_hfa(arg_ty, &self.aggregate_fields);
-        let slot_size = ((size + 7) / 8 * 8).max(8) as i32;
+        let slot_size = (size.div_ceil(8).max(1) * 8) as i32;
         let slot = self.alloc_local("<va_aggr>", slot_size);
 
         if let Some(ref hfa_info) = hfa {
@@ -2556,8 +2557,8 @@ impl Aarch64Codegen {
             self.emit_str_x(3, 9, 8, 8); // str x3, [x9, #8]
             self.emit_label_raw(&lbl_done);
         } else if size <= 16 {
-            // GP 路径: 整体检查 gp_offset 预算
-            let aligned = ((size + 7) / 8 * 8) as i32;
+            // GP 路径：整体检查 gp_offset 预算
+            let aligned = size.div_ceil(8) as i32 * 8;
             let budget = 64 - aligned;
 
             self.mov_x_reg_sp_off(9, ap_off);
@@ -2572,7 +2573,7 @@ impl Aarch64Codegen {
             self.emit_add_x_reg(3, 3, 2); // add x3, x3, x2
             self.mov_x_reg_sp_off(4, slot);
             for i in 0..(aligned / 8) {
-                let off = (i * 8) as i32;
+                let off = i * 8;
                 self.ldr_xt_indirect(1, 3, off);
                 self.str_xt_indirect(1, 4, off);
             }
@@ -2586,7 +2587,7 @@ impl Aarch64Codegen {
             self.emit_ldr_x(3, 9, 8, 8); // ldr x3, [x9, #8]
             self.mov_x_reg_sp_off(4, slot);
             for i in 0..(slot_size / 8) {
-                let off = (i * 8) as i32;
+                let off = i * 8;
                 self.ldr_xt_indirect(1, 3, off);
                 self.str_xt_indirect(1, 4, off);
             }
@@ -2599,7 +2600,7 @@ impl Aarch64Codegen {
             self.emit_ldr_x(3, 9, 8, 8); // ldr x3, [x9, #8]
             self.mov_x_reg_sp_off(4, slot);
             for i in 0..(slot_size / 8) {
-                let off = (i * 8) as i32;
+                let off = i * 8;
                 self.ldr_xt_indirect(1, 3, off);
                 self.str_xt_indirect(1, 4, off);
             }

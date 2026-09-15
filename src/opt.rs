@@ -828,6 +828,15 @@ fn eval_float_binop(op: BinOp, l: f64, r: f64) -> Option<f64> {
                 l / r
             }
         }
+        BinOp::Mod => {
+            if r == 0.0 {
+                return None;
+            } else {
+                // C fmod semantics: l - trunc(l/r) * r
+                // Rust f64 % f64 matches C fmod()
+                l % r
+            }
+        }
         _ => return None,
     })
 }
@@ -1705,7 +1714,7 @@ fn try_stmt_inline_call(
             },
             _ => return false,
         },
-        Stmt::Return { val: Some(e), span: rspan } => match e {
+        Stmt::Return { val: Some(e), span: _rspan } => match e {
             Expr::Call {
                 callee,
                 args,

@@ -38,7 +38,7 @@ fn gvn_program(prog: &mut Program, fenv_access: bool) {
 }
 
 fn func_has_static_local(f: &crate::ast::FuncDecl) -> bool {
-    f.body.as_ref().is_some_and(|b| block_has_static_local(b))
+    f.body.as_ref().is_some_and(block_has_static_local)
 }
 
 fn block_has_static_local(b: &crate::ast::Block) -> bool {

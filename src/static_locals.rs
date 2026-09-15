@@ -70,7 +70,7 @@ impl StaticLocalMap {
     pub fn needs_runtime_init(&self, func_name: &str, source_name: &str) -> bool {
         self.runtime_init
             .get(func_name)
-            .map_or(false, |names| names.iter().any(|n| n == source_name))
+            .is_some_and(|names| names.iter().any(|n| n == source_name))
     }
 
     /// 获取某函数的所有 static local 信息.

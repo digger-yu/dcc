@@ -1110,6 +1110,7 @@ mod tests {
             name.to_string(),
             std::sync::Arc::new(field_vec),
             align,
+            false,
         )
     }
 

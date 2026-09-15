@@ -393,6 +393,7 @@ mod tests {
             diag_color: crate::diagnostics::ColorPolicy::Auto,
             diag_format: crate::diagnostics::FormatStyle::Github,
             diag_show_template_tree: false,
+            instrument_functions: false,
             bootstrap_compare: None,
             sysroot: None,
             vdso: None,

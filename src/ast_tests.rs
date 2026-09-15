@@ -39,7 +39,7 @@ fn struct_size_rounds_up_to_alignment() {
             field_packed: false,
         },
     ];
-    assert_eq!(Type::Struct("s".into(), Arc::new(fields), 8, _).size(), 24);
+    assert_eq!(Type::Struct("s".into(), Arc::new(fields), 8, false).size(), 24);
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn union_size_rounds_up_to_alignment() {
             field_packed: false,
         },
     ];
-    assert_eq!(Type::Union("u".into(), Arc::new(fields), 8, _).size(), 16);
+    assert_eq!(Type::Union("u".into(), Arc::new(fields), 8, false).size(), 16);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn packed_struct_size_uses_observed_alignment() {
             field_packed: false,
         },
     ];
-    let ty = Type::Struct("packed".into(), Arc::new(fields), 1, _);
+    let ty = Type::Struct("packed".into(), Arc::new(fields), 1, false);
     assert_eq!(ty.align(), 1);
     assert_eq!(ty.size(), 5);
 }

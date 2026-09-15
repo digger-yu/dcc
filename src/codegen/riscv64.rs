@@ -2134,7 +2134,8 @@ impl Riscv64Codegen {
     /// 聚合类型 va_arg: va_arg(ap, struct S)
     /// RISC-V 变参规则:
     /// - size <= 16: 尝试 GP 保存区 (gp_offset 预算 64 字节), 超出走 overflow
-    /// - size > 16: 直接从 overflow_arg_area 读取
+    /// - 超出预算或 > 16 字节：从 overflow_arg_area 读取
+    ///
     /// 结果在 a0 = 栈槽地址 (与 sret 调用约定一致)
     fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &ValueType) {
         let ap_off = match self.locals.get(ap_name) {
@@ -2142,11 +2143,11 @@ impl Riscv64Codegen {
             None => return,
         };
         let size = aggregate_size(arg_ty).unwrap_or(8);
-        let slot_size = ((size + 7) / 8 * 8).max(8) as i32;
+        let slot_size = size.div_ceil(8).max(1) as i32 * 8;
         let slot = self.alloc_local("<va_aggr>", slot_size);
 
         if size <= 16 {
-            let aligned = ((size + 7) / 8 * 8) as i32;
+            let aligned = size.div_ceil(8) as i32 * 8;
             let budget = 64 - aligned;
 
             // a5 = va_list 地址

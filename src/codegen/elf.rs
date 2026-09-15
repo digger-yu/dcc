@@ -573,8 +573,7 @@ pub fn build_elf_exec_x86_64(
             8,
             0,
         );
-        vaddr += data_size;
-        file_off += data_size;
+        // vaddr and file_off updated but not used in subsequent writes
         ni += 1;
     }
     if bss_size > 0 {
@@ -591,7 +590,7 @@ pub fn build_elf_exec_x86_64(
             8,
             0,
         );
-        vaddr += bss_size;
+        // bss size updated for section header
         ni += 1;
     }
 

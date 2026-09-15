@@ -1021,7 +1021,7 @@ impl<'a> Lexer<'a> {
                     0
                 };
                 for _ in 0..extra {
-                    if self.peek().map_or(false, |c| c & 0xC0 == 0x80) {
+                    if self.peek().is_some_and(|c| c & 0xC0 == 0x80) {
                         self.bump();
                     } else {
                         break;

@@ -2999,7 +2999,7 @@ impl Preprocessor {
                         // 保存当前宏定义 (如果存在)
                         let saved = self.macros.get(macro_name).cloned();
                         self.macro_stack.entry(macro_name.to_string())
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(saved);
                     }
                 }
