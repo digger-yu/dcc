@@ -73,6 +73,8 @@ test_sortbuf.c
 test_clean.o
 test_ctor_simple.o
 dn_g.o
+# 误提交的调试二进制 (曾经 git add 进去，防止再次提交)
+test_globals
 
 # Test fixtures (.c files under tests/fixtures/ are tracked, but inline
 # `.s` asm fixtures for snapshot tests should also be tracked).

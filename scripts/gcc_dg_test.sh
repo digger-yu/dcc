@@ -12,8 +12,8 @@
 #   SUBDIRS      — 要测试的子目录 (可选，多个用逗号分隔；不指定则使用默认组合)
 #
 # 默认测试组合:
-#   compile: c11,c23,macro,diag,warn,compat (语言语义 + 预处理 + 负向诊断)
-#   run:     c11,c23,torture,tree-ssa (可执行正确性)
+#   compile: compat,cpp,charset,noncompile,format (语言语义 + 预处理 + 负向诊断)
+#   run:     torture,tree-ssa (可执行正确性)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +21,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DCC="${DCC:-$REPO_ROOT/target/release/dcc}"
 DG_DIR="${DG_DIR:-$REPO_ROOT/tests/gcc-dg}"
+# 兼容两种套件布局:
+#   A) git sparse-checkout 布局 (CI): $DG_DIR/gcc/testsuite/gcc.dg/
+#   B) 本地扁平布局:                 $DG_DIR/
+if [[ -d "$DG_DIR/gcc/testsuite/gcc.dg" ]]; then
+    DG_DIR="$DG_DIR/gcc/testsuite/gcc.dg"
+fi
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 VERBOSE="${VERBOSE:-}"
 SKIP_FILE="$REPO_ROOT/tests/gcc_dg_skip.txt"
@@ -53,9 +59,9 @@ for arg in "$@"; do
 done
 
 # 默认测试子目录组合（如果未指定 --dirs）
-DEFAULT_COMPILE_SUBDIRS="c11,c23,macro,diag,warn,compat"
-DEFAULT_RUN_SUBDIRS="c11,c23,torture,tree-ssa"
-SUBDIRS=""
+DEFAULT_COMPILE_SUBDIRS="compat,cpp,charset,noncompile,format"
+DEFAULT_RUN_SUBDIRS="torture,tree-ssa"
+SUBDIRS="${SUBDIRS:-}"
 
 # ── 前置检查 ──
 if [[ ! -x "$DCC" ]]; then
@@ -275,12 +281,13 @@ run_suite() {
     # 导出给子进程使用
     export DCC TMPDIR_DG
     
-    # 根据测试类型决定默认的子目录
-    if [[ -z "$SUBDIRS" ]]; then
+    # 根据测试类型决定默认的子目录（用户未通过 --dirs 指定时）
+    local dirs="$SUBDIRS"
+    if [[ -z "$dirs" ]]; then
         if [[ "$category" == "compile" ]]; then
-            SUBDIRS="$DEFAULT_COMPILE_SUBDIRS"
+            dirs="$DEFAULT_COMPILE_SUBDIRS"
         else
-            SUBDIRS="$DEFAULT_RUN_SUBDIRS"
+            dirs="$DEFAULT_RUN_SUBDIRS"
         fi
     fi
     local -a failures=()
@@ -292,10 +299,10 @@ run_suite() {
     local run_list="$TMPDIR_DG/${category}_run.txt"
 
     # 递归收集 .c 文件
-    # 如果指定了 SUBDIRS，则只搜索这些子目录
-    if [[ -n "$SUBDIRS" ]]; then
+    # 如果指定了 dirs，则只搜索这些子目录
+    if [[ -n "$dirs" ]]; then
         # 将逗号分隔的子目录转换为空格分隔的数组
-        IFS=',' read -ra DIR_ARRAY <<< "$SUBDIRS"
+        IFS=',' read -ra DIR_ARRAY <<< "$dirs"
         find_args=()
         for dir in "${DIR_ARRAY[@]}"; do
             dir="$(echo "$dir" | xargs)"  # 去除首尾空格
@@ -303,7 +310,7 @@ run_suite() {
         done
         
         if [[ ${#find_args[@]} -eq 0 ]]; then
-            echo "错误：指定的子目录不存在：$SUBDIRS"
+            echo "错误：指定的子目录不存在：$dirs"
             exit 1
         fi
         

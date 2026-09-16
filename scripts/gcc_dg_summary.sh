@@ -120,8 +120,8 @@ if [[ -n "$all_failures" ]]; then
     echo ""
 
     # compile failures
-    compile_compile_fail=$(echo "$compile_failures" | grep -c 'compile' 2>/dev/null || echo 0)
-    compile_timeout_fail=$(echo "$compile_failures" | grep -c 'timeout' 2>/dev/null || echo 0)
+    compile_compile_fail=$(echo "$compile_failures" | grep -c 'compile' 2>/dev/null || true)
+    compile_timeout_fail=$(echo "$compile_failures" | grep -c 'timeout' 2>/dev/null || true)
     if [[ "$c_fail" -gt 0 ]]; then
         echo "### Compile Test Failures (${c_fail})"
         echo ""
@@ -138,9 +138,9 @@ if [[ -n "$all_failures" ]]; then
 
     # run failures
     if [[ "$r_total" -gt 0 && "$r_fail" -gt 0 ]]; then
-        run_compile_fail=$(echo "$run_failures" | grep -c 'compile' 2>/dev/null || echo 0)
-        run_runtime_fail=$(echo "$run_failures" | grep -c 'runtime' 2>/dev/null || echo 0)
-        run_timeout_fail=$(echo "$run_failures" | grep -c 'timeout' 2>/dev/null || echo 0)
+        run_compile_fail=$(echo "$run_failures" | grep -c 'compile' 2>/dev/null || true)
+        run_runtime_fail=$(echo "$run_failures" | grep -c 'runtime' 2>/dev/null || true)
+        run_timeout_fail=$(echo "$run_failures" | grep -c 'timeout' 2>/dev/null || true)
         echo "### Run Test Failures (${r_fail})"
         echo ""
         echo "| Failure Type | Count |"
@@ -171,9 +171,9 @@ if [[ -n "$all_skips" ]]; then
     echo ""
 
     # 按 skip 原因分类统计
-    local_target_skips=$(echo "$all_skips" | grep -c 'target:' 2>/dev/null || echo 0)
-    dg_skip_if=$(echo "$all_skips" | grep -c 'dg-skip-if' 2>/dev/null || echo 0)
-    dg_do_skip=$(echo "$all_skips" | grep -c 'dg-do:' 2>/dev/null || echo 0)
+    local_target_skips=$(echo "$all_skips" | grep -c 'target:' 2>/dev/null || true)
+    dg_skip_if=$(echo "$all_skips" | grep -c 'dg-skip-if' 2>/dev/null || true)
+    dg_do_skip=$(echo "$all_skips" | grep -c 'dg-do:' 2>/dev/null || true)
     manual_skips=$((g_skip - local_target_skips - dg_skip_if - dg_do_skip))
     if [[ $manual_skips -lt 0 ]]; then manual_skips=0; fi
 
