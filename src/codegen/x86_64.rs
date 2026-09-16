@@ -6058,12 +6058,11 @@ impl Codegen {
 
         // 浮点字面量重定位
         for (code_pos, rodata_off) in self.float_refs.drain(..) {
-            // PC32: effective_addr = S + A + 4
-            // effective_addr = 符号地址 (.rodata 节内位置)
-            // desired: [rip+disp32] -> .rodata 内的浮点常量
-            // rodata_off 是当前 chunk 的 rodata 池偏移，需要转换为 .rodata 节偏移
-            // 由于所有浮点常量都在 .rodata 节开头，直接使用该偏移作为 addend
-            // 减去 4 是因为 PC32 公式中包含 +4
+            // movsd/movss xmm, [RIP+disp32] 是 8 字节指令, disp32 在 +4。
+            // ELF64 R_X86_64_PC32: disp32 = S + A - P, 其中 P 是
+            // 重定位字段地址 code_pos + 4。CPU 运行时从下一条 RIP
+            // (code_pos + 8) 加 disp32, 有效地址就是 S + A + 4。
+            // 目标地址为 .rodata + rodata_off, 因此 A = rodata_off - 4。
             self.relocations.push(ElfRela {
                 offset: code_pos + 4,
                 sym_index: rodata_sym_idx.unwrap_or(0),
@@ -6077,9 +6076,9 @@ impl Codegen {
                 offset: code_pos + 2,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                // fld 6 bytes, disp32 at byte 2.
-                // RIP = code_pos+6, P = code_pos+2.
-                // effective addr = S + A + 4, A = rodata_off - 4.
+                // fld 6 字节, disp32 在 +2, 下一条 RIP 是 code_pos + 6。
+                // P = code_pos + 2, 所以有效地址仍是 S + A + 4。
+                // 目标地址为 .rodata + rodata_off, A = rodata_off - 4。
                 addend: rodata_off as i64 - 4,
             });
         }
@@ -6753,17 +6752,18 @@ impl Codegen {
         for (pos, data) in chunk.string_refs {
             self.string_refs.push((base + pos, data));
         }
-        // Append chunk's new rodata and adjust float ref offsets
+        // 追加 chunk 局部 rodata, 并转换浮点字面量引用偏移。
+        // 每个 worker 从 ctx.rodata 快照开始, 记录的是该局部视图里的
+        // rodata 偏移, 返回时只携带 new_rodata。此处先把新字节追加到
+        // 全局 rodata, 再用 rodata_delta 把所有局部偏移映射为最终
+        // .rodata 偏移。SSE 与 x87 引用都走同一规则; 如果按是否来自
+        // 基础池做特殊分支, 后续 PC32 重定位会指向错误浮点常量。
         let rodata_delta = self.rodata.len() as u64 - chunk.rodata_base;
         self.rodata.extend_from_slice(&chunk.new_rodata);
         for (pos, off) in chunk.float_refs {
-            // 所有 float_refs 的偏移都是相对于全局 rodata 的绝对位置
-            // 只需加上当前 chunk 新增的 rodata 部分即可
             self.float_refs.push((base + pos, off + rodata_delta));
         }
         for (pos, off) in chunk.x87_float_refs {
-            // 所有 x87_float_refs 的偏移都是相对于全局 rodata 的绝对位置
-            // 只需加上当前 chunk 新增的 rodata 部分即可
             self.x87_float_refs.push((base + pos, off + rodata_delta));
         }
         for mut p in chunk.pending {
@@ -26131,9 +26131,9 @@ impl Codegen {
                         self.emit(&[0xF2, 0x0F, 0x11, 0xC0 | (dst & 7)]);
                     }
                 }
-                // 走 float_refs 通道: ET_EXEC 模式 resolve() 阶段会自动回填
-                //   disp32 = (rodata_start + off) - (entry + code_pos + 8)
-                // 也就是 addend = off - 8 (在 relocatable 模式下).
+                // 走 float_refs 通道: ET_EXEC resolve() 直接按下一条 RIP
+                // 回填 disp32; ET_REL 则由 compile_rel 使用 PC32 addend
+                // off - 4, 因为重定位位置 P 是 disp32 字段而非下一条 RIP。
                 self.float_refs.push((code_pos, off));
                 true
             }
