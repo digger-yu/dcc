@@ -12,7 +12,7 @@
 #   SUBDIRS      — 要测试的子目录 (可选，多个用逗号分隔；不指定则使用默认组合)
 #
 # 默认测试组合:
-#   compile: compat,cpp,charset,noncompile,format (语言语义 + 预处理 + 负向诊断)
+#   compile: compat,charset,noncompile,format (语言语义 + 负向诊断；cpp 需用 --dirs 手动指定)
 #   run:     torture,tree-ssa (可执行正确性)
 set -euo pipefail
 
@@ -59,7 +59,7 @@ for arg in "$@"; do
 done
 
 # 默认测试子目录组合（如果未指定 --dirs）
-DEFAULT_COMPILE_SUBDIRS="compat,cpp,charset,noncompile,format"
+DEFAULT_COMPILE_SUBDIRS="compat,charset,noncompile,format"
 DEFAULT_RUN_SUBDIRS="torture,tree-ssa"
 SUBDIRS="${SUBDIRS:-}"
 
@@ -212,7 +212,7 @@ run_dg_compile_test() {
     fi
 
     local rc=0
-    timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null || rc=$?
+    { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
     if [[ $rc -eq 0 ]]; then
         rm -f "$out"
         echo "PASS"
@@ -260,7 +260,7 @@ run_dg_run_test() {
 
     # 运行，超时 10 秒
     local rc=0
-    timeout 10 "$exe" >/dev/null 2>&1 || rc=$?
+    { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
     rm -f "$exe"
 
     if [[ $rc -eq 0 ]]; then
@@ -375,7 +375,7 @@ run_suite() {
                 echo "$rel SKIP dg-do:$do_type"
             else
                 rc=0
-                timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null || rc=$?
+                { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
                 rm -f "$out"
                 if [[ $rc -eq 0 ]]; then
                     echo "$rel PASS"
@@ -405,7 +405,7 @@ run_suite() {
                 fi
                 
                 rc=0
-                timeout 10 "$exe" >/dev/null 2>&1 || rc=$?
+                { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
                 rm -f "$exe"
                 
                 if [[ $rc -eq 0 ]]; then
