@@ -346,6 +346,9 @@ pub struct Case {
     pub range_end: Option<Expr>,
     pub body: Block,
     pub span: Span,
+    /// C23 `[[fallthrough]]` / GCC `__attribute__((fallthrough))`:
+    /// case 体末尾显式标记有意贯穿, 用于诊断未标注的隐式贯穿.
+    pub is_fallthrough: bool,
 }
 
 #[derive(Debug, Clone)]

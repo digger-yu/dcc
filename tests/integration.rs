@@ -12528,6 +12528,25 @@ fn c23_fallthrough_nodiscard_compile_and_run() {
     assert_eq!(rc, 0, "c23_fallthrough_nodiscard should return 0, got {rc}");
 }
 
+/// SSA IR volatile 感知: -O2 下 volatile 局部/指针/全局/数组
+/// 访问不被 DCE/DSE 消除, 语义保持正确
+#[test]
+fn ssa_volatile_semantics_compile_and_run() {
+    let src = include_str!("fixtures/c/ssa_volatile_semantics.c");
+    let (out, exe) = run_compile_and_run_flags("ssa-volatile-semantics", src, &["-O2"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "ssa volatile semantics compile failed: {stderr}"
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&exe);
+        let _ = fs::remove_file(&exe);
+        assert_eq!(rc, 0, "ssa_volatile_semantics should return 0, got {rc}");
+    }
+}
+
 /// C23 [[nodiscard]]: 丢弃返回值时发射 W0401 警告
 #[test]
 fn c23_nodiscard_warn_emits_w0401() {

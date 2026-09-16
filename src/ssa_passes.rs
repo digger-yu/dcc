@@ -479,6 +479,7 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
                 InstKind::Store {
                     e: Operand::Var(v),
                     src,
+                    ..
                 } => {
                     // Don't union if target is a restrict parameter
                     if !restrict_params.contains(&v.base) {
@@ -727,17 +728,24 @@ fn inst_def_bases(inst: &Inst) -> Vec<String> {
 }
 
 fn inst_is_movable_value(kind: &InstKind) -> bool {
-    matches!(
-        kind,
-        InstKind::Bin { .. }
-            | InstKind::Un { .. }
-            | InstKind::Cast { .. }
-            | InstKind::AddrOf { .. }
-            | InstKind::Load { .. }
-            | InstKind::IndexLoad { .. }
-            | InstKind::MemberLoad { .. }
-            | InstKind::Select { .. }
-    )
+    // volatile Load 不是"可移动值": 其读取有外部可见副作用,
+    // 调度器不能把它当作纯值运算随意重排
+    match kind {
+        InstKind::Load { is_volatile, .. }
+        | InstKind::IndexLoad { is_volatile, .. }
+        | InstKind::MemberLoad { is_volatile, .. } => !*is_volatile,
+        _ => matches!(
+            kind,
+            InstKind::Bin { .. }
+                | InstKind::Un { .. }
+                | InstKind::Cast { .. }
+                | InstKind::AddrOf { .. }
+                | InstKind::Load { .. }
+                | InstKind::IndexLoad { .. }
+                | InstKind::MemberLoad { .. }
+                | InstKind::Select { .. }
+        ),
+    }
 }
 
 fn inst_reads_memory(kind: &InstKind) -> bool {
@@ -765,6 +773,10 @@ fn inst_is_side_effecting(kind: &InstKind) -> bool {
         | InstKind::IndexStore { .. }
         | InstKind::MemberStore { .. }
         | InstKind::Call { .. } => true,
+        // volatile Load 属于外部可见的副作用 (读 MMIO/共享内存), 不可被 DCE 消除
+        InstKind::Load { is_volatile, .. }
+        | InstKind::IndexLoad { is_volatile, .. }
+        | InstKind::MemberLoad { is_volatile, .. } => *is_volatile,
         // 只有 volatile asm 或带 memory clobber 的 asm 才有副作用
         InstKind::InlineAsm { volatile, clobbers, output_constraints, .. } => {
             *volatile
@@ -855,6 +867,7 @@ pub fn pgo(func: &mut Function) -> bool {
                         kind: InstKind::Store {
                             e: Operand::SymAddr("__dcc_hot_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(*count as i128),
+                            is_volatile: false,
                         },
                         span: func.span.clone(),
                     },
@@ -870,6 +883,7 @@ pub fn pgo(func: &mut Function) -> bool {
                         kind: InstKind::Store {
                             e: Operand::SymAddr("__dcc_cold_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(*count as i128),
+                            is_volatile: false,
                         },
                         span: func.span.clone(),
                     },
@@ -928,6 +942,7 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
                         kind: InstKind::Store {
                             e: Operand::SymAddr("__dcc_parallel_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(1),
+                            is_volatile: false,
                         },
                         span: func.span.clone(),
                     },
@@ -1026,16 +1041,17 @@ pub fn loop_interchange(func: &mut Function) -> bool {
         // 在 entry 插入 hint
         if let Some(entry) = func.blocks.get_mut(&func.entry) {
             entry.insts.insert(
-                0,
-                Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_loop_interchanged".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
-                        src: Operand::Int(1),
-                    },
-                    span: func.span.clone(),
+            0,
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::SymAddr("__dcc_loop_interchanged".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                    src: Operand::Int(1),
+                    is_volatile: false,
                 },
-            );
+                span: func.span.clone(),
+            },
+        );
         }
     }
     changed
@@ -1121,6 +1137,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_section_cold".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
+                    is_volatile: false,
                 },
                 span: func.span.clone(),
             },
@@ -1135,6 +1152,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_section_hot".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
+                    is_volatile: false,
                 },
                 span: func.span.clone(),
             },
@@ -1149,6 +1167,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_noreturn_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
+                    is_volatile: false,
                 },
                 span: func.span.clone(),
             },
@@ -1384,6 +1403,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_regalloc_done".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(total_pressure as i128),
+                    is_volatile: false,
                 },
                 span: func.span.clone(),
             },
@@ -1421,7 +1441,7 @@ fn record_operand_use(
         }
         InstKind::AddrOf { base } => record(base),
         InstKind::Load { e: Operand::Var(v), .. } => record(&v.name()),
-        InstKind::Store { e, src } => {
+        InstKind::Store { e, src, .. } => {
             if let Operand::Var(v) = e {
                 record(&v.name());
             }
@@ -1429,7 +1449,7 @@ fn record_operand_use(
                 record(&v.name());
             }
         }
-        InstKind::IndexLoad { arr, idx } => {
+        InstKind::IndexLoad { arr, idx, .. } => {
             if let Operand::Var(v) = arr {
                 record(&v.name());
             }
@@ -1437,7 +1457,7 @@ fn record_operand_use(
                 record(&v.name());
             }
         }
-        InstKind::IndexStore { arr, idx, src } => {
+        InstKind::IndexStore { arr, idx, src, .. } => {
             if let Operand::Var(v) = arr {
                 record(&v.name());
             }
@@ -1593,6 +1613,7 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                     kind: InstKind::Store {
                         e: Operand::SymAddr(format!("__dcc_ubsan_{}", kind_str), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                         src: Operand::Int(kind_hash),
+                        is_volatile: false,
                     },
                     span: span.clone(),
                 });
@@ -1607,6 +1628,7 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                     kind: InstKind::Store {
                         e: Operand::SymAddr("__dcc_ubsan_negate_overflow".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                         src: Operand::Int(ubsan_kind_hash("negate_overflow")),
+                        is_volatile: false,
                     },
                     span: span.clone(),
                 });
@@ -1690,14 +1712,12 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         // 检查是否有副作用指令: 如果有, 且纯指令依赖副作用指令的结果,
         // 则不能安全地重排序 (会破坏数据依赖)。
         let has_side = b.insts.iter().any(|i| {
-            matches!(
-                i.kind,
-                InstKind::Store { .. }
-                    | InstKind::Call { .. }
-                    | InstKind::IndexStore { .. }
-                    | InstKind::MemberStore { .. }
-                    | InstKind::InlineAsm { .. }
-            )
+            // volatile Load 也有外部可见副作用, 不可被投机重排
+            inst_is_side_effecting(&i.kind)
+                || matches!(
+                    i.kind,
+                    InstKind::InlineAsm { .. }
+                )
         });
         if has_side {
             // 保守: 有副作用指令时不做重排, 避免破坏 Call→use 依赖
@@ -1908,15 +1928,15 @@ fn replace_op_in_inst(k: &mut InstKind, consts: &HashMap<String, i128>) {
         InstKind::Un { e, .. } => replace_op(e, consts),
         InstKind::Cast { e, .. } => replace_op(e, consts),
         InstKind::Load { e, .. } => replace_op(e, consts),
-        InstKind::Store { e, src } => {
+        InstKind::Store { e, src, .. } => {
             replace_op(e, consts);
             replace_op(src, consts);
         }
-        InstKind::IndexLoad { arr, idx } => {
+        InstKind::IndexLoad { arr, idx, .. } => {
             replace_op(arr, consts);
             replace_op(idx, consts);
         }
-        InstKind::IndexStore { arr, idx, src } => {
+        InstKind::IndexStore { arr, idx, src, .. } => {
             replace_op(arr, consts);
             replace_op(idx, consts);
             replace_op(src, consts);
@@ -2353,15 +2373,15 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
         InstKind::Un { e, .. } => add_op(e, out),
         InstKind::Cast { e, .. } => add_op(e, out),
         InstKind::Load { e, .. } => add_op(e, out),
-        InstKind::Store { e, src } => {
+        InstKind::Store { e, src, .. } => {
             add_op(e, out);
             add_op(src, out);
         }
-        InstKind::IndexLoad { arr, idx } => {
+        InstKind::IndexLoad { arr, idx, .. } => {
             add_op(arr, out);
             add_op(idx, out);
         }
-        InstKind::IndexStore { arr, idx, src } => {
+        InstKind::IndexStore { arr, idx, src, .. } => {
             add_op(arr, out);
             add_op(idx, out);
             add_op(src, out);
@@ -2604,16 +2624,13 @@ pub fn software_pipelining(func: &mut Function) -> bool {
         };
 
         // Check if loop body is safe to pipeline:
-        // no stores, no calls, no inline asm
+        // no stores, no calls, no inline asm, no volatile loads
         let has_side_effects = header_bb.insts.iter().any(|inst| {
-            matches!(
-                &inst.kind,
-                InstKind::Store { .. }
-                    | InstKind::IndexStore { .. }
-                    | InstKind::MemberStore { .. }
-                    | InstKind::Call { .. }
-                    | InstKind::InlineAsm { .. }
-            )
+            inst_is_side_effecting(&inst.kind)
+                || matches!(
+                    &inst.kind,
+                    InstKind::InlineAsm { .. }
+                )
         });
         if has_side_effects {
             continue;
@@ -3163,6 +3180,7 @@ mod tests {
                 kind: InstKind::Load {
                     e: Operand::SymAddr("p".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
+                    is_volatile: false,
                 },
                 span: span.clone(),
             });
@@ -3188,6 +3206,7 @@ mod tests {
                 kind: InstKind::Load {
                     e: Operand::SymAddr("q".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
+                    is_volatile: false,
                 },
                 span: span.clone(),
             });
@@ -3228,6 +3247,7 @@ mod tests {
                 kind: InstKind::Load {
                     e: Operand::SymAddr("p".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
+                    is_volatile: false,
                 },
                 span: span.clone(),
             });
@@ -3535,6 +3555,7 @@ mod tests {
             InstKind::Store {
                 e: Operand::SymAddr(name, _),
                 src: Operand::Int(val),
+                ..
             } => {
                 assert_eq!(name, "__dcc_regalloc_done");
                 // val 编码: (total << 16) | (alloc << 8) | spill
@@ -3587,6 +3608,7 @@ mod tests {
             InstKind::Store {
                 e: Operand::SymAddr(name, _),
                 src: Operand::Int(val),
+                ..
             } => {
                 assert_eq!(name, "__dcc_regalloc_done");
                 let spilled = *val & 0xFF;

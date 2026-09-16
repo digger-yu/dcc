@@ -4662,6 +4662,7 @@ mod tests {
                         span: Span::point("t.c", 2, 1),
                     },
                     span: Span::point("t.c", 2, 1),
+                    is_fallthrough: false,
                 }],
                 span: Span::point("t.c", 1, 1),
             })],

@@ -532,6 +532,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 kind: InstKind::Load {
                     e: ret_op.clone(),
                     ty: ret_ty,
+                    is_volatile: false,
                 },
                 span: dummy_span(),
             };
@@ -931,6 +932,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     kind: InstKind::Store {
                         e: ptr,
                         src: rhs,
+                        is_volatile: false,
                     },
                     span: dummy_span(),
                 };
@@ -1196,6 +1198,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             kind: InstKind::Load {
                 e: adjusted_this.clone(),
                 ty: vtable_ptr_ty.clone(),
+                is_volatile: false,
             },
             span: dummy_span(),
         };
@@ -1247,6 +1250,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             kind: InstKind::Load {
                 e: Operand::Var(fn_ptr_var),
                 ty: fn_ptr_ty.clone(),
+                is_volatile: false,
             },
             span: dummy_span(),
         };
@@ -1378,6 +1382,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 obj_ty,
                 field: field_name,
                 ty: result_ty.clone(),
+                is_volatile: false,
             },
             span: dummy_span(),
         };
@@ -1407,6 +1412,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 obj_ty,
                 field: field_name,
                 src,
+                is_volatile: false,
             },
             span: dummy_span(),
         };
@@ -1456,6 +1462,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             kind: InstKind::Load {
                 e: ptr,
                 ty: result_ty.clone(),
+                is_volatile: false,
             },
             span: dummy_span(),
         };
@@ -1705,6 +1712,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         kind: InstKind::Store {
                             e: Operand::Var(ret_var.clone()),
                             src: val,
+                            is_volatile: false,
                         },
                         span: dummy_span(),
                     };
@@ -2140,6 +2148,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 kind: InstKind::Store {
                     e: vptr_addr,
                     src: vptr_val,
+                    is_volatile: false,
                 },
                 span: dummy_span(),
             };
@@ -2234,6 +2243,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             obj_ty,
                             field: member_name,
                             src: init_val,
+                            is_volatile: false,
                         },
                         span: dummy_span(),
                     };

@@ -263,6 +263,99 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// 判断给定行/列 (1-based) 的 `__attribute__((NAME))` 是否为 fallthrough.
+    /// 仅在 `is_attribute_stmt` 判定为独立语句后才调用.
+    /// 返回 `Some(NAME)` 如果是已识别属性, `None` 否则.
+    pub fn gnu_attr_name_at(&self, line: usize, col: usize) -> Option<String> {
+        // 找到目标行的起始字节偏移
+        let mut p = 0;
+        let mut cur_line = 1;
+        while p < self.src.len() && cur_line < line {
+            if self.src[p] == b'\n' {
+                cur_line += 1;
+            }
+            p += 1;
+        }
+        // p 指向目标行的起始; col-1 得到 token 起始
+        p += col.saturating_sub(1);
+        // 跳过 __attribute__
+        while p < self.src.len()
+            && ((self.src[p] as char).is_ascii_alphanumeric() || self.src[p] == b'_')
+        {
+            p += 1;
+        }
+        // 跳过空白
+        while p < self.src.len() && (self.src[p] as char).is_ascii_whitespace() {
+            p += 1;
+        }
+        // 应该看到 ((
+        if p + 1 >= self.src.len() || self.src[p] != b'(' || self.src[p + 1] != b'(' {
+            return None;
+        }
+        p += 2;
+        let mut depth = 2i32;
+        while p < self.src.len() && depth > 0 {
+            if self.src[p] == b'(' {
+                depth += 1;
+            } else if self.src[p] == b')' {
+                depth -= 1;
+            }
+            p += 1;
+        }
+        // 跳过空白
+        while p < self.src.len() && (self.src[p] as char).is_ascii_whitespace() {
+            p += 1;
+        }
+        // 检查是否 ; 或 { (独立语句)
+        if p >= self.src.len() {
+            return None;
+        }
+        let ch = self.src[p] as char;
+        if ch != ';' && ch != '{' {
+            return None;
+        }
+        // 扫描 (( 内部第一个标识符作为属性名
+        // 重新从 (( 之后开始
+        // (上面已经走过 depth, 这里重做以便提取名称)
+        let mut q = 0;
+        let mut ql = 1;
+        while q < self.src.len() && ql < line {
+            if self.src[q] == b'\n' {
+                ql += 1;
+            }
+            q += 1;
+        }
+        q += col.saturating_sub(1);
+        while q < self.src.len()
+            && ((self.src[q] as char).is_ascii_alphanumeric() || self.src[q] == b'_')
+        {
+            q += 1;
+        }
+        while q < self.src.len() && (self.src[q] as char).is_ascii_whitespace() {
+            q += 1;
+        }
+        if q + 1 >= self.src.len() || self.src[q] != b'(' || self.src[q + 1] != b'(' {
+            return None;
+        }
+        q += 2;
+        // 跳过空白
+        while q < self.src.len() && (self.src[q] as char).is_ascii_whitespace() {
+            q += 1;
+        }
+        let start = q;
+        while q < self.src.len()
+            && ((self.src[q] as char).is_ascii_alphanumeric() || self.src[q] == b'_')
+        {
+            q += 1;
+        }
+        if start == q {
+            return None;
+        }
+        std::str::from_utf8(&self.src[start..q])
+            .ok()
+            .map(|s| s.to_string())
+    }
+
     fn skip_ws_and_comments(&mut self) {
         loop {
             match self.peek() {

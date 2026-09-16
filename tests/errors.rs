@@ -717,6 +717,28 @@ fn w0004_asm_goto_missing_label_warning_snapshot() {
     assert_snapshot("w0004", &normalized);
 }
 
+/// W0501: 未标注的隐式 case 贯穿给出警告; [[fallthrough]] /
+/// __attribute__((fallthrough)) / break / return / 空 case 体不警告
+#[test]
+fn w0501_implicit_fallthrough_warning_snapshot() {
+    let source = fixtures_dir().join("w0501.c");
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
+    let plain = stderr_text(&stderr);
+    assert!(
+        status == 0,
+        "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}"
+    );
+    assert!(plain.contains("warning[W0501]:"), "stderr:\n{plain}");
+    // 恰好一条警告: 只有 implicit_fallthrough 的 case 1 未标注
+    assert_eq!(
+        plain.matches("warning[W0501]:").count(),
+        1,
+        "应恰好产生 1 条 W0501, 实际 stderr:\n{plain}"
+    );
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("w0501", &normalized);
+}
+
 #[cfg(unix)]
 #[test]
 fn e0205_unreadable_include_snapshot() {

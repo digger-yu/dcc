@@ -2804,6 +2804,8 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // C23 [[fallthrough]] 诊断: 在 switch case 末尾缺失标注时给出提示.
+        self.check_implicit_fallthrough(&decls);
         (
             Program {
                 decls,
@@ -2813,6 +2815,134 @@ impl<'a> Parser<'a> {
             },
             std::mem::take(&mut self.diags),
         )
+    }
+
+    /// 判断 switch case 体最后一条语句是否会终止控制流 (break/return/continue/goto).
+    /// 用于 GCC `-Wimplicit-fallthrough` 等价诊断.
+    fn stmt_terminates_control_flow(body: &Block) -> bool {
+        // 查找最后一个实际语句 (跳过声明与仅 [[fallthrough]] 占位).
+        for item in body.items.iter().rev() {
+            match item {
+                BlockItem::Stmt(s) => return Self::stmt_terminates(s),
+                BlockItem::Decl(_) => continue,
+            }
+        }
+        false
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match s {
+            Stmt::Break { .. }
+            | Stmt::Return { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::GotoIndirect { .. } => true,
+            // `[[fallthrough]]` 显式标注 (被吞成 `Stmt::Expr(Int 0)`);
+            // 这里的终止语义在调用前由 `is_fallthrough` 短路, 此处保守返回 false.
+            Stmt::Expr { .. } => false,
+            // if/while 等复合语句, 全部路径终止才视为终止.
+            Stmt::If { then_, else_, .. } => {
+                Self::stmt_terminates(then_)
+                    && else_.as_ref().map_or(false, |e| Self::stmt_terminates(e))
+            }
+            Stmt::Block { b, .. } => Self::stmt_terminates_control_flow(b),
+            Stmt::Label { stmt, .. } => Self::stmt_terminates(stmt),
+            Stmt::Switch { .. } => true, // switch 内的 break 已在内部处理
+            Stmt::While { .. }
+            | Stmt::For { .. }
+            | Stmt::Do { .. }
+            | Stmt::AsmGoto { .. } => false,
+        }
+    }
+
+    /// 递归扫描 Program 中所有 switch 案例, 检查未标注的隐式贯穿.
+    /// 诊断级别与 GCC `-Wimplicit-fallthrough` 一致.
+    fn check_implicit_fallthrough(&mut self, decls: &[Decl]) {
+        for d in decls {
+            self.check_fallthrough_decl(d);
+        }
+    }
+
+    fn check_fallthrough_decl(&mut self, d: &Decl) {
+        match d {
+            Decl::Func(f) => {
+                if let Some(body) = &f.body {
+                    for item in &body.items {
+                        if let BlockItem::Stmt(s) = item {
+                            self.check_fallthrough_stmt(s);
+                        }
+                    }
+                }
+            }
+            Decl::Var(_)
+            | Decl::StructDef(_)
+            | Decl::UnionDef(_)
+            | Decl::EnumDef(_)
+            | Decl::Typedef { .. }
+            | Decl::GlobalAsm { .. } => {}
+        }
+    }
+
+    fn check_fallthrough_stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Switch { cases, .. } => {
+                let n = cases.len();
+                for (i, c) in cases.iter().enumerate() {
+                    // 最后一个 case 之后即退出 switch, 不存在贯穿.
+                    if i + 1 == n {
+                        continue;
+                    }
+                    // 空 case 体是合法的 (允许 fallthrough 而无需标注).
+                    if c.body.items.is_empty() {
+                        continue;
+                    }
+                    // 显式标注了 fallthrough 属性.
+                    if c.is_fallthrough {
+                        continue;
+                    }
+                    // 检查 case 体最后一条语句是否终止控制流.
+                    if Self::stmt_terminates_control_flow(&c.body) {
+                        continue;
+                    }
+                    // 未标注的隐式贯穿, 给出警告.
+                    self.diags.push(Diagnostic::warn(
+                        "W0501",
+                        "implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)",
+                        c.span.clone(),
+                    ).with_hint("add `[[fallthrough]];` at the end of the case body to silence this warning"));
+                }
+                // 递归检查 case 体内部嵌套的 switch / break / ...
+                for c in cases {
+                    for item in &c.body.items {
+                        if let BlockItem::Stmt(s) = item {
+                            self.check_fallthrough_stmt(s);
+                        }
+                    }
+                }
+            }
+            Stmt::Block { b, .. } => {
+                for item in &b.items {
+                    if let BlockItem::Stmt(s) = item {
+                        self.check_fallthrough_stmt(s);
+                    }
+                }
+            }
+            Stmt::If { then_, else_, .. } => {
+                self.check_fallthrough_stmt(then_);
+                if let Some(e) = else_ {
+                    self.check_fallthrough_stmt(e);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Do { body, .. } => {
+                self.check_fallthrough_stmt(body);
+            }
+            Stmt::Label { stmt, .. } => {
+                self.check_fallthrough_stmt(stmt);
+            }
+            _ => {}
+        }
     }
 
     fn parse_decl(&mut self) -> Option<Vec<Decl>> {
@@ -9103,6 +9233,8 @@ impl<'a> Parser<'a> {
                 continue;
             };
             let mut items = vec![];
+            // 跟踪当前 case 体是否含有 fallthrough 属性 (用于诊断)
+            let mut has_fallthrough_attr = false;
             loop {
                 // Duff's device: pending close brace from nested block
                 if self.cur.kind == TokKind::RBrace {
@@ -9119,6 +9251,11 @@ impl<'a> Parser<'a> {
                 // C23 [[attributes]] in case body (e.g. [[fallthrough]])
                 if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                     self.parse_std_attributes();
+                    if self.decl_attrs.is_fallthrough {
+                        has_fallthrough_attr = true;
+                        // 重置标志位防止被后续非 fallthrough 属性污染
+                        self.decl_attrs.is_fallthrough = false;
+                    }
                     continue;
                 }
                 // __attribute__((...)) 作为独立语句 (如 ATTRIBUTE_FALLTHROUGH)
@@ -9130,8 +9267,20 @@ impl<'a> Parser<'a> {
                     // 检查后面是否有 extern/static/typedef 等声明关键字
                     // 如果只是 __attribute__((fallthrough)); 则作为语句处理
                     if self.is_attribute_stmt() {
+                        // 探测是否是 fallthrough 属性, 用于 C23 诊断.
+                        let is_fallthrough_attr = self
+                            .lex
+                            .gnu_attr_name_at(
+                                self.cur.span.line as usize,
+                                self.cur.span.col as usize,
+                            )
+                            .as_deref()
+                            == Some("fallthrough");
                         if let Some(s) = self.parse_stmt() {
                             items.push(BlockItem::Stmt(s));
+                            if is_fallthrough_attr {
+                                has_fallthrough_attr = true;
+                            }
                             continue;
                         }
                     }
@@ -9164,6 +9313,7 @@ impl<'a> Parser<'a> {
                     span: sp.clone(),
                 },
                 span: sp,
+                is_fallthrough: has_fallthrough_attr,
             });
         }
         cases
@@ -9190,6 +9340,7 @@ impl<'a> Parser<'a> {
                     range_end: hi,
                     body: Block { items: vec![], span: sp.clone() },
                     span: sp,
+                    is_fallthrough: false,
                 });
             } else if self.cur.kind == TokKind::KwDefault {
                 self.advance();
@@ -9199,6 +9350,7 @@ impl<'a> Parser<'a> {
                     range_end: None,
                     body: Block { items: vec![], span: sp.clone() },
                     span: sp,
+                    is_fallthrough: false,
                 });
             } else {
                 break;

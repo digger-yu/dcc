@@ -1,0 +1,5 @@
+warning[W0501]: implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)
+  --> <file>:11:5
+  11 |    case 1:
+     |     ^^^^
+  hint: add `[[fallthrough]];` at the end of the case body to silence this warning

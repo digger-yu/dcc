@@ -64,16 +64,33 @@ pub enum InstKind {
     /// `dest = &base` 取址
     AddrOf { base: String },
     /// `dest = *e` 解引用
-    Load { e: Operand, ty: Type },
+    Load {
+        e: Operand,
+        ty: Type,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
+    },
     /// `*e = src` 存储
-    Store { e: Operand, src: Operand },
+    Store {
+        e: Operand,
+        src: Operand,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
+    },
     /// `dest = arr[idx]`
-    IndexLoad { arr: Operand, idx: Operand },
+    IndexLoad {
+        arr: Operand,
+        idx: Operand,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
+    },
     /// `arr[idx] = src`
     IndexStore {
         arr: Operand,
         idx: Operand,
         src: Operand,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
     },
     /// `dest = call(callee, args)`
     Call {
@@ -88,6 +105,8 @@ pub enum InstKind {
         obj_ty: Type,
         field: String,
         ty: Type,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
     },
     /// `obj.field = src`
     MemberStore {
@@ -96,6 +115,8 @@ pub enum InstKind {
         obj_ty: Type,
         field: String,
         src: Operand,
+        /// volatile 访问: 不可被 DCE/DSE 消除或重排序
+        is_volatile: bool,
     },
     /// `dest = cond ? t : f`
     Select {
@@ -670,9 +691,11 @@ impl Builder {
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
                 let dest = target.unwrap_or_else(|| self.fresh("idx", ty.clone(), span));
+                // 数组元素访问的 volatile: 取 arr 类型 (Array(Ptr(QT))) 中 QT 的 volatile.
+                let is_volatile = matches!(&arr.ty(), Type::Array(elem_qt, _) if elem_qt.is_volatile());
                 self.emit(Inst {
                     dest: Some(dest.clone()),
-                    kind: InstKind::IndexLoad { arr: a, idx: i },
+                    kind: InstKind::IndexLoad { arr: a, idx: i, is_volatile },
                     span: span.clone(),
                 });
                 self.define(dest.clone());
@@ -688,6 +711,11 @@ impl Builder {
                 let obj_ty = expr.ty();
                 let obj = self.lower_expr(expr);
                 let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
+                // 结构体字段访问: 若对象本身带 volatile, 则访问沿用.
+                let obj_is_volatile = match &obj_ty {
+                    Type::Ptr(qt) if *is_arrow => qt.is_volatile(),
+                    _ => false,
+                };
                 if *is_arrow {
                     // *obj.field: 先解引用指针, 再访问成员
                     let deref_ty = match &obj_ty {
@@ -700,6 +728,7 @@ impl Builder {
                         kind: InstKind::Load {
                             e: obj,
                             ty: ty.clone(),
+                            is_volatile: obj_is_volatile,
                         },
                         span: span.clone(),
                     });
@@ -710,6 +739,7 @@ impl Builder {
                             obj_ty: deref_ty,
                             field: field.name.clone(),
                             ty: ty.clone(),
+                            is_volatile: obj_is_volatile,
                         },
                         span: span.clone(),
                     });
@@ -721,6 +751,7 @@ impl Builder {
                             obj_ty: obj_ty.clone(),
                             field: field.name.clone(),
                             ty: ty.clone(),
+                            is_volatile: false,
                         },
                         span: span.clone(),
                     });
@@ -731,11 +762,17 @@ impl Builder {
             Expr::Deref { e, span, ty } => {
                 let o = self.lower_expr(e);
                 let dest = target.unwrap_or_else(|| self.fresh("deref", ty.clone(), span));
+                // volatile 检测: `e` 的类型若是 Ptr(QT) 且 QT.quals 含 volatile.
+                let is_volatile = match &e.ty() {
+                    Type::Ptr(qt) => qt.is_volatile(),
+                    _ => false,
+                };
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Load {
                         e: o,
                         ty: ty.clone(),
+                        is_volatile,
                     },
                     span: span.clone(),
                 });
@@ -784,11 +821,18 @@ impl Builder {
                         span: span.clone(),
                     });
                     // store back
+                    let store_volatile = self
+                        .func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false);
                     self.emit(Inst {
                         dest: None,
                         kind: InstKind::Store {
                             e: Operand::SymAddr(name.name.clone(), ty.clone()),
                             src: Operand::Var(new_dest.clone()),
+                            is_volatile: store_volatile,
                         },
                         span: span.clone(),
                     });
@@ -1439,9 +1483,17 @@ fn lower_lvalue(
     }
     if let Expr::Deref { e: inner, .. } = l {
         let addr = b.lower_expr(inner);
+        let store_volatile = match inner.ty() {
+            Type::Ptr(qt) => qt.is_volatile(),
+            _ => false,
+        };
         b.emit(Inst {
             dest: None,
-            kind: InstKind::Store { e: addr, src },
+            kind: InstKind::Store {
+                e: addr,
+                src,
+                is_volatile: store_volatile,
+            },
             span: span.clone(),
         });
         let dest = b.fresh("store", ty.clone(), span);
@@ -1450,12 +1502,17 @@ fn lower_lvalue(
     if let Expr::Index { arr, idx, .. } = l {
         let a = b.lower_expr(arr);
         let i = b.lower_expr(idx);
+        let store_volatile = match arr.ty() {
+            Type::Array(elem_qt, _) => elem_qt.is_volatile(),
+            _ => false,
+        };
         b.emit(Inst {
             dest: None,
             kind: InstKind::IndexStore {
                 arr: a,
                 idx: i,
                 src,
+                is_volatile: store_volatile,
             },
             span: span.clone(),
         });
@@ -1471,6 +1528,10 @@ fn lower_lvalue(
     {
         let obj_ty = expr.ty();
         let obj = b.lower_expr(expr);
+        let member_volatile = match &obj_ty {
+            Type::Ptr(qt) if *is_arrow => qt.is_volatile(),
+            _ => false,
+        };
         if *is_arrow {
             let deref_ty = match &obj_ty {
                 Type::Ptr(inner) => inner.base.clone(),
@@ -1482,6 +1543,7 @@ fn lower_lvalue(
                 kind: InstKind::Load {
                     e: obj,
                     ty: ty.clone(),
+                    is_volatile: member_volatile,
                 },
                 span: span.clone(),
             });
@@ -1492,6 +1554,7 @@ fn lower_lvalue(
                     obj_ty: deref_ty,
                     field: field.name.clone(),
                     src,
+                    is_volatile: member_volatile,
                 },
                 span: span.clone(),
             });
@@ -1503,6 +1566,7 @@ fn lower_lvalue(
                     obj_ty: obj_ty.clone(),
                     field: field.name.clone(),
                     src,
+                    is_volatile: false,
                 },
                 span: span.clone(),
             });
@@ -1810,7 +1874,7 @@ fn collect_var_uses_inst(kind: &InstKind, out: &mut HashMap<String, SsaVar>) {
             collect_var_uses_op(e, out);
             collect_var_uses_op(src, out);
         }
-        InstKind::IndexLoad { arr, idx } | InstKind::IndexStore { arr, idx, .. } => {
+        InstKind::IndexLoad { arr, idx, .. } | InstKind::IndexStore { arr, idx, .. } => {
             collect_var_uses_op(arr, out);
             collect_var_uses_op(idx, out);
         }
@@ -2436,6 +2500,7 @@ fn rebuild_bb(
                         span: func.span.clone(),
                     },
                     span: func.span.clone(),
+                    is_fallthrough: false,
                 });
             }
             // default case
@@ -2458,6 +2523,7 @@ fn rebuild_bb(
                     span: func.span.clone(),
                 },
                 span: func.span.clone(),
+                is_fallthrough: false,
             });
             out.push(BlockItem::Stmt(Stmt::Switch {
                 expr: idx_e,
@@ -2670,6 +2736,7 @@ fn rebuild_cycle(
                         range_end: None,
                         body: Block { items: target_items, span: func.span.clone() },
                         span: func.span.clone(),
+                        is_fallthrough: false,
                     });
                 }
                 let mut def_items: Vec<BlockItem> = Vec::new();
@@ -2680,6 +2747,7 @@ fn rebuild_cycle(
                     val: None, range_end: None,
                     body: Block { items: def_items, span: func.span.clone() },
                     span: func.span.clone(),
+                    is_fallthrough: false,
                 });
                 body_items.push(BlockItem::Stmt(Stmt::Switch {
                     expr: idx_e, cases, span: func.span.clone(),
@@ -2905,12 +2973,12 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
-        InstKind::Load { e, ty } => Expr::Deref {
+        InstKind::Load { e, ty, .. } => Expr::Deref {
             e: Box::new(resolve_operand(e, &fake_env, subst, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
-        InstKind::Store { e, src } => Expr::Assign {
+        InstKind::Store { e, src, .. } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Deref {
                 e: Box::new(resolve_operand(e, &fake_env, subst, func)),
@@ -2921,13 +2989,13 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: Type::Void,
         },
-        InstKind::IndexLoad { arr, idx } => Expr::Index {
+        InstKind::IndexLoad { arr, idx, .. } => Expr::Index {
             arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
             idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
-        InstKind::IndexStore { arr, idx, src } => Expr::Assign {
+        InstKind::IndexStore { arr, idx, src, .. } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
                 arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
@@ -2957,6 +3025,7 @@ fn inst_to_expr_resolved(
             obj_ty,
             field,
             ty,
+            ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
             // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
@@ -2977,6 +3046,7 @@ fn inst_to_expr_resolved(
             obj_ty,
             field,
             src,
+            ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
@@ -3070,15 +3140,15 @@ fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
         InstKind::Un { e, .. } => collect_op_uses_op(e, out),
         InstKind::Cast { e, .. } => collect_op_uses_op(e, out),
         InstKind::Load { e, .. } => collect_op_uses_op(e, out),
-        InstKind::Store { e, src } => {
+        InstKind::Store { e, src, .. } => {
             collect_op_uses_op(e, out);
             collect_op_uses_op(src, out);
         }
-        InstKind::IndexLoad { arr, idx } => {
+        InstKind::IndexLoad { arr, idx, .. } => {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
         }
-        InstKind::IndexStore { arr, idx, src } => {
+        InstKind::IndexStore { arr, idx, src, .. } => {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
             collect_op_uses_op(src, out);
@@ -3125,15 +3195,15 @@ fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
         InstKind::Un { e, .. } => count += op_count_in_op(e, name),
         InstKind::Cast { e, .. } => count += op_count_in_op(e, name),
         InstKind::Load { e, .. } => count += op_count_in_op(e, name),
-        InstKind::Store { e, src } => {
+        InstKind::Store { e, src, .. } => {
             count += op_count_in_op(e, name);
             count += op_count_in_op(src, name);
         }
-        InstKind::IndexLoad { arr, idx } => {
+        InstKind::IndexLoad { arr, idx, .. } => {
             count += op_count_in_op(arr, name);
             count += op_count_in_op(idx, name);
         }
-        InstKind::IndexStore { arr, idx, src } => {
+        InstKind::IndexStore { arr, idx, src, .. } => {
             count += op_count_in_op(arr, name);
             count += op_count_in_op(idx, name);
             count += op_count_in_op(src, name);
@@ -3288,12 +3358,12 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             span: sp.clone(),
             ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
-        InstKind::Load { e, ty } => Expr::Deref {
+        InstKind::Load { e, ty, .. } => Expr::Deref {
             e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
-        InstKind::Store { e, src } => Expr::Assign {
+        InstKind::Store { e, src, .. } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Deref {
                 e: Box::new(operand_to_expr(e, env, func)),
@@ -3304,13 +3374,13 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             span: sp.clone(),
             ty: Type::Void,
         },
-        InstKind::IndexLoad { arr, idx } => Expr::Index {
+        InstKind::IndexLoad { arr, idx, .. } => Expr::Index {
             arr: Box::new(operand_to_expr(arr, env, func)),
             idx: Box::new(operand_to_expr(idx, env, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
-        InstKind::IndexStore { arr, idx, src } => Expr::Assign {
+        InstKind::IndexStore { arr, idx, src, .. } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
                 arr: Box::new(operand_to_expr(arr, env, func)),
@@ -3337,6 +3407,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             obj_ty,
             field,
             ty,
+            ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
@@ -3356,6 +3427,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             obj_ty,
             field,
             src,
+            ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
