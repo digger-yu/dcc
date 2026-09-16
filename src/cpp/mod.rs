@@ -44,17 +44,24 @@
 //! 中列明.
 #![allow(dead_code, unused_imports)]
 
+pub mod abi_layout;
 pub mod bmf;
 pub mod coroutine;
 pub mod cpp_const_eval;
 pub mod driver;
 pub mod feature_degrade;
+pub mod feature_matrix;
 pub mod gcc_compat;
+pub mod hir;
+pub mod legacy;
 pub mod lexer;
 pub mod lower;
+pub mod lower_ir;
 pub mod mangle;
 pub mod modules;
 pub mod parser;
+pub mod runtime;
+pub mod sema;
 pub mod stdlib;
 pub mod template;
 pub mod template_depth;
