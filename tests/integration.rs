@@ -3811,6 +3811,39 @@ fn vector_init_rvalue_run_returns_zero() {
     assert_eq!(rc, 0, "vector_init_rvalue should return 0, got {rc}");
 }
 
+/// 小于 8B 的 vector 返回不能用 movsd 读穿临时槽。
+#[test]
+fn vector_small_return_uses_width_aware_xmm_load() {
+    let source = include_str!("fixtures/c/vec_small_return.c");
+    let (output, obj_path) = run_object_test("vector-small-return", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dump = Command::new("objdump")
+        .args(["-d"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump -d");
+    let _ = fs::remove_file(&obj_path);
+    assert!(dump.status.success(), "objdump -d failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    for func in ["ret_v1qu", "ret_v1hu", "ret_v1ui", "ret_v2hu", "ret_v4qu"] {
+        let start = disasm.find(&format!("<{func}>:")).unwrap_or_else(|| {
+            panic!("missing function {func} in disassembly:\n{disasm}")
+        });
+        let rest = &disasm[start..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(body.contains("movd"), "{func} should load via movd:\n{body}");
+        assert!(
+            !body.contains("movsd"),
+            "{func} must not read 8 bytes with movsd:\n{body}"
+        );
+    }
+}
+
 /// _Complex 除法 codegen
 #[test]
 fn complex_div_run_returns_zero() {

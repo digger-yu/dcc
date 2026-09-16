@@ -9143,7 +9143,8 @@ impl Codegen {
                             // path above).  Load from temp slot 0 into xmm0.
                             if matches!(&ret_ty, Type::Vector(_, _)) && ret_sz <= 8 {
                                 let toff = self.vector_temp_base(0, ret_sz);
-                                // movsd xmm0, [r13 + toff]  (loads 8 bytes)
+                                // vector < 8B 不能读穿自身槽位。
+                                // 按真实字节宽度加载，再把零扩展位型移入 xmm0。
                                 self.load_stack_xmm(0, toff, ret_sz, false);
                             }
                             // __int128 返回值: 若函数返回 __int128 但表达式非 __int128, rdx 未设置
@@ -13653,6 +13654,22 @@ impl Codegen {
         self.emit(&[0x66, rex, 0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]);
     }
 
+    /// movd xmm, r32: 将 GP 低 32 位移入 XMM 低位并清零高位。
+    fn emit_movd_gp_to_xmm(&mut self, xmm: u8, gp: u8) {
+        let mut rex = 0x40;
+        if xmm >= 8 {
+            rex |= 0x04;
+        }
+        if gp >= 8 {
+            rex |= 0x01;
+        }
+        self.emit(&[0x66]);
+        if rex != 0x40 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]);
+    }
+
     /// 零扩展无符号整数值到 64 位 (用于 unsigned→float 转换).
     /// dst 寄存器含源值, 高位可能含垃圾位.
     /// - Bool/UChar: and dst, 0xFF
@@ -17761,9 +17778,14 @@ impl Codegen {
         }
     }
 
-    fn load_stack_xmm(&mut self, xmm: u8, off: i64, _elem_size: usize, is_float: bool) {
-        let pfx = if is_float { 0xF3 } else { 0xF2 };
-        self.emit_xmm_r13_disp(pfx, 0x10, xmm, off);
+    fn load_stack_xmm(&mut self, xmm: u8, off: i64, elem_size: usize, is_float: bool) {
+        if is_float || elem_size >= 8 {
+            let pfx = if is_float { 0xF3 } else { 0xF2 };
+            self.emit_xmm_r13_disp(pfx, 0x10, xmm, off);
+            return;
+        }
+        self.load_stack_sized(0, off, elem_size);
+        self.emit_movd_gp_to_xmm(xmm, 0);
     }
 
     fn load_mem_xmm(&mut self, xmm: u8, elem_size: usize, is_float: bool) {
