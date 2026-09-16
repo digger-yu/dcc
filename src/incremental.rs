@@ -339,6 +339,7 @@ mod tests {
             dep_phony: false,
             dep_no_compile: false,
             dep_quote_target: false,
+            cxx_native: crate::cpp::feature_matrix::CxxNativeMode::Off,
             red_zone: true,
             frame_pointer: false,
             sse: true,

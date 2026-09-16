@@ -59,6 +59,7 @@ pub mod lower;
 pub mod lower_ir;
 pub mod mangle;
 pub mod modules;
+pub mod native;
 pub mod parser;
 pub mod runtime;
 pub mod sema;

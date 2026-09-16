@@ -107,6 +107,11 @@ pub enum HirExprKind {
         object: HirExprId,
         field: SymbolId,
     },
+    /// 方法引用（对象.方法 或 对象->方法），保留对象上下文用于虚调用判定
+    MethodRef {
+        object: HirExprId,
+        method: SymbolId,
+    },
     /// 基类转换（非虚）
     BaseCast {
         object: HirExprId,
@@ -351,6 +356,11 @@ pub enum HirStmtKind {
     CtorInitBase {
         base: ClassId,
         args: Vec<HirExprId>,
+    },
+    /// 设置 vptr 指向指定类的 vtable（构造/析构中更新虚表指针）
+    SetVTablePtr {
+        class: ClassId,
+        place: HirExprId,
     },
 }
 

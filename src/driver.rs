@@ -1911,6 +1911,53 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             search_dirs.extend(cfg.include_paths.iter().cloned());
             search_dirs.extend(cfg.system_paths.iter().cloned());
             let imported = crate::cpp::modules::load_imported_modules(decls, &search_dirs);
+
+            // --- C++ 原生后端路径 (Stage 3+) ---
+            // Off:  跳过, 走 legacy lower-to-c
+            // On:   强制走 native, 失败直接报错 (无 silent fallback)
+            // Auto: 先走 native, 失败带诊断回退 legacy
+            use crate::cpp::feature_matrix::CxxNativeMode;
+            let try_native = !matches!(cfg.cxx_native, CxxNativeMode::Off);
+            if try_native {
+                match crate::cpp::native::lower_decls_native(decls) {
+                    Ok(native_out) => {
+                        if cfg.verbose {
+                            eprintln!("dcc: using C++ native backend path");
+                        }
+                        // 进程内直接走 C 主流水线: ir::lower → 优化 → codegen::emit
+                        return emit_native_program(
+                            cfg,
+                            native_out.prog,
+                            &file_name,
+                            pp_out.line_map.clone(),
+                        );
+                    }
+                    Err(e) => {
+                        match cfg.cxx_native {
+                            CxxNativeMode::On => {
+                                return Err(vec![Diagnostic::err(
+                                    "E0500",
+                                    format!("C++ native backend: {}", e),
+                                    crate::diagnostics::Span::point(&file_name, 0, 0),
+                                )]);
+                            }
+                            CxxNativeMode::Auto => {
+                                if cfg.verbose {
+                                    eprintln!(
+                                        "dcc: C++ native backend unsupported ({}), \
+                                         falling back to legacy lower-to-c",
+                                        e
+                                    );
+                                }
+                                // fall through to legacy path
+                            }
+                            CxxNativeMode::Off => unreachable!(),
+                        }
+                    }
+                }
+            }
+            // --- 原生后端路径结束, 以下为 legacy lower-to-c ---
+
             let mut lower = Lower::new();
             lower.imported_modules = imported;
             lower.lower_decls(decls);
@@ -2160,6 +2207,251 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     eprintln!("dcc: wrote {}", cfg.output.display());
+    Ok(())
+}
+
+/// C++ 原生后端: 把 ast::Program 直接走 C 主流水线 (ir::lower → 优化 →
+/// codegen::emit → 写输出). 完整复用 run() 中的 target 构造、优化、
+/// codegen、输出写入、bootstrap compare、增量编译更新等逻辑, 确保 native
+/// 路径与 legacy 路径产出完全一致的目标文件.
+fn emit_native_program(
+    cfg: &Config,
+    prog: crate::ast::Program,
+    file_name: &str,
+    line_map: Vec<LineSpan>,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::diagnostics::Severity;
+    use std::io::Write;
+
+    let dcfg = diag_cfg(cfg);
+
+    // ir::lower (native 路径产出的 AST 已经是展平后的, 直接进 IR)
+    let (mut module, ir_warnings) =
+        ir::lower(prog).map_err(|d| {
+            let mut d = d;
+            remap_diags(&mut d, &line_map);
+            d
+        })?;
+    for w in &ir_warnings {
+        w.print_with(&dcfg);
+    }
+    ir::validate(&module).map_err(|d| {
+        let mut d = d;
+        remap_diags(&mut d, &line_map);
+        d
+    })?;
+
+    // 优化器 target 信息 (VNNI / 向量位宽)
+    let opt_has_vnni = cfg.cpu_feature_overrides.avx_vnni == Some(true)
+        || cfg.march.as_deref().is_some_and(|m| {
+            matches!(
+                m,
+                "x86-64-v4"
+                    | "sapphirerapids"
+                    | "granite-rapids"
+                    | "icelake-server"
+                    | "icelake-client"
+            )
+        });
+    let opt_vec_bits: u32 = if cfg.cpu_feature_overrides.avx512f == Some(true)
+        || (cfg.march.as_deref() == Some("x86-64-v4"))
+    {
+        512
+    } else if cfg.cpu_feature_overrides.avx2 == Some(true)
+        || cfg.march.as_deref().is_some_and(|m| {
+            matches!(
+                m,
+                "x86-64-v3" | "x86-64-v4" | "haswell" | "skylake" | "skylake-avx512"
+            )
+        })
+    {
+        256
+    } else {
+        0
+    };
+    crate::opt::optimize_with_full_target(
+        &mut module,
+        cfg.opt,
+        opt_has_vnni,
+        opt_vec_bits,
+        cfg.strict_aliasing,
+    );
+    if cfg.opt > 0 {
+        ir::resync(&mut module).map_err(|d| {
+            let mut d = d;
+            remap_diags(&mut d, &line_map);
+            d
+        })?;
+        ir::validate(&module).map_err(|d| {
+            let mut d = d;
+            remap_diags(&mut d, &line_map);
+            d
+        })?;
+    }
+
+    // 内联汇编约束校验
+    let mut asm_diags = codegen::validate_inline_asm_constraints(&module);
+    if !asm_diags.is_empty() {
+        remap_diags(&mut asm_diags, &line_map);
+        let asm_has_err = asm_diags.iter().any(|d| matches!(d.sev, Severity::Error));
+        if asm_has_err {
+            return Err(asm_diags);
+        }
+        for d in &asm_diags {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
+        }
+    }
+
+    if cfg.syntax_only {
+        return Ok(());
+    }
+
+    // target 构造 (与 run() 完全一致, 确保 native/legacy 产出一致)
+    let mut target = crate::target::Target::resolve(&cfg.target);
+    target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
+    target.apply_cpu_feature_overrides(&cfg.cpu_feature_overrides);
+    if let Some(ref arch_name) = cfg.march {
+        target.apply_march(arch_name);
+    }
+    if let Some(ref cpu_name) = cfg.mcpu {
+        target.apply_march(cpu_name);
+    }
+    if let Some(ref tune_name) = cfg.mtune {
+        target.mtune = Some(tune_name.clone());
+    }
+    target.arm_instruction_mode = cfg.arm_instruction_mode;
+    target.float_abi = cfg.float_abi;
+    if cfg.verbose && cfg.target.arch == crate::cli::Arch::X86_64 {
+        let feats = target.cpu_features.to_feature_strings();
+        if !feats.is_empty() {
+            eprintln!("dcc: cpu features: {}", feats.join(", "));
+        }
+    }
+    target.kernel_code_model = cfg.kernel_code_model;
+    target.auto_var_init_zero = cfg.auto_var_init_zero;
+    target.set_stack_protector(cfg.stack_protector);
+    target.unwind_tables = cfg.unwind_tables;
+    target.function_return_thunk_extern = cfg.function_return_thunk_extern;
+    target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
+    target.patchable_function_entry = cfg.patchable_function_entry;
+    target.ftrace_mode = cfg.ftrace_mode;
+    target.instrument_functions = cfg.instrument_functions;
+    target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
+    target.stack_clash_protection = cfg.stack_clash_protection;
+    target.strict_aliasing = cfg.strict_aliasing;
+    target.strict_overflow = cfg.strict_overflow;
+    target.fast_math = cfg.fast_math;
+    target.fp_contract_mode = cfg.fp_contract_mode;
+    target.align_loops = cfg.align_loops;
+    target.align_jumps = cfg.align_jumps;
+    target.short_wchar = cfg.short_wchar;
+    target.no_common = cfg.no_common;
+
+    // -mno-sse 浮点使用检测 (与 run() 一致, 降级为警告)
+    if !target.sse {
+        let sse_span = module
+            .functions
+            .iter()
+            .find(|f| {
+                ir_type_uses_float(&f.return_type)
+                    || f.params.iter().any(ir_type_uses_float)
+                    || f.body.iter().any(ir_stmt_uses_float)
+            })
+            .map(|f| f.span.clone())
+            .or_else(|| {
+                module
+                    .globals
+                    .iter()
+                    .find(|g| {
+                        ir_type_uses_float(&g.ty)
+                            || g.initializer.as_ref().is_some_and(ir_expr_uses_float)
+                    })
+                    .map(|g| g.span.clone())
+            });
+        if let Some(mut span) = sse_span {
+            remap_span(&mut span, &line_map);
+            let mut w = vec![Diagnostic::warn(
+                "W0300",
+                "floating-point code with -mno-sse; x87 may be used for FP operations",
+                span,
+            )];
+            for d in &w {
+                d.print_with(&dcfg);
+            }
+        }
+    }
+
+    let lto_enabled = cfg.lto_enabled;
+    let function_sections = cfg.function_sections || lto_enabled;
+    let bytes = codegen::emit(
+        &module,
+        &target,
+        cfg.relocatable,
+        cfg.emit_asm,
+        file_name,
+        cfg.debug_level,
+        cfg.dwarf_version,
+        cfg.sanitizers,
+        lto_enabled,
+        function_sections,
+        cfg.parallel_codegen,
+        cfg.bounds_check,
+        cfg.trapv,
+        None, // offload_section: native backend 暂不支持 offload
+        &line_map,
+        cfg.verbose,
+    )?;
+
+    if cfg.verbose {
+        eprintln!("dcc: size   = {} bytes", bytes.len());
+    }
+
+    // 写输出 (与 run() 完全一致: stdout / 文件 + 0755 权限)
+    let out = &cfg.output;
+    if out.to_str() == Some("-") {
+        std::io::stdout().write_all(&bytes).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("write error (stdout): {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
+    } else {
+        let mut f = fs::File::create(out).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write {}: {}", out.display(), e),
+                crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
+            )]
+        })?;
+        f.write_all(&bytes).unwrap();
+        if !cfg.relocatable && !cfg.emit_asm {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = f.metadata().unwrap().permissions();
+                p.set_mode(0o755);
+                f.set_permissions(p).unwrap();
+            }
+        }
+        eprintln!("dcc: wrote {}", out.display());
+    }
+
+    // 自举回归对比 (与 run() 一致)
+    if let Some(ref_path) = cfg.bootstrap_compare.as_ref() {
+        match crate::bootstrap::compare_files(ref_path, out) {
+            Ok(report) => {
+                eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
+                eprint!("{}", report.format());
+            }
+            Err(e) => {
+                eprintln!("dcc: bootstrap compare error: {e}");
+            }
+        }
+    }
+
     Ok(())
 }
 

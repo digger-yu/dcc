@@ -72,6 +72,7 @@ pub struct Config {
     pub dep_phony: bool,                      // -MP: 为每个头文件生成 phony 目标
     pub dep_no_compile: bool,                 // -M/-MM: 仅生成依赖, 不编译
     pub dep_quote_target: bool,               // -MQ: 对目标中的 $ 转义
+    pub cxx_native: crate::cpp::feature_matrix::CxxNativeMode, // --cxx-native=auto|off|on
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
@@ -1231,6 +1232,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut dep_phony = false;
     let mut dep_no_compile = false;
     let mut dep_quote_target = false;
+    let mut cxx_native = crate::cpp::feature_matrix::CxxNativeMode::default();
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
@@ -2649,6 +2651,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-MP" => {
                 dep_phony = true;
             }
+            // --cxx-native=<mode>: C++ 原生后端开关
+            //   auto: 默认, 失败回退 legacy (C 文本临时文件)
+            //   on:   强制走原生, 失败报错
+            //   off:  强制走 legacy
+            a if a.starts_with("--cxx-native=") => {
+                let v = &a[13..];
+                match crate::cpp::feature_matrix::CxxNativeMode::from_str(v) {
+                    Some(m) => cxx_native = m,
+                    None => cli_warnings.push(format!(
+                        "unknown --cxx-native={} (expected auto|off|on); using default",
+                        v
+                    )),
+                }
+            }
             "-dump-ast" => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
             // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径
@@ -2952,6 +2968,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dep_phony,
             dep_no_compile,
             dep_quote_target,
+            cxx_native,
             red_zone,
             frame_pointer,
             sse,
@@ -3078,6 +3095,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dep_phony,
             dep_no_compile,
             dep_quote_target,
+            cxx_native: crate::cpp::feature_matrix::CxxNativeMode::default(),
             red_zone,
             frame_pointer,
             sse,

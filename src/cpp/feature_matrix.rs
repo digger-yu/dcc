@@ -121,9 +121,16 @@ impl CppFeature {
     /// 当前 native path 已支持的特性集合
     /// 随阶段推进逐步扩展。
     pub fn native_supported(&self) -> bool {
-        // 当前 native path 尚未实现，全部返回 false。
-        // 各 Stage 完成后在此处开启。
-        false
+        // Stage 3: free function / plain class / member function /
+        // ctor-dtor / reference type 已在原生后端实现.
+        matches!(
+            self,
+            CppFeature::FreeFunction
+                | CppFeature::PlainClass
+                | CppFeature::MemberFunction
+                | CppFeature::CtorDtor
+                | CppFeature::ReferenceType
+        )
     }
 }
 
