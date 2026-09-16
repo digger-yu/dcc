@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, Stmt, Type, UnOp};
+use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, QualType, Stmt, Type, UnOp};
 use crate::diagnostics::Span;
 use crate::ssa::{Function, Inst, InstKind, Operand, SsaVar, Terminator};
 
@@ -511,7 +511,7 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
 fn set_of(o: &Operand, sets: &HashMap<String, usize>) -> Option<usize> {
     match o {
         Operand::Var(v) => sets.get(&v.name()).copied(),
-        Operand::SymAddr(n) => sets.get(n).copied(),
+        Operand::SymAddr(n, _) => sets.get(n).copied(),
         _ => None,
     }
 }
@@ -853,7 +853,7 @@ pub fn pgo(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_hot_hint".to_string()),
+                            e: Operand::SymAddr("__dcc_hot_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(*count as i128),
                         },
                         span: func.span.clone(),
@@ -868,7 +868,7 @@ pub fn pgo(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_cold_hint".to_string()),
+                            e: Operand::SymAddr("__dcc_cold_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(*count as i128),
                         },
                         span: func.span.clone(),
@@ -907,7 +907,7 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
                 break;
             }
             if let InstKind::Store {
-                e: Operand::SymAddr(n),
+                e: Operand::SymAddr(n, _),
                 ..
             } = &inst.kind
             {
@@ -926,7 +926,7 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_parallel_hint".to_string()),
+                            e: Operand::SymAddr("__dcc_parallel_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                             src: Operand::Int(1),
                         },
                         span: func.span.clone(),
@@ -1030,7 +1030,7 @@ pub fn loop_interchange(func: &mut Function) -> bool {
                 Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_loop_interchanged".to_string()),
+                        e: Operand::SymAddr("__dcc_loop_interchanged".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                         src: Operand::Int(1),
                     },
                     span: func.span.clone(),
@@ -1066,7 +1066,7 @@ pub fn tail_call_optimization(func: &mut Function) -> bool {
     let mut self_call_idx = None;
     for (i, inst) in bb.insts.iter().enumerate() {
         if let InstKind::Call {
-            callee: Operand::FnAddr(n) | Operand::SymAddr(n),
+            callee: Operand::FnAddr(n, _) | Operand::SymAddr(n, _),
             ..
         } = &inst.kind
         {
@@ -1119,7 +1119,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_section_cold".to_string()),
+                    e: Operand::SymAddr("__dcc_section_cold".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
                 },
                 span: func.span.clone(),
@@ -1133,7 +1133,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_section_hot".to_string()),
+                    e: Operand::SymAddr("__dcc_section_hot".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
                 },
                 span: func.span.clone(),
@@ -1147,7 +1147,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_noreturn_hint".to_string()),
+                    e: Operand::SymAddr("__dcc_noreturn_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(1),
                 },
                 span: func.span.clone(),
@@ -1244,7 +1244,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
         for inst in &bb.insts {
             // 跳过 pass hint 指令
             if let InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 ..
             } = &inst.kind
             {
@@ -1270,7 +1270,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
     for b in func.blocks.values() {
         for inst in &b.insts {
             if let InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 ..
             } = &inst.kind
             {
@@ -1373,7 +1373,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
         // 移除旧的 regalloc hint (如果存在)
         entry.insts.retain(|inst| {
             !matches!(&inst.kind, InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 ..
             } if name == "__dcc_regalloc_done")
         });
@@ -1382,7 +1382,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_regalloc_done".to_string()),
+                    e: Operand::SymAddr("__dcc_regalloc_done".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     src: Operand::Int(total_pressure as i128),
                 },
                 span: func.span.clone(),
@@ -1591,7 +1591,7 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                 return Some(Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::SymAddr(format!("__dcc_ubsan_{}", kind_str)),
+                        e: Operand::SymAddr(format!("__dcc_ubsan_{}", kind_str), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                         src: Operand::Int(kind_hash),
                     },
                     span: span.clone(),
@@ -1605,7 +1605,7 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                 return Some(Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_ubsan_negate_overflow".to_string()),
+                        e: Operand::SymAddr("__dcc_ubsan_negate_overflow".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                         src: Operand::Int(ubsan_kind_hash("negate_overflow")),
                     },
                     span: span.clone(),
@@ -2338,7 +2338,7 @@ fn operand_uses(k: &InstKind) -> Vec<String> {
 /// 用于指令调度屏障检测: 任何涉及 asm 标记的操作数都视为副作用.
 fn operand_refs_asm(op: &Operand) -> bool {
     match op {
-        Operand::SymAddr(name) => name.starts_with("__dcc_asm_"),
+        Operand::SymAddr(name, _) => name.starts_with("__dcc_asm_"),
         Operand::Var(v) => v.name().starts_with("__dcc_asm_"),
         _ => false,
     }
@@ -3022,7 +3022,7 @@ mod tests {
             bb.insts.push(Inst {
                 dest: Some(t1),
                 kind: InstKind::Call {
-                    callee: Operand::FnAddr("factorial".into()),
+                    callee: Operand::FnAddr("factorial".into(), Type::Int),
                     args: vec![Operand::Int(5)],
                     ret_ty: Type::Int,
                 },
@@ -3064,10 +3064,10 @@ mod tests {
         assert!(changed);
         let bb = f.blocks.get("entry").unwrap();
         let has_hot = bb.insts.iter().any(|i| {
-            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n), .. } if n == "__dcc_section_hot")
+            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n, _), .. } if n == "__dcc_section_hot")
         });
         let has_nr = bb.insts.iter().any(|i| {
-            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n), .. } if n == "__dcc_noreturn_hint")
+            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n, _), .. } if n == "__dcc_noreturn_hint")
         });
         assert!(has_hot, "should have hot section hint");
         assert!(has_nr, "should have noreturn hint");
@@ -3161,7 +3161,7 @@ mod tests {
             bb.insts.push(Inst {
                 dest: Some(z.clone()),
                 kind: InstKind::Load {
-                    e: Operand::SymAddr("p".into()),
+                    e: Operand::SymAddr("p".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
                 },
                 span: span.clone(),
@@ -3186,7 +3186,7 @@ mod tests {
             bb.insts.push(Inst {
                 dest: Some(a.clone()),
                 kind: InstKind::Load {
-                    e: Operand::SymAddr("q".into()),
+                    e: Operand::SymAddr("q".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
                 },
                 span: span.clone(),
@@ -3226,7 +3226,7 @@ mod tests {
             bb.insts.push(Inst {
                 dest: Some(z.clone()),
                 kind: InstKind::Load {
-                    e: Operand::SymAddr("p".into()),
+                    e: Operand::SymAddr("p".into(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
                     ty: Type::Int,
                 },
                 span: span.clone(),
@@ -3533,7 +3533,7 @@ mod tests {
         assert!(!entry.insts.is_empty());
         match &entry.insts[0].kind {
             InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 src: Operand::Int(val),
             } => {
                 assert_eq!(name, "__dcc_regalloc_done");
@@ -3585,7 +3585,7 @@ mod tests {
         let entry = f.blocks.get("entry").unwrap();
         match &entry.insts[0].kind {
             InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 src: Operand::Int(val),
             } => {
                 assert_eq!(name, "__dcc_regalloc_done");
@@ -3642,7 +3642,7 @@ mod tests {
         assert_eq!(entry.insts.len(), 2);
         match &entry.insts[1].kind {
             InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 ..
             } => {
                 assert!(name.contains("divrem_overflow"), "got: {}", name);
@@ -3712,7 +3712,7 @@ mod tests {
         assert_eq!(entry.insts.len(), 2);
         match &entry.insts[1].kind {
             InstKind::Store {
-                e: Operand::SymAddr(name),
+                e: Operand::SymAddr(name, _),
                 ..
             } => {
                 assert!(name.contains("negate_overflow"), "got: {}", name);

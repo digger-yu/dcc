@@ -40,9 +40,9 @@ pub enum Operand {
     /// 字符串字面量 (在 rodata 中以 FNV-1a label 表示)
     Str(Vec<u8>),
     /// 全局符号地址 (用符号名占位)
-    SymAddr(String),
+    SymAddr(String, Type),
     /// 函数地址
-    FnAddr(String),
+    FnAddr(String, Type),
     /// 无值 (void)
     Void,
     /// 调用返回
@@ -525,11 +525,10 @@ impl Builder {
                 }
                 // 全局变量 -> SymAddr 占位
                 if let Some(g) = self.func.globals.get(&name.name) {
-                    let _ = g;
-                    return Operand::SymAddr(name.name.clone());
+                    return Operand::SymAddr(name.name.clone(), g.ty.clone());
                 }
                 // 未定义变量: 视为全局 (codegen fallback)
-                Operand::SymAddr(name.name.clone())
+                Operand::SymAddr(name.name.clone(), Type::Ptr(Box::new(QualType::new(Type::Void))))
             }
             Expr::Binop { op, l, r, span, ty } => {
                 let lo = self.lower_expr(l);
@@ -788,7 +787,7 @@ impl Builder {
                     self.emit(Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr(name.name.clone()),
+                            e: Operand::SymAddr(name.name.clone(), ty.clone()),
                             src: Operand::Var(new_dest.clone()),
                         },
                         span: span.clone(),
@@ -2215,7 +2214,7 @@ pub fn rebuild_block(func: &Function) -> Block {
                     let side_effect_unused = use_count == 0 && inst_has_side_effect(&inst.kind);
                     let inlineable = is_temp && use_count <= 1 && !side_effect_unused;
                     if inlineable {
-                        let resolved = inst_to_expr_resolved(&inst.kind, &subst, &inst.span);
+                        let resolved = inst_to_expr_resolved(&inst.kind, &subst, &inst.span, func);
                         subst.insert(ssa_name, Some(resolved));
                     } else {
                         subst.insert(ssa_name, None);
@@ -2247,9 +2246,9 @@ fn phi_name(v: &SsaVar) -> String {
 /// 它们需要被保留为符号引用, 供 codegen 把热/冷函数放入不同 section.
 fn is_pass_hint_inst(kind: &InstKind) -> bool {
     if let InstKind::Store {
-        e: Operand::SymAddr(name),
-        ..
-    } = kind
+                e: Operand::SymAddr(name, _),
+                ..
+            } = kind
     {
         name.starts_with("__dcc_") && !name.starts_with("__dcc_section_")
     } else {
@@ -2323,7 +2322,7 @@ fn rebuild_bb(
             if let Some(Some(_)) = subst.get(&ssa_name) {
                 continue;
             }
-            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
             let assign = Expr::Assign {
                 op: crate::ast::BinOp::Add,
                 l: Box::new(Expr::Ident {
@@ -2343,7 +2342,7 @@ fn rebuild_bb(
                 span: inst.span.clone(),
             }));
         } else {
-            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
             out.push(BlockItem::Stmt(Stmt::Expr {
                 e,
                 span: inst.span.clone(),
@@ -2353,7 +2352,7 @@ fn rebuild_bb(
     // 2. 翻译 terminator -> AST 后, 继续后继
     match &bb.term {
         Terminator::Ret { val } => {
-            let e = val.as_ref().map(|o| resolve_operand(o, env, subst));
+            let e = val.as_ref().map(|o| resolve_operand(o, env, subst, func));
             out.push(BlockItem::Stmt(Stmt::Return {
                 val: e,
                 span: func.span.clone(),
@@ -2363,7 +2362,7 @@ fn rebuild_bb(
             rebuild_bb(t, func, out, visited, env, subst);
         }
         Terminator::Branch { cond, t, f } => {
-            let cond_e = resolve_operand(cond, env, subst);
+            let cond_e = resolve_operand(cond, env, subst, func);
             let mut then_items: Vec<BlockItem> = Vec::new();
             let mut then_env = env.clone();
             let then_subst = subst.clone();
@@ -2411,7 +2410,7 @@ fn rebuild_bb(
         }
         Terminator::Unreachable => {}
         Terminator::SwitchTable { idx, values, targets, default } => {
-            let idx_e = resolve_operand(idx, env, subst);
+            let idx_e = resolve_operand(idx, env, subst, func);
             let mut cases = Vec::new();
             for (v, target) in values.iter().zip(targets.iter()) {
                 let mut target_items: Vec<BlockItem> = Vec::new();
@@ -2565,10 +2564,10 @@ fn rebuild_cycle(
             let t_in_cycle = cycle_blocks.contains(t) && !is_back_edge(header, t, func);
             let f_in_cycle = cycle_blocks.contains(f) && !is_back_edge(header, f, func);
             if t_in_cycle {
-                (Some(resolve_operand(cond, env, subst)), Some(t.as_str()), if f_in_cycle { None } else { Some(f.as_str()) })
+                (Some(resolve_operand(cond, env, subst, func)), Some(t.as_str()), if f_in_cycle { None } else { Some(f.as_str()) })
             } else if f_in_cycle {
                 // Negate condition: while(!cond) { ... }
-                let cond_e = resolve_operand(cond, env, subst);
+                let cond_e = resolve_operand(cond, env, subst, func);
                 let neg = Expr::Unary {
                     op: crate::ast::UnOp::Not,
                     e: Box::new(cond_e),
@@ -2651,7 +2650,7 @@ fn rebuild_cycle(
                 }
             }
             Terminator::Ret { val } => {
-                let e = val.as_ref().map(|o| resolve_operand(o, env, subst));
+                let e = val.as_ref().map(|o| resolve_operand(o, env, subst, func));
                 body_items.push(BlockItem::Stmt(Stmt::Return {
                     val: e,
                     span: func.span.clone(),
@@ -2659,7 +2658,7 @@ fn rebuild_cycle(
             }
             Terminator::SwitchTable { idx, values, targets, default } => {
                 // 在循环内重建 switch 语句
-                let idx_e = resolve_operand(idx, env, subst);
+                let idx_e = resolve_operand(idx, env, subst, func);
                 let mut cases = Vec::new();
                 for (v, target) in values.iter().zip(targets.iter()) {
                     let mut target_items: Vec<BlockItem> = Vec::new();
@@ -2728,7 +2727,7 @@ fn emit_rebuild_inst(
     out: &mut Vec<BlockItem>,
     env: &mut HashMap<String, SsaVar>,
     subst: &HashMap<String, Option<Expr>>,
-    _func: &Function,
+    func: &Function,
 ) {
     // PreservedDecl: 直接输出原始变量声明 (跳过 SSA 化)
     if let InstKind::PreservedDecl { var } = &inst.kind {
@@ -2741,7 +2740,7 @@ fn emit_rebuild_inst(
         if let Some(Some(_)) = subst.get(&ssa_name) {
             return;
         }
-        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
         let assign = Expr::Assign {
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {
@@ -2761,7 +2760,7 @@ fn emit_rebuild_inst(
             span: inst.span.clone(),
         }));
     } else {
-        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
+        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
         out.push(BlockItem::Stmt(Stmt::Expr {
             e,
             span: inst.span.clone(),
@@ -2774,6 +2773,7 @@ fn resolve_operand(
     o: &Operand,
     env: &HashMap<String, SsaVar>,
     subst: &HashMap<String, Option<Expr>>,
+    func: &Function,
 ) -> Expr {
     match o {
         Operand::Var(v) => {
@@ -2802,7 +2802,7 @@ fn resolve_operand(
                 }
             }
         }
-        _ => operand_to_expr(o, env),
+        _ => operand_to_expr(o, env, func),
     }
 }
 
@@ -2856,13 +2856,14 @@ fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
     inst_span: &Span,
+    func: &Function,
 ) -> Expr {
     let sp = inst_span.clone();
     let fake_env: HashMap<String, SsaVar> = HashMap::new();
     match kind {
         InstKind::Bin { op, l, r } => {
-            let l_expr = resolve_operand(l, &fake_env, subst);
-            let r_expr = resolve_operand(r, &fake_env, subst);
+            let l_expr = resolve_operand(l, &fake_env, subst, func);
+            let r_expr = resolve_operand(r, &fake_env, subst, func);
             let binop_ty = infer_binop_type(&l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
@@ -2873,7 +2874,7 @@ fn inst_to_expr_resolved(
             }
         }
         InstKind::Un { op, e } => {
-            let inner = resolve_operand(e, &fake_env, subst);
+            let inner = resolve_operand(e, &fake_env, subst, func);
             // 向量 UnOp: 结果类型同内部表达式 (Neg/BitNot 在向量上逐元素)
             let ty = if matches!(inner.ty(), Type::Vector(_, _)) {
                 inner.ty()
@@ -2889,7 +2890,7 @@ fn inst_to_expr_resolved(
         }
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
-            e: Box::new(resolve_operand(e, &fake_env, subst)),
+            e: Box::new(resolve_operand(e, &fake_env, subst, func)),
             span: sp.clone(),
         },
         InstKind::AddrOf { base } => Expr::AddrOf {
@@ -2905,36 +2906,36 @@ fn inst_to_expr_resolved(
             ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         InstKind::Load { e, ty } => Expr::Deref {
-            e: Box::new(resolve_operand(e, &fake_env, subst)),
+            e: Box::new(resolve_operand(e, &fake_env, subst, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
         InstKind::Store { e, src } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Deref {
-                e: Box::new(resolve_operand(e, &fake_env, subst)),
+                e: Box::new(resolve_operand(e, &fake_env, subst, func)),
                 span: sp.clone(),
                 ty: Type::Void,
             }),
-            r: Box::new(resolve_operand(src, &fake_env, subst)),
+            r: Box::new(resolve_operand(src, &fake_env, subst, func)),
             span: sp.clone(),
             ty: Type::Void,
         },
         InstKind::IndexLoad { arr, idx } => Expr::Index {
-            arr: Box::new(resolve_operand(arr, &fake_env, subst)),
-            idx: Box::new(resolve_operand(idx, &fake_env, subst)),
+            arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
+            idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
         InstKind::IndexStore { arr, idx, src } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
-                arr: Box::new(resolve_operand(arr, &fake_env, subst)),
-                idx: Box::new(resolve_operand(idx, &fake_env, subst)),
+                arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
+                idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
                 span: sp.clone(),
                 ty: Type::Int,
             }),
-            r: Box::new(resolve_operand(src, &fake_env, subst)),
+            r: Box::new(resolve_operand(src, &fake_env, subst, func)),
             span: sp.clone(),
             ty: Type::Void,
         },
@@ -2943,10 +2944,10 @@ fn inst_to_expr_resolved(
             args,
             ret_ty,
         } => Expr::Call {
-            callee: Box::new(resolve_operand(callee, &fake_env, subst)),
+            callee: Box::new(resolve_operand(callee, &fake_env, subst, func)),
             args: args
                 .iter()
-                .map(|a| resolve_operand(a, &fake_env, subst))
+                .map(|a| resolve_operand(a, &fake_env, subst, func))
                 .collect(),
             span: sp.clone(),
             ty: ret_ty.clone(),
@@ -2957,7 +2958,7 @@ fn inst_to_expr_resolved(
             field,
             ty,
         } => {
-            let mut base = resolve_operand(obj, &fake_env, subst);
+            let mut base = resolve_operand(obj, &fake_env, subst, func);
             // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Member {
@@ -2977,7 +2978,7 @@ fn inst_to_expr_resolved(
             field,
             src,
         } => {
-            let mut base = resolve_operand(obj, &fake_env, subst);
+            let mut base = resolve_operand(obj, &fake_env, subst, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
                 op: BinOp::Add,
@@ -2991,15 +2992,15 @@ fn inst_to_expr_resolved(
                     ty: Type::Void,
                     is_arrow: false,
                 }),
-                r: Box::new(resolve_operand(src, &fake_env, subst)),
+                r: Box::new(resolve_operand(src, &fake_env, subst, func)),
                 span: sp.clone(),
                 ty: Type::Void,
             }
         }
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
-            cond: Box::new(resolve_operand(cond, &fake_env, subst)),
-            then_: Box::new(resolve_operand(then_, &fake_env, subst)),
-            else_: Box::new(resolve_operand(else_, &fake_env, subst)),
+            cond: Box::new(resolve_operand(cond, &fake_env, subst, func)),
+            then_: Box::new(resolve_operand(then_, &fake_env, subst, func)),
+            else_: Box::new(resolve_operand(else_, &fake_env, subst, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
@@ -3042,7 +3043,7 @@ fn inst_to_expr_resolved(
                 inputs: inputs
                     .iter()
                     .take(input_names.len())
-                    .map(|o| resolve_operand(o, &fake_env, subst))
+                    .map(|o| resolve_operand(o, &fake_env, subst, func))
                     .collect(),
                 input_names: input_names.clone(),
                 input_constraints: input_constraints.clone(),
@@ -3172,7 +3173,7 @@ fn op_count_in_op(o: &Operand, name: &str) -> usize {
     0
 }
 
-fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
+fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function) -> Expr {
     match o {
         Operand::Var(v) => {
             if let Some(found) = env.get(&v.name()) {
@@ -3210,21 +3211,25 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
             span: Span::point("ssa", 0, 0),
             ty: Type::Array(Box::new(QualType::new(Type::Char)), crate::ast::ArraySize::Const(d.len())),
         },
-        Operand::SymAddr(n) => Expr::Ident {
-            name: crate::ast::Ident {
-                name: n.clone(),
+        Operand::SymAddr(n, ty) => {
+            Expr::Ident {
+                name: crate::ast::Ident {
+                    name: n.clone(),
+                    span: Span::point("ssa", 0, 0),
+                },
                 span: Span::point("ssa", 0, 0),
-            },
-            span: Span::point("ssa", 0, 0),
-            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
+                ty: ty.clone(),
+            }
         },
-        Operand::FnAddr(n) => Expr::Ident {
-            name: crate::ast::Ident {
-                name: n.clone(),
+        Operand::FnAddr(n, ty) => {
+            Expr::Ident {
+                name: crate::ast::Ident {
+                    name: n.clone(),
+                    span: Span::point("ssa", 0, 0),
+                },
                 span: Span::point("ssa", 0, 0),
-            },
-            span: Span::point("ssa", 0, 0),
-            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
+                ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
+            }
         },
         Operand::Void => Expr::Int {
             v: 0,
@@ -3245,12 +3250,12 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
 }
 
 /// 将 SSA 指令的 kind 转换为 AST 表达式 (右侧值)。
-fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
+fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function) -> Expr {
     let sp = Span::point("ssa", 0, 0);
     match kind {
         InstKind::Bin { op, l, r } => {
-            let l_expr = operand_to_expr(l, env);
-            let r_expr = operand_to_expr(r, env);
+            let l_expr = operand_to_expr(l, env, func);
+            let r_expr = operand_to_expr(r, env, func);
             let binop_ty = infer_binop_type(&l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
@@ -3262,13 +3267,13 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
         }
         InstKind::Un { op, e } => Expr::Unary {
             op: *op,
-            e: Box::new(operand_to_expr(e, env)),
+            e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
-            e: Box::new(operand_to_expr(e, env)),
+            e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
         },
         InstKind::AddrOf { base } => Expr::AddrOf {
@@ -3284,36 +3289,36 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
         },
         InstKind::Load { e, ty } => Expr::Deref {
-            e: Box::new(operand_to_expr(e, env)),
+            e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
         InstKind::Store { e, src } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Deref {
-                e: Box::new(operand_to_expr(e, env)),
+                e: Box::new(operand_to_expr(e, env, func)),
                 span: sp.clone(),
                 ty: Type::Void,
             }),
-            r: Box::new(operand_to_expr(src, env)),
+            r: Box::new(operand_to_expr(src, env, func)),
             span: sp.clone(),
             ty: Type::Void,
         },
         InstKind::IndexLoad { arr, idx } => Expr::Index {
-            arr: Box::new(operand_to_expr(arr, env)),
-            idx: Box::new(operand_to_expr(idx, env)),
+            arr: Box::new(operand_to_expr(arr, env, func)),
+            idx: Box::new(operand_to_expr(idx, env, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
         InstKind::IndexStore { arr, idx, src } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
-                arr: Box::new(operand_to_expr(arr, env)),
-                idx: Box::new(operand_to_expr(idx, env)),
+                arr: Box::new(operand_to_expr(arr, env, func)),
+                idx: Box::new(operand_to_expr(idx, env, func)),
                 span: sp.clone(),
                 ty: Type::Int,
             }),
-            r: Box::new(operand_to_expr(src, env)),
+            r: Box::new(operand_to_expr(src, env, func)),
             span: sp.clone(),
             ty: Type::Void,
         },
@@ -3322,8 +3327,8 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             args,
             ret_ty,
         } => Expr::Call {
-            callee: Box::new(operand_to_expr(callee, env)),
-            args: args.iter().map(|a| operand_to_expr(a, env)).collect(),
+            callee: Box::new(operand_to_expr(callee, env, func)),
+            args: args.iter().map(|a| operand_to_expr(a, env, func)).collect(),
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
@@ -3333,7 +3338,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             field,
             ty,
         } => {
-            let mut base = operand_to_expr(obj, env);
+            let mut base = operand_to_expr(obj, env, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Member {
                 expr: Box::new(base),
@@ -3352,7 +3357,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             field,
             src,
         } => {
-            let mut base = operand_to_expr(obj, env);
+            let mut base = operand_to_expr(obj, env, func);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
                 op: BinOp::Add,
@@ -3366,15 +3371,15 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
                     ty: Type::Void,
                     is_arrow: false,
                 }),
-                r: Box::new(operand_to_expr(src, env)),
+                r: Box::new(operand_to_expr(src, env, func)),
                 span: sp.clone(),
                 ty: Type::Void,
             }
         }
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
-            cond: Box::new(operand_to_expr(cond, env)),
-            then_: Box::new(operand_to_expr(then_, env)),
-            else_: Box::new(operand_to_expr(else_, env)),
+            cond: Box::new(operand_to_expr(cond, env, func)),
+            then_: Box::new(operand_to_expr(then_, env, func)),
+            else_: Box::new(operand_to_expr(else_, env, func)),
             span: sp.clone(),
             ty: Type::Int,
         },
@@ -3398,7 +3403,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             inputs: inputs
                 .iter()
                 .take(input_names.len())
-                .map(|a| operand_to_expr(a, env))
+                .map(|a| operand_to_expr(a, env, func))
                 .collect(),
             input_names: input_names.clone(),
             input_constraints: input_constraints.clone(),
