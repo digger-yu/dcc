@@ -79,10 +79,12 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
     }
     // 先克隆符号表 (sema.into_hir 只消费 hir, 但 clone 更简洁安全)
     let symbols: Vec<CxxSymbol> = sema.symbols().to_vec();
+    // 收集所有类的基类信息 (用于 ABI 布局)
+    let class_bases: HashMap<ClassId, Vec<ClassId>> = collect_class_bases(&sema, &symbols);
     let hir: HirTranslationUnit = sema.into_hir();
 
     // Step 2: 计算 ABI (两阶段: 先全部注册, 再 compute)
-    let abi_map: HashMap<ClassId, ClassAbi> = build_class_abis(&symbols)?;
+    let abi_map: HashMap<ClassId, ClassAbi> = build_class_abis(&symbols, &class_bases)?;
 
     // Step 3: lower HIR -> SSA
     let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -105,7 +107,31 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
 
 // === ABI 计算 (两阶段) ===
 
-fn build_class_abis(symbols: &[CxxSymbol]) -> Result<HashMap<ClassId, ClassAbi>, NativeError> {
+/// 从 Sema 中收集每个类的直接非虚基类列表。
+fn collect_class_bases(sema: &Sema, symbols: &[CxxSymbol]) -> HashMap<ClassId, Vec<ClassId>> {
+    let mut result = HashMap::new();
+    for sym in symbols {
+        if !matches!(sym.kind, CxxSymbolKind::Class) {
+            continue;
+        }
+        let cid = ClassId::from(sym.id);
+        let mut bases = Vec::new();
+        if let Some(info) = sema.get_class_info(cid) {
+            for base in &info.bases {
+                if !base.is_virtual {
+                    bases.push(base.class);
+                }
+            }
+        }
+        result.insert(cid, bases);
+    }
+    result
+}
+
+fn build_class_abis(
+    symbols: &[CxxSymbol],
+    class_bases: &HashMap<ClassId, Vec<ClassId>>,
+) -> Result<HashMap<ClassId, ClassAbi>, NativeError> {
     let mut calc = ItaniumAbiCalculator::new();
 
     // 第一遍: 注册所有 class (含基类), 即使基类也先注册避免 compute 递归失败
@@ -123,7 +149,9 @@ fn build_class_abis(symbols: &[CxxSymbol]) -> Result<HashMap<ClassId, ClassAbi>,
                 fields.push((s2.name.clone(), s2.ty.clone()));
             }
         }
-        calc.register_simple_class(cid, fields);
+        let bases = class_bases.get(&cid).cloned().unwrap_or_default();
+        // Stage 4: has_virtual 由方法注册阶段决定，这里先置 false
+        calc.register_class(cid, bases, fields, false);
     }
 
     // 第二遍: 注册方法 (需要 class 已经注册好; 现在补充 has_virtual / method 列表)
@@ -137,12 +165,14 @@ fn build_class_abis(symbols: &[CxxSymbol]) -> Result<HashMap<ClassId, ClassAbi>,
         }
         let Some(owner_sym_id) = sym.owner else { continue };
         let cid = ClassId::from(owner_sym_id);
-        // Stage 3 暂不支持虚函数, is_virtual 置 false 占位
+        // 判断是否为虚函数: 通过 sema 的 virtual_methods 列表
+        // 这里简化: 暂时都按非虚处理, Stage 5 再完善虚函数
+        let is_virtual = false;
         calc.register_method_with_symbol(
             cid,
             sym.name.clone(),
             sym.name.clone(), // Stage 4: 用 mangle.rs 的 Itanium 修饰名
-            false,
+            is_virtual,
             cid,
         );
     }
@@ -416,6 +446,20 @@ pub fn native_supported(decls: &[CppDecl]) -> Result<(), NativeError> {
                     ));
                 }
             }
+            // Stage 4: 非虚继承走 native; 虚继承 (Stage 6) 拒绝
+            CppDecl::Class(cd) => {
+                if cd.bases.iter().any(|b| b.is_virtual) {
+                    return Err(NativeError::Unsupported(
+                        "virtual inheritance".to_string(),
+                    ));
+                }
+                let has_base = !cd.bases.is_empty();
+                if has_base && !CppFeature::NonVirtualInheritance.native_supported() {
+                    return Err(NativeError::Unsupported(
+                        "non-virtual inheritance".to_string(),
+                    ));
+                }
+            }
             CppDecl::Namespace { .. } => {
                 return Err(NativeError::Unsupported("namespace".to_string()));
             }
@@ -493,5 +537,119 @@ int global = 0;\n\
             .filter(|d| matches!(d, ast::Decl::Func(_)))
             .count();
         assert!(fn_count >= 2, "expected at least 2 functions, got {}", fn_count);
+    }
+
+    #[test]
+    fn lower_single_inheritance_native() {
+        // Stage 4: 单继承 - 验证基类字段被展平到派生类 struct
+        let src = b"\
+class Base {\n\
+public:\n\
+    int b;\n\
+};\n\
+class Derived : public Base {\n\
+public:\n\
+    int d;\n\
+    Derived() {}\n\
+};\n\
+";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().expect("parse");
+        let out = lower_decls_native(&decls).expect("native lower");
+
+        // 应该有 2 个 struct (Base + Derived)
+        let struct_count = out
+            .prog
+            .decls
+            .iter()
+            .filter(|d| matches!(d, ast::Decl::StructDef(_)))
+            .count();
+        assert_eq!(struct_count, 2);
+
+        // 找到 Derived 的 struct 定义，验证包含基类字段 b
+        let derived_struct = out.prog.decls.iter().find_map(|d| match d {
+            ast::Decl::StructDef(sd) if sd.name.name == "Derived" => Some(sd),
+            _ => None,
+        });
+        assert!(derived_struct.is_some(), "Derived struct not found");
+        let sd = derived_struct.unwrap();
+        // Derived 应该有 2 个字段: b (from Base) + d (自己)
+        assert_eq!(sd.fields.len(), 2);
+        assert_eq!(sd.fields[0].name, "b");
+        assert_eq!(sd.fields[0].offset, 0);
+        assert_eq!(sd.fields[1].name, "d");
+        assert_eq!(sd.fields[1].offset, 4);
+    }
+
+    #[test]
+    fn lower_multiple_inheritance_native() {
+        // Stage 4: 多重非虚继承 - 验证两个基类都被展平
+        let src = b"\
+class A {\n\
+public:\n\
+    int a;\n\
+};\n\
+class B {\n\
+public:\n\
+    double b;\n\
+};\n\
+class C : public A, public B {\n\
+public:\n\
+    int c;\n\
+    C() {}\n\
+};\n\
+";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().expect("parse");
+        let out = lower_decls_native(&decls).expect("native lower");
+
+        // 找到 C 的 struct 定义
+        let c_struct = out.prog.decls.iter().find_map(|d| match d {
+            ast::Decl::StructDef(sd) if sd.name.name == "C" => Some(sd),
+            _ => None,
+        });
+        assert!(c_struct.is_some(), "C struct not found");
+        let sd = c_struct.unwrap();
+        // C 应该有 3 个字段: a (from A) + b (from B) + c (自己)
+        assert_eq!(sd.fields.len(), 3);
+        assert_eq!(sd.fields[0].name, "a");
+        assert_eq!(sd.fields[0].offset, 0);
+        assert_eq!(sd.fields[1].name, "b");
+        // B 对齐到 8 字节，所以 b 的 offset 是 8
+        assert_eq!(sd.fields[1].offset, 8);
+        assert_eq!(sd.fields[2].name, "c");
+        assert_eq!(sd.fields[2].offset, 16);
+    }
+
+    #[test]
+    fn native_supported_allows_non_virtual_inheritance() {
+        // Stage 4: 非虚继承应该被 native_supported 接受
+        let src = b"\
+class Base { int x; };\n\
+class Derived : public Base { int y; };\n\
+";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().expect("parse");
+        let result = native_supported(&decls);
+        assert!(result.is_ok(), "non-virtual inheritance should be supported");
+    }
+
+    #[test]
+    fn native_supported_rejects_virtual_inheritance() {
+        // Stage 6 之前: 虚继承应该被 native_supported 拒绝
+        let src = b"\
+class Base { int x; };\n\
+class Derived : public virtual Base { int y; };\n\
+";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().expect("parse");
+        let result = native_supported(&decls);
+        assert!(result.is_err(), "virtual inheritance should be rejected");
+        match result {
+            Err(NativeError::Unsupported(s)) => {
+                assert!(s.contains("virtual inheritance"));
+            }
+            _ => panic!("expected Unsupported error for virtual inheritance"),
+        }
     }
 }

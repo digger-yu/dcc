@@ -187,6 +187,27 @@ pub struct VirtualMethodInfo {
     pub overrides: Option<SymbolId>,
 }
 
+// === 构造函数种类 ===
+
+/// 构造函数种类（Stage 4: copy/move ctor 最小匹配）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtorKind {
+    /// 普通构造函数
+    Normal,
+    /// 拷贝构造函数（参数为 const T& 或 T&）
+    Copy,
+    /// 移动构造函数（参数为 T&&）
+    Move,
+    /// 委托构造函数
+    Delegating,
+}
+
+impl Default for CtorKind {
+    fn default() -> Self {
+        CtorKind::Normal
+    }
+}
+
 // === 类信息 ===
 
 /// 类的补充信息（继承、成员顺序等）
@@ -198,6 +219,10 @@ pub struct ClassInfo {
     pub fields: Vec<SymbolId>,
     /// 方法列表（按声明顺序，包含构造/析构）
     pub methods: Vec<SymbolId>,
+    /// 构造函数列表（按声明顺序）
+    pub constructors: Vec<SymbolId>,
+    /// 析构函数符号（如果有）
+    pub destructor: Option<SymbolId>,
     /// using 声明引入的基类成员: 名字 -> 基类符号 ID 列表
     pub using_decls: HashMap<String, Vec<SymbolId>>,
     /// 虚方法列表（含从基类继承并重写的），按 slot 顺序
@@ -1689,6 +1714,56 @@ impl Sema {
         false
     }
 
+    /// 判断构造函数的种类（copy / move / normal / delegating）。
+    ///
+    /// Stage 4: 最小匹配规则:
+    /// - Copy ctor: 第一个参数是 `const T&` 或 `T&`（T 是类自身）
+    /// - Move ctor: 第一个参数是 `T&&`（T 是类自身）
+    /// - Delegating: 初始化列表第一项是类名自己（委托到同类的其他构造函数）
+    /// - Normal: 其他情况
+    pub fn classify_ctor(
+        &self,
+        class_id: ClassId,
+        params: &[(String, CxxType)],
+        inits: &[(String, CppExpr)],
+    ) -> CtorKind {
+        // 先检查是否是委托构造
+        let class_name = self
+            .get_symbol(class_id.as_symbol())
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        if let Some((first_name, _)) = inits.first() {
+            if first_name == &class_name {
+                return CtorKind::Delegating;
+            }
+        }
+
+        // 检查第一个参数是否是对自身类的引用
+        if let Some((_, first_ty)) = params.first() {
+            match first_ty {
+                CxxType::LValueRef(inner) => {
+                    // T& 或 const T& -> copy ctor
+                    if let CxxType::Class(cid) = inner.as_ref() {
+                        if *cid == class_id {
+                            return CtorKind::Copy;
+                        }
+                    }
+                }
+                CxxType::RValueRef(inner) => {
+                    // T&& -> move ctor
+                    if let CxxType::Class(cid) = inner.as_ref() {
+                        if *cid == class_id {
+                            return CtorKind::Move;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        CtorKind::Normal
+    }
+
     /// 从初始化表达式中提取实参列表
     /// 支持 `member(args)` 形式（Call）或 `member(expr)` 单参（简化为单元素列表）
     fn build_init_args(&mut self, init_expr: &CppExpr) -> Result<Vec<HirExprId>, String> {
@@ -1953,7 +2028,7 @@ impl Sema {
                     .get_symbol(owner)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
-                let _ctor_sym = self.build_constructor(
+                let ctor_sym = self.build_constructor(
                     &ctor_name,
                     class_ty,
                     &param_tys,
@@ -1963,6 +2038,11 @@ impl Sema {
                     Some(owner),
                     class_id,
                 )?;
+
+                // 记录到 ClassInfo 的 constructors 列表
+                if let Some(info) = self.get_class_info_mut(class_id) {
+                    info.constructors.push(ctor_sym);
+                }
                 Ok(())
             }
             CppDecl::Dtor { body, is_virtual, .. } => {
@@ -1996,6 +2076,11 @@ impl Sema {
                     Some(owner),
                     false,
                 )?;
+
+                // 记录到 ClassInfo
+                if let Some(info) = self.get_class_info_mut(class_id) {
+                    info.destructor = Some(dtor_sym);
+                }
 
                 if is_virtual_dtor {
                     // 分配 vtable slot
@@ -2887,6 +2972,125 @@ mod tests {
             hir.stmts[inits[0].0].kind,
             HirStmtKind::CtorInitBase { .. }
         ));
+    }
+
+    #[test]
+    fn classify_ctor_normal() {
+        let mut sema = Sema::new();
+        let (class_id, _) = sema.register_class("Foo".into(), Access::Public, &[]);
+        sema.pop_scope();
+
+        let params = vec![("a".into(), CxxType::Integer { bits: 32, signed: true })];
+        let inits: Vec<(String, CppExpr)> = vec![];
+        let kind = sema.classify_ctor(class_id, &params, &inits);
+        assert_eq!(kind, CtorKind::Normal);
+    }
+
+    #[test]
+    fn classify_ctor_copy_by_ref() {
+        let mut sema = Sema::new();
+        let (class_id, _) = sema.register_class("Foo".into(), Access::Public, &[]);
+        sema.pop_scope();
+
+        // Foo(const Foo&) 或 Foo(Foo&) -> copy ctor
+        let params = vec![(
+            "other".into(),
+            CxxType::LValueRef(Box::new(CxxType::Class(class_id))),
+        )];
+        let inits: Vec<(String, CppExpr)> = vec![];
+        let kind = sema.classify_ctor(class_id, &params, &inits);
+        assert_eq!(kind, CtorKind::Copy);
+    }
+
+    #[test]
+    fn classify_ctor_move() {
+        let mut sema = Sema::new();
+        let (class_id, _) = sema.register_class("Foo".into(), Access::Public, &[]);
+        sema.pop_scope();
+
+        // Foo(Foo&&) -> move ctor
+        let params = vec![(
+            "other".into(),
+            CxxType::RValueRef(Box::new(CxxType::Class(class_id))),
+        )];
+        let inits: Vec<(String, CppExpr)> = vec![];
+        let kind = sema.classify_ctor(class_id, &params, &inits);
+        assert_eq!(kind, CtorKind::Move);
+    }
+
+    #[test]
+    fn classify_ctor_delegating() {
+        let mut sema = Sema::new();
+        let (class_id, _) = sema.register_class("Foo".into(), Access::Public, &[]);
+        sema.pop_scope();
+
+        let params = vec![("a".into(), CxxType::Integer { bits: 32, signed: true })];
+        // 初始化列表第一项是类名自己 -> delegating
+        let inits = vec![(
+            "Foo".into(),
+            CppExpr::IntLit(0),
+        )];
+        let kind = sema.classify_ctor(class_id, &params, &inits);
+        assert_eq!(kind, CtorKind::Delegating);
+    }
+
+    #[test]
+    fn class_info_records_constructors_and_dtor() {
+        let mut sema = Sema::new();
+        let decls = vec![CppDecl::Class(ClassDecl {
+            name: "Foo".into(),
+            is_struct: false,
+            is_union: false,
+            bases: vec![],
+            members: vec![
+                CppDecl::Ctor {
+                    class: "Foo".into(),
+                    params: vec![],
+                    inits: vec![],
+                    body: CppBody {
+                        stmts: vec![],
+                        is_decl: false,
+                    },
+                    is_virtual: false,
+                    is_explicit: false,
+                    is_noexcept: false,
+                },
+                CppDecl::Ctor {
+                    class: "Foo".into(),
+                    params: vec![("v".into(), MangleType::Int)],
+                    inits: vec![],
+                    body: CppBody {
+                        stmts: vec![],
+                        is_decl: false,
+                    },
+                    is_virtual: false,
+                    is_explicit: false,
+                    is_noexcept: false,
+                },
+                CppDecl::Dtor {
+                    class: "Foo".into(),
+                    body: CppBody {
+                        stmts: vec![],
+                        is_decl: false,
+                    },
+                    is_virtual: false,
+                    is_noexcept: false,
+                },
+            ],
+        })];
+        let result = sema.build_hir_from_decls(&decls);
+        assert!(result.is_ok(), "build error: {:?}", result.err());
+
+        // 找到 Foo 类的 ClassInfo
+        let class_sym = sema.lookup_unqualified("Foo");
+        assert_eq!(class_sym.len(), 1);
+        let class_id = ClassId::from(class_sym[0]);
+        let info = sema.get_class_info(class_id).unwrap();
+
+        // 2 个构造函数
+        assert_eq!(info.constructors.len(), 2);
+        // 有析构函数
+        assert!(info.destructor.is_some());
     }
 
     #[test]
