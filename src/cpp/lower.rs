@@ -5790,26 +5790,29 @@ fn fix_missing_ptr_typedefs(s: &str) -> String {
 
 /// Convert declarations in if conditions to separate declaration and check
 /// if (Type var = expr) { ... } -> Type var = expr; if (var) { ... }
+///
+/// 实现注意: 输入可能包含非 ASCII 字符(如中文注释), 因此全部按字节处理,
+/// 仅在需要提取标识符时才转回 &str, 且保证切片落在有效的 UTF-8 边界上.
 fn convert_if_cond_decls(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut result: Vec<u8> = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     while i < len {
         // Look for 'if ('
-        if i + 4 < len && &s[i..i+3] == "if " && bytes[i+3] == b'(' {
+        if i + 4 < len && &bytes[i..i+3] == b"if " && bytes[i+3] == b'(' {
             // Check if there's a type declaration inside
             let mut j = i + 4;
-            // Skip whitespace
-            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') { j += 1; }
+            // Skip ASCII whitespace
+            while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') { j += 1; }
             // Check for type keywords or identifiers that could be types
-            let is_type_start = (j + 11 <= len && &s[j..j+11] == "__auto_type")
-                || (j + 8 <= len && &s[j..j+8] == "unsigned")
-                || (j + 6 <= len && &s[j..j+6] == "signed")
-                || (j + 4 <= len && (&s[j..j+4] == "int " || &s[j..j+4] == "char" || &s[j..j+4] == "long"))
-                || (j + 3 <= len && &s[j..j+3] == "int")
-                || (bytes[j] == b's' && j + 7 <= len && &s[j..j+7] == "struct ");
-            
+            let is_type_start = (j + 11 <= len && &bytes[j..j+11] == b"__auto_type")
+                || (j + 8 <= len && &bytes[j..j+8] == b"unsigned")
+                || (j + 6 <= len && &bytes[j..j+6] == b"signed")
+                || (j + 4 <= len && (&bytes[j..j+4] == b"int " || &bytes[j..j+4] == b"char" || &bytes[j..j+4] == b"long"))
+                || (j + 3 <= len && &bytes[j..j+3] == b"int")
+                || (bytes[j] == b's' && j + 7 <= len && &bytes[j..j+7] == b"struct ");
+
             if is_type_start {
                 // Find the matching )
                 let mut depth = 1;
@@ -5821,24 +5824,16 @@ fn convert_if_cond_decls(s: &str) -> String {
                 }
                 if depth == 0 {
                     // Extract the declaration: Type var = expr
-                    let decl = &s[j..k-1];
+                    let decl_bytes = &bytes[j..k-1];
                     // Find the variable name (last identifier before =)
                     // But skip comparison operators: !=, ==, <=, >=
                     let mut found_eq_pos = None;
                     let mut search_start = 0;
-                    while let Some(rel_pos) = decl[search_start..].find('=') {
+                    while let Some(rel_pos) = find_ascii_eq(decl_bytes, search_start) {
                         let eq_pos = search_start + rel_pos;
                         // Check if this is part of a comparison operator
-                        let prev_char = if eq_pos > 0 {
-                            decl.as_bytes()[eq_pos - 1]
-                        } else {
-                            0
-                        };
-                        let next_char = if eq_pos + 1 < decl.len() {
-                            decl.as_bytes()[eq_pos + 1]
-                        } else {
-                            0
-                        };
+                        let prev_char = if eq_pos > 0 { decl_bytes[eq_pos - 1] } else { 0 };
+                        let next_char = if eq_pos + 1 < decl_bytes.len() { decl_bytes[eq_pos + 1] } else { 0 };
                         // Skip if part of !=, ==, <=, >=
                         if prev_char == b'!' || prev_char == b'='
                             || prev_char == b'<' || prev_char == b'>'
@@ -5851,16 +5846,16 @@ fn convert_if_cond_decls(s: &str) -> String {
                         break;
                     }
                     if let Some(eq_pos) = found_eq_pos {
-                        let before_eq = &decl[..eq_pos].trim_end();
+                        let before_eq = trim_ascii_end(&decl_bytes[..eq_pos]);
                         // Find the last word (variable name)
-                        let var_name = before_eq.split_whitespace().last().unwrap_or("");
-                        if !var_name.is_empty() {
+                        let var_name = last_ascii_word(before_eq);
+                        if !var_name.is_empty() && var_name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
                             // Convert: if (Type var = expr) { ... }
                             // To: Type var = expr; if (var) { ... }
-                            result.push_str(decl);
-                            result.push_str("; if (");
-                            result.push_str(var_name);
-                            result.push(')');
+                            result.extend_from_slice(decl_bytes);
+                            result.extend_from_slice(b"; if (");
+                            result.extend_from_slice(var_name.as_bytes());
+                            result.push(b')');
                             i = k;
                             continue;
                         }
@@ -5868,10 +5863,39 @@ fn convert_if_cond_decls(s: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
+        result.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+}
+
+/// Find the next ASCII '=' byte in `bytes` starting at `start`.
+fn find_ascii_eq(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes[start..].iter().position(|&b| b == b'=')
+}
+
+/// Trim trailing ASCII whitespace from bytes.
+fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
+/// Return the last contiguous ASCII word (identifier) in bytes.
+fn last_ascii_word(bytes: &[u8]) -> &str {
+    let end = bytes.len();
+    let mut start = end;
+    while start > 0 {
+        let b = bytes[start - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    std::str::from_utf8(&bytes[start..end]).unwrap_or("")
 }
 
 /// Convert C++ reference-to-array declarations to C pointer-to-array
@@ -6242,14 +6266,17 @@ fn convert_destructors(s: &str) -> String {
 /// new (ptr) ClassName() -> placement_new_ClassName(ptr)
 /// new ClassName(args) -> allocate_and_init_ClassName(args)
 /// delete expr; -> free(expr);
+///
+/// 实现注意: 输入可能包含非 ASCII 字符(如注释), 全程按字节处理,
+/// 输出字节 Vec 后统一转回 UTF-8, 避免对 &str 做非 char 边界的切片.
 fn convert_new_delete_expressions(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut result: Vec<u8> = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     while i < len {
         // Look for 'delete ' (standalone keyword, not part of identifier)
-        if i + 7 <= len && &s[i..i+7] == "delete " {
+        if i + 7 <= len && &bytes[i..i+7] == b"delete " {
             // Check word boundary: must not be preceded by alphanumeric or _
             let prev_ok = i == 0 || !(bytes[i-1].is_ascii_alphanumeric() || bytes[i-1] == b'_');
             if prev_ok {
@@ -6262,16 +6289,16 @@ fn convert_new_delete_expressions(s: &str) -> String {
                     else if bytes[j] == b';' && depth == 0 { break; }
                     j += 1;
                 }
-                let expr = s[i+7..j].trim();
-                result.push_str("free (");
-                result.push_str(expr);
-                result.push(')');
+                let expr = trim_ascii(&bytes[i+7..j]);
+                result.extend_from_slice(b"free (");
+                result.extend_from_slice(expr);
+                result.push(b')');
                 i = j;
                 continue;
             }
         }
         // Look for 'new '
-        if i + 4 <= len && &s[i..i+4] == "new " {
+        if i + 4 <= len && &bytes[i..i+4] == b"new " {
             // Check if this is placement new: new (ptr) ClassName
             let mut j = i + 4;
             // Skip whitespace
@@ -6287,13 +6314,13 @@ fn convert_new_delete_expressions(s: &str) -> String {
                     k += 1;
                 }
                 // Extract pointer expression
-                let ptr_expr = &s[j+1..k-1];
+                let ptr_expr = &bytes[j+1..k-1];
                 // Skip whitespace
                 while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
                 // Find class name
                 let mut m = k;
                 while m < len && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') { m += 1; }
-                let class_name = &s[k..m];
+                let class_name = &bytes[k..m];
                 // Skip whitespace and find (
                 while m < len && (bytes[m] == b' ' || bytes[m] == b'\t') { m += 1; }
                 if m < len && bytes[m] == b'(' {
@@ -6305,16 +6332,16 @@ fn convert_new_delete_expressions(s: &str) -> String {
                         else if bytes[n] == b')' { depth -= 1; }
                         n += 1;
                     }
-                    let args = &s[m+1..n-1];
-                    result.push_str("_ctor_");
-                    result.push_str(class_name);
-                    result.push_str(" (");
-                    result.push_str(ptr_expr);
+                    let args = &bytes[m+1..n-1];
+                    result.extend_from_slice(b"_ctor_");
+                    result.extend_from_slice(class_name);
+                    result.extend_from_slice(b" (");
+                    result.extend_from_slice(ptr_expr);
                     if !args.is_empty() {
-                        result.push_str(", ");
-                        result.push_str(args);
+                        result.extend_from_slice(b", ");
+                        result.extend_from_slice(args);
                     }
-                    result.push(')');
+                    result.push(b')');
                     i = n;
                     continue;
                 }
@@ -6323,7 +6350,7 @@ fn convert_new_delete_expressions(s: &str) -> String {
                 // Find class name
                 let mut k = j;
                 while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') { k += 1; }
-                let class_name = &s[j..k];
+                let class_name = &bytes[j..k];
                 // Skip whitespace
                 while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
                 if k < len && bytes[k] == b'(' {
@@ -6335,26 +6362,39 @@ fn convert_new_delete_expressions(s: &str) -> String {
                         else if bytes[m] == b')' { depth -= 1; }
                         m += 1;
                     }
-                    let args = &s[k+1..m-1];
-                    result.push_str("_new_");
-                    result.push_str(class_name);
-                    result.push_str(" (");
-                    result.push_str(args);
-                    result.push(')');
+                    let args = &bytes[k+1..m-1];
+                    result.extend_from_slice(b"_new_");
+                    result.extend_from_slice(class_name);
+                    result.extend_from_slice(b" (");
+                    result.extend_from_slice(args);
+                    result.push(b')');
                     i = m;
                     continue;
                 } else if k < len && bytes[k] == b'*' {
                     // new ClassName *something - just keep as is for now
-                    result.push_str("new ");
+                    result.extend_from_slice(b"new ");
                     i = j;
                     continue;
                 }
             }
         }
-        result.push(bytes[i] as char);
+        result.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+}
+
+/// Trim leading/trailing ASCII whitespace from a byte slice.
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
 }
 
 /// Convert vector member calls to C function calls

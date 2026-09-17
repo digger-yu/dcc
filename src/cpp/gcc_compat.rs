@@ -101,6 +101,16 @@ pub fn sjlj_eh_runtime() -> String {
          #include <stdlib.h>\n\
          #include <string.h>\n\
          \n\
+         /* 自包含异常内存分配/释放: native path 不链接 libstdc++, 因此\n\
+            __cxa_allocate_exception/__cxa_free_exception 用 malloc/free 提供.\n\
+            简化 SJLJ 方案只把异常对象当裸内存, 无 Itanium 头部偏移. */\n\
+         static void* __cxa_allocate_exception(size_t n) {\n\
+         \x20   return malloc(n ? n : 1);\n\
+         }\n\
+         static void __cxa_free_exception(void* p) {\n\
+         \x20   free(p);\n\
+         }\n\
+         \n\
          /* 异常上下文: 每个 try 块一个 */\n\
          typedef struct __dcc_eh_context {\n\
          \x20   jmp_buf jmpbuf;\n\
@@ -194,7 +204,6 @@ pub fn sjlj_eh_runtime() -> String {
          \x20   }\n\
          \x20   /* 释放异常内存 (使用 __cxa_free_exception) */\n\
          \x20   if (c->exception_ptr) {\n\
-         \x20       extern void __cxa_free_exception(void*);\n\
          \x20       __cxa_free_exception(c->exception_ptr);\n\
          \x20       c->exception_ptr = 0;\n\
          \x20   }\n\

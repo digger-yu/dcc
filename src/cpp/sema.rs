@@ -978,7 +978,21 @@ impl Sema {
                 let kind = sym_info.kind;
                 let ty = sym_info.ty.clone();
                 let expr_kind = match kind {
-                    CxxSymbolKind::Variable | CxxSymbolKind::Field => HirExprKind::Local(sym),
+                    CxxSymbolKind::Variable => HirExprKind::Local(sym),
+                    CxxSymbolKind::Field => {
+                        // 成员函数体内裸字段名等价于 this->field
+                        let this_id = self.build_expr(&CppExpr::This)?;
+                        let this_class = self
+                            .current_class
+                            .ok_or_else(|| "field used outside member function".to_string())?;
+                        // 字段若属于基类, 经 this-adjust 对齐到基类子对象
+                        let object_expr =
+                            self.adjust_pointer_to_member_base(this_id, sym, this_class)?;
+                        HirExprKind::FieldAccess {
+                            object: object_expr,
+                            field: sym,
+                        }
+                    }
                     CxxSymbolKind::Function => HirExprKind::Global(sym),
                     CxxSymbolKind::Method => HirExprKind::Global(sym),
                     _ => return Err(format!("identifier '{}' is not a value", name)),
@@ -1093,8 +1107,27 @@ impl Sema {
                             HirCallee::Direct(method_sym)
                         };
                         // 对象指针作为 this 第一个参数（模拟成员函数调用）
+                        // 对象若为类值 lvalue (如 `w.get()`), 需取址得到 this;
+                        // 指针/引用对象 (如 `p->get()` 或经解引用) 已是地址.
+                        let object_ty = self.hir.exprs[object_expr.0].ty.clone();
+                        let object_for_this = match &object_ty {
+                            CxxType::Class(_) => self.add_expr(
+                                HirExprKind::AddressOf(object_expr),
+                                CxxType::Pointer(Box::new(object_ty)),
+                            ),
+                            CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
+                                match inner.as_ref() {
+                                    CxxType::Class(_) => self.add_expr(
+                                        HirExprKind::AddressOf(object_expr),
+                                        CxxType::Pointer(inner.clone()),
+                                    ),
+                                    _ => object_expr,
+                                }
+                            }
+                            _ => object_expr,
+                        };
                         let mut full_args = Vec::with_capacity(hir_args.len() + 1);
-                        full_args.push(object_expr);
+                        full_args.push(object_for_this);
                         full_args.extend(hir_args);
                         hir_args = full_args;
                         (callee, ret)
@@ -1319,6 +1352,29 @@ impl Sema {
                         dst: dst_ty.clone(),
                     },
                     dst_ty,
+                ))
+            }
+            CppExpr::Ternary { cond, then, els } => {
+                // 三元表达式: cond ? then : els
+                // C++ 公共类型规则简化为: 两分支类型相同则用之,
+                // 否则取 then 分支类型 (覆盖基础整数/指针字面量场景)
+                let cond_id = self.build_expr(cond)?;
+                let then_id = self.build_expr(then)?;
+                let else_id = self.build_expr(els)?;
+                let then_ty = self.hir.exprs[then_id.0].ty.clone();
+                let else_ty = self.hir.exprs[else_id.0].ty.clone();
+                let ty = if then_ty == else_ty {
+                    then_ty
+                } else {
+                    then_ty
+                };
+                Ok(self.add_expr(
+                    HirExprKind::Conditional {
+                        cond: cond_id,
+                        then_expr: then_id,
+                        else_expr: else_id,
+                    },
+                    ty,
                 ))
             }
             other => Err(format!(
@@ -1949,7 +2005,7 @@ impl Sema {
                         }
                     });
 
-                let (class_id, class_scope) = match class_id {
+                let (class_id, _class_scope) = match class_id {
                     Some(existing_id) => {
                         // 第一遍已注册，现在 push scope 并更新基类
                         let class_scope = self.push_scope(ScopeKind::Class);
@@ -2408,6 +2464,39 @@ mod tests {
     fn sema_starts_with_global_scope() {
         let sema = Sema::new();
         assert_eq!(sema.current_scope(), sema.global_scope());
+    }
+
+    #[test]
+    fn overload_set_lookup_returns_all_candidates() {
+        // Section 7.1: overload resolution - 同名重载函数构成 overload set,
+        // lookup 必须返回全部候选, 供调用点按实参挑选.
+        let mut sema = Sema::new();
+        let fn_ty = |n: usize| CxxType::Function {
+            ret: Box::new(CxxType::Void),
+            params: vec![CxxType::Integer {
+                bits: 32,
+                signed: true,
+            }; n],
+            is_const: false,
+            is_volatile: false,
+            ref_qual: None,
+        };
+        let f0 = sema.add_symbol("f".into(), CxxSymbolKind::Function, fn_ty(0), Access::Public);
+        let f1 = sema.add_symbol("f".into(), CxxSymbolKind::Function, fn_ty(1), Access::Public);
+        let f2 = sema.add_symbol("f".into(), CxxSymbolKind::Function, fn_ty(2), Access::Public);
+        let set = sema.lookup_unqualified("f");
+        // overload set 包含 3 个候选, 且按声明顺序排列
+        assert_eq!(set.len(), 3);
+        assert_eq!(set, vec![f0, f1, f2]);
+        // 候选函数签名参数个数可区分 (arity 匹配的依据)
+        let arities: Vec<usize> = set
+            .iter()
+            .map(|&id| match sema.get_symbol(id).unwrap().ty.clone() {
+                CxxType::Function { params, .. } => params.len(),
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(arities, vec![0, 1, 2]);
     }
 
     #[test]

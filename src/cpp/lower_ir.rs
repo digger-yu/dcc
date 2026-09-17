@@ -489,8 +489,6 @@ struct FuncLowerer<'a, 'b> {
     current_bb: String,
     /// 局部变量名 -> 当前 SSA 变量版本
     locals: HashMap<String, SsaVar>,
-    /// 返回值变量（非 void 函数使用）
-    ret_val: Option<SsaVar>,
     /// 返回块名称
     return_bb: String,
     /// SSA 版本计数器（每个基名一个）
@@ -510,27 +508,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         let mut ssa = Function::new(sym.name.clone(), ret_ty.clone(), span);
 
-        // 返回块
+        // 返回块 (void 函数或空函数收尾用)
         let return_bb = ssa.unique_bb("return");
-
-        // 返回值变量（非 void）
-        let ret_val = if ret_ty != Type::Void {
-            let var = SsaVar {
-                base: "__ret_val".to_string(),
-                version: 0,
-                ty: ret_ty.clone(),
-                span: dummy_span(),
-            };
-            ssa.local_types.insert("__ret_val".to_string(), ret_ty.clone());
-            ssa.original_locals.insert("__ret_val".to_string());
-            Some(var)
-        } else {
-            None
-        };
 
         let mut locals = HashMap::new();
         let mut versions = HashMap::new();
-        versions.insert("__ret_val".to_string(), 0);
 
         // 成员函数/构造函数/析构函数: 在 ssa.params 前注入隐式 this 形参
         // (sema.build_function 仅把显式形参放入 HirFunction.params,
@@ -585,7 +567,6 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             ssa,
             current_bb,
             locals,
-            ret_val,
             return_bb,
             versions,
             bb_counter: 0,
@@ -611,27 +592,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
     fn build_return_block(&mut self) {
         let bb_name = self.return_bb.clone();
-        let ret_val = self.ret_val.clone();
-        let term = if let Some(ret_var) = ret_val {
-            let ret_op = Operand::Var(ret_var.clone());
-            let ret_ty = ret_var.ty.clone();
-            let load_dest = self.fresh_var("__ret_load", ret_ty.clone());
-            let load_inst = Inst {
-                dest: Some(load_dest.clone()),
-                kind: InstKind::Load {
-                    e: ret_op.clone(),
-                    ty: ret_ty,
-                    is_volatile: false,
-                },
-                span: dummy_span(),
-            };
-            self.ssa.blocks.get_mut(&bb_name).unwrap().insts.push(load_inst);
-            Terminator::Ret {
-                val: Some(Operand::Var(load_dest)),
-            }
-        } else {
-            Terminator::Ret { val: None }
-        };
+        // ret_val 已移除: 非 void 函数的 return 语句直接生成 Ret terminator,
+        // return_bb 仅用于 void 函数/隐式 fall-through.
+        let term = Terminator::Ret { val: None };
         self.ssa.blocks.get_mut(&bb_name).unwrap().term = term;
     }
 
@@ -751,6 +714,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.lower_binary_op(*op, *lhs, *rhs, &expr_ty)
             }
 
+            HirExprKind::UnaryOp { op, operand } => {
+                self.lower_unary_op(*op, *operand, &expr_ty)
+            }
+
             HirExprKind::Assign { lhs, rhs } => {
                 self.lower_assign(*lhs, *rhs)
             }
@@ -818,6 +785,28 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             }
 
             HirExprKind::Throw { object, ty } => self.lower_throw(*object, ty),
+
+            HirExprKind::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                // 条件表达式: dest = cond ? then : else
+                let cond = self.lower_expr(*cond)?;
+                let then_val = self.lower_expr(*then_expr)?;
+                let else_val = self.lower_expr(*else_expr)?;
+                let result = self.fresh_var("__cond", expr_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(result.clone()),
+                    kind: InstKind::Select {
+                        cond,
+                        then_: then_val,
+                        else_: else_val,
+                    },
+                    span: dummy_span(),
+                });
+                Ok(Operand::Var(result))
+            }
 
             _ => Err(LowerIrError::Unsupported(format!(
                 "HIR expression kind: {:?}",
@@ -908,6 +897,87 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(inst);
 
         Ok(Operand::Var(dest))
+    }
+
+    /// 降低一元运算。Deref 复用 lower_dereference (Load)；AddrOf 由
+    /// AddressOf 分支处理；自增/自减目前支持局部变量 (SSA 重绑定)。
+    fn lower_unary_op(
+        &mut self,
+        op: UnaryOp,
+        operand_id: HirExprId,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use UnaryOp::*;
+        match op {
+            Deref => self.lower_dereference(operand_id, result_ty),
+            AddrOf => self.lower_address_of(operand_id, result_ty),
+            Plus => self.lower_expr(operand_id),
+            Minus | BitNot | LogicalNot => {
+                let operand = self.lower_expr(operand_id)?;
+                let ast_op = match op {
+                    Minus => UnOp::Neg,
+                    BitNot => UnOp::BitNot,
+                    LogicalNot => UnOp::Not,
+                    _ => unreachable!(),
+                };
+                let dest = self.fresh_var("unary", result_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::Un {
+                        op: ast_op,
+                        e: operand,
+                    },
+                    span: dummy_span(),
+                });
+                Ok(Operand::Var(dest))
+            }
+            PreInc | PreDec | PostInc | PostDec => {
+                // x++/++x 等目前只支持局部变量 (SSA 版本重绑定)
+                let operand_expr = self.get_expr(operand_id)?;
+                let sym_id = match &operand_expr.kind {
+                    HirExprKind::Local(sid) => *sid,
+                    _ => {
+                        return Err(LowerIrError::Unsupported(
+                            "increment/decrement of non-local object".to_string(),
+                        ))
+                    }
+                };
+                let sym = self.lowerer.get_symbol(sym_id)?;
+                let name = sym.name.clone();
+                let old = match self.locals.get(&name) {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Err(LowerIrError::Internal(format!(
+                            "local variable '{}' not found",
+                            name
+                        )))
+                    }
+                };
+                let delta = Operand::Int(1);
+                let ast_op = match op {
+                    PreInc | PostInc => BinOp::Add,
+                    PreDec | PostDec => BinOp::Sub,
+                    _ => unreachable!(),
+                };
+                let new_var = self.fresh_var(&name, result_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(new_var.clone()),
+                    kind: InstKind::Bin {
+                        op: ast_op,
+                        l: Operand::Var(old.clone()),
+                        r: delta,
+                    },
+                    span: dummy_span(),
+                });
+                self.locals.insert(name, new_var.clone());
+                // 前缀返回新值, 后缀返回旧值 (简化为同名旧版本变量)
+                Ok(Operand::Var(if matches!(op, PreInc | PreDec) {
+                    new_var
+                } else {
+                    old
+                }))
+            }
+        }
     }
 
     fn lower_logical_and(
@@ -1490,10 +1560,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let object = self.lower_expr(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let obj_ty = {
-            let obj_expr = self.get_expr(object_id)?;
-            self.lowerer.lower_type(&obj_expr.ty)?
-        };
+        let (object, obj_ty, object_is_arrow) =
+            self.deref_object_for_member(object_id, object)?;
 
         let dest = self.fresh_var("field", result_ty.clone());
         let inst = Inst {
@@ -1504,6 +1572,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 field: field_name,
                 ty: result_ty.clone(),
                 is_volatile: false,
+                is_arrow: object_is_arrow,
             },
             span: dummy_span(),
         };
@@ -1521,10 +1590,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let object = self.lower_expr(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let obj_ty = {
-            let obj_expr = self.get_expr(object_id)?;
-            self.lowerer.lower_type(&obj_expr.ty)?
-        };
+        let (object, obj_ty, object_is_arrow) =
+            self.deref_object_for_member(object_id, object)?;
 
         let inst = Inst {
             dest: None,
@@ -1534,12 +1601,34 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 field: field_name,
                 src,
                 is_volatile: false,
+                is_arrow: object_is_arrow,
             },
             span: dummy_span(),
         };
         self.push_inst(inst);
 
         Ok(Operand::Void)
+    }
+
+    /// 成员访问的对象若是 class 指针 (如 this), MemberLoad 的 obj
+    /// 保留指针地址, 但 obj_ty 必须是指向的类类型; 对象为类值时原样返回.
+    /// 返回 `(obj operand, 结构体类型, obj 是否为箭头基址)`.
+    fn deref_object_for_member(
+        &mut self,
+        object_id: HirExprId,
+        object: Operand,
+    ) -> Result<(Operand, Type, bool), LowerIrError> {
+        let obj_expr = self.get_expr(object_id)?;
+        match &obj_expr.ty {
+            CxxType::Pointer(inner) if matches!(inner.as_ref(), CxxType::Class(_)) => {
+                let pointee_ty = self.lowerer.lower_type(inner)?;
+                Ok((object, pointee_ty, true))
+            }
+            _ => {
+                let obj_ty = self.lowerer.lower_type(&obj_expr.ty)?;
+                Ok((object, obj_ty, false))
+            }
+        }
     }
 
     // --- address of / dereference ---
@@ -2324,20 +2413,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirStmtKind::Return(Some(expr_id)) => {
                 let val = self.lower_expr(*expr_id)?;
-                if let Some(ret_var) = &self.ret_val {
-                    // 把返回值存入 ret_val 变量
-                    let store_inst = Inst {
-                        dest: None,
-                        kind: InstKind::Store {
-                            e: Operand::Var(ret_var.clone()),
-                            src: val,
-                            is_volatile: false,
-                        },
-                        span: dummy_span(),
-                    };
-                    self.push_inst(store_inst);
-                }
-                self.set_term(Terminator::Jump(self.return_bb.clone()));
+                // ret_val 已移除: 直接在当前块返回, 不经过统一 return_bb.
+                self.set_term(Terminator::Ret { val: Some(val) });
                 Ok(())
             }
 
@@ -3190,6 +3267,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             field: member_name,
                             src: init_val,
                             is_volatile: false,
+                            is_arrow: true,
                         },
                         span: dummy_span(),
                     };
@@ -3872,15 +3950,12 @@ mod tests {
         lowerer.lower().unwrap();
         let func = &lowerer.output.functions[0];
 
-        // entry 块应跳到 return 块（因为只有 return 语句）
+        // ret_val 移除后, 非 void 函数的 return 语句直接在 entry 块生成 Ret,
+        // 不再先 Jump 到统一 return 块.
         let entry = &func.blocks["entry"];
         match &entry.term {
-            Terminator::Jump(target) => {
-                // 目标应该是 return 块
-                let ret_bb = &func.blocks[target];
-                assert!(matches!(&ret_bb.term, Terminator::Ret { .. }));
-            }
-            other => panic!("entry terminator should be Jump, got {:?}", other),
+            Terminator::Ret { val: Some(_) } => {}
+            other => panic!("entry terminator should be Ret with value, got {:?}", other),
         }
     }
 

@@ -2407,7 +2407,7 @@ fn emit_native_program(
             });
         if let Some(mut span) = sse_span {
             remap_span(&mut span, &line_map);
-            let mut w = vec![Diagnostic::warn(
+            let w = vec![Diagnostic::warn(
                 "W0300",
                 "floating-point code with -mno-sse; x87 may be used for FP operations",
                 span,

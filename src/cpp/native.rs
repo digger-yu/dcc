@@ -858,6 +858,10 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
     if let Err(e) = sema.build_hir_from_decls(&all_decls) {
         return Err(NativeError::Unsupported(e));
     }
+    // Debug: DCC_CXX_HIR_DUMP=path 时把 HIR 翻译单元 dump 出来
+    if let Ok(p) = std::env::var("DCC_CXX_HIR_DUMP") {
+        let _ = std::fs::write(&p, format!("{:#?}\n", sema.hir()));
+    }
     // 先克隆符号表 (sema.into_hir 只消费 hir, 但 clone 更简洁安全)
     let symbols: Vec<CxxSymbol> = sema.symbols().to_vec();
     // 收集所有类的基类信息 (用于 ABI 布局)
@@ -868,6 +872,14 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
     // Step 2: 计算 ABI (两阶段: 先全部注册, 再 compute)
     let abi_map: HashMap<ClassId, ClassAbi> =
         build_class_abis(&sema, &symbols, &class_bases, &class_virtual_bases)?;
+    // Debug: DCC_CXX_ABI_DUMP=path 时把 ABI 布局表 dump 出来
+    if let Ok(p) = std::env::var("DCC_CXX_ABI_DUMP") {
+        let mut s = String::new();
+        for (cid, abi) in &abi_map {
+            s.push_str(&format!("class {:?} -> {:#?}\n", cid, abi));
+        }
+        let _ = std::fs::write(&p, s);
+    }
     let hir: HirTranslationUnit = sema.into_hir();
 
     // Step 3: lower HIR -> SSA
@@ -880,6 +892,10 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
 
     // Step 4 + 5: SSA 函数 + struct 定义 -> ast::Program
     let prog = build_program(&output, &abi_map, &hir, &symbols)?;
+    // Debug: DCC_CXX_IR_DUMP=path 时把最终 ast::Program dump 出来
+    if let Ok(p) = std::env::var("DCC_CXX_IR_DUMP") {
+        let _ = std::fs::write(&p, format!("{:#?}\n", prog));
+    }
 
     // Step 6: vtable 数据暂作 rodata 记号, Stage 5 完整发射.
     Ok(NativeLowered {

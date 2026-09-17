@@ -107,6 +107,9 @@ pub enum InstKind {
         ty: Type,
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
+        /// obj 已经是指向结构体的指针 (如 C++ 的 this): 重建为
+        /// `obj->field`, 保留 obj 的指针类型, 不再额外解引用。
+        is_arrow: bool,
     },
     /// `obj.field = src`
     MemberStore {
@@ -117,6 +120,9 @@ pub enum InstKind {
         src: Operand,
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
+        /// obj 已经是指向结构体的指针 (如 C++ 的 this): 重建为
+        /// `obj->field`, 保留 obj 的指针类型, 不再额外解引用。
+        is_arrow: bool,
     },
     /// `dest = cond ? t : f`
     Select {
@@ -740,6 +746,7 @@ impl Builder {
                             field: field.name.clone(),
                             ty: ty.clone(),
                             is_volatile: obj_is_volatile,
+                            is_arrow: false,
                         },
                         span: span.clone(),
                     });
@@ -752,6 +759,7 @@ impl Builder {
                             field: field.name.clone(),
                             ty: ty.clone(),
                             is_volatile: false,
+                            is_arrow: false,
                         },
                         span: span.clone(),
                     });
@@ -1555,6 +1563,7 @@ fn lower_lvalue(
                     field: field.name.clone(),
                     src,
                     is_volatile: member_volatile,
+                    is_arrow: false,
                 },
                 span: span.clone(),
             });
@@ -1567,6 +1576,7 @@ fn lower_lvalue(
                     field: field.name.clone(),
                     src,
                     is_volatile: false,
+                    is_arrow: false,
                 },
                 span: span.clone(),
             });
@@ -3025,11 +3035,16 @@ fn inst_to_expr_resolved(
             obj_ty,
             field,
             ty,
+            is_arrow,
             ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
-            // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
-            set_expr_ty_if_compatible(&mut base, obj_ty);
+            if *is_arrow {
+                // obj 本身就是结构体指针: 保留其指针类型, 重建为 ptr->field
+            } else {
+                // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
             Expr::Member {
                 expr: Box::new(base),
                 field: crate::ast::Ident {
@@ -3038,7 +3053,7 @@ fn inst_to_expr_resolved(
                 },
                 span: sp.clone(),
                 ty: ty.clone(),
-                is_arrow: false,
+                is_arrow: *is_arrow,
             }
         }
         InstKind::MemberStore {
@@ -3046,10 +3061,15 @@ fn inst_to_expr_resolved(
             obj_ty,
             field,
             src,
+            is_arrow,
             ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
-            set_expr_ty_if_compatible(&mut base, obj_ty);
+            if *is_arrow {
+                // obj 本身就是结构体指针: 保留其指针类型
+            } else {
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
             Expr::Assign {
                 op: BinOp::Add,
                 l: Box::new(Expr::Member {
@@ -3060,7 +3080,7 @@ fn inst_to_expr_resolved(
                     },
                     span: sp.clone(),
                     ty: Type::Void,
-                    is_arrow: false,
+                    is_arrow: *is_arrow,
                 }),
                 r: Box::new(resolve_operand(src, &fake_env, subst, func)),
                 span: sp.clone(),
@@ -3407,10 +3427,15 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             obj_ty,
             field,
             ty,
+            is_arrow,
             ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
-            set_expr_ty_if_compatible(&mut base, obj_ty);
+            if *is_arrow {
+                // obj 本身就是结构体指针: 保留其指针类型, 重建为 ptr->field
+            } else {
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
             Expr::Member {
                 expr: Box::new(base),
                 field: crate::ast::Ident {
@@ -3419,7 +3444,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 },
                 span: sp.clone(),
                 ty: ty.clone(),
-                is_arrow: false,
+                is_arrow: *is_arrow,
             }
         }
         InstKind::MemberStore {
@@ -3427,10 +3452,15 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             obj_ty,
             field,
             src,
+            is_arrow,
             ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
-            set_expr_ty_if_compatible(&mut base, obj_ty);
+            if *is_arrow {
+                // obj 本身就是结构体指针: 保留其指针类型
+            } else {
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
             Expr::Assign {
                 op: BinOp::Add,
                 l: Box::new(Expr::Member {
@@ -3441,7 +3471,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                     },
                     span: sp.clone(),
                     ty: Type::Void,
-                    is_arrow: false,
+                    is_arrow: *is_arrow,
                 }),
                 r: Box::new(operand_to_expr(src, env, func)),
                 span: sp.clone(),

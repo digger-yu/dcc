@@ -934,6 +934,43 @@ mod tests {
     }
 
     #[test]
+    fn canonical_key_uniqueness() {
+        // Section 7.1: template canonical key - type_key 必须为不同类型生成
+        // 不同 key (缓存命中依据), 且对嵌套/模板类型保持结构.
+        use MangleType as M;
+        // 基础类型互异
+        let mut keys = std::collections::HashSet::new();
+        for ty in [
+            M::Void,
+            M::Int,
+            M::Uint,
+            M::Long,
+            M::LongLong,
+            M::Float,
+            M::Double,
+            M::Bool,
+            M::Char,
+        ] {
+            assert!(keys.insert(type_key(&ty)), "dup key for {ty:?}");
+        }
+        // 指针 vs 引用不同
+        let p = M::Pointer(Box::new(M::Int));
+        let r = M::Reference(Box::new(M::Int));
+        assert_ne!(type_key(&p), type_key(&r));
+        // 嵌套模板 vector<vector<int>> 保持递归结构
+        let inner = t("vector", &[M::Int]);
+        let outer = t("vector", &[inner.clone()]);
+        let flat = t("vector", &[M::Int]);
+        assert_ne!(type_key(&outer), type_key(&flat));
+        assert_eq!(type_key(&inner), "t_vector_int");
+        // 非类型实参 key
+        let n0 = M::NonType(0);
+        let n1 = M::NonType(1);
+        assert_ne!(type_key(&n0), type_key(&n1));
+        assert_eq!(type_key(&n1), "n1");
+    }
+
+    #[test]
     fn substitute_type_basic() {
         let params = ["T".to_string(), "U".to_string()];
         let args = [MangleType::Int, MangleType::Class("MyClass".to_string())];
