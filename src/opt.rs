@@ -2233,7 +2233,8 @@ impl StmtSpan for Stmt {
             | Stmt::GotoIndirect { span, .. }
             | Stmt::Label { span, .. }
             | Stmt::Switch { span, .. }
-            | Stmt::AsmGoto { span, .. } => span,
+            | Stmt::AsmGoto { span, .. }
+            | Stmt::Fallthrough { span } => span,
         }
     }
 }

@@ -1237,6 +1237,7 @@ impl Lowering {
             Stmt::Break { span } | Stmt::Continue { span } | Stmt::Goto { span, .. } => {
                 (Vec::new(), Vec::new(), span)
             }
+            Stmt::Fallthrough { span } => (Vec::new(), Vec::new(), span),
         };
         TypedStmt {
             expressions,

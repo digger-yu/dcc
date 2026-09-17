@@ -561,6 +561,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             allow_implicit_function_decl,
             allow_implicit_int,
             warn_implicit_decl: cfg.warn_implicit_decl,
+            warn_implicit_fallthrough: cfg.warn_implicit_fallthrough,
             cuda: cfg.profile.offload.cuda,
             hip: cfg.profile.offload.hip,
             fenv_access,
@@ -1607,88 +1608,13 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
 /// C++ 编译驱动: M9 接入点
 ///
 /// 流程:
-///   1. 预处理 C++ 源 (复用 C 预处理器; C++ 模式不处理 #include <iostream> 等)
-///   2. 调 cpp 前端 lex/parse/lower → 降级到 C 字符串
-///   3. 写到临时 .c 文件
-///   4. 调 C 链路 (re-preprocess / parse / IR / codegen) 写 .o 或 .s
+///   1. 预处理 C++ 源 (复用 C 预处理器)
+///   2. C++ 前端 lex/parse → native lower → 进程内走 C 主流水线
 ///
-/// M30.4: AST lower 可能因 parser 容错恢复丢失尾部的 `main` 函数.
-/// 检测: 若预处理文本含 `main` 定义但 lowered C 不含, 从预处理文本
-/// 提取 `main` 函数体并追加到 lowered C 末尾.
-fn recover_missing_main(c_src: String, pp_text: &str) -> String {
-    // 检查 lowered C 是否已有 main
-    let has_main_in_c = c_src.lines().any(|line| {
-        let t = line.trim();
-        t.contains("main") && (t.contains('(') || t.contains('{'))
-            && !t.starts_with("//") && !t.starts_with("/*")
-            && !t.contains("getdomainname") && !t.contains("setdomainname")
-    });
-    if has_main_in_c {
-        return c_src;
-    }
-    // 检查预处理文本是否有 main 定义
-    let pp_lines: Vec<&str> = pp_text.lines().collect();
-    let mut main_start = None;
-    for (i, line) in pp_lines.iter().enumerate() {
-        let t = line.trim();
-        if t.starts_with("main") && t.contains('(') {
-            main_start = Some(i);
-            break;
-        }
-        // 也检测 "int\nmain (void)" 模式: 上一行是 "int", 当前行是 "main ("
-        if t.starts_with("main") && !t.contains('(') {
-            // 检查下一行是否继续 main 的签名
-            if i + 1 < pp_lines.len() && pp_lines[i + 1].trim().starts_with('(') {
-                main_start = Some(i);
-                break;
-            }
-        }
-        // 检查 "int\nmain" 模式
-        if t == "int" && i + 1 < pp_lines.len() {
-            let next = pp_lines[i + 1].trim();
-            if next.starts_with("main") {
-                main_start = Some(i);
-                break;
-            }
-        }
-    }
-    let main_start = match main_start {
-        Some(s) => s,
-        None => return c_src,
-    };
-    // 从 main_start 提取到匹配的 '}' 结束
-    let mut brace_depth = 0i32;
-    let mut found_open = false;
-    let mut main_end = main_start;
-    for (i, line) in pp_lines.iter().enumerate().skip(main_start) {
-        for ch in line.chars() {
-            if ch == '{' { brace_depth += 1; found_open = true; }
-            if ch == '}' { brace_depth -= 1; }
-        }
-        if found_open && brace_depth <= 0 {
-            main_end = i;
-            break;
-        }
-    }
-    if !found_open {
-        return c_src;
-    }
-    // 提取 main 函数文本
-    let main_text: String = pp_lines[main_start..=main_end].to_vec()
-        .join("\n");
-    // 追加到 lowered C 末尾
-    let mut result = c_src;
-    result.push_str("\n/* recovered main function (lost during AST lower) */\n");
-    result.push_str(&main_text);
-    result.push('\n');
-    result
-}
-
 ///
-/// 设计: C++ 不另起 IR, 而是降级到 C 后复用整条 C 链路 (M7 决策)。
-/// 这意味着 C++ 的所有限制 = 现有 C 后端能表达的限制。
+/// 设计: C++ 不另起 IR, 而是通过 native lower 降级到 C AST
+/// 后复用整条 C 链路 (IR / 优化 / codegen)。
 fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
-    use crate::cpp::lower::Lower;
     use crate::cpp::parser::CppParser;
 
     let file_name = input.display().to_string();
@@ -1852,397 +1778,57 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         })?;
     }
 
-    // 2. C++ lex + parse + lower
-    //    当 CppParser 失败或有错误时, 回退到“预处理 + strip C++ 关键字 → C 后端”
-    //    直通模式. 此外, 当源文件本身不含 C++ 关键字 (class/template/namespace)
-    //    时也使用直通模式, 以避免系统头文件中的类型定义在 lower 过程中丢失.
-    //    M30.1: 检测范围加入预处理后文本 - 纯 include 型源 (`#include
-    //    <type_traits>` + 使用) 的 C++ 构造全在头文件里, 只看原始源码
-    //    会误走 strip 直通, 模板 / namespace 全部丢失.
-    //    M30.2: 补充 `::` 作用域运算符与 new/delete/operator/访问说明符
-    //    检测. `struct`/`bool` 兼容 C 的源 (libcpp/line-map.cc 风格: 结构体
-    //    + 类外成员定义 `T C::m() const {}`) 此前漏网, strip 管道只会把
-    //    `::` 拼成 `_` 而不剩 const / 注入 this, 产出非法 C.
-    let src_has_cpp = {
-        let raw = String::from_utf8_lossy(&src);
-        let has = |t: &str| crate::cpp::lower::has_cpp_feature(t);
-        has(&raw) || has(&pp_out.text)
-    };
+    // 2. C++ 解析 + native lower
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
-    let (decls, c_src, module_bmf) = match parser.parse_top_level() {
-        Ok(ref decls) if src_has_cpp => {
-            // 基于成功率的降级决策:
-            // parser 容错恢复会将无法解析的声明保留为 Opaque 原文,
-            // 因此即使错误数较多, 只要大部分声明解析成功,
-            // AST lower + opaque 混合路径的语义保真度仍远高于
-            // strip-keywords 文本处理.
-            let error_count = parser.diags.iter()
-                .filter(|d| matches!(d.sev, Severity::Error))
-                .count();
-            let total_attempted = decls.len() + error_count;
-            let success_ratio = if total_attempted > 0 {
-                decls.len() as f64 / total_attempted as f64
-            } else {
-                0.0
-            };
-            // 无错误时直接走 AST; 有错误时按成功率决策:
-            // >= 20% 声明解析成功 → AST lower + opaque 混合路径
-            // < 20% → 回退 strip-keywords
-            // 阈值从 50% 降至 20%: 复杂标准库头文件 (<expected>, <print>)
-            // 含大量模板声明会拖低成功率, 但 AST lower + opaque 混合路径
-            // 的语义保真度仍远高于 strip-keywords.
-            let use_ast = error_count == 0 || success_ratio >= 0.2;
-            if use_ast {
-                if error_count > 0 && cfg.verbose {
-                    eprintln!(
-                        "dcc: C++ parser had {} errors ({}/{} decls ok, {:.0}% success), using AST lower + opaque",
-                        error_count, decls.len(), total_attempted, success_ratio * 100.0
-                    );
-                }
-            let mut search_dirs: Vec<PathBuf> = Vec::new();
-            if let Some(p) = input.parent() {
-                search_dirs.push(p.to_path_buf());
-            }
-            if let Ok(cwd) = std::env::current_dir() {
-                if !search_dirs.contains(&cwd) {
-                    search_dirs.push(cwd);
-                }
-            }
-            search_dirs.extend(cfg.include_paths.iter().cloned());
-            search_dirs.extend(cfg.system_paths.iter().cloned());
-            let imported = crate::cpp::modules::load_imported_modules(decls, &search_dirs);
-
-            // --- C++ 原生后端路径 (Stage 3+) ---
-            // Off:  跳过, 走 legacy lower-to-c
-            // On:   强制走 native, 失败直接报错 (无 silent fallback)
-            // Auto: 先走 native, 失败带诊断回退 legacy
-            use crate::cpp::feature_matrix::CxxNativeMode;
-            let try_native = !matches!(cfg.cxx_native, CxxNativeMode::Off);
-            if try_native {
-                // Stage 10: 先做能力检测，判断是否预期可以走 native
-                let features = crate::cpp::native::detect_features(decls);
-                let can_native = crate::cpp::native::can_compile_native(decls);
-
-                if cfg.verbose {
-                    let mut sorted: Vec<&crate::cpp::feature_matrix::CppFeature> = features.iter().collect();
-                    sorted.sort_by_key(|f| f.name());
-                    eprintln!("dcc: C++ feature detection: {} features found", sorted.len());
-                    for f in &sorted {
-                        let status = if f.native_supported() { "[native]" } else { "[legacy]" };
-                        eprintln!("dcc:   {} {}", status, f.name());
-                    }
-                }
-
-                // Auto 模式下，如果检测到不支持的特性，直接 fallback 而不尝试 native
-                // 这样可以避免不必要的 native 编译尝试和错误输出
-                let should_try_native = match cfg.cxx_native {
-                    CxxNativeMode::On => true,
-                    CxxNativeMode::Auto => can_native.is_ok(),
-                    CxxNativeMode::Off => unreachable!(),
-                };
-
-                if !should_try_native {
-                    if cfg.verbose {
-                        let unsupported = can_native.unwrap_err();
-                        let names: Vec<&str> = unsupported.iter().map(|f| f.name()).collect();
-                        eprintln!(
-                            "dcc: C++ native backend skipped (unsupported features: {}), \
-                             falling back to legacy lower-to-c",
-                            names.join(", ")
-                        );
-                    }
-                    // fall through to legacy path
-                } else {
-                    match crate::cpp::native::lower_decls_native(decls) {
-                        Ok(native_out) => {
-                            if cfg.verbose {
-                                eprintln!("dcc: using C++ native backend path");
-                            }
-                            // 进程内直接走 C 主流水线: ir::lower → 优化 → codegen::emit
-                            return emit_native_program(
-                                cfg,
-                                native_out.prog,
-                                &file_name,
-                                pp_out.line_map.clone(),
-                            );
-                        }
-                        Err(e) => {
-                            match cfg.cxx_native {
-                                CxxNativeMode::On => {
-                                    return Err(vec![Diagnostic::err(
-                                        "E0500",
-                                        format!("C++ native backend: {}", e),
-                                        crate::diagnostics::Span::point(&file_name, 0, 0),
-                                    )]);
-                                }
-                                CxxNativeMode::Auto => {
-                                    if cfg.verbose {
-                                        eprintln!(
-                                            "dcc: C++ native backend failed ({}), \
-                                             falling back to legacy lower-to-c",
-                                            e
-                                        );
-                                    }
-                                    // fall through to legacy path
-                                }
-                                CxxNativeMode::Off => unreachable!(),
-                            }
-                        }
-                    }
-                }
-            }
-            // --- 原生后端路径结束, 以下为 legacy lower-to-c ---
-
-            let mut lower = Lower::new();
-            lower.imported_modules = imported;
-            lower.lower_decls(decls);
-            if let Some(msg) = lower.odr_check() {
-                return Err(vec![Diagnostic::err(
-                    "E0103",
-                    msg,
-                    crate::diagnostics::Span::point(&file_name, 0, 0),
-                )]);
-            }
-            let module_bmf = lower.module_bmf();
-            (Some(decls.clone()), lower.finish(), module_bmf)
-            } else {
-                // 成功率太低 (< 50%), 回退到 strip-keywords
-                if cfg.verbose {
-                    eprintln!(
-                        "dcc: C++ parser success ratio {:.0}% < 50%, falling back to strip-keywords",
-                        success_ratio * 100.0
-                    );
-                }
-                if std::env::var("DCC_CPP_DUMP_DIAGS").is_ok() {
-                    for d in &parser.diags {
-                        eprintln!("dcc-cpp-diag: {:?} {} @ {:?}", d.sev, d.msg, d.span);
-                    }
-                }
-                let stripped = crate::cpp::lower::strip_cpp_keywords(&pp_out.text);
-                (None, stripped, None)
-            }
-        }
-        Err(_) | Ok(_) => {
-            // Fallback: C++ parser 失败或解析中有错误,
-            // 预处理文本 → strip C++ 关键字 → 直接交 C 后端
-            if cfg.verbose {
-                eprintln!(
-                    "dcc: C++ parser had errors, falling back to strip-keywords mode"
-                );
-            }
-            // M30: 诊断转储 (DCC_CPP_DUMP_DIAGS 开启时打印 C++ parser
-            // 降级原因, 定位为何未走 AST lower 路径)
-            if std::env::var("DCC_CPP_DUMP_DIAGS").is_ok() {
-                for d in &parser.diags {
-                    eprintln!("dcc-cpp-diag: {:?} {} @ {:?}", d.sev, d.msg, d.span);
-                }
-            }
-            let stripped = crate::cpp::lower::strip_cpp_keywords(&pp_out.text);
-            (None, stripped, None)
-        }
-    };
-
-    // Post-process: flatten any remaining :: scope operators (both AST and fallback paths)
-    let c_src = crate::cpp::lower::flatten_all_scope_operators(&c_src);
-    // Apply additional C++ to C conversions that might have been missed by AST lowering
-    let c_src = crate::cpp::lower::apply_post_lowering_conversions(&c_src);
-    // M30.4: AST lower 可能因 parser 容错恢复丢失尾部函数 (如 main).
-    // 检测: 若预处理文本含 main 但 lowered C 不含, 从预处理文本提取并追加.
-    let c_src = recover_missing_main(c_src, &pp_out.text);
+    let decls = parser.parse_top_level().map_err(|_| {
+        let mut diags = parser.diags.clone();
+        enrich_diags(&mut diags, &src, &file_name, input.parent());
+        diags
+    })?;
 
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {
-        if let Some(ref d) = decls {
-            println!("{:#?}", d);
-        } else {
-            eprintln!("dcc: no AST available (fallback mode)");
-        }
+        println!("{:#?}", decls);
         return Ok(());
     }
 
-    // -fsyntax-only: 只跑 lower, 不调 dcc 编译
+    // -fsyntax-only: 只跑 parser, 不生成代码
     if cfg.syntax_only {
         return Ok(());
     }
 
-    // M26.4: 写出模块接口文件 (BMIP 缓存: 供后续 TU import)
-    if let Some(bmf_text) = module_bmf {
-        if let Some(out_path) = &cfg.emit_module_file {
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = fs::create_dir_all(parent);
-                }
-            }
-            fs::write(out_path, bmf_text).map_err(|e| {
-                vec![Diagnostic::err(
-                    "E0101",
-                    format!("cannot write module file {}: {}", out_path.display(), e),
-                    crate::diagnostics::Span::point("", 0, 0),
-                )]
-            })?;
-            if cfg.verbose {
-                eprintln!("dcc: wrote {}", out_path.display());
-            }
+    // Feature detection verbose output (用于诊断)
+    if cfg.verbose {
+        let features = crate::cpp::native::detect_features(&decls);
+        let mut sorted: Vec<&crate::cpp::feature_matrix::CppFeature> = features.iter().collect();
+        sorted.sort_by_key(|f| f.name());
+        eprintln!("dcc: C++ feature detection: {} features found", sorted.len());
+        for f in &sorted {
+            let status = if f.native_supported() { "[native]" } else { "[unsupported]" };
+            eprintln!("dcc:   {} {}", status, f.name());
         }
     }
 
-    // 3. 写临时 .c
-    let tmp = if let Ok(p) = std::env::var("DCC_CPP_KEEP_TMP") {
-        std::path::PathBuf::from(p)
-    } else {
-        std::env::temp_dir().join(format!(
-            "dcc-cpp-{}-{}.c",
-            std::process::id(),
-            input
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("input")
-        ))
-    };
-    fs::write(&tmp, c_src).map_err(|e| {
+    // 3. Native lower → 进程内直接走 C 主流水线
+    let native_out = crate::cpp::native::lower_decls_native(&decls).map_err(|e| {
         vec![Diagnostic::err(
-            "E0101",
-            format!("cannot write tmp: {}", e),
+            "E0500",
+            format!("C++ native backend: {}", e),
             crate::diagnostics::Span::point(&file_name, 0, 0),
         )]
     })?;
-
-    // 4. 调 dcc C 链路编译 (走相同 dcc 二进制, 复用 codegen/IR)
-    let dcc_bin = std::env::current_exe().map_err(|e| {
-        vec![Diagnostic::err(
-            "E0102",
-            format!("cannot find dcc: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0),
-        )]
-    })?;
-
-    // 判断是否需要链接为可执行文件
-    let output_str = cfg.output.to_string_lossy();
-    let needs_link = !output_str.ends_with(".o")
-        && !output_str.ends_with(".s")
-        && !cfg.emit_asm
-        && !cfg.relocatable;
-
-    // 如果需要链接, 先编译到临时 .o, 再用 host cc 链接
-    let (compile_output, tmp_obj) = if needs_link {
-        let tmp = std::env::temp_dir().join(format!(
-            "dcc-cpp-link-{}-{}.o",
-            std::process::id(),
-            input.file_name().and_then(|n| n.to_str()).unwrap_or("input")
-        ));
-        (tmp.clone(), Some(tmp))
-    } else {
-        (cfg.output.clone(), None)
-    };
-
-    let mut cmd = Command::new(&dcc_bin);
-    // Remove DCC_CPP_KEEP_TMP so the second invocation (C compilation) doesn't overwrite the file
-    cmd.env_remove("DCC_CPP_KEEP_TMP");
-    cmd.arg("-c");
-    cmd.arg("-fpermissive");
-    cmd.arg(format!("-O{}", cfg.opt));
-    cmd.arg(format!("-std={}", cfg.std.as_str()));
-    for inc in &cfg.include_paths {
-        cmd.arg("-I").arg(inc);
-    }
-    for sys in &cfg.system_paths {
-        cmd.arg("-isystem").arg(sys);
-    }
-    for d in &cfg.defines {
-        if let Some(v) = &d.1 {
-            cmd.arg("-D").arg(format!("{}={}", d.0, v));
-        } else {
-            cmd.arg("-D").arg(&d.0);
-        }
-    }
-    if cfg.debug_level > 0 {
-        cmd.arg(format!("-g{}", cfg.debug_level));
-    }
-    if cfg.emit_asm {
-        cmd.arg("-S");
-    }
-    // Dependency files are now generated by the C++ driver itself,
-    // not passed to the subprocess (which would use the temp C file)
-    cmd.arg("-o").arg(&compile_output);
-    cmd.arg(&tmp);
 
     if cfg.verbose {
-        eprintln!(
-            "dcc: dcc -c -fpermissive -O{} -o {} {}",
-            cfg.opt,
-            compile_output.display(),
-            tmp.display()
-        );
+        eprintln!("dcc: using C++ native backend path");
     }
 
-    let out = cmd.output().map_err(|e| {
-        vec![Diagnostic::err(
-            "E0102",
-            format!("cannot spawn dcc: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0),
-        )]
-    })?;
-    if std::env::var("DCC_CPP_KEEP_TMP").is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        if let Some(ref tmp_obj) = tmp_obj {
-            let _ = fs::remove_file(tmp_obj);
-        }
-        return Err(vec![Diagnostic::err(
-            "E0301",
-            format!("dcc C backend failed for {}: {}", file_name, stderr),
-            crate::diagnostics::Span::point(&file_name, 0, 0),
-        )]);
-    }
+    return emit_native_program(
+        cfg,
+        native_out.prog,
+        &file_name,
+        pp_out.line_map.clone(),
+    );
 
-    // 5. 如果需要链接, 用 host cc 链接临时 .o 到最终可执行文件
-    if let Some(ref tmp_obj) = tmp_obj {
-        let cc = match std::env::var("CC") {
-            Ok(v)
-                if v != std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.to_str().map(String::from))
-                    .unwrap_or_default() =>
-            {
-                v
-            }
-            _ => "cc".to_string(),
-        };
-        let mut link_cmd = Command::new(&cc);
-        link_cmd.arg(tmp_obj).arg("-o").arg(&cfg.output);
-        // 自动包含 dcc C++ 运行时库
-        let dcc_runtime = std::path::PathBuf::from(
-            "/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c"
-        );
-        if dcc_runtime.exists() {
-            link_cmd.arg(&dcc_runtime);
-        }
-        if cfg.verbose {
-            eprintln!("dcc: host-link: {} -> {}", tmp_obj.display(), cfg.output.display());
-        }
-        let link_out = link_cmd.output().map_err(|e| {
-            let _ = fs::remove_file(tmp_obj);
-            vec![Diagnostic::err(
-                "E0202",
-                format!("cannot invoke {}: {}", cc, e),
-                crate::diagnostics::Span::point(&file_name, 0, 0),
-            )]
-        })?;
-        let _ = fs::remove_file(tmp_obj);
-        if !link_out.status.success() {
-            let stderr = String::from_utf8_lossy(&link_out.stderr);
-            return Err(vec![Diagnostic::err(
-                "E0202",
-                format!("{} link failed: {}", cc, stderr.trim_end()),
-                crate::diagnostics::Span::point(&file_name, 0, 0),
-            )]);
-        }
-    }
-
-    eprintln!("dcc: wrote {}", cfg.output.display());
-    Ok(())
 }
 
 /// C++ 原生后端: 把 ast::Program 直接走 C 主流水线 (ir::lower → 优化 →

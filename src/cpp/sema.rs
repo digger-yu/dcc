@@ -162,6 +162,49 @@ impl CxxType {
             _ => None,
         }
     }
+
+    /// 是否带 volatile 限定符。
+    /// 对于指针/引用/数组类型，检查的是"被指向/被包含"的类型是否 volatile；
+    /// 函数类型检查函数自身的 volatile 限定符（成员函数用）。
+    /// 其他类型（基本类型、类、枚举等）当前不直接携带 cv 限定符，返回 false。
+    pub fn is_volatile(&self) -> bool {
+        match self {
+            CxxType::Pointer(inner)
+            | CxxType::LValueRef(inner)
+            | CxxType::RValueRef(inner)
+            | CxxType::Array(inner, _) => inner.is_volatile(),
+            CxxType::Function { is_volatile, .. } => *is_volatile,
+            CxxType::MemberPointer { member, .. } => member.is_volatile(),
+            CxxType::Void
+            | CxxType::Bool
+            | CxxType::Integer { .. }
+            | CxxType::Float { .. }
+            | CxxType::Class(_)
+            | CxxType::Enum(_)
+            | CxxType::Dependent(_)
+            | CxxType::Alias(_) => false,
+        }
+    }
+
+    /// 脱去一层指针或引用，返回被指向/被引用的类型。
+    /// 返回 `None` 表示不是指针也不是引用。
+    pub fn pointee_type(&self) -> Option<&CxxType> {
+        match self {
+            CxxType::Pointer(inner)
+            | CxxType::LValueRef(inner)
+            | CxxType::RValueRef(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// 数组或指针的元素类型。
+    /// 对于 `T[N]`、`T[]`、`T*` 返回 `T`；其他类型返回 None。
+    pub fn element_type(&self) -> Option<&CxxType> {
+        match self {
+            CxxType::Array(inner, _) | CxxType::Pointer(inner) => Some(inner),
+            _ => None,
+        }
+    }
 }
 
 // === 基类信息 ===

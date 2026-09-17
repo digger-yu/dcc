@@ -544,10 +544,49 @@ impl Builder {
             Expr::Char { v, .. } => Operand::Int(*v),
             Expr::Ident {
                 name,
-                span: _,
-                ty: _,
+                span,
+                ty,
             } => {
                 if let Some(v) = self.lookup(&name.name) {
+                    // volatile 局部变量: 必须从内存加载, 不能复用 SSA 值
+                    let is_volatile = self
+                        .func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false);
+                    if is_volatile {
+                        // 标量类型 volatile 局部变量: 从栈内存加载, 不走 SSA 版本
+                        // 复合类型 (数组/结构体/联合体) 直接返回 SSA 变量:
+                        // 它们的子访问 (IndexLoad/MemberLoad) 已带 is_volatile 标志
+                        match ty {
+                            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                                return Operand::Var(v);
+                            }
+                            _ => {}
+                        }
+                        let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+                        self.emit(Inst {
+                            dest: Some(addr.clone()),
+                            kind: InstKind::AddrOf {
+                                base: name.name.clone(),
+                            },
+                            span: span.clone(),
+                        });
+                        self.define(addr.clone());
+                        let dest = target.unwrap_or_else(|| self.fresh("vload", ty.clone(), span));
+                        self.emit(Inst {
+                            dest: Some(dest.clone()),
+                            kind: InstKind::Load {
+                                e: Operand::Var(addr),
+                                ty: ty.clone(),
+                                is_volatile: true,
+                            },
+                            span: span.clone(),
+                        });
+                        self.define(dest.clone());
+                        return Operand::Var(dest);
+                    }
                     return Operand::Var(v);
                 }
                 // 全局变量 -> SymAddr 占位
@@ -603,6 +642,48 @@ impl Builder {
                     name, ty: var_ty, ..
                 } = l.as_ref()
                 {
+                    let is_volatile = self
+                        .func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false);
+                    if is_volatile {
+                        // 标量类型 volatile 局部变量: 强制走 Store 路径, 不直接 SSA define
+                        // 复合类型 (数组/结构体/联合体) 走正常 SSA 路径:
+                        // 它们的子访问 (IndexStore/MemberStore) 已带 is_volatile 标志
+                        let is_scalar = !matches!(var_ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
+                        if is_scalar {
+                            let ro = self.lower_expr(r);
+                            let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(var_ty.clone()))), span);
+                            self.emit(Inst {
+                                dest: Some(addr.clone()),
+                                kind: InstKind::AddrOf {
+                                    base: name.name.clone(),
+                                },
+                                span: span.clone(),
+                            });
+                            self.define(addr.clone());
+                            self.emit(Inst {
+                                dest: None,
+                                kind: InstKind::Store {
+                                    e: Operand::Var(addr),
+                                    src: ro,
+                                    is_volatile: true,
+                                },
+                                span: span.clone(),
+                            });
+                            // 仍然创建一个新版本供后续引用
+                            let nv = SsaVar {
+                                base: name.name.clone(),
+                                version: self.next_version(&name.name),
+                                ty: var_ty.clone(),
+                                span: span.clone(),
+                            };
+                            self.define(nv.clone());
+                            return Operand::Var(nv);
+                        }
+                    }
                     let new_v = SsaVar {
                         base: name.name.clone(),
                         version: self.next_version(&name.name),
@@ -718,8 +799,15 @@ impl Builder {
                 let obj = self.lower_expr(expr);
                 let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
                 // 结构体字段访问: 若对象本身带 volatile, 则访问沿用.
-                let obj_is_volatile = match &obj_ty {
-                    Type::Ptr(qt) if *is_arrow => qt.is_volatile(),
+                let obj_is_volatile = match (&obj_ty, expr.as_ref()) {
+                    (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
+                    (_, Expr::Ident { name, .. }) if !*is_arrow => {
+                        self.func
+                            .local_quals
+                            .get(name.name.as_str())
+                            .map(|q| q.is_volatile())
+                            .unwrap_or(false)
+                    }
                     _ => false,
                 };
                 if *is_arrow {
@@ -758,7 +846,7 @@ impl Builder {
                             obj_ty: obj_ty.clone(),
                             field: field.name.clone(),
                             ty: ty.clone(),
-                            is_volatile: false,
+                            is_volatile: obj_is_volatile,
                             is_arrow: false,
                         },
                         span: span.clone(),
@@ -811,39 +899,66 @@ impl Builder {
                 let is_inc = matches!(&**e, Expr::PostInc { .. } | Expr::PreInc { .. });
                 let one = if is_inc { 1i128 } else { -1i128 };
                 if let Expr::Ident { name, ty, .. } = e.as_ref() {
-                    let cur_v = self.lookup(&name.name).unwrap_or_else(|| SsaVar {
-                        base: name.name.clone(),
-                        version: 0,
-                        ty: ty.clone(),
-                        span: span.clone(),
-                    });
+                    let is_volatile = self
+                        .func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false);
+                    // volatile 局部变量: 从内存 Load 当前值, 不走 SSA 版本
+                    let (cur_op, addr_op) = if is_volatile {
+                        let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+                        self.emit(Inst {
+                            dest: Some(addr.clone()),
+                            kind: InstKind::AddrOf {
+                                base: name.name.clone(),
+                            },
+                            span: span.clone(),
+                        });
+                        self.define(addr.clone());
+                        let load_dest = self.fresh("vload", ty.clone(), span);
+                        self.emit(Inst {
+                            dest: Some(load_dest.clone()),
+                            kind: InstKind::Load {
+                                e: Operand::Var(addr.clone()),
+                                ty: ty.clone(),
+                                is_volatile: true,
+                            },
+                            span: span.clone(),
+                        });
+                        (Operand::Var(load_dest), Some(Operand::Var(addr)))
+                    } else {
+                        let cur_v = self.lookup(&name.name).unwrap_or_else(|| SsaVar {
+                            base: name.name.clone(),
+                            version: 0,
+                            ty: ty.clone(),
+                            span: span.clone(),
+                        });
+                        (Operand::Var(cur_v), None)
+                    };
                     let one_op = Operand::Int(one);
                     let new_dest = self.fresh("upd", ty.clone(), span);
                     self.emit(Inst {
                         dest: Some(new_dest.clone()),
                         kind: InstKind::Bin {
                             op: BinOp::Add,
-                            l: Operand::Var(cur_v.clone()),
+                            l: cur_op.clone(),
                             r: one_op,
                         },
                         span: span.clone(),
                     });
                     // store back
-                    let store_volatile = self
-                        .func
-                        .local_quals
-                        .get(name.name.as_str())
-                        .map(|q| q.is_volatile())
-                        .unwrap_or(false);
-                    self.emit(Inst {
-                        dest: None,
-                        kind: InstKind::Store {
-                            e: Operand::SymAddr(name.name.clone(), ty.clone()),
-                            src: Operand::Var(new_dest.clone()),
-                            is_volatile: store_volatile,
-                        },
-                        span: span.clone(),
-                    });
+                    if let Some(addr) = addr_op {
+                        self.emit(Inst {
+                            dest: None,
+                            kind: InstKind::Store {
+                                e: addr,
+                                src: Operand::Var(new_dest.clone()),
+                                is_volatile,
+                            },
+                            span: span.clone(),
+                        });
+                    }
                     let nv = SsaVar {
                         base: name.name.clone(),
                         version: self.next_version(&name.name),
@@ -851,14 +966,12 @@ impl Builder {
                         span: span.clone(),
                     };
                     self.define(nv.clone());
-                    // override previous
-                    let _ = cur_v;
                     let v = self.fresh("post", ty.clone(), span);
                     self.emit(Inst {
                         dest: Some(v.clone()),
                         kind: InstKind::Bin {
                             op: BinOp::Add,
-                            l: Operand::Var(cur_v),
+                            l: cur_op,
                             r: Operand::Int(0),
                         },
                         span: span.clone(),
@@ -1536,8 +1649,15 @@ fn lower_lvalue(
     {
         let obj_ty = expr.ty();
         let obj = b.lower_expr(expr);
-        let member_volatile = match &obj_ty {
-            Type::Ptr(qt) if *is_arrow => qt.is_volatile(),
+        let member_volatile = match (&obj_ty, expr.as_ref()) {
+            (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
+            (_, Expr::Ident { name, .. }) if !*is_arrow => {
+                b.func
+                    .local_quals
+                    .get(name.name.as_str())
+                    .map(|q| q.is_volatile())
+                    .unwrap_or(false)
+            }
             _ => false,
         };
         if *is_arrow {
@@ -1575,7 +1695,7 @@ fn lower_lvalue(
                     obj_ty: obj_ty.clone(),
                     field: field.name.clone(),
                     src,
-                    is_volatile: false,
+                    is_volatile: member_volatile,
                     is_arrow: false,
                 },
                 span: span.clone(),
@@ -2510,7 +2630,6 @@ fn rebuild_bb(
                         span: func.span.clone(),
                     },
                     span: func.span.clone(),
-                    is_fallthrough: false,
                 });
             }
             // default case
@@ -2533,7 +2652,6 @@ fn rebuild_bb(
                     span: func.span.clone(),
                 },
                 span: func.span.clone(),
-                is_fallthrough: false,
             });
             out.push(BlockItem::Stmt(Stmt::Switch {
                 expr: idx_e,
@@ -2746,7 +2864,6 @@ fn rebuild_cycle(
                         range_end: None,
                         body: Block { items: target_items, span: func.span.clone() },
                         span: func.span.clone(),
-                        is_fallthrough: false,
                     });
                 }
                 let mut def_items: Vec<BlockItem> = Vec::new();
@@ -2757,7 +2874,6 @@ fn rebuild_cycle(
                     val: None, range_end: None,
                     body: Block { items: def_items, span: func.span.clone() },
                     span: func.span.clone(),
-                    is_fallthrough: false,
                 });
                 body_items.push(BlockItem::Stmt(Stmt::Switch {
                     expr: idx_e, cases, span: func.span.clone(),

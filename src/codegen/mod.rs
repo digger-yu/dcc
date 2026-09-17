@@ -145,7 +145,7 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
                 diags,
             );
         }
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } => {}
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Fallthrough { .. } => {}
     }
 }
 

@@ -1118,12 +1118,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::Dereference(inner_id) => {
                 // *ptr = val → Store
                 let ptr = self.lower_expr(*inner_id)?;
+                let inner_expr = self.get_expr(*inner_id)?;
+                let is_volatile = inner_expr.ty.is_volatile();
                 let inst = Inst {
                     dest: None,
                     kind: InstKind::Store {
                         e: ptr,
                         src: rhs,
-                        is_volatile: false,
+                        is_volatile,
                     },
                     span: dummy_span(),
                 };
@@ -1562,6 +1564,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let field_name = field_sym.name.clone();
         let (object, obj_ty, object_is_arrow) =
             self.deref_object_for_member(object_id, object)?;
+        let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
         let dest = self.fresh_var("field", result_ty.clone());
         let inst = Inst {
@@ -1571,7 +1574,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 obj_ty,
                 field: field_name,
                 ty: result_ty.clone(),
-                is_volatile: false,
+                is_volatile: obj_is_volatile,
                 is_arrow: object_is_arrow,
             },
             span: dummy_span(),
@@ -1592,6 +1595,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let field_name = field_sym.name.clone();
         let (object, obj_ty, object_is_arrow) =
             self.deref_object_for_member(object_id, object)?;
+        let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
         let inst = Inst {
             dest: None,
@@ -1600,7 +1604,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 obj_ty,
                 field: field_name,
                 src,
-                is_volatile: false,
+                is_volatile: obj_is_volatile,
                 is_arrow: object_is_arrow,
             },
             span: dummy_span(),
@@ -1628,6 +1632,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let obj_ty = self.lowerer.lower_type(&obj_expr.ty)?;
                 Ok((object, obj_ty, false))
             }
+        }
+    }
+
+    /// 成员访问的基对象是否是 volatile 限定的。
+    /// 对于 `obj.field` 检查 obj 的类型是否 volatile；
+    /// 对于 `ptr->field`（或指针基址）检查被指向的类型是否 volatile。
+    fn obj_base_is_volatile(&self, object_id: HirExprId) -> bool {
+        match self.get_expr(object_id) {
+            Ok(expr) => expr.ty.is_volatile(),
+            Err(_) => false,
         }
     }
 
@@ -1666,13 +1680,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         result_ty: &Type,
     ) -> Result<Operand, LowerIrError> {
         let ptr = self.lower_expr(inner_id)?;
+        let inner_expr = self.get_expr(inner_id)?;
+        let is_volatile = inner_expr.ty.is_volatile();
         let dest = self.fresh_var("deref", result_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Load {
                 e: ptr,
                 ty: result_ty.clone(),
-                is_volatile: false,
+                is_volatile,
             },
             span: dummy_span(),
         };
@@ -3258,6 +3274,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             ));
                         }
                     };
+                    let is_volatile = fn_sym.ty.is_volatile();
+                    drop(fn_sym);
                     let obj_ty = self.lowerer.lower_type(&CxxType::Class(owner_class))?;
                     let inst = Inst {
                         dest: None,
@@ -3266,7 +3284,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             obj_ty,
                             field: member_name,
                             src: init_val,
-                            is_volatile: false,
+                            is_volatile,
                             is_arrow: true,
                         },
                         span: dummy_span(),

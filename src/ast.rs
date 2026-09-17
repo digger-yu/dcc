@@ -337,6 +337,11 @@ pub enum Stmt {
         volatile: bool,
         span: Span,
     },
+    /// C23 `[[fallthrough]]` / GCC `__attribute__((fallthrough))` 语句,
+    /// 显式标记 switch case 有意贯穿.
+    Fallthrough {
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -346,9 +351,6 @@ pub struct Case {
     pub range_end: Option<Expr>,
     pub body: Block,
     pub span: Span,
-    /// C23 `[[fallthrough]]` / GCC `__attribute__((fallthrough))`:
-    /// case 体末尾显式标记有意贯穿, 用于诊断未标注的隐式贯穿.
-    pub is_fallthrough: bool,
 }
 
 #[derive(Debug, Clone)]

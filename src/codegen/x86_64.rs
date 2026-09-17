@@ -9648,6 +9648,7 @@ impl Codegen {
                 self.gen_expr(expr, 0); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
             }
+            Stmt::Fallthrough { .. } => {}
             Stmt::AsmGoto {
                 asm_str,
                 outputs,

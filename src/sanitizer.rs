@@ -843,6 +843,7 @@ fn instrument_stmt(
             }
         }
         Stmt::AsmGoto { .. } => {}
+        Stmt::Fallthrough { .. } => {}
     }
 }
 
@@ -861,7 +862,8 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Break { span }
         | Stmt::Continue { span }
         | Stmt::Label { span, .. }
-        | Stmt::AsmGoto { span, .. } => span.clone(),
+        | Stmt::AsmGoto { span, .. }
+        | Stmt::Fallthrough { span } => span.clone(),
     }
 }
 
@@ -4662,7 +4664,6 @@ mod tests {
                         span: Span::point("t.c", 2, 1),
                     },
                     span: Span::point("t.c", 2, 1),
-                    is_fallthrough: false,
                 }],
                 span: Span::point("t.c", 1, 1),
             })],
