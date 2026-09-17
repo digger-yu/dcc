@@ -3812,6 +3812,7 @@ fn vector_init_rvalue_run_returns_zero() {
 }
 
 /// 小于 8B 的 vector 返回不能用 movsd 读穿临时槽。
+/// 机器码语义以 objdump -d 为准，不依赖 dcc -S 文本。
 #[test]
 fn vector_small_return_uses_width_aware_xmm_load() {
     let source = include_str!("fixtures/c/vec_small_return.c");
@@ -3842,6 +3843,188 @@ fn vector_small_return_uses_width_aware_xmm_load() {
             "{func} must not read 8 bytes with movsd:\n{body}"
         );
     }
+}
+
+/// dcc -S 对 movd 等 SSE 桥接指令不应再输出逐字节 .byte，也不应把后续
+/// 字节错当成 shift 等伪指令。文本可重汇编性由下一个 roundtrip 测试覆盖。
+#[test]
+fn s_output_disassembles_movd_without_desync() {
+    let source = include_str!("fixtures/c/vec_small_return.c");
+    let (output, asm_text) = run_asm_output_test("vector-small-return-s", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for func in ["ret_v1qu", "ret_v1hu", "ret_v1ui", "ret_v2hu", "ret_v4qu"] {
+        let start = asm_text.find(&format!("{func}:")).unwrap_or_else(|| {
+            panic!("missing function {func} in -S output:\n{asm_text}")
+        });
+        let rest = &asm_text[start..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("movd"),
+            "{func} should disassemble to movd in -S:\n{body}"
+        );
+        assert!(
+            !body.contains("shift"),
+            "{func} -S output is desynced (spurious shift):\n{body}"
+        );
+        assert!(
+            !body.contains(".byte"),
+            "{func} -S output should not fallback to .byte:\n{body}"
+        );
+    }
+}
+
+/// dcc -S 输出应能被 GAS 重新汇编，且重汇编后的机器码与 dcc -c 直发对象
+/// 在目标函数级别语义等价。机器码语义以 objdump -d 为 oracle。
+#[test]
+fn s_output_roundtrips_through_gas_for_small_vector() {
+    let source = include_str!("fixtures/c/vec_small_return.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-vec-rt-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-vec-rt-{}.s", std::process::id()));
+    let direct_obj = dir.join(format!("dcc-vec-rt-direct-{}.o", std::process::id()));
+    let text_obj = dir.join(format!("dcc-vec-rt-text-{}.o", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+
+    let direct = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&direct_obj)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        direct.status.success(),
+        "direct compile stderr: {}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+
+    let s = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -S");
+    assert!(
+        s.status.success(),
+        "-S compile stderr: {}",
+        String::from_utf8_lossy(&s.stderr)
+    );
+
+    let assemble = Command::new("as")
+        .args(["-o"])
+        .arg(&text_obj)
+        .arg(&asm_path)
+        .output()
+        .expect("run as");
+    assert!(
+        assemble.status.success(),
+        "as failed: {}",
+        String::from_utf8_lossy(&assemble.stderr)
+    );
+
+    fn objdump_func_body(obj: &std::path::Path, func: &str) -> String {
+        let out = Command::new("objdump")
+            .args(["-d"])
+            .arg(obj)
+            .output()
+            .expect("objdump -d");
+        assert!(out.status.success(), "objdump -d failed");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let start = text.find(&format!("<{func}>:")).unwrap_or_else(|| {
+            panic!("missing {func} in {}:\n{text}", obj.display())
+        });
+        let rest = &text[start..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    fn normalize(body: &str) -> Vec<String> {
+        body.lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.ends_with(':') {
+                    return None;
+                }
+                // 去掉地址/字节列，只保留 mnemonic + operands。
+                // objdump 行格式: "<addr>: <bytes>\t<mnemonic> <operands>"
+                let after_colon = trimmed.splitn(2, ':').nth(1)?;
+                let after_colon = after_colon.trim_start();
+                // 跳过字节列（由 2 位十六进制 token 组成）
+                let mut idx = 0usize;
+                for tok in after_colon.split_whitespace() {
+                    let tok_start = after_colon[idx..].find(tok)? + idx;
+                    let tok_end = tok_start + tok.len();
+                    if tok.len() == 2 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+                        idx = tok_end;
+                        continue;
+                    }
+                    // 遇到非字节 token，从这里开始是指令
+                    idx = tok_start;
+                    break;
+                }
+                let inst = after_colon[idx..].trim_start();
+                if inst.is_empty() {
+                    return None;
+                }
+                // 对齐填充用的 nop 在不同汇编流程中数量可能不同，不影响语义。
+                if inst == "nop" {
+                    return None;
+                }
+                // 归一化 0x[hex] 常量，避免不同汇编器对 $127/$0x7f 等表示差异
+                Some(regex_replace_hex_addrs(inst))
+            })
+            .collect()
+    }
+
+    fn regex_replace_hex_addrs(inst: &str) -> String {
+        let mut out = String::with_capacity(inst.len());
+        let mut chars = inst.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '0' && chars.peek() == Some(&'x') {
+                chars.next();
+                let mut hex = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_hexdigit() {
+                        hex.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if !hex.is_empty() {
+                    out.push_str("0xHEX");
+                    continue;
+                }
+                out.push('0');
+                out.push('x');
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    for func in ["ret_v1qu", "ret_v1hu", "ret_v1ui", "ret_v2hu", "ret_v4qu"] {
+        let direct_body = objdump_func_body(&direct_obj, func);
+        let text_body = objdump_func_body(&text_obj, func);
+        let direct_norm = normalize(&direct_body);
+        let text_norm = normalize(&text_body);
+        assert!(
+            direct_norm == text_norm,
+            "{func} machine code differs between dcc -c and dcc -S -> as:\n\
+             direct:\n{direct_body}\n\
+             text:\n{text_body}"
+        );
+    }
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    let _ = fs::remove_file(&direct_obj);
+    let _ = fs::remove_file(&text_obj);
 }
 
 /// _Complex 除法 codegen
@@ -10023,9 +10206,10 @@ fn fenv_runtime_calls_are_inlined() {
         "compile stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // stmxcsr/ldmxcsr 操作码组 (0F AE): 内联的 MXCSR 访问
+    // stmxcsr/ldmxcsr 操作码组 (0F AE): 内联的 MXCSR 访问。
+    // 即使反汇编器未覆盖，也应以整条 .byte 0x0f, 0xae, ... 输出，而不是逐字节失步。
     assert!(
-        asm_text.contains(".byte 0xae"),
+        asm_text.contains("stmxcsr") || asm_text.contains("ldmxcsr") || asm_text.contains("0xae"),
         "assembly should inline MXCSR ops, got:\n{}",
         asm_text
     );

@@ -142,6 +142,23 @@ impl<'a> Dec<'a> {
         Some((reg_name, mem))
     }
 
+    /// modrm，reg 字段为 XMM，r/m 字段为 GP 寄存器或内存（按 gp_width 命名）。
+    /// 用于 movd/movq (0F 6E/7E) 的 XMM/GP 混合编码。
+    fn modrm_xmm_gp(&mut self, rex: &Rex, gp_width: u8) -> Option<(String, String)> {
+        let modrm = self.take()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 7;
+        let rm = modrm & 7;
+        let xmm_name = self.xmm(rex, reg).to_string();
+        let gp = if mod_ == 3 {
+            self.reg(rex, rm | if rex.b { 8 } else { 0 }, gp_width)
+                .to_string()
+        } else {
+            self.decode_mem(rex, mod_, rm, gp_width)?
+        };
+        Some((xmm_name, gp))
+    }
+
     /// modrm，其中 reg 字段是宽目标 (dst_width), r/m 是窄源:
     /// mod=3 时用 sub_width (8/16 位) 寄存器名, 否则显示内存操作数.
     /// 用于 movzx/movsx (0F B6/B7/BE/BF) 的 reg=宽, r/m=窄 非对称编码.
@@ -241,9 +258,8 @@ impl<'a> Dec<'a> {
         } else if pfx.rep {
             parts.push("rep");
         }
-        if pfx.o16 {
-            parts.push("data16");
-        }
+        // 0x66 操作数大小前缀通过 16 位寄存器名（如 %ax）隐式表达，
+        // 显式输出 data16 会导致 GAS 把它当作重复前缀而报错。
         if parts.is_empty() {
             String::new()
         } else {
@@ -252,7 +268,7 @@ impl<'a> Dec<'a> {
     }
 
     fn finish(&self, start: usize, pfx: &Prefixes, body: &str) -> (usize, String) {
-        let text = if pfx.lock || pfx.rep || pfx.repne || pfx.o16 {
+        let text = if pfx.lock || pfx.rep || pfx.repne {
             format!("{}{body}", Self::prefix_str(pfx))
         } else {
             body.to_string()
@@ -343,6 +359,10 @@ impl<'a> Dec<'a> {
             0x99 => {
                 self.take();
                 Some((self.pos - start, "cltd".into()))
+            }
+            0x9B => {
+                self.take();
+                Some((self.pos - start, "fwait".into()))
             }
             0xA4 if pfx.rep => {
                 self.take();
@@ -490,7 +510,7 @@ impl<'a> Dec<'a> {
                 let r = self.reg(&rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
             }
-            0x10 | 0x11 | 0x2A | 0x2C | 0x5A => {
+            0x10 | 0x11 | 0x2A | 0x2C | 0x5A | 0x6E | 0x7E => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
             }
@@ -527,6 +547,7 @@ impl<'a> Dec<'a> {
         let rex = self.parse_rex();
         let _ = self.take(); // 0x0F
         let op = self.take()?;
+        // 0x66/0xF2/0xF3 在此是 SSE 指令编码的一部分，不是独立前缀助记符。
         let scalar = if pfx.repne {
             "sd"
         } else if pfx.rep {
@@ -538,27 +559,39 @@ impl<'a> Dec<'a> {
             0x10 => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "movss" } else { "movsd" };
-                Some(self.finish(start, &pfx, &format!("{mn} {src}, {dst}")))
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
             }
             0x11 => {
                 let (src, dst) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "movss" } else { "movsd" };
-                Some(self.finish(start, &pfx, &format!("{mn} {src}, {dst}")))
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
             }
             0x2A => {
                 let (xmm, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvtsi2ss" } else { "cvtsi2sd" };
-                Some(self.finish(start, &pfx, &format!("{mn} {src}, {xmm}")))
+                Some((self.pos - start, format!("{mn} {src}, {xmm}")))
             }
             0x2C => {
                 let (dst, xmm) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvttss2si" } else { "cvttsd2si" };
-                Some(self.finish(start, &pfx, &format!("{mn} {xmm}, {dst}")))
+                Some((self.pos - start, format!("{mn} {xmm}, {dst}")))
             }
             0x5A => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvtss2sd" } else { "cvtsd2ss" };
-                Some(self.finish(start, &pfx, &format!("{mn} {src}, {dst}")))
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            }
+            0x6E | 0x7E => {
+                // 66 0F 6E /r: movd r/m32, xmm (REX.W 时为 movq)
+                // 66 0F 7E /r: movd xmm, r/m32 (REX.W 时为 movq)
+                let gp_width = if rex.w { 8 } else { 4 };
+                let (xmm, gp) = self.modrm_xmm_gp(&rex, gp_width)?;
+                let mn = if rex.w { "movq" } else { "movd" };
+                if op == 0x6E {
+                    Some((self.pos - start, format!("{mn} {gp}, {xmm}")))
+                } else {
+                    Some((self.pos - start, format!("{mn} {xmm}, {gp}")))
+                }
             }
             _ => {
                 self.pos = start + 1;
@@ -609,7 +642,7 @@ impl<'a> Dec<'a> {
             }
             0x8D => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
-                Some(self.finish(start, pfx, &format!("lea {dst}, {src}")))
+                Some(self.finish(start, pfx, &format!("lea {src}, {dst}")))
             }
             // --- ALU r/m, r (reg=src, r/m=dst) ---
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
@@ -871,13 +904,23 @@ impl<'a> Dec<'a> {
     ) -> Option<(usize, String)> {
         let op = self.take()?;
         match op {
-            0x10 | 0x11 => {
-                let (a, b) = self.modrm_xmm(rex)?;
-                if op == 0x10 {
-                    Some(self.finish(start, pfx, &format!("movups {b}, {a}")))
+            // REX 前缀的 SSE 标量/vector 指令（0x66/0xF2/0xF3 为 opcode 选择符）
+            // 统一交回 decode_sse 处理，避免把 F2/F3/66 误当成独立前缀助记符。
+            0x10 | 0x11 | 0x2A | 0x2C | 0x5A => {
+                self.pos = start;
+                self.decode_sse(start, pfx)
+            }
+            0x6E | 0x7E => {
+                // REX 前缀版本的 movd/movq：66 48 0F 6E/7E /r
+                let gp_width = if rex.w { 8 } else { 4 };
+                let (xmm, gp) = self.modrm_xmm_gp(rex, gp_width)?;
+                let mn = if rex.w { "movq" } else { "movd" };
+                let body = if op == 0x6E {
+                    format!("{mn} {gp}, {xmm}")
                 } else {
-                    Some(self.finish(start, pfx, &format!("movups {a}, {b}")))
-                }
+                    format!("{mn} {xmm}, {gp}")
+                };
+                Some((self.pos - start, body))
             }
             0xB0 | 0xB1 => {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
@@ -1013,7 +1056,7 @@ impl<'a> Dec<'a> {
             // LEA r32, mem
             0x8D => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
-                Some(self.finish(start, pfx, &format!("lea {dst}, {src}")))
+                Some(self.finish(start, pfx, &format!("lea {src}, {dst}")))
             }
             // CMP/TEST r/m32, r32
             0x39 | 0x85 => {
@@ -1283,6 +1326,8 @@ impl<'a> Dec<'a> {
                 0 => "flds",
                 2 => "fstps",
                 3 => "fstps",
+                5 => "fldcw",
+                7 => "fnstcw",
                 _ => "f???",
             },
             0xDA => "fi???",
@@ -1378,6 +1423,211 @@ impl<'a> Dec<'a> {
             Some(format!("{}({})", disp, base_reg))
         }
     }
+
+    /// 计算从 start 开始的未知指令应整体消费的字节数。
+    /// 根据 prefix/opcode/ModRM/SIB/disp/imm 做最低限度的 x86 长度解析，
+    /// 确保未覆盖指令不会只消费 1 字节而导致后续解码失步。
+    fn unknown_len(&self, start: usize) -> usize {
+        let code = self.code;
+        let len = code.len();
+        let mut pos = start;
+
+        // 扫描 legacy prefixes
+        while pos < len {
+            match code[pos] {
+                0xF0 | 0xF2 | 0xF3 | 0x66 | 0x67 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64
+                | 0x65 => pos += 1,
+                _ => break,
+            }
+        }
+
+        // 扫描 REX
+        if pos < len && (code[pos] & 0xF0) == 0x40 {
+            pos += 1;
+        }
+
+        if pos >= len {
+            return len - start;
+        }
+
+        let op1 = code[pos];
+        pos += 1;
+
+        // VEX/EVEX/XOP：至少完整消费前缀 payload 及后续 ModRM
+        if matches!(op1, 0xC4 | 0xC5 | 0x62 | 0x8F) {
+            return self.skip_vex_evex_xop_len(start);
+        }
+
+        let (has_modrm, mut imm_len) = if op1 == 0x0F {
+            if pos >= len {
+                return len - start;
+            }
+            let op2 = code[pos];
+            pos += 1;
+            match op2 {
+                // syscall / ud2 / cpuid / rdmsr / wrmsr / rdtsc / etc.
+                0x05 | 0x0B | 0x34 | 0x35 | 0xA0 | 0xA1 | 0xA2 | 0xA8 | 0xA9 => {
+                    (false, 0)
+                }
+                // 0F 38：三字节 opcode，通常带 ModRM，无立即数
+                0x38 => {
+                    if pos >= len {
+                        return len - start;
+                    }
+                    pos += 1;
+                    (true, 0)
+                }
+                // 0F 3A：三字节 opcode，通常带 ModRM + imm8
+                0x3A => {
+                    if pos >= len {
+                        return len - start;
+                    }
+                    pos += 1;
+                    (true, 1)
+                }
+                // jcc rel32 / near call/jmp rel32
+                0x80..=0x8F | 0xE8 | 0xE9 => (false, 4),
+                _ => (true, 0),
+            }
+        } else {
+            Self::legacy_opcode_props(op1)
+        };
+
+        if has_modrm {
+            if pos >= len {
+                return len - start;
+            }
+            let modrm = code[pos];
+            pos += 1;
+            let mod_ = modrm >> 6;
+            let reg = (modrm >> 3) & 7;
+            let rm = modrm & 7;
+
+            // 根据 opcode + reg 调整立即数长度
+            match op1 {
+                0x80 | 0x82 | 0x83 => imm_len = 1,
+                0x81 => imm_len = 4,
+                0xC0 | 0xC1 => imm_len = 1,
+                0xC6 => imm_len = 1,
+                0xC7 => imm_len = 4,
+                0xF6 => {
+                    if reg == 0 {
+                        imm_len = 1;
+                    }
+                }
+                0xF7 => {
+                    if reg == 0 {
+                        imm_len = 4;
+                    }
+                }
+                _ => {}
+            }
+
+            // SIB
+            if mod_ != 3 && rm == 4 {
+                if pos >= len {
+                    return len - start;
+                }
+                let sib = code[pos];
+                pos += 1;
+                let base = sib & 7;
+                if mod_ == 0 && base == 5 {
+                    pos = (pos + 4).min(len);
+                }
+            } else if mod_ == 0 && rm == 5 {
+                // [rip+disp32] 或 disp32 绝对地址
+                pos = (pos + 4).min(len);
+            }
+
+            // disp
+            match mod_ {
+                1 => pos = (pos + 1).min(len),
+                2 => pos = (pos + 4).min(len),
+                _ => {}
+            }
+        }
+
+        pos = (pos + imm_len).min(len);
+        (pos - start).max(1)
+    }
+
+    /// VEX/EVEX/XOP 指令的最低限度整条消费。
+    fn skip_vex_evex_xop_len(&self, start: usize) -> usize {
+        let code = self.code;
+        let len = code.len();
+        let mut pos = start;
+        // 扫描 legacy prefixes（VEX 允许前面有 legacy prefixes，但少见）
+        while pos < len {
+            match code[pos] {
+                0xF0 | 0xF2 | 0xF3 | 0x66 | 0x67 => pos += 1,
+                _ => break,
+            }
+        }
+        if pos >= len {
+            return len - start;
+        }
+        match code[pos] {
+            // 2-byte VEX: C5 + 1 payload + opcode + ModRM + ...
+            0xC5 => pos = (pos + 2).min(len),
+            // 3-byte VEX: C4 + 2 payload + opcode + ModRM + ...
+            0xC4 | 0x8F => pos = (pos + 3).min(len),
+            // EVEX: 62 + 3 payload + opcode + ModRM + ...
+            0x62 => pos = (pos + 4).min(len),
+            _ => return 1,
+        }
+        if pos >= len {
+            return len - start;
+        }
+        // 假定存在 ModRM 并跳过 SIB/disp；imm 长度保守按 0 处理。
+        // 这至少保证不会把 VEX/EVEX 多字节编码拆散。
+        let modrm = code[pos];
+        pos += 1;
+        let mod_ = modrm >> 6;
+        let rm = modrm & 7;
+        if mod_ != 3 && rm == 4 {
+            if pos < len {
+                pos += 1; // SIB
+            }
+        }
+        match mod_ {
+            0 => {
+                if rm == 5 {
+                    pos = (pos + 4).min(len);
+                }
+            }
+            1 => pos = (pos + 1).min(len),
+            2 => pos = (pos + 4).min(len),
+            _ => {}
+        }
+        (pos - start).max(1)
+    }
+
+    /// 单字节 opcode 的 (是否含 ModRM, 默认立即数长度) 属性表。
+    fn legacy_opcode_props(op1: u8) -> (bool, usize) {
+        match op1 {
+            // 无 ModRM，无立即数
+            0x90 | 0xC3 | 0xC9 | 0x99 | 0x9C | 0x9D | 0x98 | 0x37 | 0x3F | 0x27
+            | 0x2F | 0xF5 | 0xF8 | 0xF9 | 0xFA | 0xFB | 0xFC | 0xFD | 0x06 | 0x07
+            | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x60 | 0x61 | 0x9E | 0x9F => {
+                (false, 0)
+            }
+            // 无 ModRM，imm8
+            0x6A | 0xEB | 0xCD | 0xD4 | 0xD5 | 0xE4 | 0xE5 | 0xE6 | 0xE7
+            | 0x70..=0x7F => (false, 1),
+            // 无 ModRM，imm32/rel32
+            0x68 | 0xE8 | 0xE9 => (false, 4),
+            // mov r, imm
+            0xB0..=0xB7 => (false, 1),
+            0xB8..=0xBF => (false, 4),
+            // ALU rax, imm8
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => (false, 1),
+            // ALU rax, imm32
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => (false, 4),
+            // ret imm16 / int imm8 / in/out imm8 等已在上面覆盖
+            // 默认：含 ModRM，立即数长度待定
+            _ => (true, 0),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1423,10 +1673,16 @@ pub fn disassemble_range(
                 pos += len;
             }
             _ => {
+                let len = dec.unknown_len(pos);
+                let bytes: Vec<String> = code[pos..(pos + len).min(code.len())]
+                    .iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
                 out.push('\t');
-                out.push_str(&format!(".byte 0x{:02x}", code[pos]));
+                out.push_str(".byte ");
+                out.push_str(&bytes.join(", "));
                 out.push('\n');
-                pos += 1;
+                pos += len;
             }
         }
     }
