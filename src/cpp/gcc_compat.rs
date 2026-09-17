@@ -83,6 +83,127 @@ pub fn member_ptr_helpers() -> String {
     )
 }
 
+/// SJLJ 风格异常处理运行时 (Stage 9)
+///
+/// 实现基于 setjmp/longjmp 的异常栈,用于 native path 的 throw/catch.
+/// 与 libstdc++ 的 __cxa_allocate_exception / __cxa_free_exception 配合使用.
+///
+/// 结构:
+/// - __dcc_eh_context_t: 每个 try 块的异常上下文 (含 jmp_buf + 异常指针)
+/// - 线程局部异常栈: 链表结构, push/pop 管理 (使用 __thread)
+///
+/// 注意: 这是 SJLJ (setjmp/longjmp) 风格, 不是零成本异常.
+/// 每个 try 块入口有开销, 但 throw/catch 能正确工作.
+pub fn sjlj_eh_runtime() -> String {
+    String::from(
+        "/* dcc GCC ABI: SJLJ exception handling runtime (Stage 9) */\n\
+         #include <setjmp.h>\n\
+         #include <stdlib.h>\n\
+         #include <string.h>\n\
+         \n\
+         /* 异常上下文: 每个 try 块一个 */\n\
+         typedef struct __dcc_eh_context {\n\
+         \x20   jmp_buf jmpbuf;\n\
+         \x20   void* exception_ptr;\n\
+         \x20   void* type_info;\n\
+         \x20   struct __dcc_eh_context* next;\n\
+         \x20   int caught; /* 是否已被 catch 处理 */\n\
+         } __dcc_eh_context_t;\n\
+         \n\
+         /* 线程局部异常栈顶指针 (thread-local storage) */\n\
+         static __thread __dcc_eh_context_t* __dcc_eh_stack_top = 0;\n\
+         \n\
+         /* 当前正在处理的异常 (用于 rethrow) */\n\
+         static __thread void* __dcc_eh_current_exn = 0;\n\
+         static __thread void* __dcc_eh_current_ti = 0;\n\
+         \n\
+         /* 推入异常上下文 (进入 try 块时调用) */\n\
+         static inline void __dcc_eh_push_context(void* ctx) {\n\
+         \x20   __dcc_eh_context_t* c = (__dcc_eh_context_t*)ctx;\n\
+         \x20   c->exception_ptr = 0;\n\
+         \x20   c->type_info = 0;\n\
+         \x20   c->caught = 0;\n\
+         \x20   c->next = __dcc_eh_stack_top;\n\
+         \x20   __dcc_eh_stack_top = c;\n\
+         }\n\
+         \n\
+         /* 弹出异常上下文 (正常退出 try 块时调用) */\n\
+         static inline void __dcc_eh_pop_context(void) {\n\
+         \x20   if (__dcc_eh_stack_top) {\n\
+         \x20       __dcc_eh_stack_top = __dcc_eh_stack_top->next;\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         /* 设置 catch 点 (返回 0 表示正常进入, 非 0 表示异常抛出) */\n\
+         static inline int __dcc_eh_setjmp(void* ctx) {\n\
+         \x20   __dcc_eh_context_t* c = (__dcc_eh_context_t*)ctx;\n\
+         \x20   return setjmp(c->jmpbuf);\n\
+         }\n\
+         \n\
+         /* 获取当前异常对象指针 */\n\
+         static inline void* __dcc_eh_get_exception(void* ctx) {\n\
+         \x20   __dcc_eh_context_t* c = (__dcc_eh_context_t*)ctx;\n\
+         \x20   return c->exception_ptr;\n\
+         }\n\
+         \n\
+         /* 类型匹配检查 (简化: 比较 typeinfo 指针) */\n\
+         static inline int __dcc_eh_type_match(void* exn, void* ti) {\n\
+         \x20   (void)exn;\n\
+         \x20   /* 简化: ti == 0 视为 catch-all (总是匹配); 类类型按指针等比较 */\n\
+         \x20   if (ti == 0) return 1;\n\
+         \x20   if (__dcc_eh_current_ti == 0) return 0;\n\
+         \x20   return __dcc_eh_current_ti == ti;\n\
+         }\n\
+         \n\
+         /* 抛出异常 (SJLJ 风格: 直接 longjmp 到栈顶) */\n\
+         static inline void __dcc_eh_throw(void* exn, void* ti) {\n\
+         \x20   __dcc_eh_current_exn = exn;\n\
+         \x20   __dcc_eh_current_ti = ti;\n\
+         \x20   if (__dcc_eh_stack_top) {\n\
+         \x20       __dcc_eh_stack_top->exception_ptr = exn;\n\
+         \x20       __dcc_eh_stack_top->type_info = ti;\n\
+         \x20       longjmp(__dcc_eh_stack_top->jmpbuf, 1);\n\
+         \x20   }\n\
+         \x20   /* 没有 catch handler: 调用 terminate (简化: abort) */\n\
+         \x20   abort();\n\
+         }\n\
+         \n\
+         /* 重新抛出当前异常 */\n\
+         static inline void __dcc_eh_rethrow(void) {\n\
+         \x20   void* exn = __dcc_eh_current_exn;\n\
+         \x20   void* ti = __dcc_eh_current_ti;\n\
+         \x20   /* 弹出当前 context (catch 块的 context) */\n\
+         \x20   if (__dcc_eh_stack_top) {\n\
+         \x20       __dcc_eh_stack_top = __dcc_eh_stack_top->next;\n\
+         \x20   }\n\
+         \x20   if (__dcc_eh_stack_top && exn) {\n\
+         \x20       __dcc_eh_stack_top->exception_ptr = exn;\n\
+         \x20       __dcc_eh_stack_top->type_info = ti;\n\
+         \x20       longjmp(__dcc_eh_stack_top->jmpbuf, 1);\n\
+         \x20   }\n\
+         \x20   abort();\n\
+         }\n\
+         \n\
+         /* 结束 catch 处理 */\n\
+         static inline void __dcc_eh_end_catch(void* ctx) {\n\
+         \x20   __dcc_eh_context_t* c = (__dcc_eh_context_t*)ctx;\n\
+         \x20   c->caught = 1;\n\
+         \x20   /* 弹出当前 context */\n\
+         \x20   if (__dcc_eh_stack_top == c) {\n\
+         \x20       __dcc_eh_stack_top = c->next;\n\
+         \x20   }\n\
+         \x20   /* 释放异常内存 (使用 __cxa_free_exception) */\n\
+         \x20   if (c->exception_ptr) {\n\
+         \x20       extern void __cxa_free_exception(void*);\n\
+         \x20       __cxa_free_exception(c->exception_ptr);\n\
+         \x20       c->exception_ptr = 0;\n\
+         \x20   }\n\
+         \x20   __dcc_eh_current_exn = 0;\n\
+         \x20   __dcc_eh_current_ti = 0;\n\
+         }\n",
+    )
+}
+
 /// 完整运行时前导: 追加到 lower 输出前部 (幂等, 可重复安全)
 pub fn runtime_prologue() -> String {
     let mut s = cxa_guard_runtime();
@@ -90,6 +211,7 @@ pub fn runtime_prologue() -> String {
     s.push_str(&dynamic_cast_runtime());
     s.push_str(&initializer_list_layout());
     s.push_str(&member_ptr_helpers());
+    s.push_str(&sjlj_eh_runtime());
     s
 }
 
@@ -171,5 +293,32 @@ mod tests {
         assert!(s.contains("__dynamic_cast"), "{}", s);
         assert!(s.contains("__dcc_initializer_list_t"), "{}", s);
         assert!(s.contains("__dcc_mbr_off"), "{}", s);
+        assert!(s.contains("__dcc_eh_throw"), "{}", s);
+        assert!(s.contains("__dcc_eh_push_context"), "{}", s);
+    }
+
+    #[test]
+    fn sjlj_eh_runtime_has_all_functions() {
+        let s = sjlj_eh_runtime();
+        assert!(s.contains("__dcc_eh_context_t"), "{}", s);
+        assert!(s.contains("__dcc_eh_push_context"), "{}", s);
+        assert!(s.contains("__dcc_eh_pop_context"), "{}", s);
+        assert!(s.contains("__dcc_eh_setjmp"), "{}", s);
+        assert!(s.contains("__dcc_eh_get_exception"), "{}", s);
+        assert!(s.contains("__dcc_eh_type_match"), "{}", s);
+        assert!(s.contains("__dcc_eh_throw"), "{}", s);
+        assert!(s.contains("__dcc_eh_rethrow"), "{}", s);
+        assert!(s.contains("__dcc_eh_end_catch"), "{}", s);
+    }
+
+    #[test]
+    fn sjlj_eh_runtime_uses_thread_local_storage() {
+        // 修复: 异常栈与当前异常状态必须真正线程局部,
+        // 否则多线程下会跨栈 longjmp 与 catch 误匹配
+        let s = sjlj_eh_runtime();
+        assert!(s.contains("__thread"), "expected __thread TLS, got: {}", s);
+        assert!(s.contains("__dcc_eh_stack_top"), "{}", s);
+        assert!(s.contains("__dcc_eh_current_exn"), "{}", s);
+        assert!(s.contains("__dcc_eh_current_ti"), "{}", s);
     }
 }

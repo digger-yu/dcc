@@ -1919,39 +1919,74 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             use crate::cpp::feature_matrix::CxxNativeMode;
             let try_native = !matches!(cfg.cxx_native, CxxNativeMode::Off);
             if try_native {
-                match crate::cpp::native::lower_decls_native(decls) {
-                    Ok(native_out) => {
-                        if cfg.verbose {
-                            eprintln!("dcc: using C++ native backend path");
-                        }
-                        // 进程内直接走 C 主流水线: ir::lower → 优化 → codegen::emit
-                        return emit_native_program(
-                            cfg,
-                            native_out.prog,
-                            &file_name,
-                            pp_out.line_map.clone(),
+                // Stage 10: 先做能力检测，判断是否预期可以走 native
+                let features = crate::cpp::native::detect_features(decls);
+                let can_native = crate::cpp::native::can_compile_native(decls);
+
+                if cfg.verbose {
+                    let mut sorted: Vec<&crate::cpp::feature_matrix::CppFeature> = features.iter().collect();
+                    sorted.sort_by_key(|f| f.name());
+                    eprintln!("dcc: C++ feature detection: {} features found", sorted.len());
+                    for f in &sorted {
+                        let status = if f.native_supported() { "[native]" } else { "[legacy]" };
+                        eprintln!("dcc:   {} {}", status, f.name());
+                    }
+                }
+
+                // Auto 模式下，如果检测到不支持的特性，直接 fallback 而不尝试 native
+                // 这样可以避免不必要的 native 编译尝试和错误输出
+                let should_try_native = match cfg.cxx_native {
+                    CxxNativeMode::On => true,
+                    CxxNativeMode::Auto => can_native.is_ok(),
+                    CxxNativeMode::Off => unreachable!(),
+                };
+
+                if !should_try_native {
+                    if cfg.verbose {
+                        let unsupported = can_native.unwrap_err();
+                        let names: Vec<&str> = unsupported.iter().map(|f| f.name()).collect();
+                        eprintln!(
+                            "dcc: C++ native backend skipped (unsupported features: {}), \
+                             falling back to legacy lower-to-c",
+                            names.join(", ")
                         );
                     }
-                    Err(e) => {
-                        match cfg.cxx_native {
-                            CxxNativeMode::On => {
-                                return Err(vec![Diagnostic::err(
-                                    "E0500",
-                                    format!("C++ native backend: {}", e),
-                                    crate::diagnostics::Span::point(&file_name, 0, 0),
-                                )]);
+                    // fall through to legacy path
+                } else {
+                    match crate::cpp::native::lower_decls_native(decls) {
+                        Ok(native_out) => {
+                            if cfg.verbose {
+                                eprintln!("dcc: using C++ native backend path");
                             }
-                            CxxNativeMode::Auto => {
-                                if cfg.verbose {
-                                    eprintln!(
-                                        "dcc: C++ native backend unsupported ({}), \
-                                         falling back to legacy lower-to-c",
-                                        e
-                                    );
+                            // 进程内直接走 C 主流水线: ir::lower → 优化 → codegen::emit
+                            return emit_native_program(
+                                cfg,
+                                native_out.prog,
+                                &file_name,
+                                pp_out.line_map.clone(),
+                            );
+                        }
+                        Err(e) => {
+                            match cfg.cxx_native {
+                                CxxNativeMode::On => {
+                                    return Err(vec![Diagnostic::err(
+                                        "E0500",
+                                        format!("C++ native backend: {}", e),
+                                        crate::diagnostics::Span::point(&file_name, 0, 0),
+                                    )]);
                                 }
-                                // fall through to legacy path
+                                CxxNativeMode::Auto => {
+                                    if cfg.verbose {
+                                        eprintln!(
+                                            "dcc: C++ native backend failed ({}), \
+                                             falling back to legacy lower-to-c",
+                                            e
+                                        );
+                                    }
+                                    // fall through to legacy path
+                                }
+                                CxxNativeMode::Off => unreachable!(),
                             }
-                            CxxNativeMode::Off => unreachable!(),
                         }
                     }
                 }

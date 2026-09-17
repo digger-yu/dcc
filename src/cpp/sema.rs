@@ -14,9 +14,9 @@
 use std::collections::HashMap;
 
 use crate::cpp::hir::{
-    BinaryOp, CastKind, CtorVariant, DtorVariant, HirBody, HirBodyId, HirCallee, HirExpr,
-    HirExprId, HirExprKind, HirFunction, HirId, HirStmt, HirStmtId, HirStmtKind, HirTopLevelDecl,
-    HirTranslationUnit, UnaryOp,
+    BinaryOp, CastKind, CtorVariant, DtorVariant, HirBody, HirBodyId, HirCallee, HirCatchHandler,
+    HirExpr, HirExprId, HirExprKind, HirFunction, HirId, HirStmt, HirStmtId, HirStmtKind,
+    HirTopLevelDecl, HirTranslationUnit, UnaryOp,
 };
 use crate::cpp::mangle::MangleType;
 use crate::cpp::parser::*;
@@ -1257,6 +1257,70 @@ impl Sema {
                     target,
                 ))
             }
+            CppExpr::TypeidType(ty) => {
+                // typeid(T): 静态类型的 type_info 引用
+                // 简化：返回 type_info*（引用在 ABI 层降级为指针）
+                let cxx_ty = self.convert_type(ty)?;
+                match cxx_ty {
+                    CxxType::Class(class_id) => {
+                        // type_info* 类型用 void* 表示（不透明）
+                        let type_info_ptr = CxxType::Pointer(Box::new(CxxType::Void));
+                        Ok(self.add_expr(HirExprKind::TypeInfoRef(class_id), type_info_ptr))
+                    }
+                    _ => Err(format!(
+                        "typeid of non-class type not yet supported"
+                    )),
+                }
+            }
+            CppExpr::Typeid(expr) => {
+                // typeid(expr): 表达式的动态类型 type_info
+                // 简化：对于多态类型需要动态查找，这里先用静态类型
+                let expr_id = self.build_expr(expr)?;
+                let expr_ty = self.hir.exprs[expr_id.0].ty.clone();
+                match expr_ty {
+                    CxxType::Class(class_id) => {
+                        let type_info_ptr = CxxType::Pointer(Box::new(CxxType::Void));
+                        Ok(self.add_expr(HirExprKind::TypeInfoRef(class_id), type_info_ptr))
+                    }
+                    CxxType::Pointer(inner) => match inner.as_ref() {
+                        CxxType::Class(class_id) => {
+                            let type_info_ptr = CxxType::Pointer(Box::new(CxxType::Void));
+                            Ok(self.add_expr(HirExprKind::TypeInfoRef(*class_id), type_info_ptr))
+                        }
+                        _ => Err(format!(
+                            "typeid of non-class pointer type not yet supported"
+                        )),
+                    },
+                    CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
+                        match inner.as_ref() {
+                            CxxType::Class(class_id) => {
+                                let type_info_ptr = CxxType::Pointer(Box::new(CxxType::Void));
+                                Ok(self.add_expr(HirExprKind::TypeInfoRef(*class_id), type_info_ptr))
+                            }
+                            _ => Err(format!(
+                                "typeid of non-class reference type not yet supported"
+                            )),
+                        }
+                    }
+                    _ => Err(format!(
+                        "typeid of non-class type not yet supported"
+                    )),
+                }
+            }
+            CppExpr::DynamicCast { ty, expr } => {
+                // dynamic_cast<T>(expr)
+                let dst_ty = self.convert_type(ty)?;
+                let expr_id = self.build_expr(expr)?;
+                let src_ty = self.hir.exprs[expr_id.0].ty.clone();
+                Ok(self.add_expr(
+                    HirExprKind::DynamicCast {
+                        object: expr_id,
+                        src: src_ty,
+                        dst: dst_ty.clone(),
+                    },
+                    dst_ty,
+                ))
+            }
             other => Err(format!(
                 "unsupported expression kind: {:?}",
                 std::mem::discriminant(other)
@@ -1370,6 +1434,59 @@ impl Sema {
             }
             CppStmt::Break => Ok(self.add_stmt(HirStmtKind::Break)),
             CppStmt::Continue => Ok(self.add_stmt(HirStmtKind::Continue)),
+            CppStmt::Throw(expr) => {
+                let obj_id = match expr {
+                    Some(e) => Some(self.build_expr(e)?),
+                    None => None,
+                };
+                // throw 表达式的类型：有对象时是对象类型，rethrow 时为 void
+                let throw_ty = match &obj_id {
+                    Some(id) => self.hir.exprs[id.0].ty.clone(),
+                    None => CxxType::Void,
+                };
+                let throw_expr = self.add_expr(HirExprKind::Throw {
+                    object: obj_id,
+                    ty: throw_ty.clone(),
+                }, throw_ty);
+                Ok(self.add_stmt(HirStmtKind::Expr(throw_expr)))
+            }
+            CppStmt::Try { body, catches } => {
+                let body_stmts = self.build_body(body)?;
+                let body_stmt = self.add_stmt(HirStmtKind::Compound(body_stmts));
+                let mut handlers = Vec::new();
+                for catch in catches {
+                    // 进入 catch 作用域
+                    self.push_scope(ScopeKind::Block);
+                    let param_ty = match &catch.ty {
+                        Some(t) => self.convert_type(t)?,
+                        None => CxxType::Void, // catch (...) 用 Void 表示
+                    };
+                    let param_sym = match &catch.name {
+                        Some(name) => {
+                            let sym = self.add_symbol(
+                                name.clone(),
+                                CxxSymbolKind::Variable,
+                                param_ty.clone(),
+                                Access::Private,
+                            );
+                            Some(sym)
+                        }
+                        None => None,
+                    };
+                    let catch_body_stmts = self.build_body(&catch.body)?;
+                    let catch_body_stmt = self.add_stmt(HirStmtKind::Compound(catch_body_stmts));
+                    self.pop_scope();
+                    handlers.push(HirCatchHandler {
+                        param_ty,
+                        param: param_sym,
+                        body: catch_body_stmt,
+                    });
+                }
+                Ok(self.add_stmt(HirStmtKind::Try {
+                    body: body_stmt,
+                    handlers,
+                }))
+            }
             CppStmt::Decl(_d) => Err("nested declaration statement not yet supported".into()),
             other => Err(format!(
                 "unsupported statement kind: {:?}",

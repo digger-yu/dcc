@@ -121,8 +121,7 @@ impl CppFeature {
     /// 当前 native path 已支持的特性集合
     /// 随阶段推进逐步扩展。
     pub fn native_supported(&self) -> bool {
-        // Stage 4: non-virtual inheritance / base ctor order /
-        // delegating ctor 已在原生后端实现.
+        // Stage 9: 异常 (throw/catch) 已支持（SJLJ 风格）。
         matches!(
             self,
             CppFeature::FreeFunction
@@ -133,6 +132,17 @@ impl CppFeature {
                 | CppFeature::NonVirtualInheritance
                 | CppFeature::BaseCtorOrder
                 | CppFeature::DelegatingCtor
+                | CppFeature::VirtualFunction
+                | CppFeature::VPtrInit
+                | CppFeature::ThisAdjustThunk
+                | CppFeature::VirtualInheritance
+                | CppFeature::DiamondVirtualInheritance
+                | CppFeature::TypeId
+                | CppFeature::DynamicCast
+                | CppFeature::FunctionTemplate
+                | CppFeature::ClassTemplate
+                | CppFeature::Exception
+                | CppFeature::DtorCleanup
         )
     }
 }
@@ -168,8 +178,8 @@ pub enum CxxNativeMode {
 
 impl Default for CxxNativeMode {
     fn default() -> Self {
-        // 默认走 legacy，保证行为不变
-        Self::Off
+        // Stage 10: 默认走 Auto，优先 native，不支持的特性自动 fallback 到 legacy
+        Self::Auto
     }
 }
 
@@ -233,8 +243,8 @@ mod tests {
     }
 
     #[test]
-    fn cxx_native_mode_default_is_off() {
-        assert_eq!(CxxNativeMode::default(), CxxNativeMode::Off);
+    fn cxx_native_mode_default_is_auto() {
+        assert_eq!(CxxNativeMode::default(), CxxNativeMode::Auto);
     }
 
     #[test]

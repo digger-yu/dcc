@@ -286,6 +286,7 @@ impl<'a> IrLowerer<'a> {
 
     /// 递归收集类及其所有基类的字段，展平成单一字段列表。
     /// 基类字段按基类偏移重新计算最终偏移。
+    /// Stage 6: 也包含虚基类字段。
     fn collect_flattened_fields(
         &self,
         class_id: &ClassId,
@@ -293,7 +294,7 @@ impl<'a> IrLowerer<'a> {
         base_offset: u64,
         fields: &mut Vec<crate::ast::Field>,
     ) -> Result<(), LowerIrError> {
-        // 先处理基类（按声明顺序）
+        // 先处理非虚基类（按声明顺序）
         for base_layout in &abi.bases {
             let base_abi = self.abis.get(&base_layout.base).ok_or_else(|| {
                 LowerIrError::Internal(format!(
@@ -322,6 +323,40 @@ impl<'a> IrLowerer<'a> {
                 field_align: None,
                 field_packed: false,
             });
+        }
+        // 最后处理虚基类字段 (Stage 6)
+        // 虚基类的偏移从 vtable 的 VBaseOffset 条目中获取
+        for vb_layout in &abi.virtual_bases {
+            let vb_abi = self.abis.get(&vb_layout.base).ok_or_else(|| {
+                LowerIrError::Internal(format!(
+                    "ABI for virtual base class {} not found",
+                    vb_layout.base.0
+                ))
+            })?;
+            // 从 primary vtable 中查找 vbase offset 值
+            let vbase_offset = abi
+                .vtables
+                .first()
+                .and_then(|vt| {
+                    vt.components.iter().find_map(|comp| {
+                        if let VTableComponent::VBaseOffset { target, offset } = comp {
+                            if *target == vb_layout.base {
+                                Some(*offset as u64)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or(0);
+            self.collect_flattened_fields(
+                &vb_layout.base,
+                vb_abi,
+                base_offset + vbase_offset,
+                fields,
+            )?;
         }
         Ok(())
     }
@@ -387,6 +422,60 @@ fn is_union_layout(abi: &ClassAbi) -> bool {
         return false;
     }
     abi.fields.iter().all(|f| f.offset == 0)
+}
+
+/// 计算 ast::Type 的大小（字节），用于异常分配等场景。
+fn type_size(ty: &Type) -> u64 {
+    match ty {
+        Type::Void => 0,
+        Type::Bool => 1,
+        Type::Char | Type::SChar | Type::UChar | Type::Char8 => 1,
+        Type::Char16 => 2,
+        Type::Char32 => 4,
+        Type::Short | Type::UShort => 2,
+        Type::Int | Type::UInt => 4,
+        Type::Long | Type::ULong => 8,
+        Type::LongLong | Type::ULongLong => 8,
+        Type::Int128 | Type::UInt128 => 16,
+        Type::Float => 4,
+        Type::Double => 8,
+        Type::LongDouble => 16,
+        Type::Fract | Type::Accum => 4, // 简化
+        Type::Ptr(_) => POINTER_SIZE,
+        Type::Array(inner, crate::ast::ArraySize::Const(n)) => {
+            type_size(&inner.base) * (*n as u64)
+        }
+        Type::Array(_, _) => POINTER_SIZE,
+        Type::Vector(inner, n) => type_size(&inner.base) * (*n as u64),
+        Type::Struct(_name, fields, _align, _) => {
+            let mut max_end: u64 = 0;
+            for f in fields.iter() {
+                let fsize = type_size(&f.ty);
+                let end = f.offset as u64 + fsize;
+                if end > max_end {
+                    max_end = end;
+                }
+            }
+            max_end.max(1)
+        }
+        Type::Union(_name, fields, _align, _) => {
+            let mut max_size: u64 = 0;
+            for f in fields.iter() {
+                let fsize = type_size(&f.ty);
+                if fsize > max_size {
+                    max_size = fsize;
+                }
+            }
+            max_size.max(1)
+        }
+        Type::Enum(_, _, Some(underlying)) => type_size(&underlying.base),
+        Type::Enum(_, _, None) => 4,
+        Type::Func(_, _) => POINTER_SIZE,
+        Type::Named(_) => POINTER_SIZE, // 简化
+        Type::Atomic(inner) => type_size(&inner.base),
+        Type::Complex(inner) => type_size(&inner.base) * 2,
+        Type::Imaginary(inner) => type_size(&inner.base),
+    }
 }
 
 // === Function lowerer ===
@@ -690,6 +779,36 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.lower_base_cast(*object, *from, *to, &expr_ty)
             }
 
+            HirExprKind::VBaseAdjust { object, from, to } => {
+                self.lower_vbase_adjust(*object, *from, *to, &expr_ty)
+            }
+
+            HirExprKind::TypeInfoRef(class_id) => {
+                // typeid 表达式：返回 typeinfo 符号的地址
+                // type_info* 类型简化为 *const u8（不透明指针）
+                let abi = self
+                    .lowerer
+                    .abis
+                    .get(class_id)
+                    .ok_or_else(|| {
+                        LowerIrError::Internal(format!(
+                            "ABI not found for class {} in TypeInfoRef",
+                            class_id.0
+                        ))
+                    })?;
+                let sym_name = abi.rtti.typeinfo_symbol.clone();
+                let ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
+                // 将 typeinfo 符号加入 rodata 列表
+                if !self.lowerer.output.rodata.contains(&sym_name) {
+                    self.lowerer.output.rodata.push(sym_name.clone());
+                }
+                Ok(Operand::SymAddr(sym_name, ty))
+            }
+
+            HirExprKind::DynamicCast { object, src, dst } => {
+                self.lower_dynamic_cast(*object, src, dst, &expr_ty)
+            }
+
             HirExprKind::Construct { class, place, args, variant } => {
                 self.lower_construct(*class, *place, args, *variant)
             }
@@ -697,6 +816,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::Destroy { class, place, variant } => {
                 self.lower_destroy(*class, *place, *variant)
             }
+
+            HirExprKind::Throw { object, ty } => self.lower_throw(*object, ty),
 
             _ => Err(LowerIrError::Unsupported(format!(
                 "HIR expression kind: {:?}",
@@ -1594,6 +1715,353 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         Ok(Operand::Var(dest))
     }
 
+    // --- vbase adjust (virtual inheritance) ---
+
+    /// 虚基类调整 lowering。
+    /// 从派生类指针调整到虚基类指针：从 vtable 中读取 vbase offset，然后加到 this 指针上。
+    ///
+    /// 实现步骤:
+    /// 1. 获取对象指针
+    /// 2. 转换为 vptr 类型 (*const *const u8)
+    /// 3. 从 vptr 加载 vtable 指针
+    /// 4. 计算 vbase offset 槽的地址 (vtable_ptr + vtable_offset)
+    ///    注意: vbase offset 在 address point 之前（负偏移）
+    /// 5. 从 vtable 加载 vbase offset (i64)
+    /// 6. 将 vbase offset 加到对象指针上
+    /// 7. 转换为结果类型
+    fn lower_vbase_adjust(
+        &mut self,
+        object_id: HirExprId,
+        from_class: ClassId,
+        to_class: ClassId,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        let object = self.lower_expr(object_id)?;
+
+        // 同类转换：直接返回
+        if from_class == to_class {
+            return Ok(object);
+        }
+
+        // 获取 from_class 的 ABI
+        let from_abi = self.lowerer.abis.get(&from_class).ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", from_class.0))
+        })?;
+
+        // 查找虚基类的 vbase_index
+        let vbase_idx = from_abi
+            .virtual_bases
+            .iter()
+            .find(|vb| vb.base == to_class)
+            .map(|vb| vb.vbase_index)
+            .ok_or_else(|| {
+                LowerIrError::Internal(format!(
+                    "virtual base class {} not found in class {}",
+                    to_class.0, from_class.0
+                ))
+            })?;
+
+        // 计算 vbase offset 在 vtable 中的相对偏移（相对于 address point）
+        // vtable 布局（从低地址到高地址）:
+        //   [vbase_offset_0] [vbase_offset_1] ... [offset_to_top] [typeinfo] [vfunc_0] [vfunc_1] ...
+        //                                                                   ^
+        //                                                            address_point (vptr 指向这里)
+        // 所以 vbase_offset_i 的地址 = vptr - (vbase_count - i) * 8 - 16
+        let vbase_count = from_abi.virtual_bases.len() as i64;
+        let vtable_offset_bytes = -(vbase_count - vbase_idx as i64) * POINTER_SIZE as i64
+            - 2 * POINTER_SIZE as i64;
+
+        let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
+
+        // 1. 将对象指针转换为 byte 指针（保存一份用于后面加偏移）
+        let obj_byte_ptr = self.fresh_var("obj_byte_ptr", byte_ptr_ty.clone());
+        let cast_obj_to_byte = Inst {
+            dest: Some(obj_byte_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: byte_ptr_ty.clone(),
+                e: object.clone(),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_obj_to_byte);
+
+        // 2. 将对象指针转换为 *const *const u8 (vptr 的类型)
+        let vptr_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(
+            QualType::new(Type::UChar),
+        )))));
+        let vptr_ptr = self.fresh_var("vptr_ptr", vptr_ptr_ty.clone());
+        let cast_to_vptr_ptr = Inst {
+            dest: Some(vptr_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: vptr_ptr_ty,
+                e: object,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_to_vptr_ptr);
+
+        // 3. 从 vptr 加载 vtable 指针
+        let vtable_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
+        let vtable_ptr = self.fresh_var("vtable_ptr", vtable_ptr_ty.clone());
+        let load_vtable = Inst {
+            dest: Some(vtable_ptr.clone()),
+            kind: InstKind::Load {
+                e: Operand::Var(vptr_ptr),
+                ty: vtable_ptr_ty,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(load_vtable);
+
+        // 4. 计算 vbase offset 槽的地址
+        let vtable_byte_ptr = self.fresh_var("vtable_byte", byte_ptr_ty.clone());
+        let cast_vtable_to_byte = Inst {
+            dest: Some(vtable_byte_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: byte_ptr_ty.clone(),
+                e: Operand::Var(vtable_ptr),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_vtable_to_byte);
+
+        let vbase_slot_ptr = self.fresh_var("vbase_slot", byte_ptr_ty.clone());
+        let gep_vbase_slot = Inst {
+            dest: Some(vbase_slot_ptr.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::Var(vtable_byte_ptr),
+                r: Operand::Int(vtable_offset_bytes as i128),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(gep_vbase_slot);
+
+        // 5. 从 vtable 加载 vbase offset (i64)
+        let vbase_offset_ty = Type::Long; // i64
+        let vbase_offset_ptr_ty = Type::Ptr(Box::new(QualType::new(vbase_offset_ty.clone())));
+        let vbase_offset_ptr = self.fresh_var("vbase_offset_ptr", vbase_offset_ptr_ty.clone());
+        let cast_to_vbase_offset_ptr = Inst {
+            dest: Some(vbase_offset_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: vbase_offset_ptr_ty,
+                e: Operand::Var(vbase_slot_ptr),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_to_vbase_offset_ptr);
+
+        let vbase_offset = self.fresh_var("vbase_offset", vbase_offset_ty.clone());
+        let load_vbase_offset = Inst {
+            dest: Some(vbase_offset.clone()),
+            kind: InstKind::Load {
+                e: Operand::Var(vbase_offset_ptr),
+                ty: vbase_offset_ty,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(load_vbase_offset);
+
+        // 6. 将 vbase offset 加到对象指针上
+        let adjusted_byte_ptr = self.fresh_var("vbase_adj_byte", byte_ptr_ty.clone());
+        let add_vbase_offset = Inst {
+            dest: Some(adjusted_byte_ptr.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::Var(obj_byte_ptr),
+                r: Operand::Var(vbase_offset),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(add_vbase_offset);
+
+        // 7. 转换为结果类型
+        let dest = self.fresh_var("vbase_adjust", result_ty.clone());
+        let cast_back = Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::Cast {
+                ty: result_ty.clone(),
+                e: Operand::Var(adjusted_byte_ptr),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_back);
+
+        Ok(Operand::Var(dest))
+    }
+
+    // --- dynamic_cast ---
+
+    /// dynamic_cast lowering。
+    ///
+    /// 调用 __dynamic_cast runtime 函数:
+    ///   void* __dynamic_cast(const void* sub,
+    ///                        const __class_type_info* src,
+    ///                        const __class_type_info* dst,
+    ///                        ptrdiff_t src2dst);
+    ///
+    /// src2dst 是提示参数:
+    ///   -1: 向上转型（src 是派生类，dst 是基类）
+    ///    0: 无提示
+    ///    2: 向下转型到公有基类
+    ///
+    /// 对于非多态类型，dynamic_cast 等价于 static_cast（编译期确定）。
+    fn lower_dynamic_cast(
+        &mut self,
+        object_id: HirExprId,
+        src_ty: &CxxType,
+        dst_ty: &CxxType,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use crate::cpp::runtime::CxxRuntimeSymbol;
+
+        let object = self.lower_expr(object_id)?;
+
+        // 提取源和目标的类类型（从指针类型中）
+        let src_class = match src_ty {
+            CxxType::Pointer(inner) => match inner.as_ref() {
+                CxxType::Class(cid) => Some(*cid),
+                _ => None,
+            },
+            CxxType::Class(cid) => Some(*cid),
+            _ => None,
+        };
+
+        let dst_class = match dst_ty {
+            CxxType::Pointer(inner) => match inner.as_ref() {
+                CxxType::Class(cid) => Some(*cid),
+                _ => None,
+            },
+            CxxType::Class(cid) => Some(*cid),
+            _ => None,
+        };
+
+        let (src_class, dst_class) = match (src_class, dst_class) {
+            (Some(s), Some(d)) => (s, d),
+            _ => {
+                return Err(LowerIrError::Unsupported(
+                    "dynamic_cast on non-class types".into(),
+                ));
+            }
+        };
+
+        // 同类转换：直接返回
+        if src_class == dst_class {
+            return Ok(object);
+        }
+
+        // 获取源类的 ABI，判断是否为多态类
+        let src_abi = self.lowerer.abis.get(&src_class).ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", src_class.0))
+        })?;
+
+        // 非多态类型：dynamic_cast 等价于 static_cast（只能向上转型）
+        if !src_abi.is_polymorphic() {
+            // 简化：直接做指针 cast（非多态类型只能向上转型，且偏移为 0 或已知）
+            // 这里我们直接返回 cast 后的结果
+            let dest = self.fresh_var("dyn_cast_static", result_ty.clone());
+            let inst = Inst {
+                dest: Some(dest.clone()),
+                kind: InstKind::Cast {
+                    ty: result_ty.clone(),
+                    e: object,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(inst);
+            return Ok(Operand::Var(dest));
+        }
+
+        // 多态类型：调用 __dynamic_cast runtime
+        // 获取 src 和 dst 的 typeinfo 符号
+        let src_typeinfo = src_abi.rtti.typeinfo_symbol.clone();
+        let dst_abi = self.lowerer.abis.get(&dst_class).ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", dst_class.0))
+        })?;
+        let dst_typeinfo = dst_abi.rtti.typeinfo_symbol.clone();
+
+        // 将 typeinfo 符号加入 rodata
+        if !self.lowerer.output.rodata.contains(&src_typeinfo) {
+            self.lowerer.output.rodata.push(src_typeinfo.clone());
+        }
+        if !self.lowerer.output.rodata.contains(&dst_typeinfo) {
+            self.lowerer.output.rodata.push(dst_typeinfo.clone());
+        }
+
+        // type_info* 类型：*const u8
+        let typeinfo_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
+
+        // __dynamic_cast 函数类型：void* (*)(const void*, const type_info*, const type_info*, ptrdiff_t)
+        let dyn_cast_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Func(
+            Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))),
+            vec![
+                QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                QualType::new(typeinfo_ptr_ty.clone()),
+                QualType::new(typeinfo_ptr_ty.clone()),
+                QualType::new(Type::Long), // ptrdiff_t
+            ],
+        ))));
+
+        // 构造参数
+        // 1. object 指针（转为 void*）
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let obj_void_ptr = self.fresh_var("dyn_cast_obj", void_ptr_ty.clone());
+        let cast_obj = Inst {
+            dest: Some(obj_void_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: void_ptr_ty.clone(),
+                e: object,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_obj);
+
+        // 2. src typeinfo
+        let src_ti_op = Operand::SymAddr(src_typeinfo, typeinfo_ptr_ty.clone());
+
+        // 3. dst typeinfo
+        let dst_ti_op = Operand::SymAddr(dst_typeinfo, typeinfo_ptr_ty.clone());
+
+        // 4. src2dst hint (简化为 0，表示无提示)
+        let hint_op = Operand::Int(0);
+
+        // 调用 __dynamic_cast
+        let fn_addr = Operand::FnAddr(CxxRuntimeSymbol::DynamicCast.name().to_string(), dyn_cast_fn_ty);
+
+        let result_void_ptr = self.fresh_var("dyn_cast_result", void_ptr_ty.clone());
+        let call_inst = Inst {
+            dest: Some(result_void_ptr.clone()),
+            kind: InstKind::Call {
+                callee: fn_addr,
+                args: vec![
+                    Operand::Var(obj_void_ptr),
+                    src_ti_op,
+                    dst_ti_op,
+                    hint_op,
+                ],
+                ret_ty: void_ptr_ty.clone(),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(call_inst);
+
+        // 将结果转换为目标类型
+        let dest = self.fresh_var("dyn_cast_final", result_ty.clone());
+        let cast_result = Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::Cast {
+                ty: result_ty.clone(),
+                e: Operand::Var(result_void_ptr),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_result);
+
+        Ok(Operand::Var(dest))
+    }
+
     // --- construct / destroy ---
 
     /// 构造函数调用 lowering（placement new 风格）。
@@ -1672,6 +2140,157 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(inst);
 
         Ok(Operand::Void)
+    }
+
+    /// 降低 throw 表达式（SJLJ 风格异常处理）
+    ///
+    /// 流程:
+    /// 1. rethrow (throw;)：调用 __dcc_eh_rethrow
+    /// 2. throw expr：
+    ///    - 计算抛出对象大小
+    ///    - 调用 __cxa_allocate_exception 分配异常内存
+    ///    - 把对象拷贝到异常内存
+    ///    - 调用 __dcc_eh_throw 抛出异常（SJLJ 风格，内部 longjmp）
+    fn lower_throw(
+        &mut self,
+        object: Option<HirExprId>,
+        ty: &CxxType,
+    ) -> Result<Operand, LowerIrError> {
+        use crate::cpp::runtime::CxxRuntimeSymbol;
+
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+
+        match object {
+            None => {
+                // rethrow: 调用 __dcc_eh_rethrow
+                let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+                let callee_op = Operand::FnAddr(
+                    "__dcc_eh_rethrow".to_string(),
+                    rethrow_fn_ty,
+                );
+                let inst = Inst {
+                    dest: None,
+                    kind: InstKind::Call {
+                        callee: callee_op,
+                        args: vec![],
+                        ret_ty: Type::Void,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(inst);
+                // throw 不返回，标记当前块为不可达
+                self.set_term(Terminator::Unreachable);
+                Ok(Operand::Void)
+            }
+            Some(obj_id) => {
+                // 计算抛出对象大小
+                let obj_size = self.compute_type_size(ty)?;
+                let size_op = Operand::Int(obj_size as i128);
+
+                // 调用 __cxa_allocate_exception(size)
+                let alloc_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+                let alloc_callee = Operand::FnAddr(
+                    CxxRuntimeSymbol::AllocException.name().to_string(),
+                    alloc_fn_ty.clone(),
+                );
+                let exn_ptr_var = self.fresh_var("exn_ptr", void_ptr_ty.clone());
+                let alloc_call = Inst {
+                    dest: Some(exn_ptr_var.clone()),
+                    kind: InstKind::Call {
+                        callee: alloc_callee,
+                        args: vec![size_op],
+                        ret_ty: void_ptr_ty.clone(),
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(alloc_call);
+
+                // 把抛出对象的值拷贝到异常内存
+                let obj_val = self.lower_expr(obj_id)?;
+                let obj_ir_ty = self.lowerer.lower_type(ty)?;
+                // 把 void* 转为目标类型指针
+                let typed_ptr_var = self.fresh_var(
+                    "exn_typed",
+                    Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))),
+                );
+                let cast_inst = Inst {
+                    dest: Some(typed_ptr_var.clone()),
+                    kind: InstKind::Cast {
+                        ty: Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))),
+                        e: Operand::Var(exn_ptr_var.clone()),
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(cast_inst);
+
+                // 存储值到异常内存
+                let store_inst = Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::Var(typed_ptr_var),
+                        src: obj_val,
+                        is_volatile: false,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(store_inst);
+
+                // 调用 __dcc_eh_throw(exn_ptr, typeinfo)
+                // 简化：typeinfo 暂时传 null，SJLJ 运行时用类型名匹配
+                // 先获取 typeinfo（如果是类类型）
+                let typeinfo_op = self.get_typeinfo_for(ty)?;
+
+                let throw_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+                let throw_callee = Operand::FnAddr(
+                    "__dcc_eh_throw".to_string(),
+                    throw_fn_ty,
+                );
+                let throw_call = Inst {
+                    dest: None,
+                    kind: InstKind::Call {
+                        callee: throw_callee,
+                        args: vec![Operand::Var(exn_ptr_var), typeinfo_op],
+                        ret_ty: Type::Void,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(throw_call);
+
+                // throw 不返回
+                self.set_term(Terminator::Unreachable);
+                Ok(Operand::Void)
+            }
+        }
+    }
+
+    /// 计算类型的大小（字节）
+    fn compute_type_size(&mut self, ty: &CxxType) -> Result<u64, LowerIrError> {
+        let ir_ty = self.lowerer.lower_type(ty)?;
+        Ok(type_size(&ir_ty))
+    }
+
+    /// 获取类型对应的 typeinfo 指针（用于异常类型匹配）
+    fn get_typeinfo_for(&mut self, ty: &CxxType) -> Result<Operand, LowerIrError> {
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        match ty {
+            CxxType::Class(id) => {
+                let abi = self.lowerer.abis.get(id).ok_or_else(|| {
+                    LowerIrError::Internal(format!(
+                        "ABI for class {} not found in get_typeinfo_for",
+                        id.0
+                    ))
+                })?;
+                let sym_name = abi.rtti.typeinfo_symbol.clone();
+                if !self.lowerer.output.rodata.contains(&sym_name) {
+                    self.lowerer.output.rodata.push(sym_name.clone());
+                }
+                Ok(Operand::SymAddr(sym_name, void_ptr_ty))
+            }
+            _ => {
+                // 非类类型：返回 null（简化处理，SJLJ 运行时按类型名匹配）
+                Ok(Operand::Int(0))
+            }
+        }
     }
 
     // === statement lowering ===
@@ -1776,6 +2395,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.lower_set_vtable_ptr(*class, *place)
             }
 
+            HirStmtKind::Try { body, handlers } => self.lower_try(*body, handlers),
+
             _ => Err(LowerIrError::Unsupported(format!(
                 "HIR statement kind: {:?}",
                 stmt_kind_name(&stmt.kind)
@@ -1873,6 +2494,331 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 .get_mut(&body_bb)
                 .unwrap()
                 .term = Terminator::Jump(cond_bb.clone());
+        }
+
+        self.current_bb = end_bb;
+        Ok(())
+    }
+
+    /// 降低 try/catch 语句（SJLJ 风格异常处理）
+    ///
+    /// 生成的伪代码:
+    /// ```c
+    /// __dcc_eh_context_t __eh_ctx;
+    /// __dcc_eh_push_context(&__eh_ctx);
+    /// if (__dcc_eh_setjmp(&__eh_ctx) == 0) {
+    ///     // try body
+    ///     __dcc_eh_pop_context();
+    /// } else {
+    ///     // exception thrown
+    ///     void* exn = __dcc_eh_get_exception(&__eh_ctx);
+    ///     // 逐个检查 catch handler
+    ///     if (type matches handler 0) {
+    ///         // catch body 0
+    ///     } else if (type matches handler 1) {
+    ///         // catch body 1
+    ///     } else {
+    ///         __dcc_eh_rethrow();
+    ///     }
+    ///     __dcc_eh_end_catch(&__eh_ctx);
+    /// }
+    /// ```
+    fn lower_try(
+        &mut self,
+        body_id: HirStmtId,
+        handlers: &[HirCatchHandler],
+    ) -> Result<(), LowerIrError> {
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let int_ty = Type::Int;
+
+        // 创建异常上下文变量（栈上分配）
+        // 大小必须足以容纳运行时 __dcc_eh_context_t (含 jmp_buf)：
+        // x86-64 SysV 上 jmp_buf ≈ 200B，整结构体约 256B + padding
+        // 取 512 字节作为保守上限，16 字节对齐以满足 jmp_buf 要求
+        let ctx_size: usize = 512;
+        let ctx_ty = Type::Array(
+            Box::new(QualType::new(Type::UChar)),
+            crate::ast::ArraySize::Const(ctx_size),
+        );
+        let ctx_var = self.fresh_var("__eh_ctx", ctx_ty.clone());
+        self.ssa
+            .local_types
+            .insert("__eh_ctx".to_string(), ctx_ty.clone());
+        self.ssa.original_locals.insert("__eh_ctx".to_string());
+        self.locals.insert("__eh_ctx".to_string(), ctx_var.clone());
+
+        // 获取上下文指针（数组名退化为指针）
+        let ctx_ptr_var = self.fresh_var(
+            "__eh_ctx_ptr",
+            Type::Ptr(Box::new(QualType::new(Type::UChar))),
+        );
+        let ctx_addr_inst = Inst {
+            dest: Some(ctx_ptr_var.clone()),
+            kind: InstKind::Cast {
+                ty: Type::Ptr(Box::new(QualType::new(Type::UChar))),
+                e: Operand::Var(ctx_var.clone()),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(ctx_addr_inst);
+
+        // 调用 __dcc_eh_push_context(ctx)
+        let push_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let push_callee = Operand::FnAddr(
+            "__dcc_eh_push_context".to_string(),
+            push_fn_ty.clone(),
+        );
+        let push_call = Inst {
+            dest: None,
+            kind: InstKind::Call {
+                callee: push_callee,
+                args: vec![Operand::Var(ctx_ptr_var.clone())],
+                ret_ty: Type::Void,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(push_call);
+
+        // 调用 __dcc_eh_setjmp(ctx)，返回值决定是否异常发生
+        let setjmp_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
+        let setjmp_callee = Operand::FnAddr(
+            "__dcc_eh_setjmp".to_string(),
+            setjmp_fn_ty.clone(),
+        );
+        let setjmp_result = self.fresh_var("__eh_setjmp_res", int_ty.clone());
+        let setjmp_call = Inst {
+            dest: Some(setjmp_result.clone()),
+            kind: InstKind::Call {
+                callee: setjmp_callee,
+                args: vec![Operand::Var(ctx_ptr_var.clone())],
+                ret_ty: int_ty.clone(),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(setjmp_call);
+
+        // 创建基本块
+        let try_bb = self.unique_bb("try_body");
+        let catch_bb = self.unique_bb("catch_dispatch");
+        let end_bb = self.unique_bb("try_end");
+
+        // 分支：setjmp 返回 0 进入 try body，非 0 进入 catch
+        let cond = Operand::Var(setjmp_result.clone());
+        // setjmp == 0 走 try，否则走 catch
+        self.set_term(Terminator::Branch {
+            cond: cond.clone(),
+            t: catch_bb.clone(), // 非 0 (true) -> catch
+            f: try_bb.clone(),   // 0 (false) -> try body
+        });
+
+        // === try body 块 ===
+        self.current_bb = try_bb.clone();
+        self.lower_stmt(body_id)?;
+        // try body 正常结束：pop context，跳到 end
+        let try_term = self.ssa.blocks[&try_bb].term.clone();
+        if matches!(try_term, Terminator::Unreachable) {
+            // 调用 __dcc_eh_pop_context
+            let pop_callee = Operand::FnAddr(
+                "__dcc_eh_pop_context".to_string(),
+                push_fn_ty.clone(),
+            );
+            let pop_call = Inst {
+                dest: None,
+                kind: InstKind::Call {
+                    callee: pop_callee,
+                    args: vec![],
+                    ret_ty: Type::Void,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(pop_call);
+            self.ssa
+                .blocks
+                .get_mut(&try_bb)
+                .unwrap()
+                .term = Terminator::Jump(end_bb.clone());
+        }
+
+        // === catch dispatch 块 ===
+        self.current_bb = catch_bb.clone();
+
+        // 获取异常对象指针
+        let get_exn_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))));
+        let get_exn_callee = Operand::FnAddr(
+            "__dcc_eh_get_exception".to_string(),
+            get_exn_fn_ty.clone(),
+        );
+        let exn_ptr_var = self.fresh_var("__eh_exn_ptr", void_ptr_ty.clone());
+        let get_exn_call = Inst {
+            dest: Some(exn_ptr_var.clone()),
+            kind: InstKind::Call {
+                callee: get_exn_callee,
+                args: vec![Operand::Var(ctx_ptr_var.clone())],
+                ret_ty: void_ptr_ty.clone(),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(get_exn_call);
+
+        // 逐个处理 catch handler
+        // 对于每个 handler，生成: if (type_match) { handler body } else { next handler }
+        let mut current_bb = catch_bb.clone();
+        let mut next_handler_bbs: Vec<String> = Vec::new();
+
+        for (i, handler) in handlers.iter().enumerate() {
+            let handler_bb = self.unique_bb(&format!("catch_handler_{}", i));
+            let next_bb = if i + 1 < handlers.len() {
+                let bb = self.unique_bb(&format!("catch_next_{}", i));
+                next_handler_bbs.push(bb.clone());
+                bb
+            } else {
+                // 最后一个 handler 不匹配则 rethrow
+                let bb = self.unique_bb("catch_rethrow");
+                next_handler_bbs.push(bb.clone());
+                bb
+            };
+
+            self.current_bb = current_bb.clone();
+
+            // 检查类型是否匹配
+            // 简化：对于基本类型，用 typeinfo 指针比较
+            // catch (...) 总是匹配
+            let is_catch_all = matches!(handler.param_ty, CxxType::Void) && handler.param.is_none();
+
+            if is_catch_all {
+                // catch (...)：直接进入 handler
+                self.set_term(Terminator::Jump(handler_bb.clone()));
+            } else {
+                // 调用 __dcc_eh_type_match(exn, typeinfo)
+                let typeinfo_op = self.get_typeinfo_for(&handler.param_ty)?;
+                let type_match_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
+                let type_match_callee = Operand::FnAddr(
+                    "__dcc_eh_type_match".to_string(),
+                    type_match_fn_ty,
+                );
+                let match_result = self.fresh_var("__eh_type_match", int_ty.clone());
+                let match_call = Inst {
+                    dest: Some(match_result.clone()),
+                    kind: InstKind::Call {
+                        callee: type_match_callee,
+                        args: vec![
+                            Operand::Var(exn_ptr_var.clone()),
+                            typeinfo_op,
+                        ],
+                        ret_ty: int_ty.clone(),
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(match_call);
+
+                // 匹配则进入 handler，否则进入下一个
+                self.set_term(Terminator::Branch {
+                    cond: Operand::Var(match_result),
+                    t: handler_bb.clone(),
+                    f: next_bb.clone(),
+                });
+            }
+
+            // handler body
+            self.current_bb = handler_bb.clone();
+
+            // 如果有 catch 参数，把异常对象绑定到参数
+            if let Some(param_sym_id) = handler.param {
+                let param_sym = self.lowerer.get_symbol(param_sym_id)?;
+                let param_name = param_sym.name.clone();
+                let param_ir_ty = self.lowerer.lower_type(&handler.param_ty)?;
+
+                // 创建参数变量
+                let param_var = self.fresh_var(&param_name, param_ir_ty.clone());
+                self.ssa
+                    .local_types
+                    .insert(param_name.clone(), param_ir_ty.clone());
+                self.ssa.original_locals.insert(param_name.clone());
+
+                // 把 void* 异常指针转为参数类型并赋值
+                // 对于引用类型：直接绑定指针（引用即指针）
+                // 对于值类型：解引用拷贝
+                let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(param_ir_ty.clone())));
+                let typed_ptr_var = self.fresh_var("__catch_typed_ptr", typed_ptr_ty.clone());
+                let cast_inst = Inst {
+                    dest: Some(typed_ptr_var.clone()),
+                    kind: InstKind::Cast {
+                        ty: typed_ptr_ty,
+                        e: Operand::Var(exn_ptr_var.clone()),
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(cast_inst);
+
+                // 解引用得到值
+                let load_inst = Inst {
+                    dest: Some(param_var.clone()),
+                    kind: InstKind::Load {
+                        e: Operand::Var(typed_ptr_var),
+                        ty: param_ir_ty.clone(),
+                        is_volatile: false,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(load_inst);
+
+                self.locals.insert(param_name, param_var);
+            }
+
+            // 执行 catch body
+            self.lower_stmt(handler.body)?;
+
+            // catch body 结束后，调用 __dcc_eh_end_catch 并跳到 end
+            let handler_term = self.ssa.blocks[&handler_bb].term.clone();
+            if matches!(handler_term, Terminator::Unreachable) {
+                let end_catch_callee = Operand::FnAddr(
+                    "__dcc_eh_end_catch".to_string(),
+                    push_fn_ty.clone(),
+                );
+                let end_catch_call = Inst {
+                    dest: None,
+                    kind: InstKind::Call {
+                        callee: end_catch_callee,
+                        args: vec![Operand::Var(ctx_ptr_var.clone())],
+                        ret_ty: Type::Void,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(end_catch_call);
+                self.ssa
+                    .blocks
+                    .get_mut(&handler_bb)
+                    .unwrap()
+                    .term = Terminator::Jump(end_bb.clone());
+            }
+
+            current_bb = next_bb.clone();
+        }
+
+        // 最后一个 handler 不匹配：rethrow
+        if !handlers.is_empty() {
+            let rethrow_bb = next_handler_bbs.last().unwrap().clone();
+            self.current_bb = rethrow_bb.clone();
+            let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+            let rethrow_callee = Operand::FnAddr(
+                "__dcc_eh_rethrow".to_string(),
+                rethrow_fn_ty,
+            );
+            let rethrow_call = Inst {
+                dest: None,
+                kind: InstKind::Call {
+                    callee: rethrow_callee,
+                    args: vec![],
+                    ret_ty: Type::Void,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(rethrow_call);
+            self.ssa
+                .blocks
+                .get_mut(&rethrow_bb)
+                .unwrap()
+                .term = Terminator::Unreachable;
         }
 
         self.current_bb = end_bb;
@@ -4123,7 +5069,7 @@ mod tests {
         fields: Vec<(String, CxxType)>,
         bases: Vec<ClassId>,
     ) {
-        calc.register_class(class_id, bases, fields, true);
+        calc.register_class(class_id, bases, vec![], fields, true);
         for &(name, is_virtual) in methods {
             // owner = class_id（简化：都是自身声明的）
             calc.register_method(class_id, name.to_string(), is_virtual, class_id);
@@ -4444,19 +5390,19 @@ mod tests {
         let c_id = ClassId(2);
 
         // A
-        calc.register_class(a_id, vec![], vec![
+        calc.register_class(a_id, vec![], vec![], vec![
             ("a".into(), CxxType::Integer { bits: 32, signed: true }),
         ], true);
         calc.register_method(a_id, "a_func".into(), true, a_id);
 
         // B
-        calc.register_class(b_id, vec![], vec![
+        calc.register_class(b_id, vec![], vec![], vec![
             ("b".into(), CxxType::Float { bits: 64 }),
         ], true);
         calc.register_method(b_id, "b_func".into(), true, b_id);
 
         // C : A, B
-        calc.register_class(c_id, vec![a_id, b_id], vec![
+        calc.register_class(c_id, vec![a_id, b_id], vec![], vec![
             ("c".into(), CxxType::Integer { bits: 32, signed: true }),
         ], true);
         calc.register_method(c_id, "a_func".into(), true, a_id); // override A
