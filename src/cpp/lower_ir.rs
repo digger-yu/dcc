@@ -724,6 +724,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         match &expr.kind {
             HirExprKind::IntLiteral(v) => Ok(Operand::Int(*v)),
 
+            HirExprKind::FloatLiteral(s) => {
+                let val: f64 = s.parse().unwrap_or(0.0);
+                Ok(Operand::Float(val, Type::Double))
+            }
+
             HirExprKind::BoolLiteral(b) => Ok(Operand::Int(if *b { 1 } else { 0 })),
 
             HirExprKind::NullPtr => Ok(Operand::Int(0)),
@@ -940,6 +945,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirExprKind::InitList { elems, target_ty: _ } => {
                 self.lower_init_list(elems, &expr_ty)
+            }
+
+            HirExprKind::SizeOf(cxx_ty) => {
+                let sz = self.compute_type_size(cxx_ty)?;
+                Ok(Operand::Int(sz as i128))
             }
 
             _ => Err(LowerIrError::Unsupported(format!(
