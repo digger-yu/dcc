@@ -116,6 +116,8 @@ pub enum CppKw {
     Char8T,
     ConstevalAuto,
     Constinit,  // C++20: constinit 说明符
+    // G3: User-defined literal operator
+    UserDefinedLiteral,
 }
 
 impl CppKw {
@@ -168,6 +170,7 @@ impl CppKw {
             "export" => Self::Export,
             "char8_t" => Self::Char8T,
             "constinit" => Self::Constinit,
+            "operator\"\"" => Self::UserDefinedLiteral,
             _ => return None,
         })
     }
@@ -223,6 +226,7 @@ impl CppKw {
             Self::Char8T => "char8_t",
             Self::ConstevalAuto => "consteval",
             Self::Constinit => "constinit",
+            Self::UserDefinedLiteral => "operator\"\"",
         }
     }
 }
@@ -236,6 +240,8 @@ pub enum CppTok {
     Kw(CppKw, Span),
     /// `::` 作用域解析
     ColonColon(Span),
+    /// G1: Raw string literal R"delim(...)delim"
+    RawStringLit { span: Span, text: String, delimiter: Option<String> },
 }
 
 impl CppTok {
@@ -243,6 +249,7 @@ impl CppTok {
         match self {
             Self::C(t) => t.span.clone(),
             Self::Kw(_, s) | Self::ColonColon(s) => s.clone(),
+            Self::RawStringLit { span: s, .. } => s.clone(),
         }
     }
 
@@ -345,6 +352,112 @@ impl<'a> CppLexer<'a> {
         }
     }
 
+    /// G1: Lex raw string literal R"delim(...)delim"
+    fn lex_raw_string(&mut self) -> Option<CppTok> {
+        // 首先检查是否有 '\"'
+        if self.pos + 1 >= self.src.len() || self.src[self.pos + 1] != b'"' {
+            return None; // Not a raw string
+        }
+        
+        // Skip 'R' and '"'
+        self.pos += 2;
+        self.col += 2;
+            
+        // Read optional delimiter (<=16 chars)
+        let delim_start = self.pos;
+        while self.pos < self.src.len() {
+            let c = self.src[self.pos];
+            // Delimiter ends at '"' (no delimiter case) or invalid char
+            if c == b'"' || c.is_ascii_whitespace()
+                || c == b'/' || c == b'\\' || c > 127 {
+                break;
+            }
+            // Stop at '(' only if we've read some characters (custom delimiter like R"delim"(...))
+            if c == b'(' && self.pos > delim_start {
+                break; // Found custom delimiter followed by '('
+            }
+            if self.pos - delim_start >= 16 {
+                break; // Max 16 chars for delimiter
+            }
+            self.pos += 1;
+            self.col += 1;
+        }
+            
+        let has_delim = self.pos > delim_start && self.src[self.pos] == b'"';
+        let delimiter = if has_delim {
+            eprintln!("DEBUG: Found delimiter {:?}", std::str::from_utf8(&self.src[delim_start..self.pos]));
+            Some(std::str::from_utf8(&self.src[delim_start..self.pos])
+                .unwrap_or("").to_string())
+        } else {
+            None
+        };
+            
+        // Expect '"' after delimiter
+        if self.pos >= self.src.len() || self.src[self.pos] != b'"' {
+            eprintln!("DEBUG: Invalid raw string at pos {}, expected '\"', got {:?}", self.pos, self.src.get(self.pos..self.pos+10));
+            return None;
+        }
+        self.pos += 1;
+        self.col += 1;
+            
+        // Now scan until we find ') + optional delimiter + '"'
+        let content_start = self.pos;
+        loop {
+            if self.pos >= self.src.len() {
+                // Unterminated raw string
+                return None;
+            }
+                
+            // Check for closing sequence: ')' + optional delimiter + '"'
+            if self.src[self.pos] == b')' {
+                let mut check_pos = self.pos + 1;
+                let mut matched = true;
+                    
+                // If there's a delimiter, it must match
+                if let Some(ref delim) = delimiter {
+                    if check_pos + delim.len() > self.src.len() {
+                        matched = false;
+                    } else {
+                        for delim_byte in delim.bytes() {
+                            if self.src[check_pos] != delim_byte {
+                                matched = false;
+                                break;
+                            }
+                            check_pos += 1;
+                        }
+                    }
+                }
+                    
+                // Check for closing '"'
+                if matched && check_pos < self.src.len() && self.src[check_pos] == b'"' {
+                    // End of raw string
+                    let full_len = (check_pos + 1 - content_start) as u32;
+                    let span = Span {
+                        file: self.file.clone(),
+                        line: self.line,
+                        col: self.col.saturating_sub(full_len),
+                        len: full_len,
+                    };
+                    let text = std::str::from_utf8(&self.src[content_start..self.pos])
+                        .unwrap_or("")
+                        .to_string();
+                        
+                    self.pos = check_pos + 1;
+                    self.col += full_len + 1;
+                    return Some(CppTok::RawStringLit { span, text, delimiter });
+                }
+            }
+                
+            self.pos += 1;
+            if self.src[self.pos - 1] == b'\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+        }
+    }
+
     /// 读一个 C++ token
     pub fn next_tok(&mut self) -> Option<CppTok> {
         self.skip_trivia();
@@ -352,6 +465,10 @@ impl<'a> CppLexer<'a> {
             return None;
         }
         let b = self.src[self.pos];
+        // G1: Raw string literal check before :: handling
+        if b == b'r' || b == b'R' {
+            return self.lex_raw_string();
+        }
         if b == b':' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b':' {
             self.pos += 2;
             self.col += 2;
@@ -610,9 +727,10 @@ impl<'a> CppLexer<'a> {
             return Some(CppTok::C(tok));
         }
         if b.is_ascii_digit() {
+            // G4: 数字分隔符 - 扫描时允许 ' 作为分隔符
             let start = self.pos;
             while self.pos < self.src.len()
-                && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'.')
+                && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'.' || self.src[self.pos] == b'\'' || self.src[self.pos] == b'p' || self.src[self.pos] == b'P')
             {
                 self.pos += 1;
                 self.col += 1;
@@ -627,6 +745,13 @@ impl<'a> CppLexer<'a> {
                     .to_string(),
             };
             return Some(CppTok::C(tok));
+        }
+        // G1: Raw string literal R"delim(...)delim"
+        if b == b'R' || b == b'r' {
+            // 检查是否有双引号紧跟着
+            if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'"' {
+                return self.lex_raw_string();
+            }
         }
         if b == b'"' || b == b'\'' {
             let q = b;
@@ -883,5 +1008,40 @@ mod tests {
                 ..
             }))
         ));
+    }
+    #[test]
+    fn cpp_lex_raw_string() {
+        // G1: Raw string with no delimiter R"(content)"
+        let mut lx = CppLexer::new(b"R\"(hello world)\"", "t.cpp");
+        if let Some(CppTok::RawStringLit { text, delimiter, .. }) = lx.next_tok() {
+            assert_eq!(text, "hello world");
+            assert_eq!(delimiter, None);
+        } else {
+            panic!("expected RawStringLit, got {:?}", lx.next_tok());
+        }
+    }
+    #[test]
+    fn cpp_lex_raw_string_delim() {
+        // G1: Raw string with custom delimiter
+        let mut lx = CppLexer::new(b"R\"mydelim\"(hello world)mydelim\"", "t.cpp");
+        if let Some(CppTok::RawStringLit { text, delimiter, .. }) = lx.next_tok() {
+            assert_eq!(text, "hello world");
+            assert_eq!(delimiter.as_deref(), Some("mydelim"));
+        } else {
+            panic!("expected RawStringLit, got {:?}", lx.next_tok());
+        }
+    }
+    #[test]
+    fn cpp_lex_number_with_separators() {
+        // G4: Number separators (C++14)
+        let mut lx = CppLexer::new(b"1'000'000",
+        "t.cpp");
+        let t = lx.next_tok().unwrap();
+        match t {
+            CppTok::C(Tok { kind: TokKind::Number, text, .. }) => {
+                assert_eq!(text, "1'000'000");
+            }
+            _ => panic!("expected Number, got {:?}", t),
+        }
     }
 }

@@ -752,6 +752,7 @@ impl<'a> CppParser<'a> {
             CppTok::C(Tok { text, .. }) => text.clone(),
             CppTok::Kw(kw, _) => kw.as_str().to_string(),
             CppTok::ColonColon(_) => "::".to_string(),
+            CppTok::RawStringLit { text, .. } => format!("R\"{}\"", text),
         }
     }
 
