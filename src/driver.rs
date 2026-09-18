@@ -11,6 +11,7 @@ use crate::link;
 use crate::lto;
 use crate::mmap_io::MappedInput;
 use crate::parser;
+use crate::parse_profile::ParseProfile;
 use crate::preproc;
 use crate::preproc::LineSpan;
 use crate::profile;
@@ -20,6 +21,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 /// 判断 IR 类型是否(递归)包含浮点成分, 供 -mno-sse 下的 E0300 检测使用
 fn ir_type_uses_float(t: &ir::ValueType) -> bool {
@@ -326,7 +328,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     };
     let src = mapped.as_slice();
 
+    // Parse profile data (collected always, only output when --profile-parse)
+    let mut parse_profile = ParseProfile::default();
+
     // 预处理
+    let pp_start = Instant::now();
     let pp_out = preproc::preprocess(
         src,
         &file_name,
@@ -348,6 +354,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.warn_undef,
         cfg.opt,
     );
+    parse_profile.preprocess_time_ns = pp_start.elapsed().as_nanos() as u64;
+    parse_profile.include_count = pp_out.include_count;
+    parse_profile.macro_expand_count = pp_out.macro_expand_count;
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
     let line_map = pp_out.line_map;
@@ -545,7 +554,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 | crate::cli::StdMode::Gnu17
                 | crate::cli::StdMode::Gnu23
         );
-    let (mut prog, mut diags) = parser::parse_with_opts(
+    let parse_start = Instant::now();
+    let (mut prog, mut diags, token_count) = parser::parse_with_stats(
         preprocessed.as_bytes(),
         &file_name,
         parser::ParseOptions {
@@ -577,6 +587,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             ),
         },
     );
+    parse_profile.parse_time_ns = parse_start.elapsed().as_nanos() as u64;
+    parse_profile.token_count = token_count;
+    parse_profile.diagnostic_count = diags.len() as u64;
     drop(preprocessed);
     drop(pack_history);
     drop(weak_symbols);
@@ -596,6 +609,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     if has_errors {
         return Err(diags);
+    }
+
+    // --profile-parse: 输出解析阶段的 JSON 性能数据到 stderr
+    if cfg.profile_parse {
+        eprintln!("{}", parse_profile.to_json());
     }
 
     let mut wlist: Vec<Diagnostic> = format_check::check_program(&prog);

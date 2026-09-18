@@ -318,6 +318,7 @@ pub struct Parser<'a> {
     in_switch_depth: u32,        // switch 嵌套深度 (>0 表示在 switch 体内)
     block_ended_with_case: bool,  // parse_block 是否因 case/default 而终止
     pending_close_brace: u32,     // 未消费的内层 '}' 计数 (Duff's device)
+    pub token_count: u64,         // 已消费的 token 数量 (供 profile 使用)
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -327,6 +328,18 @@ pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
 pub fn parse_with_opts(src: &[u8], file: &str, opts: ParseOptions) -> (Program, Vec<Diagnostic>) {
     let mut p = Parser::new(src, file, opts);
     p.program()
+}
+
+/// 解析并返回额外的统计信息 (token 数量)。
+/// 供 --profile-parse 使用, 不影响标准 parse_with_opts 的返回类型。
+pub fn parse_with_stats(
+    src: &[u8],
+    file: &str,
+    opts: ParseOptions,
+) -> (Program, Vec<Diagnostic>, u64) {
+    let mut p = Parser::new(src, file, opts);
+    let (prog, diags) = p.program();
+    (prog, diags, p.token_count)
 }
 
 impl<'a> Parser<'a> {
@@ -367,6 +380,7 @@ impl<'a> Parser<'a> {
             in_switch_depth: 0,
             block_ended_with_case: false,
             pending_close_brace: 0,
+            token_count: 2, // cur + peek are pre-fetched
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
         // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
@@ -394,6 +408,7 @@ impl<'a> Parser<'a> {
     }
     fn advance(&mut self) {
         self.cur = std::mem::replace(&mut self.peek, self.lex.next_tok());
+        self.token_count += 1;
     }
 
     /// 增加递归深度并检查限制

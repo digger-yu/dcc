@@ -215,6 +215,8 @@ pub struct Config {
     pub align_loops: u32,
     /// -falign-jumps=N: 跳转目标对齐边界 (2 的幂, 0=不对齐)
     pub align_jumps: u32,
+    /// --profile-parse / -fprofile-parse: 输出预处理/词法/解析阶段的 JSON 性能数据
+    pub profile_parse: bool,
 }
 
 /// -ffp-contract= 模式: FP 收缩 (fma) 策略
@@ -1323,6 +1325,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut float_abi = FloatAbi::default();
     let mut fast_math = false;
     let mut fp_contract_mode = FpContractMode::Default;
+    let mut profile_parse = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -2170,6 +2173,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fno-builtin" => {}
             "-fsyntax-only" => {
                 syntax_only = true;
+            }
+            "--profile-parse" | "-fprofile-parse" => {
+                profile_parse = true;
             }
             // -Wa,* : 传递给汇编器的选项
             a if a.starts_with("-Wa,") => {
@@ -3040,6 +3046,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             fp_contract_mode,
             align_loops,
             align_jumps,
+            profile_parse,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -3167,6 +3174,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             fp_contract_mode,
             align_loops,
             align_jumps,
+            profile_parse,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

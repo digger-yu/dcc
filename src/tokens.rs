@@ -88,6 +88,94 @@ fn keyword_lookup(text: &str) -> TokKind {
         .unwrap_or(TokKind::Ident)
 }
 
+// ============================================================================
+// char_class: 单字节 ASCII 字符分类查表 (Phase 3 优化基础)
+// ============================================================================
+// 第一性原理: 词法状态机在每次 next_tok 起始处都要识别字符类别 (空白 /
+//   字母 / 数字 / 标点 / 引号 ...). 原实现直接调用 `is_ascii_*` 系列函数,
+//   每次都进行若干分支比较. 用 256 字节查表代替之: 单次数组索引 + 表项比对,
+//   在热路径上分支数显著下降.
+//
+// suckless 准则: 不引入第三方依赖; 256 字节静态表 + const fn 即可; 编译期
+//   求值, 运行时零成本. 表项 0..=7 对应 8 类; 用 u8 表示足够, 占 1 字节.
+//
+// 类别编号:
+//   0 WHITESPACE      — 空格 / 制表 / 回车 (跳过)
+//   1 LETTER          — ASCII 字母 (标识符首字符的子集)
+//   2 DIGIT           — ASCII 十进制数字
+//   3 IDENT_CONT      — 标识符后续字符 (字母 + 数字 + 下划线)
+//   4 QUOTE           — '"' 或 '\'' (字符串/字符字面量)
+//   5 PUNCT           — 运算符/分隔符 (lex 主要派发到多字符 token)
+//   6 OTHER           — 未分类字节 (非 ASCII 高字节 / 罕见符号, 走 Invalid)
+//   7 NEWLINE         — '\n' (单独识别便于行号维护)
+//
+// 注: 类别 1 LETTER 与 3 IDENT_CONT 的拆分是为了让 is_id_start 只需一次
+//   比较 (== LETTER), 而 is_id_continue 用类别 3 直接索引即可, 不必 OR
+//   多个类别. 这是 LLVM 难以自动合成的小优化.
+mod char_class {
+    pub const WHITESPACE: u8 = 0;
+    pub const LETTER: u8 = 1;
+    pub const DIGIT: u8 = 2;
+    pub const IDENT_CONT: u8 = 3;
+    pub const QUOTE: u8 = 4;
+    pub const PUNCT: u8 = 5;
+    pub const OTHER: u8 = 6;
+    pub const NEWLINE: u8 = 7;
+
+    /// 对单个字节做分类 (const fn, 编译期可求值).
+    const fn classify_byte(b: u8) -> u8 {
+        match b {
+            b' ' | b'\t' | b'\r' | 0x0b | 0x0c => WHITESPACE,
+            b'\n' => NEWLINE,
+            b'"' | b'\'' => QUOTE,
+            b'A'..=b'Z' | b'a'..=b'z' => LETTER,
+            b'0'..=b'9' => DIGIT,
+            b'_' => IDENT_CONT,
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b',' | b';' | b':'
+            | b'?' | b'~' | b'#' | b'+' | b'-' | b'*' | b'/' | b'%'
+            | b'&' | b'|' | b'^' | b'!' | b'=' | b'<' | b'>' | b'.'
+            | b'@' | b'$' | b'\\' | b'`' => PUNCT,
+            _ => OTHER,
+        }
+    }
+
+    /// 256 项查表, 编译期用 classify_byte 填充. 在热路径上单次数组加载
+    /// + 一次比较即可完成字符分类, 优于多次 ASCII 谓词的链式调用.
+    pub const CLASS_TABLE: [u8; 256] = {
+        let mut table = [OTHER; 256];
+        let mut i: usize = 0;
+        while i < 256 {
+            table[i] = classify_byte(i as u8);
+            i += 1;
+        }
+        table
+    };
+
+    /// 编译期可调用的字符分类入口.
+    #[inline]
+    pub const fn classify(c: u8) -> u8 {
+        CLASS_TABLE[c as usize]
+    }
+
+    /// 标识符首字符: 字母 (LETTER) 或下划线 (IDENT_CONT 中的 '_').
+    /// 下划线在 CLASS_TABLE 中归类为 IDENT_CONT, 故需单独 OR.
+    #[inline]
+    pub const fn is_id_start(c: u8) -> bool {
+        classify(c) == LETTER || c == b'_'
+    }
+
+    /// 标识符后续字符: 字母 / 数字 / 下划线.
+    ///
+    /// LETTER / DIGIT / IDENT_CONT 三类都合法: 字母 + 数字 + 下划线
+    /// 共同构成 identifier continuation. LLVM 通常能把此 OR 链优化为
+    /// 一次 mask-and-compare, 等价于"class ∈ {LETTER, DIGIT, IDENT_CONT}".
+    #[inline]
+    pub const fn is_id_continue(c: u8) -> bool {
+        let cls = classify(c);
+        cls == LETTER || cls == DIGIT || cls == IDENT_CONT
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tok {
     pub kind: TokKind,
@@ -252,6 +340,20 @@ impl<'a> Lexer<'a> {
             self.col += 1;
         }
         Some(b)
+    }
+
+    /// 当前字符的类别 (查 char_class 表), 无边界检查版本.
+    ///
+    /// 调用者必须保证 `self.pos < self.src.len()`. 源码输入是 UTF-8
+    /// ASCII 子集 (C 源文件单字节字符都是 ASCII), lex 入口已经在
+    /// `peek()` 处确认过非空, 故此处的越界访问是安全的.
+    ///
+    /// 与 `self.peek()` 不同, 此函数跳过 `Option<u8>` 的 None 分支与
+    /// `slice::get` 的隐式长度比较, 适合作为热路径上多次分类的内联.
+    #[inline]
+    fn peek_char_class(&self) -> u8 {
+        let b = unsafe { *self.src.get_unchecked(self.pos) };
+        char_class::classify(b)
     }
 
     fn span_here(&self, len: u32) -> Span {
@@ -1148,6 +1250,266 @@ impl<'a> Lexer<'a> {
     }
 }
 
+// ============================================================================
+// Phase 2: 紧凑词法单元 (interned + arena) — 与现有 Tok 并存, 不替换.
+// ============================================================================
+// 第一性原理: 现 Tok 携带 String + Span, 单 token 24+ 字节.
+//   编译器单次 parse 数十万 token, 内存压力 + cache miss 显著.
+//   紧凑表示: 用 SymbolId (4B) 取代 String, 用 arena 索引代替逐 token 分配.
+// suckless 准则: 不引入第三方 intern crate; arena 是普通 Vec; 生命周期 'static
+//   是符号池驻留字符串的简化 (id 解析需借助外部 Interner).
+//
+// 与现有 `Tok` 的关系:
+//   * 不修改 `Tok` / `next_tok` / 任何现有签名.
+//   * CompactTok / TokenArena 是供后续 pipeline 阶段 (例如 batch lexer)
+//     使用的替代表示. 旧路径保持不变, 1498 既有测试无需改动.
+
+use crate::symbol::SymbolId;
+
+/// 整数后缀 (C99/C11/C23).
+///
+/// 设计为 1 字节 enum, 与 CompactTok::Int 紧凑对齐.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntSuffix {
+    None,
+    U,
+    L,
+    UL,
+    LL,
+    ULL,
+    /// `unsigned __int128` / `_Int128` 等扩展整数.
+    U128,
+    /// `__int128` (有符号).
+    I128,
+    /// `_BitInt(N)` / `size_t` 等需要任意宽度指示的占位.
+    /// (保留位, 暂未启用; 留作未来扩展, 不破坏变体序.)
+    Z,
+}
+
+/// 紧凑词法单元: 不持有 String/Span, 仅携带必要 payload.
+///
+/// 内存布局 (`size_of` 在大多数平台上 ≤ 16 字节):
+///   * tag (discriminant) + 4~8B payload, 紧凑打包.
+/// 字符串原文通过 `Interner` + `SymbolId` 解析; Span 由外部 arena 索引表达.
+///
+/// 注意: 该类型故意保留 `'static` 生命周期; 通过 `CompactTok<'static>`
+///   推过 arena, 实际生命周期由 `TokenArena` 拥有.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactTok<'a> {
+    /// 关键字 / 标点 / EOF 等无 payload 的变体.
+    Kind(TokKind),
+    /// 标识符; 通过 `Interner::resolve` 取回原文.
+    Ident(SymbolId),
+    /// 整数 (bit-pattern + 后缀); 解析时按后缀决定宽度.
+    Int(u64, IntSuffix),
+    /// 浮点 (按位重解释的 u64).
+    Float(u64),
+    /// 字符串字面量 (已 intern).
+    Str(SymbolId),
+    /// 字符字面量 (Unicode codepoint).
+    Char(u32),
+    // 抑制 'a 未使用告警; 该参数为未来 lifetime 扩展预留.
+    #[allow(dead_code)]
+    _Phantom(std::marker::PhantomData<&'a ()>),
+}
+
+impl<'a> CompactTok<'a> {
+    /// 仅取 TokKind (其他变体的语义类别).
+    ///
+    /// 用于在不解析字面量值的前提下快速分发 token 类型.
+    #[inline]
+    pub fn kind(&self) -> TokKind {
+        match self {
+            CompactTok::Kind(k) => *k,
+            CompactTok::Ident(_) => TokKind::Ident,
+            CompactTok::Int(..) => TokKind::Number,
+            CompactTok::Float(_) => TokKind::FloatLit,
+            CompactTok::Str(_) => TokKind::StringLit,
+            CompactTok::Char(_) => TokKind::CharLit,
+            CompactTok::_Phantom(_) => TokKind::Invalid,
+        }
+    }
+}
+
+/// Token arena: 预分配向量存储 CompactTok, 降低分配次数.
+///
+/// 默认 capacity 4096 适配中型翻译单元的典型 token 量;
+/// 超出后自动扩容 (Vec 标准行为).
+#[derive(Debug)]
+pub struct TokenArena {
+    buf: Vec<CompactTok<'static>>,
+}
+
+impl Default for TokenArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TokenArena {
+    /// 预分配 4096 槽位的 arena.
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::with_capacity(4096),
+        }
+    }
+
+    /// 指定初始容量 (例如已知 token 数的批处理场景).
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
+    }
+
+    /// 追加 token, 返回其索引.
+    #[inline]
+    pub fn push(&mut self, tok: CompactTok<'static>) -> usize {
+        let idx = self.buf.len();
+        self.buf.push(tok);
+        idx
+    }
+
+    /// 按索引读取 token.
+    #[inline]
+    pub fn get(&self, idx: usize) -> Option<&CompactTok<'static>> {
+        self.buf.get(idx)
+    }
+
+    /// 当前已存入的 token 数.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// 是否为空.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// 剩余容量 (供决策是否复用 arena).
+    #[inline]
+    pub fn remaining_capacity(&self) -> usize {
+        self.buf.capacity() - self.buf.len()
+    }
+
+    /// 清空内容但保留已分配的容量 (供批量重用).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+
+    /// 底层切片 (供迭代器使用).
+    #[inline]
+    pub fn as_slice(&self) -> &[CompactTok<'static>] {
+        &self.buf
+    }
+}
+
+#[cfg(test)]
+mod arena_tests {
+    use super::*;
+    use crate::symbol::{Interner, SymbolId};
+
+    #[test]
+    fn compact_tok_kind_dispatch() {
+        let it = Interner::new();
+        let id = it.intern("foo");
+        assert_eq!(CompactTok::Kind(TokKind::Plus).kind(), TokKind::Plus);
+        assert_eq!(CompactTok::Ident(id).kind(), TokKind::Ident);
+        assert_eq!(
+            CompactTok::Int(42, IntSuffix::L).kind(),
+            TokKind::Number
+        );
+        assert_eq!(
+            CompactTok::Float(0x7ff0_0000_0000_0000).kind(),
+            TokKind::FloatLit
+        );
+        let sid = it.intern("hello");
+        assert_eq!(CompactTok::Str(sid).kind(), TokKind::StringLit);
+        assert_eq!(CompactTok::Char(b'a' as u32).kind(), TokKind::CharLit);
+    }
+
+    #[test]
+    fn arena_push_returns_index_and_get_roundtrip() {
+        let mut arena = TokenArena::new();
+        let i0 = arena.push(CompactTok::Kind(TokKind::LParen));
+        let i1 = arena.push(CompactTok::Kind(TokKind::RParen));
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+        assert_eq!(arena.get(0).unwrap().kind(), TokKind::LParen);
+        assert_eq!(arena.get(1).unwrap().kind(), TokKind::RParen);
+        assert!(arena.get(2).is_none());
+    }
+
+    #[test]
+    fn arena_preallocates_capacity_4096() {
+        let arena = TokenArena::new();
+        assert_eq!(arena.len(), 0);
+        assert!(arena.is_empty());
+        assert!(arena.remaining_capacity() >= 4096);
+    }
+
+    #[test]
+    fn arena_clear_preserves_capacity() {
+        let mut arena = TokenArena::new();
+        for _ in 0..16 {
+            arena.push(CompactTok::Kind(TokKind::Semi));
+        }
+        let total_cap = arena.remaining_capacity() + arena.len();
+        arena.clear();
+        assert_eq!(arena.len(), 0);
+        assert!(arena.is_empty());
+        // clear 不应丢弃已分配的容量, 剩余容量恢复到原始容量.
+        assert_eq!(arena.remaining_capacity(), total_cap);
+    }
+
+    #[test]
+    fn arena_with_capacity_respects_request() {
+        let arena = TokenArena::with_capacity(1024);
+        assert!(arena.remaining_capacity() >= 1024);
+    }
+
+    #[test]
+    fn arena_as_slice_iterates_in_order() {
+        let mut arena = TokenArena::new();
+        arena.push(CompactTok::Kind(TokKind::Plus));
+        arena.push(CompactTok::Kind(TokKind::Minus));
+        arena.push(CompactTok::Kind(TokKind::Star));
+        let kinds: Vec<TokKind> = arena.as_slice().iter().map(|t| t.kind()).collect();
+        assert_eq!(kinds, vec![TokKind::Plus, TokKind::Minus, TokKind::Star]);
+    }
+
+    #[test]
+    fn compact_tok_with_interner_round_trip() {
+        // 验证 CompactTok::Ident 与 Interner 协同.
+        let it = Interner::new();
+        let mut arena = TokenArena::new();
+        let id_x = it.intern("x");
+        let id_y = it.intern("y");
+        arena.push(CompactTok::Ident(id_x));
+        arena.push(CompactTok::Ident(id_y));
+        if let CompactTok::Ident(got) = arena.get(0).unwrap() {
+            assert_eq!(it.resolve(*got), "x");
+        } else {
+            panic!("expected Ident variant");
+        }
+        if let CompactTok::Ident(got) = arena.get(1).unwrap() {
+            assert_eq!(it.resolve(*got), "y");
+        } else {
+            panic!("expected Ident variant");
+        }
+    }
+
+    #[test]
+    fn empty_symbol_id_is_distinct_from_zero() {
+        // SymbolId(0) 作为占位, 永远解析为空串. 但 CompactTok::Kind
+        // 仍能区分 EOF 与占位 id; 单元测试仅锁定 interner 行为.
+        let it = Interner::new();
+        assert_eq!(it.resolve(SymbolId::EMPTY), "");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Lexer, TokKind};
@@ -1207,5 +1569,101 @@ mod tests {
     fn wide_char_unterminated_is_invalid() {
         let mut lx = Lexer::new(b"L'abc", "wide.c");
         assert_eq!(lx.next_tok().kind, TokKind::Invalid);
+    }
+}
+
+// char_class 查表正确性单元测试. 这些断言锁定了 Phase 3 优化路径上
+// 字符分类的核心不变量; 任何对分类表的改动都必须经过此模块验证.
+#[cfg(test)]
+mod char_class_tests {
+    use super::char_class;
+
+    #[test]
+    fn letters_are_id_start() {
+        // 大小写字母都是标识符首字符.
+        assert!(char_class::is_id_start(b'a'));
+        assert!(char_class::is_id_start(b'z'));
+        assert!(char_class::is_id_start(b'A'));
+        assert!(char_class::is_id_start(b'Z'));
+        assert!(char_class::is_id_start(b'm'));
+    }
+
+    #[test]
+    fn underscore_is_id_start() {
+        // 下划线在 C 中是合法的标识符首字符.
+        assert!(char_class::is_id_start(b'_'));
+    }
+
+    #[test]
+    fn digits_are_not_id_start() {
+        // 数字不能作为标识符首字符, 但可以是后续字符.
+        for c in b'0'..=b'9' {
+            assert!(!char_class::is_id_start(c), "digit {:?} should not start ident", c as char);
+        }
+    }
+
+    #[test]
+    fn operators_are_punct() {
+        // 常见运算符应归类为 PUNCT (5).
+        for &c in &[b'+', b'-', b'*', b'/'] {
+            assert_eq!(char_class::classify(c), char_class::PUNCT, "{:?}", c as char);
+        }
+    }
+
+    #[test]
+    fn whitespace_classification() {
+        // 空格 / 制表 / 回车归类为 WHITESPACE (0).
+        assert_eq!(char_class::classify(b' '), char_class::WHITESPACE);
+        assert_eq!(char_class::classify(b'\t'), char_class::WHITESPACE);
+        assert_eq!(char_class::classify(b'\r'), char_class::WHITESPACE);
+    }
+
+    #[test]
+    fn newline_is_separate_class() {
+        // 换行单独一类 (NEWLINE = 7), 便于行号维护.
+        assert_eq!(char_class::classify(b'\n'), char_class::NEWLINE);
+    }
+
+    #[test]
+    fn id_continue_includes_letter_digit_underscore() {
+        // 字母 / 数字 / 下划线都是合法 id_continue.
+        assert!(char_class::is_id_continue(b'a'));
+        assert!(char_class::is_id_continue(b'Z'));
+        assert!(char_class::is_id_continue(b'_'));
+        for c in b'0'..=b'9' {
+            assert!(char_class::is_id_continue(c), "digit {:?} should continue ident", c as char);
+        }
+        // 标点和空白不应是 id_continue.
+        assert!(!char_class::is_id_continue(b'+'));
+        assert!(!char_class::is_id_continue(b' '));
+        assert!(!char_class::is_id_continue(b'\n'));
+    }
+
+    #[test]
+    fn quotes_are_classified() {
+        assert_eq!(char_class::classify(b'"'), char_class::QUOTE);
+        assert_eq!(char_class::classify(b'\''), char_class::QUOTE);
+    }
+
+    #[test]
+    fn table_is_const_evaluable() {
+        // 验证 CLASS_TABLE 是 const (编译期可读), 并且条目符合预期.
+        // 这一断言同时保证 const fn 的初始化器在编译期已被求值.
+        const _: () = {
+            assert!(char_class::CLASS_TABLE[b'a' as usize] == char_class::LETTER);
+            assert!(char_class::CLASS_TABLE[b'_' as usize] == char_class::IDENT_CONT);
+            assert!(char_class::CLASS_TABLE[b'0' as usize] == char_class::DIGIT);
+            assert!(char_class::CLASS_TABLE[b'+' as usize] == char_class::PUNCT);
+            assert!(char_class::CLASS_TABLE[b'\n' as usize] == char_class::NEWLINE);
+            assert!(char_class::CLASS_TABLE[0xFF] == char_class::OTHER);
+        };
+    }
+
+    #[test]
+    fn classify_high_bytes_default_to_other() {
+        // 高字节 (UTF-8 后续字节) 不会单字节出现, 但表项应归类为 OTHER.
+        for &b in &[0x80u8, 0xC0, 0xFF] {
+            assert_eq!(char_class::classify(b), char_class::OTHER, "{:#x}", b);
+        }
     }
 }

@@ -422,6 +422,7 @@ mod tests {
             fp_contract_mode: crate::cli::FpContractMode::Default,
             align_loops: 0,
             align_jumps: 0,
+            profile_parse: false,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         }
