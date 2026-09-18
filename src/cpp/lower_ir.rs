@@ -40,6 +40,8 @@ pub struct LowerIrOutput {
     pub rodata: Vec<String>,
     /// vtable 全局数据（符号名 + 条目列表）
     pub vtables: Vec<(String, Vec<VTableEntry>)>,
+    /// 需要导出的外部 runtime symbol（如 dccpp_*）
+    pub external_symbols: Vec<String>,
 }
 
 /// 指针大小（x86_64 / LP64）
@@ -171,6 +173,8 @@ impl<'a> IrLowerer<'a> {
 
     /// 消费 lowerer，返回输出
     pub fn finish(self) -> LowerIrOutput {
+        // 在所有 lowering 完成后，统一注册 external symbols
+        // (实际上已经在调用过程中注册了)
         self.output
     }
 
@@ -1613,6 +1617,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
 
+                // 如果符号是 dccpp_* runtime symbol，需要注册为 external
+                if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") {
+                    if !self.lowerer.output.external_symbols.contains(&fn_name) {
+                        self.lowerer.output.external_symbols.push(fn_name.clone());
+                    }
+                }
+
                 let callee_op = Operand::FnAddr(fn_name, fn_ty);
 
                 if ret_ty == &Type::Void {
@@ -2590,7 +2601,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let hint_op = Operand::Int(0);
 
         // 调用 __dynamic_cast
-        let fn_addr = Operand::FnAddr(CxxRuntimeSymbol::DynamicCast.name().to_string(), dyn_cast_fn_ty);
+        let fn_name = CxxRuntimeSymbol::DynamicCast.name().to_string();
+        
+        // 如果是 runtime symbol，需要注册为 external
+        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" {
+            if !self.lowerer.output.external_symbols.contains(&fn_name) {
+                self.lowerer.output.external_symbols.push(fn_name.clone());
+            }
+        }
+        
+        let fn_addr = Operand::FnAddr(fn_name, dyn_cast_fn_ty);
 
         let result_void_ptr = self.fresh_var("dyn_cast_result", void_ptr_ty.clone());
         let call_inst = Inst {
@@ -2805,8 +2825,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let typeinfo_op = self.get_typeinfo_for(ty)?;
 
                 let throw_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-                let throw_callee = Operand::FnAddr(
-                    "__dcc_eh_throw".to_string(),
+                let fn_name = "__dcc_eh_throw".to_string();
+                
+                // 如果是 runtime symbol，需要注册为 external
+                if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") {
+                    if !self.lowerer.output.external_symbols.contains(&fn_name) {
+                        self.lowerer.output.external_symbols.push(fn_name.clone());
+                    }
+                }
+                
+                let throw_callee = Operand::FnAddr(fn_name,
                     throw_fn_ty,
                 );
                 let throw_call = Inst {
@@ -2910,7 +2938,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             CxxRuntimeSymbol::New
         };
         let new_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let new_callee = Operand::FnAddr(op_sym.name().to_string(), new_fn_ty.clone());
+        let fn_name = op_sym.name().to_string();
+        
+        // 如果是 runtime symbol，需要注册为 external
+        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" || fn_name.starts_with("_Z") {
+            if !self.lowerer.output.external_symbols.contains(&fn_name) {
+                self.lowerer.output.external_symbols.push(fn_name.clone());
+            }
+        }
+        
+        let new_callee = Operand::FnAddr(fn_name, new_fn_ty.clone());
         let raw_ptr_var = self.fresh_var("raw_new", void_ptr_ty.clone());
         let new_call = Inst {
             dest: Some(raw_ptr_var.clone()),
@@ -3001,7 +3038,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
         let delete_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let delete_callee = Operand::FnAddr(op_sym.name().to_string(), delete_fn_ty);
+        let fn_name = op_sym.name().to_string();
+        
+        // 如果是 runtime symbol，需要注册为 external
+        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" || fn_name.starts_with("_Z") {
+            if !self.lowerer.output.external_symbols.contains(&fn_name) {
+                self.lowerer.output.external_symbols.push(fn_name.clone());
+            }
+        }
+        
+        let delete_callee = Operand::FnAddr(fn_name, delete_fn_ty);
 
         // 把指针转成 void*
         let void_ptr_var = self.fresh_var("del_void", void_ptr_ty.clone());

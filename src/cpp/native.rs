@@ -1138,6 +1138,39 @@ fn build_program(
             }));
         }
     }
+
+    // 发射 dcc++ runtime symbols（如 dccpp_dur_free, __dcc_eh_throw 等）
+    // 作为 extern var 占位符（实际是函数，但目前编译器仅需要声明存在）
+    for sym in &output.external_symbols {
+        prog.decls.push(ast::Decl::Var(ast::VarDecl {
+            name: ast::Ident {
+                name: sym.clone(),
+                span: dummy_span(),
+            },
+            ty: ast::Type::Ptr(Box::new(ast::QualType::new(ast::Type::UChar))),
+            init: None,
+            span: dummy_span(),
+            is_extern: true,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            register_name: None,
+            cleanup_fn: None,
+            is_thread_local: false,
+            no_sanitize: Vec::new(),
+            alias_name: None,
+            copy_fn: None,
+            is_retain: false,
+            is_used_attr: false,
+            quals: ast::QualifierFlags::NONE,
+            addr_space: ast::AddrSpace::None,
+            tls_model: None,
+            asm_label: None,
+        }));
+    }
     let _ = hir; // 当前未直接读 (已通过 lower_ir 用过), 保留参数便于扩展
     Ok(prog)
 }

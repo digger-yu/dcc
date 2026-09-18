@@ -1729,8 +1729,55 @@ int __dcc_multi_index_3(int* obj, int i, int j, int k) {
     (void)obj; (void)i; (void)j; (void)k;
     return 0;
 }
-int __dcc_multi_index_4(int* obj, int i, int j, int k, int l) {
+void __dcc_multi_index_4(int* obj, int i, int j, int k, int l) {
     (void)obj; (void)i; (void)j; (void)k; (void)l;
     return 0;
+}
+
+/* =========================================================================
+ * Part 20: Threading Support (C++11) - <thread>, <mutex>
+ * 
+ * 提供基本的线程同步原语
+ * ========================================================================= */
+
+#include <pthread.h>
+
+struct dccpp_mutex {
+    pthread_mutex_t handle;
+};
+
+void* dccpp_mutex_create(void) {
+    struct dccpp_mutex* m = (struct dccpp_mutex*)malloc(sizeof(*m));
+    if (!m) abort();
+    if (pthread_mutex_init(&m->handle, NULL) != 0) {
+        free(m);
+        abort();
+    }
+    return m;
+}
+
+void dccpp_mutex_destroy(void* ptr) {
+    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
+    if (m) {
+        pthread_mutex_destroy(&m->handle);
+        free(m);
+    }
+}
+
+void dccpp_mutex_lock(void* ptr) {
+    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
+    if (m) pthread_mutex_lock(&m->handle);
+}
+
+void dccpp_mutex_unlock(void* ptr) {
+    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
+    if (m) pthread_mutex_unlock(&m->handle);
+}
+
+int dccpp_mutex_trylock(void* ptr) {
+    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
+    if (!m) return 0;
+    int rc = pthread_mutex_trylock(&m->handle);
+    return (rc == 0) ? 0 : 1;  // 返回 0 表示成功，非 0 表示失败
 }
 

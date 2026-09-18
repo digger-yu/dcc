@@ -64,6 +64,30 @@ pub enum CxxRuntimeSymbol {
     BadTypeid,
     /// `__dynamic_cast`
     DynamicCast,
+
+    // --- Chrono (C++17) ---
+    /// `dccpp_dur_free`
+    ChronoDurFree,
+    /// `dccpp_tp_free`
+    ChronoTpFree,
+    /// `dccpp_sysclock_now`
+    ChronoSysClockNow,
+    /// `dccpp_steadyclock_now`
+    ChronoSteadyClockNow,
+    /// `dccpp_hrclock_now`
+    ChronoHrClockNow,
+
+    // --- Threading / Mutex (C++11) ---
+    /// `dccpp_mutex_create`
+    ThreadMutexCreate,
+    /// `dccpp_mutex_destroy`
+    ThreadMutexDestroy,
+    /// `dccpp_mutex_lock`
+    ThreadMutexLock,
+    /// `dccpp_mutex_unlock`
+    ThreadMutexUnlock,
+    /// `dccpp_mutex_trylock`
+    ThreadMutexTryLock,
 }
 
 impl CxxRuntimeSymbol {
@@ -89,6 +113,20 @@ impl CxxRuntimeSymbol {
             Self::BadCast => "__cxa_bad_cast",
             Self::BadTypeid => "__cxa_bad_typeid",
             Self::DynamicCast => "__dynamic_cast",
+
+            // --- Chrono (C++17) ---
+            Self::ChronoDurFree => "dccpp_dur_free",
+            Self::ChronoTpFree => "dccpp_tp_free",
+            Self::ChronoSysClockNow => "dccpp_sysclock_now",
+            Self::ChronoSteadyClockNow => "dccpp_steadyclock_now",
+            Self::ChronoHrClockNow => "dccpp_hrclock_now",
+
+            // --- Threading / Mutex (C++11) ---
+            Self::ThreadMutexCreate => "dccpp_mutex_create",
+            Self::ThreadMutexDestroy => "dccpp_mutex_destroy",
+            Self::ThreadMutexLock => "dccpp_mutex_lock",
+            Self::ThreadMutexUnlock => "dccpp_mutex_unlock",
+            Self::ThreadMutexTryLock => "dccpp_mutex_trylock",
         }
     }
 
@@ -145,5 +183,19 @@ mod tests {
         assert!(CxxRuntimeSymbol::BeginCatch.is_exception());
         assert!(!CxxRuntimeSymbol::New.is_exception());
         assert!(!CxxRuntimeSymbol::PureVirtual.is_exception());
+    }
+
+    #[test]
+    fn chrono_thread_symbols() {
+        // Verify chrono symbols exist
+        assert_eq!(CxxRuntimeSymbol::ChronoDurFree.name(), "dccpp_dur_free");
+        assert_eq!(CxxRuntimeSymbol::ChronoTpFree.name(), "dccpp_tp_free");
+        assert_eq!(CxxRuntimeSymbol::ChronoSysClockNow.name(), "dccpp_sysclock_now");
+
+        // Verify thread/mutex symbols exist
+        assert_eq!(CxxRuntimeSymbol::ThreadMutexCreate.name(), "dccpp_mutex_create");
+        assert_eq!(CxxRuntimeSymbol::ThreadMutexDestroy.name(), "dccpp_mutex_destroy");
+        assert_eq!(CxxRuntimeSymbol::ThreadMutexLock.name(), "dccpp_mutex_lock");
+        assert_eq!(CxxRuntimeSymbol::ThreadMutexUnlock.name(), "dccpp_mutex_unlock");
     }
 }

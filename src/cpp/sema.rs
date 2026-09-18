@@ -373,7 +373,7 @@ impl Sema {
         let global = Scope::new(ScopeId(0), ScopeKind::Global, None);
         scopes.push(global);
         let global_scope = ScopeId(0);
-        Self {
+        let mut result = Self {
             symbols: Vec::new(),
             scopes,
             current_scope: global_scope,
@@ -382,7 +382,40 @@ impl Sema {
             hir: HirTranslationUnit::new(),
             current_class: None,
             static_local_counter: 0,
+        };
+        
+        // 注册 C++ runtime symbols（如 dccpp_dur_free, __dcc_eh_throw 等）
+        // 这些符号由运行时提供实现，需要作为 extern 函数注册
+        use crate::cpp::runtime::CxxRuntimeSymbol;
+        
+        // 显式切换到 global scope 再注册 symbols
+        let old_scope = result.current_scope;
+        result.current_scope = result.global_scope;
+        
+        for sym in &[
+            CxxRuntimeSymbol::ChronoDurFree,
+            CxxRuntimeSymbol::ChronoTpFree,
+            CxxRuntimeSymbol::ChronoSysClockNow,
+            CxxRuntimeSymbol::ChronoSteadyClockNow,
+            CxxRuntimeSymbol::ChronoHrClockNow,
+        ] {
+            let name = sym.name().to_string();
+            // 创建一个简化的函数类型：ret=void*, params=[] (真实参数将在后续推导)
+            let fn_ty = CxxType::Function {
+                ret: Box::new(CxxType::Pointer(Box::new(CxxType::Integer { bits: 8, signed: false }))),
+                params: vec![],
+                is_const: false,
+                is_volatile: false,
+                ref_qual: None,
+            };
+            // let's just add it without logging for now
+            result.add_symbol(name.clone(), CxxSymbolKind::Function, fn_ty, Access::Public);
         }
+        
+        // 恢复之前的 scope
+        result.current_scope = old_scope;
+        
+        result
     }
 
     // --- scope 管理 ---
