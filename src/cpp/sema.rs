@@ -3850,6 +3850,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         }];
         let result = sema.build_hir_from_decls(&decls);
         assert!(result.is_ok(), "build error: {:?}", result.err());
@@ -3965,6 +3966,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         }];
         let result = sema.build_hir_from_decls(&decls);
         assert!(result.is_ok(), "build error: {:?}", result.err());
@@ -4033,6 +4035,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         }];
         let result = sema.build_hir_from_decls(&decls);
         // 注意：`i` 在 for init 中未声明为 LocalVar，而是直接赋值，会找不到 `i`

@@ -759,6 +759,7 @@ pub fn substitute_decl(
             params: ps,
             body,
             is_noexcept,
+            trailing_ret_type,
         } => CppDecl::FreeFn {
             ret: substitute_type(ret, params, args),
             name: name.clone(),
@@ -768,6 +769,7 @@ pub fn substitute_decl(
                 .collect(),
             body: substitute_body(body, params, args),
             is_noexcept: *is_noexcept,
+            trailing_ret_type: trailing_ret_type.clone(),
         },
         CppDecl::MemberFn {
             class,
@@ -1104,6 +1106,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         };
         let targs = TemplateArgs {
             params: vec![
@@ -1144,6 +1147,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
@@ -1172,6 +1176,7 @@ mod tests {
                 is_decl: false,
             },
             is_noexcept: false,
+            trailing_ret_type: None,
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {

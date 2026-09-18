@@ -9010,9 +9010,12 @@ impl Lower {
                 params,
                 body,
                 is_noexcept,
+                trailing_ret_type,
             } => {
+                // Use trailing return type if present (M30.5)
+                let final_ret = trailing_ret_type.as_ref().unwrap_or(ret);
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
-                let m = mangle_member_function(&n, &[], ret);
+                let m = mangle_member_function(&n, &[], final_ret);
                 // M26: BMF - export module 后的顶层自由函数记为导出 (main 除外)
                 if self.module_collect && name != "main" {
                     self.module_exports.push(BmfExport {
@@ -9020,7 +9023,7 @@ impl Lower {
                         // M26.4: name 记源码名 (import 端注册用); signature 记
                         // 完整 C 声明文本 `ret mangled(args)` (含 Itanium 符号)
                         name: name.clone(),
-                        signature: self.fn_decl_c(&m, ret, params),
+                        signature: self.fn_decl_c(&m, final_ret, params),
                         layout: None,
                     });
                 }
@@ -9028,7 +9031,21 @@ impl Lower {
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
-                self.emit_fn(&m, ret, params, body);
+                self.emit_fn(&m, final_ret, params, body);
+            }
+            // M30.9: static_assert(condition, "message")
+            CppDecl::StaticAssert { condition, message } => {
+                // Emit as C _Static_assert (C11 feature)
+                // Note: full evaluation happens in check_static_assert for compile-time errors
+                self.out.push_str("_Static_assert(");
+                // Convert cpp_expr to string representation
+                self.emit_static_assert_condition(condition);
+                if let Some(m) = message {
+                    self.out.push_str(&format!(", \"{}\"", m));
+                } else {
+                    self.out.push_str(", \"static assertion failed\"");
+                }
+                self.out.push_str(");\n");
             }
             CppDecl::MemberFn {
                 class,
@@ -10401,32 +10418,10 @@ impl Lower {
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
             }
-            CppStmt::StructuredBinding { names, ty, init, is_volatile: _ } => {
-                // C++17 结构化绑定降级：生成隐藏临时 + 引用
-                // `auto [a, b, c] = expr;`
-                // → `{ Type __dcc_temp = expr; auto& a = __dcc_temp.field0; ... }`
-                // 简单实现：假设 struct 按字段顺序访问，使用 `__dcc_temp.field0`, `get<0>(temp)` 等
-                // M30.4: 保守降级为普通变量声明链，靠后续 sema 解析 get<N>
-                if let Some(e) = init {
-                    // 生成临时变量
-                    self.binding_counter += 1;
-                    let temp_name = format!("__dcc_binding_{}", self.binding_counter);
-                    let c_type = self.mangle_to_c_ns(ty);
-                    self.out.push_str(&format!("{} {} = ", c_type, temp_name));
-                    self.emit_expr(e);
-                    self.out.push_str(";\n");
-                    
-                    // 为每个绑定名生成引用声明
-                    // 简化版：用 std::get<N>(temp) 模式，假设 has_tuple_member
-                    for (i, name) in names.iter().enumerate() {
-                        self.out.push_str(&format!("auto& {} = std::get<{}>({});\n", name, i, temp_name));
-                    }
-                } else {
-                    // 无初始化器 - 错误情况，但容忍过去
-                    for name in names {
-                        self.out.push_str(&format!("auto &{};\n", name));
-                    }
-                }
+            CppStmt::StructuredBinding { names, ty, init: _, is_volatile: _ } => {
+                // M30.4: 结构化绑定降级 - 暂时输出注释警告
+                self.out.push_str("// structured binding not yet fully implemented: ");
+                self.out.push_str(&format!("{:?}\n", names));
             }
             CppStmt::If { cond, then, els } => {
                 self.out.push_str("if (");
@@ -11328,6 +11323,102 @@ impl Lower {
                 }
                 self.out.push(')');
             }
+        }
+    }
+
+    /// Helper for static_assert: convert CppExpr to string (for _Static_assert)
+    fn emit_static_assert_condition(&mut self, e: &crate::cpp::parser::CppExpr) {
+        // We already checked the condition in check_static_assert, so just output the expression as-is
+        // This is a simplified version - real evaluation happens in cpp_const_eval
+        match e {
+            crate::cpp::parser::CppExpr::IntLit(v) => self.out.push_str(&v.to_string()),
+            crate::cpp::parser::CppExpr::UnaryOp(op, inner) => {
+                use crate::cpp::parser::UnaryOpKind::*;
+                let prefix = match op {
+                    Neg => "(-)",
+                    Plus => "",
+                    LNot => "!",
+                    Not => "~",
+                    _ => "", // other ops not supported in static_assert context
+                };
+                self.out.push_str(prefix);
+                self.emit_static_assert_condition(inner);
+            }
+            crate::cpp::parser::CppExpr::BinOp(op, lhs, rhs) => {
+                use crate::cpp::parser::BinOpKind::*;
+                let sym = match op {
+                    Add => "+",
+                    Sub => "-",
+                    Mul => "*",
+                    Div => "/",
+                    Mod => "%",
+                    And => "&",
+                    Or => "|",
+                    Xor => "^",
+                    Shl => "<<",
+                    Shr => ">>",
+                    EqEq => "==",
+                    Ne => "!=",
+                    Lt => "<",
+                    Le => "<=",
+                    Gt => ">",
+                    Ge => ">=",
+                    LAnd => "&&",
+                    LOr => "||",
+                    _ => "",
+                };
+                if !sym.is_empty() {
+                    self.out.push('(');
+                    self.emit_static_assert_condition(lhs);
+                    self.out.push_str(sym);
+                    self.emit_static_assert_condition(rhs);
+                    self.out.push(')');
+                } else {
+                    self.out.push_str("?"); // placeholder
+                }
+            }
+            crate::cpp::parser::CppExpr::Ident(name) => {
+                // true/false/nullptr are keywords, const vars would be in locals
+                self.out.push_str(name);
+            }
+            crate::cpp::parser::CppExpr::Call(f, args) => {
+                if let crate::cpp::parser::CppExpr::Ident(n) = &**f {
+                    if n == "sizeof" && args.len() == 1 {
+                        self.out.push_str("sizeof(");
+                        if let crate::cpp::parser::CppExpr::Ident(t) = &args[0] {
+                            self.out.push_str(t);
+                        }
+                        self.out.push(')');
+                        return;
+                    }
+                }
+                self.out.push_str("call_");
+                self.out.push_str(&format!("{:?}", f));
+            }
+            crate::cpp::parser::CppExpr::Sizeof(arg) => {
+                self.out.push_str("sizeof(");
+                match arg {
+                    crate::cpp::parser::SizeofArg::Type(t) => self.out.push_str(&format!("{:?}", t)),
+                    crate::cpp::parser::SizeofArg::Expr(x) => self.emit_static_assert_condition(x),
+                }
+                self.out.push(')');
+            }
+            crate::cpp::parser::CppExpr::Noexcept(_) => self.out.push_str("1"),
+            crate::cpp::parser::CppExpr::Ternary { cond, then, els } => {
+                self.out.push('(');
+                self.emit_static_assert_condition(cond);
+                self.out.push_str(" ? ");
+                self.emit_static_assert_condition(then);
+                self.out.push_str(" : ");
+                self.emit_static_assert_condition(els);
+                self.out.push(')');
+            }
+            crate::cpp::parser::CppExpr::Cast(_, inner) | crate::cpp::parser::CppExpr::StaticCast { expr: inner, .. } => {
+                self.out.push_str("cast(");
+                self.emit_static_assert_condition(inner);
+                self.out.push(')');
+            }
+            _ => self.out.push_str("expr_"),
         }
     }
 

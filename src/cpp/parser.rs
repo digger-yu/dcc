@@ -171,6 +171,11 @@ pub enum CppDecl {
         /// M30.5: trailing return type `auto f() -> Ret`
         trailing_ret_type: Option<MangleType>,
     },
+    /// M30.9: static_assert(constant-expr, "message")
+    StaticAssert {
+        condition: CppExpr,
+        message: Option<String>,
+    },
     /// 类外成员函数定义
     MemberFn {
         class: String,
@@ -6177,10 +6182,11 @@ impl<'a> CppParser<'a> {
                 name: String::new(),
                 params: vec![],
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_noexcept: false,
+                trailing_ret_type: None,
             });
         }
         // `friend <type> <name>(args) [const] [{...} | ;]`
@@ -6195,6 +6201,8 @@ impl<'a> CppParser<'a> {
             false
         };
         let spec = self.skip_specifiers();
+        // M30.5: trailing return type 一般不在 friend 声明中使用，初始化为 None
+        let mut trailing_ret_type: Option<MangleType> = None;
         // 函数体 或 ;
         if matches!(
             &self.peek,
@@ -6209,10 +6217,11 @@ impl<'a> CppParser<'a> {
                 name,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_noexcept: spec.is_noexcept,
+                trailing_ret_type,
             });
         }
         let body = self.parse_body()?;
@@ -6222,6 +6231,7 @@ impl<'a> CppParser<'a> {
             params,
             body,
             is_noexcept: spec.is_noexcept,
+            trailing_ret_type,
         })
     }
 
@@ -6341,6 +6351,16 @@ impl<'a> CppParser<'a> {
             return self.finish_global_var(ret, name, is_static, is_volatile);
         }
         let params = self.parse_param_list()?;
+        // M30.5: trailing return type `auto f() -> Ret`
+        let mut trailing_ret_type: Option<MangleType> = None;
+        if matches!(self.peek, Some(CppTok::C(Tok {
+            kind: TokKind::Arrow,
+            ..
+        }))) {
+            self.bump(); // consume `->`
+            let ret_ty = self.parse_mangle_type()?;
+            trailing_ret_type = Some(ret_ty);
+        }
         self.skip_cv_qual();
         // M30.2: GNU 尾缀 `__attribute__ ((__nothrow__ ...))` /
         // `__asm__ ("" "__isoc23_scanf")` (glibc 头大量使用).
@@ -6361,10 +6381,11 @@ impl<'a> CppParser<'a> {
                 name,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_noexcept: spec.is_noexcept,
+                trailing_ret_type,
             });
         }
         let body = self.parse_body()?;
@@ -6374,6 +6395,7 @@ impl<'a> CppParser<'a> {
             params,
             body,
             is_noexcept: spec.is_noexcept,
+            trailing_ret_type,
         })
     }
 
@@ -7496,7 +7518,8 @@ impl<'a> CppParser<'a> {
             | CppStmt::Return(_)
             | CppStmt::Throw(_)
             | CppStmt::Goto(_)
-            | CppStmt::Fallthrough { .. } => true,
+            | CppStmt::Fallthrough { .. }
+            | CppStmt::StructuredBinding { .. } => true,
             CppStmt::If { then, els, .. } => {
                 let then_term = Self::last_effective_stmt(then)
                     .map_or(false, |s| Self::stmt_terminates(s));
@@ -7608,7 +7631,8 @@ impl<'a> CppParser<'a> {
             | CppDecl::Typedef { .. }
             | CppDecl::Empty
             | CppDecl::Enum { .. }
-            | CppDecl::Opaque(_) => {}
+            | CppDecl::Opaque(_)
+            | CppDecl::StaticAssert { .. } => {}
         }
     }
 
@@ -7719,7 +7743,9 @@ impl<'a> CppParser<'a> {
             | CppStmt::Decl(_)
             | CppStmt::ThisMember(_, _)
             | CppStmt::Fallthrough { .. }
-            | CppStmt::OpaqueStmt(_) => {}
+            | CppStmt::OpaqueStmt(_)
+            | CppStmt::StructuredBinding { .. }
+            | CppStmt::IfConstexpr { .. } => {}
         }
     }
 
@@ -10108,7 +10134,7 @@ impl<'a> CppParser<'a> {
         }
         // M30.4: 结构化绑定 `auto [a, b] = expr;`
         // 检查：类型后紧跟 `[` 而不是标识符
-        let ty = if is_qualified_type {
+        let mut ty = if self.is_qualified_type_start() {
             // 解析限定名为 class 类型，存为 (last segment, qualified path)
             let parts = self.parse_qualified_name()?;
             let last = parts.last().cloned().unwrap_or_default();
@@ -10232,8 +10258,8 @@ impl<'a> CppParser<'a> {
         }
             
         // 普通变量声明：继续解析 ident + 可能数组声明符
-        let name = self.expect_ident()?
-        // 数组声明符: `T name[N];` — 收集所有 `[N]` 后缀 (多维数组),
+        let name = self.expect_ident()?;
+        // 数组声明符：`T name[N];` — 收集所有 `[N]` 后缀 (多维数组),
         // 从最内层向外包装: `int a[2][3]` => Array(Array(Int, 3), 2)
         let mut array_dims: Vec<usize> = Vec::new();
         while matches!(
@@ -10417,7 +10443,11 @@ impl<'a> CppParser<'a> {
                 continue;
             }
             // 支持忽略符 `_`
-            let name = if self.at_str("_") {
+            let name = if matches!(&self.peek, Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                text: ref t,
+                ..
+            })) if t == "_") {
                 self.bump();
                 "_".to_string()
             } else {
@@ -10433,15 +10463,14 @@ impl<'a> CppParser<'a> {
                 continue;
             }
             return Err(CppParseError::Unexpected(
-                "]", ",",
-                format!("{:?}", self.peek),
+                "]", "expected comma or ]".to_string(),
                 self.span(),
             ));
         }
         self.bump(); // consume ']'
         
         // 解析初始化表达式：`= init`
-        let init = if matches!(
+        let init_expr = if matches!(
             &self.peek,
             Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
         ) {
@@ -10449,8 +10478,7 @@ impl<'a> CppParser<'a> {
             Some(self.parse_expr()?)
         } else {
             return Err(CppParseError::Unexpected(
-                "=",
-                format!("{:?}", self.peek),
+                "=", "expected init".to_string(),
                 self.span(),
             ));
         };
@@ -10466,7 +10494,7 @@ impl<'a> CppParser<'a> {
         Ok(CppStmt::StructuredBinding {
             names,
             ty: ty.clone(),
-            init,
+            init: init_expr.unwrap_or(CppExpr::IntLit(0)),
             is_volatile,
         })
     }

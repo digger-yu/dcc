@@ -122,12 +122,14 @@ fn collect_templates_from_decl(d: &CppDecl, reg: &mut TemplateRegistry) {
 fn rename_tpl_fn_inst(decl: &CppDecl, name: &str, args: &[MangleType]) -> CppDecl {
     let new_name = tplfn_c_name(name, args);
     match decl {
-        CppDecl::FreeFn { ret, name: _, params, body, is_noexcept } => CppDecl::FreeFn {
+        CppDecl::FreeFn { ret, name: _, params, body, is_noexcept,
+            trailing_ret_type } => CppDecl::FreeFn {
             ret: ret.clone(),
             name: new_name,
             params: params.clone(),
             body: body.clone(),
             is_noexcept: *is_noexcept,
+            trailing_ret_type: trailing_ret_type.clone(),
         },
         other => other.clone(),
     }
@@ -495,7 +497,8 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
             is_static: *is_static,
             is_volatile: *is_volatile,
         },
-        CppDecl::FreeFn { ret, name, params, body, is_noexcept } => CppDecl::FreeFn {
+        CppDecl::FreeFn { ret, name, params, body, is_noexcept,
+            trailing_ret_type } => CppDecl::FreeFn {
             ret: replace_template_type(ret, reg),
             name: name.clone(),
             params: params
@@ -504,6 +507,7 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                 .collect(),
             body: replace_template_types_in_body(body, reg),
             is_noexcept: *is_noexcept,
+            trailing_ret_type: trailing_ret_type.as_ref().map(|t| replace_template_type(t, reg)),
         },
         CppDecl::Class(c) => {
             let new_bases = c

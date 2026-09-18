@@ -177,7 +177,16 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
                 _ => locals.get(name).copied(),
             }
         }
-        // 其它表达式: 不展开
+        // 其它表达式：不展开
         _ => None,
+    }
+}
+
+/// 检查 static_assert 条件，如果为 false 则返回 Some("error message")
+pub fn check_static_assert(condition: &CppExpr, locals: &HashMap<String, i128>) -> Option<String> {
+    match eval_cpp_const(condition, locals) {
+        Some(0) => Some("static assertion failed".to_string()),
+        Some(_) => None, // condition is true, OK
+        None => None,   // cannot evaluate, defer to semantic analysis
     }
 }
