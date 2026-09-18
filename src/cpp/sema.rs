@@ -3123,8 +3123,9 @@ impl Sema {
                 // 顶层 enum: 注册枚举值为全局 int 符号
                 let mut next_val: i128 = 0;
                 for (var_name, init_text) in variants {
-                    let val = if let Some(text) = init_text {
-                        // 简化: 尝试直接 parse 为 i128 (支持十进制/十六进制/八进制)
+                    // 尝试 parse init_text 为 i128, 成功则更新 next_val;
+                    // 失败也注册 (scoped enum 成员如 B = A+2 无法 parse)
+                    if let Some(text) = init_text {
                         let trimmed = text.trim();
                         let parsed = if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
                             i128::from_str_radix(hex, 16).ok()
@@ -3137,13 +3138,8 @@ impl Sema {
                         } else {
                             trimmed.parse::<i128>().ok()
                         };
-                        match parsed {
-                            Some(v) => { next_val = v; v }
-                            None => next_val,
-                        }
-                    } else {
-                        next_val
-                    };
+                        if let Some(v) = parsed { next_val = v; }
+                    }
                     self.add_symbol(
                         var_name.clone(),
                         CxxSymbolKind::EnumConstant,
@@ -3552,7 +3548,7 @@ impl Sema {
                 // 类内 enum: 注册枚举常量到类作用域
                 let mut next_val: i128 = 0;
                 for (var_name, init_text) in variants {
-                    let val = if let Some(text) = init_text {
+                    if let Some(text) = init_text {
                         let trimmed = text.trim();
                         let parsed = if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
                             i128::from_str_radix(hex, 16).ok()
@@ -3565,13 +3561,8 @@ impl Sema {
                         } else {
                             trimmed.parse::<i128>().ok()
                         };
-                        match parsed {
-                            Some(v) => { next_val = v; v }
-                            None => next_val,
-                        }
-                    } else {
-                        next_val
-                    };
+                        if let Some(v) = parsed { next_val = v; }
+                    }
                     self.add_symbol(
                         var_name.clone(),
                         CxxSymbolKind::EnumConstant,
