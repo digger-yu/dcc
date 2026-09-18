@@ -47,6 +47,9 @@ pub enum MangleType {
     LongDouble,
     Pointer(Box<MangleType>),
     Reference(Box<MangleType>),
+    /// 定长数组 `T[N]`（元素类型 + 元素个数）。
+    /// 用于局部/全局数组声明的语义化，native 后端据此分配栈/静态存储。
+    Array(Box<MangleType>, usize),
     Class(String),
     Ellipsis,
     /// `auto` 占位 - 由 lower 阶段基于 init 表达式推导真实类型
@@ -101,6 +104,13 @@ impl MangleType {
             }
             Self::Reference(t) => {
                 out.push('R');
+                t.encode(out);
+            }
+            // Itanium: A<n>_<element>
+            Self::Array(t, n) => {
+                out.push('A');
+                out.push_str(&n.to_string());
+                out.push('_');
                 t.encode(out);
             }
             Self::Class(n) => {
@@ -314,7 +324,7 @@ pub enum Operator {
 
 impl Operator {
     /// 编码成 Itanium operator-name (简单形式: 用字符串代替)
-    pub fn encode_name(self) -> &'static str {
+    pub fn encode_name(&self) -> &'static str {
         match self {
             Self::Add => "pl",
             Self::Sub => "mi",

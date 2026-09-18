@@ -1,0 +1,15 @@
+warning[W0501]: implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)
+  --> <file>:13:5
+  13 |    case 1:
+     |     ^^^^
+  hint: add `[[fallthrough]];` at the end of the case body to silence this warning
+warning[W0502]: fallthrough attribute is not at the end of a case label
+  --> <file>:82:9
+  82 |        [[fallthrough]];
+     |         ^
+  hint: move `[[fallthrough]];` to the last statement before the next case label
+warning[W0501]: implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)
+  --> <file>:81:5
+  81 |    case 1:
+     |     ^^^^
+  hint: add `[[fallthrough]];` at the end of the case body to silence this warning

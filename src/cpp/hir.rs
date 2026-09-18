@@ -167,6 +167,11 @@ pub enum HirExprKind {
         op: UnaryOp,
         operand: HirExprId,
     },
+    /// 下标访问 `array[index]`（数组或指针）
+    Index {
+        array: HirExprId,
+        index: HirExprId,
+    },
     /// 赋值
     Assign {
         lhs: HirExprId,
@@ -221,6 +226,12 @@ pub enum HirExprKind {
     Comma {
         lhs: HirExprId,
         rhs: HirExprId,
+    },
+    /// 花括号初始化列表 `{a, b, c}`
+    InitList {
+        elems: Vec<HirExprId>,
+        /// 可选的目标类型（TypedInitList 时设置）
+        target_ty: Option<CxxType>,
     },
 }
 
@@ -334,6 +345,8 @@ pub enum HirStmtKind {
     Break,
     /// continue
     Continue,
+    /// C++17 [[fallthrough]] / GCC __attribute__((fallthrough))
+    Fallthrough,
     /// goto
     Goto(String),
     /// 标签
@@ -341,6 +354,15 @@ pub enum HirStmtKind {
     /// 变量声明
     Decl {
         symbol: SymbolId,
+        init: Option<HirExprId>,
+    },
+    /// 静态局部变量声明（带 guard 的线程安全初始化）
+    StaticDecl {
+        /// 静态变量符号（实际存储在全局数据区）
+        symbol: SymbolId,
+        /// guard 变量符号（i64 类型，用于 __cxa_guard_*）
+        guard_symbol: SymbolId,
+        /// 初始化表达式
         init: Option<HirExprId>,
     },
     /// try/catch

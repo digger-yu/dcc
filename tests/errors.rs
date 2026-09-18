@@ -739,6 +739,36 @@ fn w0501_implicit_fallthrough_warning_snapshot() {
     assert_snapshot("w0501", &normalized);
 }
 
+/// W0501/W0502: C++ native backend 的隐式贯穿诊断必须与 C 端一致:
+/// 未标注贯穿报 W0501 (定位到 case 标签), 有标注但不在 case 体末尾时
+/// 额外报 W0502 (定位到 fallthrough 语句), 其余情形不告警。
+#[test]
+fn w0501_cpp_implicit_fallthrough_warning_snapshot() {
+    let source = fixtures_dir().join("w0501_cpp.cpp");
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
+    let plain = stderr_text(&stderr);
+    assert!(
+        status == 0,
+        "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}"
+    );
+    assert!(plain.contains("warning[W0501]:"), "stderr:\n{plain}");
+    assert!(plain.contains("warning[W0502]:"), "stderr:\n{plain}");
+    // 恰好两条 W0501: implicit_fallthrough 的 case 1 与
+    // misplaced_fallthrough 的 case 1 (后者同时触发 W0502)
+    assert_eq!(
+        plain.matches("warning[W0501]:").count(),
+        2,
+        "应恰好产生 2 条 W0501, 实际 stderr:\n{plain}"
+    );
+    assert_eq!(
+        plain.matches("warning[W0502]:").count(),
+        1,
+        "应恰好产生 1 条 W0502, 实际 stderr:\n{plain}"
+    );
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("w0501_cpp", &normalized);
+}
+
 #[cfg(unix)]
 #[test]
 fn e0205_unreadable_include_snapshot() {

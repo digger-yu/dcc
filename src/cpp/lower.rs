@@ -6993,6 +6993,9 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         MangleType::LongDouble => "long double".into(),
         MangleType::Pointer(t) => format!("{}*", mangle_to_c(t)),
         MangleType::Reference(t) => format!("{}*", mangle_to_c(t)),
+        // 数组类型: C 端声明形如 `T name[N]`, 因此这里只返回元素类型,
+        // 具体的 `[N]` 由 emit_local_var / emit_global_var 单独输出.
+        MangleType::Array(t, _n) => mangle_to_c(t),
         MangleType::Class(n) => {
             // enum/struct/union 前缀: 保留原始关键字而非一律加 struct
             if n.starts_with("enum ") || n.starts_with("union ")
@@ -7055,6 +7058,7 @@ fn template_arg_to_c(ty: &MangleType) -> String {
             }
             s
         }
+        MangleType::Array(t, n) => format!("arr{}_{}", n, template_arg_to_c(t)),
         MangleType::Schar => "schar".into(),
         MangleType::Uchar => "uchar".into(),
         MangleType::Short => "short".into(),
@@ -8584,7 +8588,7 @@ impl Lower {
                 }
             }
             CppStmt::Throw(Some(e)) => self.scan_expr_types(e),
-            CppStmt::Switch { expr, arms } => {
+            CppStmt::Switch { expr, arms, .. } => {
                 self.scan_expr_types(expr);
                 for (_, body) in arms {
                     self.scan_body_types(body);
@@ -8888,7 +8892,7 @@ impl Lower {
                     || self.body_needs_system_headers(body)
             }
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
-            CppStmt::Switch { expr, arms } => {
+            CppStmt::Switch { expr, arms, .. } => {
                 self.expr_needs_system_headers(expr)
                     || arms.iter().any(|(_, b)| self.body_needs_system_headers(b))
             }
@@ -8957,6 +8961,7 @@ impl Lower {
                 name,
                 init,
                 is_static,
+                is_volatile: _,
             } => {
                 let ty_c = self.mangle_to_c_ns(ty);
                 let st = if *is_static { "static " } else { "" };
@@ -9177,6 +9182,7 @@ impl Lower {
                 ty,
                 name,
                 is_mutable,
+                is_volatile: _,
             } => {
                 // M27: mutable 成员跟踪 + C 端注释标记
                 // C 语言无 mutable 概念, 但语义上 mutable 字段在 const 方法中可写.
@@ -10217,7 +10223,7 @@ impl Lower {
                 }
                 self.out.push_str(";\n");
             }
-            CppStmt::LocalVar { ty, name, init } => {
+            CppStmt::LocalVar { ty, name, init, is_volatile: _ } => {
                 // M17.0: auto / decltype(auto) 真类型推导
                 let resolved_ty = if ty.is_unresolved() {
                     if let Some(e) = init {
@@ -10287,6 +10293,19 @@ impl Lower {
                 self.out.push_str(&c_type);
                 self.out.push(' ');
                 self.out.push_str(name);
+                // 数组声明符 `T name[N][M]`: MangleType::Array 是最外层维度,
+                // 因此按由外向内的顺序依次输出下标.
+                {
+                    let mut dims: Vec<usize> = Vec::new();
+                    let mut cur = &resolved_ty;
+                    while let MangleType::Array(inner, n) = cur {
+                        dims.push(*n);
+                        cur = inner.as_ref();
+                    }
+                    for n in &dims {
+                        self.out.push_str(&format!("[{}]", n));
+                    }
+                }
                 if let Some(e) = init {
                     if is_class_ctor_init {
                         // 类构造: 单独放在下一个 stmt 调用, 这里仅以 0 占位
@@ -10351,7 +10370,7 @@ impl Lower {
                     }
                 }
             }
-            CppStmt::StaticLocal { ty, name, init } => {
+            CppStmt::StaticLocal { ty, name, init, is_volatile: _ } => {
                 // M10+: 静态局部变量 - 触发 __cxa_guard_* 线程安全单次初始化
                 // Itanium C++ ABI: 静态局部变量存放在 .rodata/.data, 初始化由 guard 保护
                 self.local_var_types.insert(name.clone(), ty.clone());
@@ -10526,7 +10545,7 @@ impl Lower {
             }
             CppStmt::Break => self.out.push_str("break;\n"),
             CppStmt::Continue => self.out.push_str("continue;\n"),
-            CppStmt::Switch { expr, arms } => {
+            CppStmt::Switch { expr, arms, .. } => {
                 self.out.push_str("switch (");
                 self.emit_expr(expr);
                 self.out.push_str(") {\n");
@@ -10598,6 +10617,28 @@ impl Lower {
                 if !text.ends_with('\n') {
                     self.out.push('\n');
                 }
+            }
+            CppStmt::Fallthrough { .. } => {
+                // no-op: fallthrough 只是一个标记，不输出任何代码
+            }
+            CppStmt::DoWhile { body, cond } => {
+                self.out.push_str("do {\n");
+                for s in &body.stmts {
+                    self.emit_stmt(s);
+                }
+                self.out.push_str("} while (");
+                self.emit_expr(cond);
+                self.out.push_str(");\n");
+            }
+            CppStmt::Goto(label) => {
+                self.out.push_str("goto ");
+                self.out.push_str(label);
+                self.out.push_str(";\n");
+            }
+            CppStmt::Labeled { label, stmt } => {
+                self.out.push_str(label);
+                self.out.push_str(": ");
+                self.emit_stmt(stmt);
             }
         }
     }

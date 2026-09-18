@@ -488,11 +488,12 @@ fn replace_template_types_in_decls(decls: &[CppDecl], reg: &TemplateRegistry) ->
 /// 替换单个声明中的模板类型
 fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDecl {
     match d {
-        CppDecl::GlobalVar { ty, name, init, is_static } => CppDecl::GlobalVar {
+        CppDecl::GlobalVar { ty, name, init, is_static, is_volatile } => CppDecl::GlobalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
             is_static: *is_static,
+            is_volatile: *is_volatile,
         },
         CppDecl::FreeFn { ret, name, params, body, is_noexcept } => CppDecl::FreeFn {
             ret: replace_template_type(ret, reg),
@@ -533,10 +534,11 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                     .collect(),
             })
         }
-        CppDecl::MemberVar { ty, name, is_mutable } => CppDecl::MemberVar {
+        CppDecl::MemberVar { ty, name, is_mutable, is_volatile } => CppDecl::MemberVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             is_mutable: *is_mutable,
+            is_volatile: *is_volatile,
         },
         CppDecl::MemberFn {
             class,
@@ -679,15 +681,17 @@ fn replace_template_types_in_body(body: &CppBody, reg: &TemplateRegistry) -> Cpp
 /// 替换语句中的模板类型
 fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStmt {
     match s {
-        CppStmt::LocalVar { ty, name, init } => CppStmt::LocalVar {
+        CppStmt::LocalVar { ty, name, init, is_volatile } => CppStmt::LocalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
+            is_volatile: *is_volatile,
         },
-        CppStmt::StaticLocal { ty, name, init } => CppStmt::StaticLocal {
+        CppStmt::StaticLocal { ty, name, init, is_volatile } => CppStmt::StaticLocal {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
+            is_volatile: *is_volatile,
         },
         CppStmt::Expr(e) => CppStmt::Expr(replace_template_types_in_expr(e, reg)),
         CppStmt::Return(e) => {
@@ -1600,7 +1604,7 @@ fn detect_features_from_stmt(s: &CppStmt, features: &mut HashSet<CppFeature>) {
         CppStmt::Throw(_) => {
             features.insert(CppFeature::Exception);
         }
-        CppStmt::Switch { expr, arms } => {
+        CppStmt::Switch { expr, arms, .. } => {
             detect_features_from_expr(expr, features);
             for (_, body) in arms {
                 detect_features_from_body(body, features);
@@ -2706,8 +2710,10 @@ public:
         assert!(can_compile_native(&decls).is_ok());
     }
 
+    /// namespace: sema 已支持作用域内名字查找与 `ns_fn` 形式 linkage name,
+    /// native 后端可直接编译。
     #[test]
-    fn can_compile_native_fails_for_namespace() {
+    fn can_compile_native_ok_for_namespace() {
         let src = b"\
 namespace foo {
     int bar() { return 42; }
@@ -2715,14 +2721,13 @@ namespace foo {
 ";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
-        let result = can_compile_native(&decls);
-        assert!(result.is_err());
-        let unsupported = result.unwrap_err();
-        assert!(unsupported.contains(&CppFeature::Namespace));
+        assert!(can_compile_native(&decls).is_ok());
     }
 
+    /// new/delete: native 后端按 Itanium ABI 调用 operator new / operator delete,
+    /// 链接期由 C++ 运行时提供实现。
     #[test]
-    fn can_compile_native_fails_for_new_delete() {
+    fn can_compile_native_ok_for_new_delete() {
         let src = b"\
 void test() {
     int* p = new int;
@@ -2731,23 +2736,18 @@ void test() {
 ";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
-        let result = can_compile_native(&decls);
-        assert!(result.is_err());
-        let unsupported = result.unwrap_err();
-        assert!(unsupported.contains(&CppFeature::NewDelete));
+        assert!(can_compile_native(&decls).is_ok());
     }
 
+    /// concept: 仅作为约束声明参与重载决议, 不生成任何代码, native 后端可直接编译。
     #[test]
-    fn can_compile_native_fails_for_concept() {
+    fn can_compile_native_ok_for_concept() {
         let src = b"\
 template <typename T>
 concept Foo = true;
 ";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
-        let result = can_compile_native(&decls);
-        assert!(result.is_err());
-        let unsupported = result.unwrap_err();
-        assert!(unsupported.contains(&CppFeature::Concept));
+        assert!(can_compile_native(&decls).is_ok());
     }
 }

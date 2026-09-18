@@ -1780,11 +1780,26 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
 
     // 2. C++ 解析 + native lower
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
-    let decls = parser.parse_top_level().map_err(|_| {
-        let mut diags = parser.diags.clone();
-        enrich_diags(&mut diags, &src, &file_name, input.parent());
-        diags
-    })?;
+    parser.warn_implicit_fallthrough = cfg.warn_implicit_fallthrough;
+    let decls = match parser.parse_top_level() {
+        Ok(d) => {
+            // 解析成功时也要输出警告（如 -Wimplicit-fallthrough）
+            let mut diags = parser.diags.clone();
+            enrich_diags(&mut diags, &src, &file_name, input.parent());
+            let dcfg = diag_cfg(&cfg);
+            for d in &diags {
+                if matches!(d.sev, Severity::Warning) {
+                    d.print_with(&dcfg);
+                }
+            }
+            d
+        }
+        Err(_) => {
+            let mut diags = parser.diags.clone();
+            enrich_diags(&mut diags, &src, &file_name, input.parent());
+            return Err(diags);
+        }
+    };
 
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {

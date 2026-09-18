@@ -218,6 +218,8 @@ pub enum CppDecl {
         name: String,
         /// M17.0: `mutable` 标记 - 即使在 const 方法中也可修改
         is_mutable: bool,
+        /// `volatile` 标记 - 成员变量为 volatile 限定
+        is_volatile: bool,
     },
     /// M30.2: 匿名聚合实例成员 `union { ... } temp;` / `struct {...} x;`
     /// (obstack temp/chunkfun/freefun, cpp_hash_table val) - 定义与
@@ -310,6 +312,8 @@ pub enum CppDecl {
         init: Option<CppExpr>,
         /// `static` 修饰 (C 同义: 内部链接)
         is_static: bool,
+        /// `volatile` 修饰
+        is_volatile: bool,
     },
     /// M30: typedef 声明. M30: 带目标类型与别名, 使模板实例别名
     /// (`typedef Name<Args> alias`) 和模板类内 typedef
@@ -374,6 +378,7 @@ pub enum CppStmt {
         ty: MangleType,
         name: String,
         init: Option<CppExpr>,
+        is_volatile: bool,
     },
     /// M10+: 静态局部变量 `static T name = init;`
     /// 触发 `__cxa_guard_*` 调用 (C++ ABI 线程安全单次初始化)
@@ -381,6 +386,7 @@ pub enum CppStmt {
         ty: MangleType,
         name: String,
         init: Option<CppExpr>,
+        is_volatile: bool,
     },
     /// `try { ... } catch (T& e) { ... }` (M8)
     Try {
@@ -389,15 +395,35 @@ pub enum CppStmt {
     },
     /// `throw expr;` (M8)
     Throw(Option<CppExpr>),
+    /// `do stmt while (expr);`
+    DoWhile {
+        body: Box<CppBody>,
+        cond: CppExpr,
+    },
+    /// `goto label;`
+    Goto(String),
+    /// `label: stmt` — 带标签的语句
+    Labeled {
+        label: String,
+        stmt: Box<CppStmt>,
+    },
     /// `break;` (M8)
     Break,
     /// `continue;` (M8)
     Continue,
+    /// C++17 `[[fallthrough]];` / GCC `__attribute__((fallthrough));`
+    /// 显式标记 switch case 有意贯穿.
+    Fallthrough {
+        span: Span,
+    },
     /// `switch (expr) { case val: stmts... default: stmts... }`
     Switch {
         expr: CppExpr,
         /// Each arm: None = default, Some(expr) = case expr
         arms: Vec<(Option<CppExpr>, CppBody)>,
+        /// 每个 arm 的 case/default 标签 span, 与 `arms` 一一对应.
+        /// 用于 `-Wimplicit-fallthrough` 把 W0501 定位到 case 标签 (对齐 C 端).
+        label_spans: Vec<Span>,
     },
     /// `co_await expr;` (C++20 协程, M9 占位)
     CoAwait(CppExpr),
@@ -599,6 +625,8 @@ pub struct CppParser<'a> {
     pub peek: Option<CppTok>,
     pub file: Arc<str>,
     pub diags: Vec<Diagnostic>,
+    /// -Wimplicit-fallthrough: switch case 隐式贯穿警告
+    pub warn_implicit_fallthrough: bool,
     /// 解析期间记下的 lambda (M8: lower 时分配闭包类型名)
     pub lambdas: Vec<LambdaExpr>,
     /// 嵌套模板 `>>` 拆出的待闭合 `>` 计数 (M18.x, 见 parse_mangle_type_depth)
@@ -625,6 +653,7 @@ impl<'a> CppParser<'a> {
             peek,
             file: Arc::from(file),
             diags: vec![],
+            warn_implicit_fallthrough: true,
             lambdas: vec![],
             deferred_gt: 0,
             typedef_alias: std::collections::HashMap::new(),
@@ -781,6 +810,67 @@ impl<'a> CppParser<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// 解析 C++17 `[[attr1, attr2, ...]]` 属性语句（以 `;` 结尾）.
+    /// 若属性为 `fallthrough`，返回 `Some(CppStmt::Fallthrough)`；
+    /// 其他属性消费 token 后返回 `None`（视为空语句）.
+    /// 调用前需确认 peek 是 `[` 且下一个 token 也是 `[`.
+    fn parse_std_attributes_stmt(&mut self) -> Result<Option<CppStmt>, CppParseError> {
+        let start_span = self.span();
+        // consume `[[`
+        self.bump(); // [
+        self.bump(); // [
+        let mut attr_text = String::new();
+        let mut depth = 2i32;
+        while depth > 0 {
+            let cur_is_lbracket = self.at_tok(TokKind::LBracket);
+            let cur_is_rbracket = self.at_tok(TokKind::RBracket);
+            if cur_is_lbracket {
+                if let Some(CppTok::C(Tok { kind: TokKind::LBracket, .. })) = self.peek_token_at(1) {
+                    depth += 2;
+                    self.bump();
+                    self.bump();
+                    continue;
+                }
+            }
+            if cur_is_rbracket {
+                if let Some(CppTok::C(Tok { kind: TokKind::RBracket, .. })) = self.peek_token_at(1) {
+                    depth -= 2;
+                    if depth == 0 {
+                        self.bump(); // ]
+                        break;
+                    }
+                    self.bump();
+                    self.bump();
+                    continue;
+                }
+            }
+            // 收集属性文本
+            if let Some(tok) = &self.peek {
+                if let CppTok::C(Tok { text, .. }) = tok {
+                    if !attr_text.is_empty() || *text != "," {
+                        attr_text.push_str(text);
+                        attr_text.push(' ');
+                    }
+                }
+            }
+            self.bump();
+        }
+        // consume second `]`
+        if self.at_tok(TokKind::RBracket) {
+            self.bump();
+        }
+        // consume trailing `;`
+        if self.at_tok(TokKind::Semi) {
+            self.bump();
+        }
+        let attr_trimmed = attr_text.trim();
+        if attr_trimmed == "fallthrough" {
+            Ok(Some(CppStmt::Fallthrough { span: start_span }))
+        } else {
+            Ok(None)
         }
     }
 
@@ -965,6 +1055,7 @@ impl<'a> CppParser<'a> {
                 }
             }
         }
+        self.check_implicit_fallthrough(&decls);
         Ok(decls)
     }
 
@@ -3076,6 +3167,7 @@ impl<'a> CppParser<'a> {
                             ty: MangleType::Reference(Box::new(MangleType::Class(ty_text))),
                             name,
                             is_mutable: false,
+                            is_volatile: false,
                         });
                     }
                     return Err(CppParseError::Unsupported("T& member", self.span()));
@@ -4660,6 +4752,12 @@ impl<'a> CppParser<'a> {
         } else {
             false
         };
+        // 检测 volatile 前缀限定符
+        let mut is_volatile = false;
+        if self.at(CppKw::Volatile) {
+            is_volatile = true;
+            self.bump();
+        }
         let ty = self.parse_mangle_type()?;
         // M30.2: 无名位域 `int :32;` (结构体 padding, glibc __fd_set) -
         // 无名字, 仅跳过位宽; 成员名占位避免 expect_ident 撞 `:`.
@@ -4801,6 +4899,7 @@ impl<'a> CppParser<'a> {
             ty,
             name,
             is_mutable,
+            is_volatile,
         })
     }
 
@@ -4947,6 +5046,7 @@ impl<'a> CppParser<'a> {
             ty: MangleType::Pointer(Box::new(MangleType::Void)),
             name,
             is_mutable: false,
+            is_volatile: false,
         })
     }
 
@@ -6119,6 +6219,7 @@ impl<'a> CppParser<'a> {
         // 跳过函数说明符 (inline, static, virtual, explicit, ...)
         // M30: 记录 static (Ident 起始的顶层变量声明需要内部链接信息)
         let mut is_static = false;
+        let mut is_volatile = false;
         loop {
             // M30.2: 说明符同认 C 形式关键字 (KwStatic/KwInline/KwAuto/
             // KwRegister) 与 GNU 宏 Ident `__inline` / `__extension__`
@@ -6160,6 +6261,9 @@ impl<'a> CppParser<'a> {
                 if is_c_static {
                     is_static = true;
                 }
+                self.bump();
+            } else if self.at(CppKw::Volatile) {
+                is_volatile = true;
                 self.bump();
             } else {
                 break;
@@ -6224,7 +6328,7 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return self.finish_global_var(ret, name, is_static);
+            return self.finish_global_var(ret, name, is_static, is_volatile);
         }
         let params = self.parse_param_list()?;
         self.skip_cv_qual();
@@ -6268,11 +6372,15 @@ impl<'a> CppParser<'a> {
     /// 共用. 仅支持单个声明符 (`,` 多声明符仍走降级路径).
     fn parse_global_var_decl(&mut self) -> Result<CppDecl, CppParseError> {
         let mut is_static = false;
+        let mut is_volatile = false;
         loop {
             if self.at(CppKw::Static) {
                 is_static = true;
                 self.bump();
-            } else if self.at(CppKw::Const) || self.at(CppKw::Volatile) {
+            } else if self.at(CppKw::Const) {
+                self.bump();
+            } else if self.at(CppKw::Volatile) {
+                is_volatile = true;
                 self.bump();
             } else {
                 break;
@@ -6327,7 +6435,7 @@ impl<'a> CppParser<'a> {
                 }
             }
         }
-        self.finish_global_var(ty, name, is_static)
+        self.finish_global_var(ty, name, is_static, is_volatile)
     }
 
     /// M30: 完成全局变量声明尾部 (`= init` / `;`)
@@ -6336,6 +6444,7 @@ impl<'a> CppParser<'a> {
         ty: MangleType,
         name: String,
         is_static: bool,
+        is_volatile: bool,
     ) -> Result<CppDecl, CppParseError> {
         let init = if matches!(
             &self.peek,
@@ -6369,6 +6478,7 @@ impl<'a> CppParser<'a> {
             name,
             init,
             is_static,
+            is_volatile,
         })
     }
 
@@ -6539,6 +6649,22 @@ impl<'a> CppParser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<CppStmt, CppParseError> {
+        // label: stmt — check for ident followed by colon before anything else
+        if matches!(
+            (&self.peek, self.peek_token_at(1)),
+            (
+                Some(CppTok::C(Tok { kind: TokKind::Ident, .. })),
+                Some(CppTok::C(Tok { kind: TokKind::Colon, .. }))
+            )
+        ) {
+            let label = self.expect_ident()?;
+            self.bump(); // consume ':'
+            let inner = self.parse_stmt()?;
+            return Ok(CppStmt::Labeled {
+                label,
+                stmt: Box::new(inner),
+            });
+        }
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -6652,6 +6778,94 @@ impl<'a> CppParser<'a> {
                 self.bump();
             }
             return Ok(CppStmt::Continue);
+        }
+        // do body while (expr);
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwDo,
+                ..
+            }))
+        ) {
+            self.bump(); // 'do'
+            let body = self.parse_body_or_stmt()?;
+            if !matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwWhile,
+                    ..
+                }))
+            ) {
+                return Err(CppParseError::Unexpected(
+                    "while",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
+            }
+            self.bump(); // 'while'
+            if !matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+            ) {
+                return Err(CppParseError::Unexpected(
+                    "(",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
+            }
+            self.bump(); // '('
+            let cond = self.parse_expr()?;
+            if !matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::RParen,
+                    ..
+                }))
+            ) {
+                return Err(CppParseError::Unexpected(
+                    ")",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
+            }
+            self.bump(); // ')'
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
+            }
+            return Ok(CppStmt::DoWhile {
+                body: Box::new(body),
+                cond,
+            });
+        }
+        // goto label;
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwGoto,
+                ..
+            }))
+        ) {
+            self.bump(); // 'goto'
+            let label = self.expect_ident()?;
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
+            }
+            return Ok(CppStmt::Goto(label));
         }
         // switch (expr) { case val: stmts... default: stmts... }
         if matches!(
@@ -7077,8 +7291,10 @@ impl<'a> CppParser<'a> {
         self.bump();
         // Parse body: collect case/default arms
         let mut arms: Vec<(Option<CppExpr>, CppBody)> = Vec::new();
+        let mut label_spans: Vec<Span> = Vec::new();
         let mut cur_expr: Option<CppExpr> = None;
         let mut cur_stmts: Vec<CppStmt> = Vec::new();
+        let mut cur_label: Span = self.span();
         while !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -7103,7 +7319,9 @@ impl<'a> CppParser<'a> {
                             is_decl: false,
                         },
                     ));
+                    label_spans.push(cur_label.clone());
                 }
+                cur_label = self.span(); // `case` 关键字位置
                 self.bump(); // past `case`
                 let case_expr = self.parse_expr()?;
                 // expect `:`
@@ -7141,7 +7359,9 @@ impl<'a> CppParser<'a> {
                             is_decl: false,
                         },
                     ));
+                    label_spans.push(cur_label.clone());
                 }
+                cur_label = self.span(); // `default` 关键字位置
                 self.bump(); // past `default`
                 // expect `:`
                 if !matches!(
@@ -7161,6 +7381,58 @@ impl<'a> CppParser<'a> {
                 cur_expr = None; // None = default arm
                 continue;
             }
+            // Check for `[[fallthrough]];` (C++17 standard attribute)
+            if self.at_tok(TokKind::LBracket) {
+                if let Some(CppTok::C(Tok { kind: TokKind::LBracket, .. })) = self.peek_token_at(1) {
+                    if let Some(stmt) = self.parse_std_attributes_stmt()? {
+                        cur_stmts.push(stmt);
+                    }
+                    continue;
+                }
+            }
+            // Check for `__attribute__((fallthrough));` (GNU extension)
+            let is_attr_fallthrough = matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                })) if text == "__attribute__" || text == "__attribute"
+            );
+            if is_attr_fallthrough {
+                let attr_span = self.span();
+                self.bump(); // __attribute__
+                // expect `((`
+                if self.at_tok(TokKind::LParen) {
+                    self.bump();
+                    if self.at_tok(TokKind::LParen) {
+                        self.bump();
+                        // collect attribute name
+                        let mut attr_name = String::new();
+                        while !self.at_tok(TokKind::RParen) {
+                            if let Some(CppTok::C(Tok { text, .. })) = &self.peek {
+                                attr_name.push_str(text);
+                            }
+                            self.bump();
+                        }
+                        // consume `))`
+                        if self.at_tok(TokKind::RParen) {
+                            self.bump();
+                        }
+                        if self.at_tok(TokKind::RParen) {
+                            self.bump();
+                        }
+                        // consume `;`
+                        if self.at_tok(TokKind::Semi) {
+                            self.bump();
+                        }
+                        if attr_name.trim() == "fallthrough" {
+                            cur_stmts.push(CppStmt::Fallthrough { span: attr_span });
+                        }
+                        continue;
+                    }
+                }
+            }
             // Regular statement inside an arm
             cur_stmts.push(self.parse_stmt()?);
         }
@@ -7173,10 +7445,280 @@ impl<'a> CppParser<'a> {
                     is_decl: false,
                 },
             ));
+            label_spans.push(cur_label);
         }
         // bump past `}`
         self.bump();
-        Ok(CppStmt::Switch { expr, arms })
+        Ok(CppStmt::Switch {
+            expr,
+            arms,
+            label_spans,
+        })
+    }
+
+    // === fallthrough 诊断辅助函数 ===
+
+    /// 从 case body 末尾向前查找最后一条"有效语句"（跳过空语句、空块）.
+    /// 返回找到的语句的引用，空 body 返回 None.
+    fn last_effective_stmt(body: &CppBody) -> Option<&CppStmt> {
+        for stmt in body.stmts.iter().rev() {
+            match stmt {
+                // 空块跳过
+                CppStmt::Block(b) if b.stmts.is_empty() => continue,
+                // Block：递归进入找最后一条
+                CppStmt::Block(b) => {
+                    if let Some(s) = Self::last_effective_stmt(b) {
+                        return Some(s);
+                    }
+                    continue;
+                }
+                _ => return Some(stmt),
+            }
+        }
+        None
+    }
+
+    /// 判断 switch case 体最后一条语句是否会终止控制流 (break/return/continue/goto).
+    fn stmt_terminates(s: &CppStmt) -> bool {
+        match s {
+            CppStmt::Break
+            | CppStmt::Continue
+            | CppStmt::Return(_)
+            | CppStmt::Throw(_)
+            | CppStmt::Goto(_)
+            | CppStmt::Fallthrough { .. } => true,
+            CppStmt::If { then, els, .. } => {
+                let then_term = Self::last_effective_stmt(then)
+                    .map_or(false, |s| Self::stmt_terminates(s));
+                let else_term = els.as_ref().map_or(false, |e| {
+                    Self::last_effective_stmt(e).map_or(false, |s| Self::stmt_terminates(s))
+                });
+                then_term && else_term
+            }
+            CppStmt::IfConstexpr { then, els, .. } => {
+                let then_term = Self::last_effective_stmt(then)
+                    .map_or(false, |s| Self::stmt_terminates(s));
+                let else_term = els.as_ref().map_or(false, |e| {
+                    Self::last_effective_stmt(e).map_or(false, |s| Self::stmt_terminates(s))
+                });
+                then_term && else_term
+            }
+            CppStmt::Block(b) => {
+                Self::last_effective_stmt(b).map_or(false, |s| Self::stmt_terminates(s))
+            }
+            CppStmt::Labeled { stmt, .. } => Self::stmt_terminates(stmt),
+            CppStmt::Switch { .. } => true,
+            CppStmt::While { .. }
+            | CppStmt::DoWhile { .. }
+            | CppStmt::For { .. }
+            | CppStmt::CoAwait(_)
+            | CppStmt::CoYield(_)
+            | CppStmt::CoReturn(_) => false,
+            CppStmt::Expr(_)
+            | CppStmt::LocalVar { .. }
+            | CppStmt::StaticLocal { .. }
+            | CppStmt::Decl(_)
+            | CppStmt::ThisMember(_, _)
+            | CppStmt::Try { .. }
+            | CppStmt::OpaqueStmt(_) => false,
+        }
+    }
+
+    /// 从 case body 中查找第一个 Fallthrough 语句的 span（用于 misplaced 警告定位）.
+    fn find_fallthrough_span(body: &CppBody) -> Option<Span> {
+        for stmt in &body.stmts {
+            match stmt {
+                CppStmt::Fallthrough { span } => return Some(span.clone()),
+                CppStmt::Block(b) => {
+                    if let Some(s) = Self::find_fallthrough_span(b) {
+                        return Some(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 递归扫描所有声明中的 switch 案例, 检查未标注的隐式贯穿.
+    fn check_implicit_fallthrough(&mut self, decls: &[CppDecl]) {
+        if !self.warn_implicit_fallthrough {
+            return;
+        }
+        for d in decls {
+            self.check_fallthrough_decl(d);
+        }
+    }
+
+    fn check_fallthrough_decl(&mut self, d: &CppDecl) {
+        match d {
+            CppDecl::FreeFn { body, .. }
+            | CppDecl::MemberFn { body, .. }
+            | CppDecl::Ctor { body, .. }
+            | CppDecl::Dtor { body, .. }
+            | CppDecl::OperatorFn { body, .. } => {
+                for stmt in &body.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+            }
+            CppDecl::Class(cd) => {
+                for m in &cd.members {
+                    self.check_fallthrough_decl(m);
+                }
+            }
+            CppDecl::Namespace { body, .. } => {
+                for d in body {
+                    self.check_fallthrough_decl(d);
+                }
+            }
+            CppDecl::Template { decl, .. }
+            | CppDecl::PartialSpec { decl, .. } => {
+                self.check_fallthrough_decl(decl);
+            }
+            CppDecl::ExportBlock(decls) => {
+                for d in decls {
+                    self.check_fallthrough_decl(d);
+                }
+            }
+            CppDecl::AnonAggr { members, .. } => {
+                for m in members {
+                    self.check_fallthrough_decl(m);
+                }
+            }
+            CppDecl::MemberVar { .. }
+            | CppDecl::Using { .. }
+            | CppDecl::UsingEnum { .. }
+            | CppDecl::InheritingCtor { .. }
+            | CppDecl::Concept { .. }
+            | CppDecl::Module { .. }
+            | CppDecl::Import { .. }
+            | CppDecl::PrivateFragment
+            | CppDecl::RawExternC(_)
+            | CppDecl::GlobalVar { .. }
+            | CppDecl::Typedef { .. }
+            | CppDecl::Empty
+            | CppDecl::Enum { .. }
+            | CppDecl::Opaque(_) => {}
+        }
+    }
+
+    fn check_fallthrough_stmt(&mut self, s: &CppStmt) {
+        match s {
+            CppStmt::Switch {
+                arms, label_spans, ..
+            } => {
+                let n = arms.len();
+                for (i, (_expr, body)) in arms.iter().enumerate() {
+                    // case 标签 span (与 arms 一一对应), 缺省时退化为 point(0,0)
+                    let label_span = label_spans
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| Span::point(&self.file, 0, 0));
+                    // 最后一个 case 之后即退出 switch, 不存在贯穿.
+                    if i + 1 == n {
+                        continue;
+                    }
+                    // 空 case 体是合法的 (允许 fallthrough 而无需标注).
+                    if body.stmts.is_empty() {
+                        continue;
+                    }
+                    // 找到 case 体最后一条有效语句.
+                    let last = Self::last_effective_stmt(body);
+                    match last {
+                        // 最后一条有效语句是 fallthrough：合法标注
+                        Some(CppStmt::Fallthrough { .. }) => {}
+                        // 最后一条有效语句终止控制流：不会贯穿
+                        Some(s) if Self::stmt_terminates(s) => {}
+                        // 其他情况：未标注的隐式贯穿
+                        _ => {
+                            // 如果 body 中有 fallthrough 但不在最后，额外发 misplaced 警告
+                            if let Some(mis_span) = Self::find_fallthrough_span(body) {
+                                self.diags.push(Diagnostic::warn(
+                                    "W0502",
+                                    "fallthrough attribute is not at the end of a case label",
+                                    mis_span,
+                                ).with_hint("move `[[fallthrough]];` to the last statement before the next case label"));
+                            }
+                            // W0501: 隐式贯穿警告, 定位到 case 标签 (对齐 C 端)
+                            let diag_span = label_span.clone();
+                            self.diags.push(Diagnostic::warn(
+                                "W0501",
+                                "implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)",
+                                diag_span,
+                            ).with_hint("add `[[fallthrough]];` at the end of the case body to silence this warning"));
+                        }
+                    }
+                }
+            }
+            CppStmt::If { then, els, .. } => {
+                for stmt in &then.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+                if let Some(e) = els {
+                    for stmt in &e.stmts {
+                        self.check_fallthrough_stmt(stmt);
+                    }
+                }
+            }
+            CppStmt::IfConstexpr { then, els, .. } => {
+                for stmt in &then.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+                if let Some(e) = els {
+                    for stmt in &e.stmts {
+                        self.check_fallthrough_stmt(stmt);
+                    }
+                }
+            }
+            CppStmt::While { body, .. }
+            | CppStmt::DoWhile { body, .. }
+            | CppStmt::For { body, .. } => {
+                for stmt in &body.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+            }
+            CppStmt::Block(b) => {
+                for stmt in &b.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+            }
+            CppStmt::Labeled { stmt, .. } => {
+                self.check_fallthrough_stmt(stmt);
+            }
+            CppStmt::Try { body, catches, .. } => {
+                for stmt in &body.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
+                for c in catches {
+                    for stmt in &c.body.stmts {
+                        self.check_fallthrough_stmt(stmt);
+                    }
+                }
+            }
+            CppStmt::Return(_)
+            | CppStmt::Break
+            | CppStmt::Continue
+            | CppStmt::Goto(_)
+            | CppStmt::Throw(_)
+            | CppStmt::Expr(_)
+            | CppStmt::CoAwait(_)
+            | CppStmt::CoYield(_)
+            | CppStmt::CoReturn(_)
+            | CppStmt::LocalVar { .. }
+            | CppStmt::StaticLocal { .. }
+            | CppStmt::Decl(_)
+            | CppStmt::ThisMember(_, _)
+            | CppStmt::Fallthrough { .. }
+            | CppStmt::OpaqueStmt(_) => {}
+        }
+    }
+
+    /// 获取语句的 span（用于诊断定位）.
+    fn stmt_span(s: &CppStmt) -> Option<Span> {
+        match s {
+            CppStmt::Fallthrough { span } => Some(span.clone()),
+            _ => None,
+        }
     }
 
     fn parse_expr(&mut self) -> Result<CppExpr, CppParseError> {
@@ -9210,6 +9752,8 @@ impl<'a> CppParser<'a> {
     /// 局部变量声明探测: `Type name;` / `Type name = expr;` 等
     fn is_local_var_decl_start(&self) -> bool {
         let mut i = 0;
+        // 第一个类型说明符是否是内置类型关键字 (决定能否跟数组声明符)
+        let mut first_is_builtin = false;
         // 跳过 static
         let is_static = self.at(CppKw::Static);
         if is_static {
@@ -9283,6 +9827,26 @@ impl<'a> CppParser<'a> {
             if !self.is_type_specifier(first.as_ref()) {
                 return false;
             }
+            // 内置类型关键字 (int/char/...) 开头的声明, 后面允许出现数组
+            // 声明符 `[N]`. 用户类型 (Ident) 开头时不放行: `a[0] = x;`
+            // 这种下标赋值语句与 `T a[N];` 在只看前几个 token 时无法区分,
+            // 因此只对不可能与表达式混淆的内置类型开绿灯.
+            first_is_builtin = matches!(
+                first.as_ref(),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwInt
+                        | TokKind::KwChar
+                        | TokKind::KwShort
+                        | TokKind::KwLong
+                        | TokKind::KwFloat
+                        | TokKind::KwDouble
+                        | TokKind::KwSigned
+                        | TokKind::KwUnsigned
+                        | TokKind::KwBool
+                        | TokKind::KwVoid,
+                    ..
+                }))
+            );
             i += 1;
             // M26: 模板实例化类型 `Holder<int>` / `Holder<Holder<int>>`:
             // 类型名后紧跟 `<` 且尖括号平衡 → 跳过模板实参
@@ -9383,7 +9947,8 @@ impl<'a> CppParser<'a> {
         ) {
             return false;
         }
-        // 第 i+1 个 token 必须是 `;` `=` `(` 之一
+        // 第 i+1 个 token 必须是 `;` `=` `(` 之一; 内置类型开头时还允许
+        // `[` (数组声明 `int name[N];`, 由 parse_local_var_decl 处理).
         let after_name = self.peek_token_at(i + 1);
         matches!(
             after_name,
@@ -9397,7 +9962,14 @@ impl<'a> CppParser<'a> {
                 kind: TokKind::LParen,
                 ..
             }))
-        )
+        ) || (first_is_builtin
+            && matches!(
+                after_name,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBracket,
+                    ..
+                }))
+            ))
     }
 
     /// 第 i 个 token 是否是除第一个类型说明符之外的其他类型说明符
@@ -9521,11 +10093,15 @@ impl<'a> CppParser<'a> {
         // M30.2: 先跳过 const/volatile 前缀, 否则 `const bidi::context &x`
         // 因 const 挡住 is_qualified_type_start 检测而走 parse_mangle_type,
         // 丢失命名空间上下文.
+        let mut is_volatile = false;
         while self.at(CppKw::Const) || self.at(CppKw::Volatile) {
+            if self.at(CppKw::Volatile) {
+                is_volatile = true;
+            }
             self.bump();
         }
         let is_qualified_type = self.is_qualified_type_start();
-        let ty = if is_qualified_type {
+        let mut ty = if is_qualified_type {
             // 解析限定名为 class 类型, 存为 (last segment, qualified path)
             let parts = self.parse_qualified_name()?;
             let last = parts.last().cloned().unwrap_or_default();
@@ -9643,6 +10219,73 @@ impl<'a> CppParser<'a> {
             self.parse_mangle_type()?
         };
         let name = self.expect_ident()?;
+        // 数组声明符: `T name[N];` — 收集所有 `[N]` 后缀 (多维数组),
+        // 从最内层向外包装: `int a[2][3]` => Array(Array(Int, 3), 2)
+        let mut array_dims: Vec<usize> = Vec::new();
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBracket,
+                ..
+            }))
+        ) {
+            self.bump(); // '['
+            let n = match self.parse_expr()? {
+                CppExpr::IntLit(v) if v > 0 => v as usize,
+                _other => {
+                    return Err(CppParseError::Unsupported(
+                        "array size must be a positive integer literal",
+                        self.span(),
+                    ))
+                }
+            };
+            if !matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::RBracket,
+                    ..
+                }))
+            ) {
+                return Err(CppParseError::Unexpected(
+                    "]",
+                    format!("{:?}", self.peek),
+                    self.span(),
+                ));
+            }
+            self.bump(); // ']'
+            array_dims.push(n);
+        }
+        let is_array = !array_dims.is_empty();
+        for n in array_dims.into_iter().rev() {
+            ty = MangleType::Array(Box::new(ty), n);
+        }
+        // 数组声明可以带初值 `int a[2] = {1, 2};` / `int a[2] = {};`
+        if is_array
+            && matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Assign,
+                    ..
+                }))
+            )
+        {
+            self.bump();
+            self.parse_expr()?; // 初值暂不建模, 仅消费以避免误解析
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
+            }
+            return if is_static {
+                Ok(CppStmt::StaticLocal { ty, name, init: None, is_volatile })
+            } else {
+                Ok(CppStmt::LocalVar { ty, name, init: None, is_volatile })
+            };
+        }
         // 跳过可能的 `()` (如 `int x(0);` C++ 风格构造)
         if matches!(
             &self.peek,
@@ -9706,9 +10349,9 @@ impl<'a> CppParser<'a> {
                 _ => None,
             };
             return if is_static {
-                Ok(CppStmt::StaticLocal { ty, name, init })
+                Ok(CppStmt::StaticLocal { ty, name, init, is_volatile })
             } else {
-                Ok(CppStmt::LocalVar { ty, name, init })
+                Ok(CppStmt::LocalVar { ty, name, init, is_volatile })
             };
         }
         let init = if matches!(
@@ -9733,9 +10376,9 @@ impl<'a> CppParser<'a> {
             self.bump();
         }
         if is_static {
-            Ok(CppStmt::StaticLocal { ty, name, init })
+            Ok(CppStmt::StaticLocal { ty, name, init, is_volatile })
         } else {
-            Ok(CppStmt::LocalVar { ty, name, init })
+            Ok(CppStmt::LocalVar { ty, name, init, is_volatile })
         }
     }
 }

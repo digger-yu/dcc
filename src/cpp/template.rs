@@ -95,6 +95,7 @@ pub fn type_key(ty: &MangleType) -> String {
         }
         // M30.1: 非类型实参 key `n<值>` (n0/n1/n42); 偏特化 pattern
         // 字面量 (true/false/整数) 由 pick_partial 解析后与之比较
+        MangleType::Array(t, n) => format!("arr{}_{}", n, type_key(t)),
         MangleType::NonType(v) => format!("n{}", v),
         MangleType::Ellipsis => "ellipsis".into(),
         MangleType::Auto => "auto".into(),
@@ -466,6 +467,9 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
         MangleType::Reference(t) => {
             MangleType::Reference(Box::new(substitute_type(t, params, args)))
         }
+        MangleType::Array(t, n) => {
+            MangleType::Array(Box::new(substitute_type(t, params, args)), *n)
+        }
         MangleType::Template { name, args: tas } => {
             let new_args: Vec<MangleType> = tas
                 .iter()
@@ -678,15 +682,17 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
         CppStmt::ThisMember(n, inner) => {
             CppStmt::ThisMember(n.clone(), Box::new(substitute_stmt(inner, params, args)))
         }
-        CppStmt::LocalVar { ty, name, init } => CppStmt::LocalVar {
+        CppStmt::LocalVar { ty, name, init, is_volatile } => CppStmt::LocalVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             init: init.as_ref().map(|x| substitute_expr(x, params, args)),
+            is_volatile: *is_volatile,
         },
-        CppStmt::StaticLocal { ty, name, init } => CppStmt::StaticLocal {
+        CppStmt::StaticLocal { ty, name, init, is_volatile } => CppStmt::StaticLocal {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             init: init.as_ref().map(|x| substitute_expr(x, params, args)),
+            is_volatile: *is_volatile,
         },
         CppStmt::Try { body, catches } => CppStmt::Try {
             body: Box::new(substitute_body(body, params, args)),
@@ -846,10 +852,12 @@ pub fn substitute_decl(
             ty,
             name,
             is_mutable,
+            is_volatile,
         } => CppDecl::MemberVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             is_mutable: *is_mutable,
+            is_volatile: *is_volatile,
         },
         CppDecl::OperatorFn {
             class,
@@ -1021,6 +1029,7 @@ mod tests {
                     ty: MangleType::Class("T".to_string()),
                     name: "payload".to_string(),
                     is_mutable: false,
+                    is_volatile: false,
                 },
                 CppDecl::Ctor {
                     class: "Box".to_string(),

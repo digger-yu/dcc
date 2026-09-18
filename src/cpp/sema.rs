@@ -289,6 +289,8 @@ pub struct CxxSymbol {
     pub linkage_name: Option<String>,
     /// 所在作用域
     pub scope: ScopeId,
+    /// 是否为 volatile 限定（volatile 局部/全局变量、volatile 参数）
+    pub is_volatile: bool,
 }
 
 // === 作用域 ===
@@ -360,6 +362,8 @@ pub struct Sema {
     hir: HirTranslationUnit,
     /// 当前所在的类（用于 this 指针上下文）
     current_class: Option<ClassId>,
+    /// 静态局部变量命名计数器（生成唯一 linkage name）
+    static_local_counter: usize,
 }
 
 impl Sema {
@@ -377,6 +381,7 @@ impl Sema {
             class_infos: Vec::new(),
             hir: HirTranslationUnit::new(),
             current_class: None,
+            static_local_counter: 0,
         }
     }
 
@@ -411,6 +416,42 @@ impl Sema {
 
     // --- symbol 管理 ---
 
+    /// 计算 namespace 内符号的 linkage name（`ns1_ns2_name` 形式）。
+    /// 类成员跳过（由 lower_ir 专门处理 mangling）。
+    fn compute_linkage_name(&self, name: &str, kind: CxxSymbolKind) -> Option<String> {
+        if matches!(
+            kind,
+            CxxSymbolKind::Field
+                | CxxSymbolKind::Method
+                | CxxSymbolKind::Constructor
+                | CxxSymbolKind::Destructor
+        ) {
+            return None;
+        }
+        // 从当前作用域向上收集 namespace 前缀
+        let mut ns_parts: Vec<String> = Vec::new();
+        let mut scope = Some(self.current_scope);
+        while let Some(sid) = scope {
+            let s = &self.scopes[sid.0];
+            if s.kind == ScopeKind::Namespace {
+                if let Some(owner) = s.owner_symbol {
+                    if let Some(sym) = self.symbols.get(owner.0) {
+                        if !sym.name.is_empty() {
+                            ns_parts.push(sym.name.clone());
+                        }
+                    }
+                }
+            }
+            scope = s.parent;
+        }
+        ns_parts.reverse();
+        if ns_parts.is_empty() {
+            None
+        } else {
+            Some(ns_parts.join("_") + "_" + name)
+        }
+    }
+
     /// 创建新符号并加入当前作用域
     pub fn add_symbol(
         &mut self,
@@ -421,6 +462,7 @@ impl Sema {
     ) -> SymbolId {
         let id = SymbolId(self.symbols.len());
         let scope = self.current_scope;
+        let linkage_name = self.compute_linkage_name(&name, kind);
         let sym = CxxSymbol {
             id,
             name: name.clone(),
@@ -428,8 +470,9 @@ impl Sema {
             ty,
             owner: None,
             access,
-            linkage_name: None,
+            linkage_name,
             scope,
+            is_volatile: false,
         };
         self.symbols.push(sym);
         self.scopes[scope.0].add_symbol(name, id);
@@ -880,6 +923,10 @@ impl Sema {
                 let inner = self.convert_type(t)?;
                 Ok(CxxType::LValueRef(Box::new(inner)))
             }
+            MangleType::Array(t, n) => {
+                let inner = self.convert_type(t)?;
+                Ok(CxxType::Array(Box::new(inner), Some(*n)))
+            }
             MangleType::Class(name) => {
                 // 从当前作用域向上查找类名
                 let syms = self.lookup_unqualified(name);
@@ -902,6 +949,61 @@ impl Sema {
             crate::cpp::parser::Access::Private => Access::Private,
             crate::cpp::parser::Access::Protected => Access::Protected,
         }
+    }
+
+    /// 从类型名字符串解析 CxxType（用于 new/delete 表达式，类型名尚未实例化为 MangleType）
+    fn type_name_to_cxx_type(&mut self, name: &str) -> Result<CxxType, String> {
+        let t = name.trim();
+        match t {
+            "void" => return Ok(CxxType::Void),
+            "bool" => return Ok(CxxType::Bool),
+            "char" => return Ok(CxxType::Integer { bits: 8, signed: true }),
+            "signed char" => return Ok(CxxType::Integer { bits: 8, signed: true }),
+            "unsigned char" => return Ok(CxxType::Integer { bits: 8, signed: false }),
+            "short" | "short int" | "signed short" => {
+                return Ok(CxxType::Integer { bits: 16, signed: true })
+            }
+            "unsigned short" | "unsigned short int" => {
+                return Ok(CxxType::Integer { bits: 16, signed: false })
+            }
+            "int" | "signed" | "signed int" => {
+                return Ok(CxxType::Integer { bits: 32, signed: true })
+            }
+            "unsigned" | "unsigned int" => {
+                return Ok(CxxType::Integer { bits: 32, signed: false })
+            }
+            "long" | "long int" | "signed long" => {
+                return Ok(CxxType::Integer { bits: 64, signed: true })
+            }
+            "unsigned long" | "unsigned long int" => {
+                return Ok(CxxType::Integer { bits: 64, signed: false })
+            }
+            "long long" | "long long int" | "signed long long" => {
+                return Ok(CxxType::Integer { bits: 64, signed: true })
+            }
+            "unsigned long long" | "unsigned long long int" => {
+                return Ok(CxxType::Integer { bits: 64, signed: false })
+            }
+            "float" => return Ok(CxxType::Float { bits: 32 }),
+            "double" => return Ok(CxxType::Float { bits: 64 }),
+            "long double" => return Ok(CxxType::Float { bits: 80 }),
+            _ => {}
+        }
+        // 指针形式: `int*`, `Foo*` 等
+        if let Some(inner) = t.strip_suffix('*').map(|s| s.trim()) {
+            let inner_ty = self.type_name_to_cxx_type(inner)?;
+            return Ok(CxxType::Pointer(Box::new(inner_ty)));
+        }
+        // 类名查找
+        let syms = self.lookup_unqualified(t);
+        for &sym in &syms {
+            if let Some(s) = self.get_symbol(sym) {
+                if matches!(s.kind, CxxSymbolKind::Class) {
+                    return Ok(CxxType::Class(ClassId::from(sym)));
+                }
+            }
+        }
+        Err(format!("unknown type name: {}", name))
     }
 
     /// 解析基类列表为 BaseClass 向量
@@ -1237,6 +1339,28 @@ impl Sema {
                             lhs_ty,
                         ))
                     }
+                    Index => {
+                        // a[b]: 数组 / 指针下标访问。结果类型 = 元素类型。
+                        // 保留独立的 Index 节点 (而不是降级成 *(a+b))，
+                        // 这样 lower_ir 能精确生成 IndexLoad/IndexStore 并
+                        // 带上元素的 volatile 属性。
+                        let elem_ty = match &lhs_ty {
+                            CxxType::Array(inner, _) => *inner.clone(),
+                            CxxType::Pointer(inner) => *inner.clone(),
+                            _ => {
+                                return Err(
+                                    "subscripted value is not an array or pointer".into()
+                                )
+                            }
+                        };
+                        Ok(self.add_expr(
+                            HirExprKind::Index {
+                                array: lhs_id,
+                                index: rhs_id,
+                            },
+                            elem_ty,
+                        ))
+                    }
                     _ => {
                         let bin_op = match op {
                             Add => BinaryOp::Add,
@@ -1257,10 +1381,6 @@ impl Sema {
                             Shr => BinaryOp::Shr,
                             LAnd => BinaryOp::LogicalAnd,
                             LOr => BinaryOp::LogicalOr,
-                            Index => {
-                                // a[b] => *(a + b)
-                                return Err("index operator not yet supported in HIR".into());
-                            }
                             _ => return Err("unsupported binary operator".into()),
                         };
                         // 简化：结果类型 = 左操作数类型
@@ -1420,6 +1540,226 @@ impl Sema {
                     ty,
                 ))
             }
+            CppExpr::Comma(elems) => {
+                // 逗号表达式: 依次求值，返回最后一个
+                if elems.is_empty() {
+                    return Err("empty comma expression".into());
+                }
+                let mut last_id = self.build_expr(&elems[0])?;
+                for e in &elems[1..] {
+                    let rhs_id = self.build_expr(e)?;
+                    let rhs_ty = self.hir.exprs[rhs_id.0].ty.clone();
+                    last_id = self.add_expr(
+                        HirExprKind::Comma {
+                            lhs: last_id,
+                            rhs: rhs_id,
+                        },
+                        rhs_ty,
+                    );
+                }
+                Ok(last_id)
+            }
+            CppExpr::New(ty_str, args) => {
+                let ty = self.type_name_to_cxx_type(ty_str)?;
+                let mut hir_args = Vec::new();
+                for a in args {
+                    hir_args.push(self.build_expr(a)?);
+                }
+                let ret_ty = CxxType::Pointer(Box::new(ty.clone()));
+                Ok(self.add_expr(
+                    HirExprKind::New {
+                        ty,
+                        args: hir_args,
+                        placement: None,
+                        is_array: false,
+                    },
+                    ret_ty,
+                ))
+            }
+            CppExpr::NewArr { ty, count } => {
+                let elem_ty = self.type_name_to_cxx_type(ty)?;
+                let count_id = self.build_expr(count)?;
+                let ret_ty = CxxType::Pointer(Box::new(elem_ty.clone()));
+                Ok(self.add_expr(
+                    HirExprKind::New {
+                        ty: elem_ty,
+                        args: vec![count_id],
+                        placement: None,
+                        is_array: true,
+                    },
+                    ret_ty,
+                ))
+            }
+            CppExpr::PlacementNew { ptr, ty, args } => {
+                let elem_ty = self.type_name_to_cxx_type(ty)?;
+                let ptr_id = self.build_expr(ptr)?;
+                let mut hir_args = Vec::new();
+                for a in args {
+                    hir_args.push(self.build_expr(a)?);
+                }
+                let ret_ty = CxxType::Pointer(Box::new(elem_ty.clone()));
+                Ok(self.add_expr(
+                    HirExprKind::New {
+                        ty: elem_ty,
+                        args: hir_args,
+                        placement: Some(vec![ptr_id]),
+                        is_array: false,
+                    },
+                    ret_ty,
+                ))
+            }
+            CppExpr::Delete(ptr) => {
+                let ptr_id = self.build_expr(ptr)?;
+                Ok(self.add_expr(
+                    HirExprKind::Delete {
+                        ptr: ptr_id,
+                        is_array: false,
+                    },
+                    CxxType::Void,
+                ))
+            }
+            CppExpr::DeleteArr(ptr) => {
+                let ptr_id = self.build_expr(ptr)?;
+                Ok(self.add_expr(
+                    HirExprKind::Delete {
+                        ptr: ptr_id,
+                        is_array: true,
+                    },
+                    CxxType::Void,
+                ))
+            }
+            CppExpr::InitList(elems) => {
+                let mut hir_elems = Vec::new();
+                for e in elems {
+                    hir_elems.push(self.build_expr(e)?);
+                }
+                // 简化：用第一个元素的类型作为列表类型（实际应做公共类型推导）
+                let target_ty = if let Some(first) = hir_elems.first() {
+                    self.hir.exprs[first.0].ty.clone()
+                } else {
+                    CxxType::Void
+                };
+                Ok(self.add_expr(
+                    HirExprKind::InitList {
+                        elems: hir_elems,
+                        target_ty: None,
+                    },
+                    target_ty,
+                ))
+            }
+            CppExpr::TypedInitList { ty, elems } => {
+                let target_ty = self.convert_type(ty)?;
+                let mut hir_elems = Vec::new();
+                for e in elems {
+                    hir_elems.push(self.build_expr(e)?);
+                }
+                Ok(self.add_expr(
+                    HirExprKind::InitList {
+                        elems: hir_elems,
+                        target_ty: Some(target_ty.clone()),
+                    },
+                    target_ty,
+                ))
+            }
+            CppExpr::QualifiedAccess(path, name) => {
+                // 限定名访问: ns1::ns2::name
+                // 从全局作用域开始逐级解析
+                let mut scope = self.global_scope();
+                for part in path {
+                    let syms = self.lookup_qualified(scope, part);
+                    if syms.is_empty() {
+                        return Err(format!("'{}' not found in qualified name", part));
+                    }
+                    // 找 namespace 或 class
+                    let mut found = None;
+                    for &s in &syms {
+                        if let Some(sym) = self.get_symbol(s) {
+                            if matches!(sym.kind, CxxSymbolKind::Class | CxxSymbolKind::Namespace) {
+                                found = Some(sym.scope);
+                                break;
+                            }
+                        }
+                    }
+                    scope = found.ok_or_else(|| {
+                        format!("'{}' is not a class or namespace", part)
+                    })?;
+                }
+                // 在最终作用域中查找目标名称
+                let syms = self.lookup_qualified(scope, name);
+                if syms.is_empty() {
+                    return Err(format!("'{}' not found in qualified name", name));
+                }
+                let sym = syms[0];
+                let sym_info = self
+                    .get_symbol(sym)
+                    .ok_or_else(|| "symbol not found".to_string())?;
+                let kind = sym_info.kind;
+                let ty = sym_info.ty.clone();
+                let expr_kind = match kind {
+                    CxxSymbolKind::Variable => HirExprKind::Global(sym),
+                    CxxSymbolKind::Function => HirExprKind::Global(sym),
+                    CxxSymbolKind::Method => HirExprKind::Global(sym),
+                    CxxSymbolKind::Class => {
+                        return Err(format!("'{}' is a type, not a value", name))
+                    }
+                    _ => return Err(format!("'{}' is not a value", name)),
+                };
+                Ok(self.add_expr(expr_kind, ty))
+            }
+            CppExpr::OpCall { op, args } => {
+                // 运算符调用: 按运算符名查找重载函数，转为普通调用
+                let op_name = op.encode_name();
+                let syms = self.lookup_unqualified(&format!("operator{}", op_name));
+                if syms.is_empty() {
+                    return Err(format!("no match for operator '{}'", op_name));
+                }
+                let sym = syms[0];
+                let sym_info = self
+                    .get_symbol(sym)
+                    .ok_or_else(|| "operator symbol not found".to_string())?;
+                let fn_ty = sym_info.ty.clone();
+                let ret_ty = match &fn_ty {
+                    CxxType::Function { ret, .. } => *ret.clone(),
+                    _ => CxxType::Void,
+                };
+                let is_member = matches!(sym_info.kind, CxxSymbolKind::Method);
+                let mut hir_args = Vec::new();
+                for a in args {
+                    hir_args.push(self.build_expr(a)?);
+                }
+                // 成员运算符：第一个参数是对象，需要作为 this 传递
+                if is_member && !hir_args.is_empty() {
+                    let object = hir_args.remove(0);
+                    let object_ty = self.hir.exprs[object.0].ty.clone();
+                    let object_for_this = match &object_ty {
+                        CxxType::Class(_) => self.add_expr(
+                            HirExprKind::AddressOf(object),
+                            CxxType::Pointer(Box::new(object_ty)),
+                        ),
+                        CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
+                            match inner.as_ref() {
+                                CxxType::Class(_) => self.add_expr(
+                                    HirExprKind::AddressOf(object),
+                                    CxxType::Pointer(inner.clone()),
+                                ),
+                                _ => object,
+                            }
+                        }
+                        _ => object,
+                    };
+                    let mut full_args = Vec::with_capacity(hir_args.len() + 1);
+                    full_args.push(object_for_this);
+                    full_args.extend(hir_args);
+                    hir_args = full_args;
+                }
+                Ok(self.add_expr(
+                    HirExprKind::Call {
+                        callee: HirCallee::Direct(sym),
+                        args: hir_args,
+                    },
+                    ret_ty,
+                ))
+            }
             other => Err(format!(
                 "unsupported expression kind: {:?}",
                 std::mem::discriminant(other)
@@ -1509,7 +1849,7 @@ impl Sema {
                 let body_stmts = self.build_body(body)?;
                 Ok(self.add_stmt(HirStmtKind::Compound(body_stmts)))
             }
-            CppStmt::LocalVar { ty, name, init } => {
+            CppStmt::LocalVar { ty, name, init, is_volatile } => {
                 let var_ty = self.convert_type(ty)?;
                 let init_id = match init {
                     Some(e) => Some(self.build_expr(e)?),
@@ -1521,10 +1861,76 @@ impl Sema {
                     var_ty,
                     Access::Private,
                 );
+                if *is_volatile {
+                    if let Some(s) = self.symbols.get_mut(sym.0) {
+                        s.is_volatile = true;
+                    }
+                }
                 Ok(self.add_stmt(HirStmtKind::Decl {
                     symbol: sym,
                     init: init_id,
                 }))
+            }
+            CppStmt::StaticLocal { ty, name, init, .. } => {
+                // 静态局部变量: 符号注册到全局作用域, 生成带 guard 的线程安全初始化
+                let var_ty = self.convert_type(ty)?;
+                let init_id = match init {
+                    Some(e) => Some(self.build_expr(e)?),
+                    None => None,
+                };
+                let counter = self.static_local_counter;
+                self.static_local_counter += 1;
+                let var_link = format!("__dcc_static_{}", counter);
+                let guard_link = format!("__dcc_static_guard_{}", counter);
+
+                // 切换到全局作用域注册变量符号
+                let saved_scope = self.current_scope;
+                self.current_scope = self.global_scope;
+                let var_sym = self.add_symbol(
+                    var_link.clone(),
+                    CxxSymbolKind::Variable,
+                    var_ty,
+                    Access::Private,
+                );
+                let guard_sym = self.add_symbol(
+                    guard_link.clone(),
+                    CxxSymbolKind::Variable,
+                    CxxType::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    Access::Private,
+                );
+                self.current_scope = saved_scope;
+
+                // 设置 linkage name
+                if let Some(s) = self.symbols.get_mut(var_sym.0) {
+                    s.linkage_name = Some(var_link.clone());
+                }
+                if let Some(s) = self.symbols.get_mut(guard_sym.0) {
+                    s.linkage_name = Some(guard_link.clone());
+                }
+                // 注册为顶层全局变量
+                self.hir.top_level.push(HirTopLevelDecl::Variable(var_sym));
+                self.hir.top_level.push(HirTopLevelDecl::Variable(guard_sym));
+                let _ = name;
+                Ok(self.add_stmt(HirStmtKind::StaticDecl {
+                    symbol: var_sym,
+                    guard_symbol: guard_sym,
+                    init: init_id,
+                }))
+            }
+            CppStmt::CoAwait(_e) => {
+                // 协程语句应在 AST 预转换阶段被转换为状态机形式, 此处不应再出现
+                Err("co_await not supported in this context".into())
+            }
+            CppStmt::CoYield(_e) => {
+                // 协程语句应在 AST 预转换阶段被转换为状态机形式, 此处不应再出现
+                Err("co_yield not supported in this context".into())
+            }
+            CppStmt::CoReturn(_e) => {
+                // 协程语句应在 AST 预转换阶段被转换为状态机形式, 此处不应再出现
+                Err("co_return not supported in this context".into())
             }
             CppStmt::ThisMember(_name, _stmt) => {
                 // this->member = ... 或 this->member(...) 可以在表达式层处理
@@ -1584,6 +1990,62 @@ impl Sema {
                 Ok(self.add_stmt(HirStmtKind::Try {
                     body: body_stmt,
                     handlers,
+                }))
+            }
+            CppStmt::DoWhile { body, cond } => {
+                // do-while: 先构建 body, 再构建条件表达式 (条件在 body
+                // 作用域内可见: `do { int i = 0; } while (i < 3);`)
+                let body_stmts = self.build_body(body)?;
+                let body_stmt = self.add_stmt(HirStmtKind::Compound(body_stmts));
+                let cond_id = self.build_expr(cond)?;
+                Ok(self.add_stmt(HirStmtKind::DoWhile {
+                    body: body_stmt,
+                    cond: cond_id,
+                }))
+            }
+            CppStmt::Goto(label) => Ok(self.add_stmt(HirStmtKind::Goto(label.clone()))),
+            CppStmt::Labeled { label, stmt } => {
+                // `label: stmt` — 标签只影响控制流, 语句本身照常构建
+                let inner = self.build_stmt(stmt)?;
+                Ok(self.add_stmt(HirStmtKind::Label(label.clone(), inner)))
+            }
+            CppStmt::Fallthrough { .. } => {
+                // [[fallthrough]]; 只是给诊断用的标记, 语义上是空操作
+                Ok(self.add_stmt(HirStmtKind::Fallthrough))
+            }
+            CppStmt::Switch { expr, arms, .. } => {
+                let cond_id = self.build_expr(expr)?;
+                // switch body 是一个独立作用域 (`switch (x) { case 1: int y; }`)
+                self.push_scope(ScopeKind::Block);
+                let mut body_stmts = Vec::new();
+                for (case_expr, case_body) in arms {
+                    let stmts = self.build_body(case_body)?;
+                    let body_stmt = self.add_stmt(HirStmtKind::Compound(stmts));
+                    match case_expr {
+                        Some(ce) => {
+                            // case 标签必须是编译期整型常量
+                            let value = crate::cpp::cpp_const_eval::eval_cpp_const(
+                                ce,
+                                &HashMap::new(),
+                            )
+                            .ok_or_else(|| {
+                                "case label must be an integer constant expression".to_string()
+                            })?;
+                            body_stmts.push(self.add_stmt(HirStmtKind::Case {
+                                value,
+                                body: body_stmt,
+                            }));
+                        }
+                        None => {
+                            body_stmts.push(self.add_stmt(HirStmtKind::Default(body_stmt)));
+                        }
+                    }
+                }
+                let body = self.add_stmt(HirStmtKind::Compound(body_stmts));
+                self.pop_scope();
+                Ok(self.add_stmt(HirStmtKind::Switch {
+                    cond: cond_id,
+                    body,
                 }))
             }
             CppStmt::Decl(_d) => Err("nested declaration statement not yet supported".into()),
@@ -2107,6 +2569,124 @@ impl Sema {
                 let _ = init_id; // HIR 顶层变量的 init 暂不存储
                 Ok(())
             }
+            CppDecl::Namespace { name, body } => {
+                // 命名空间: 注册 namespace 符号 + push namespace 作用域, 递归处理成员
+                if let Some(ns_name) = name {
+                    let ns_sym = self.add_symbol(
+                        ns_name.clone(),
+                        CxxSymbolKind::Namespace,
+                        CxxType::Void,
+                        Access::Public,
+                    );
+                    let ns_scope = self.push_scope(ScopeKind::Namespace);
+                    if let Some(s) = self.scopes.get_mut(ns_scope.0) {
+                        s.owner_symbol = Some(ns_sym);
+                    }
+                    if let Some(s) = self.symbols.get_mut(ns_sym.0) {
+                        s.scope = ns_scope;
+                    }
+                } else {
+                    // 匿名 namespace: 纯作用域（内部链接）
+                    self.push_scope(ScopeKind::Namespace);
+                }
+                for d in body {
+                    self.build_decl(d)?;
+                }
+                self.pop_scope();
+                Ok(())
+            }
+            CppDecl::OperatorFn {
+                class,
+                op,
+                params,
+                body,
+                ret,
+                is_unary,
+            } => {
+                // 运算符重载函数: 全局或类外成员运算符, 符号名 operator<encode>
+                let ret_ty = self.convert_type(ret)?;
+                let mut param_tys = Vec::new();
+                for (pname, pty) in params {
+                    let ct = self.convert_type(pty)?;
+                    param_tys.push((pname.clone(), ct));
+                }
+                let sym_name = format!("operator{}", op.encode_name());
+                if let Some(class_name) = class {
+                    // 类外成员运算符定义: 查找类, 以 Method 注册
+                    let class_syms = self.lookup_unqualified(class_name);
+                    let class_id = class_syms
+                        .iter()
+                        .find_map(|&s| {
+                            let sym = self.get_symbol(s)?;
+                            if matches!(sym.kind, CxxSymbolKind::Class) {
+                                Some(ClassId::from(s))
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| {
+                            format!("operator class '{}' not found", class_name)
+                        })?;
+                    let owner = class_id.as_symbol();
+                    let saved_class = self.current_class;
+                    self.current_class = Some(class_id);
+                    let method_sym = self.build_function(
+                        &sym_name,
+                        ret_ty,
+                        &param_tys,
+                        body,
+                        CxxSymbolKind::Method,
+                        Access::Public,
+                        Some(owner),
+                        false,
+                    )?;
+                    self.current_class = saved_class;
+                    if let Some(info) = self.get_class_info_mut(class_id) {
+                        info.methods.push(method_sym);
+                    }
+                    Ok(())
+                } else {
+                    // 全局运算符函数
+                    let fn_sym = self.build_function(
+                        &sym_name,
+                        ret_ty,
+                        &param_tys,
+                        body,
+                        CxxSymbolKind::Function,
+                        Access::Public,
+                        None,
+                        false,
+                    )?;
+                    self.hir.top_level.push(HirTopLevelDecl::Function(fn_sym));
+                    let _ = is_unary;
+                    Ok(())
+                }
+            }
+            CppDecl::ExportBlock(inner) => {
+                // export { ... }: 内部声明正常处理
+                for d in inner {
+                    self.build_decl(d)?;
+                }
+                Ok(())
+            }
+            CppDecl::Template { decl, .. }
+            | CppDecl::PartialSpec { decl, .. } => {
+                // 模板声明通常已在 native.rs 被过滤, 此处递归处理内部声明
+                self.build_decl(decl)
+            }
+            CppDecl::Concept { .. }
+            | CppDecl::Module { .. }
+            | CppDecl::Import { .. }
+            | CppDecl::PrivateFragment
+            | CppDecl::RawExternC(_)
+            | CppDecl::Using { .. }
+            | CppDecl::UsingEnum { .. }
+            | CppDecl::Typedef { .. }
+            | CppDecl::InheritingCtor { .. }
+            | CppDecl::Empty => {
+                // no-op: 模块/概念/typedef 等在 native 路径降级为占位
+                Ok(())
+            }
             CppDecl::MemberFn { .. }
             | CppDecl::Ctor { .. }
             | CppDecl::Dtor { .. }
@@ -2120,6 +2700,39 @@ impl Sema {
 
     fn build_class_member(&mut self, member: &CppDecl, _class_id: ClassId) -> Result<(), String> {
         match member {
+            CppDecl::OperatorFn {
+                class: _,
+                op,
+                params,
+                body,
+                ret,
+                is_unary: _,
+            } => {
+                // 类内运算符重载: 以 Method 注册, 符号名 operator<encode>
+                let ret_ty = self.convert_type(ret)?;
+                let mut param_tys = Vec::new();
+                for (pname, pty) in params {
+                    let ct = self.convert_type(pty)?;
+                    param_tys.push((pname.clone(), ct));
+                }
+                let owner = self.current_class.unwrap().as_symbol();
+                let class_id = self.current_class.unwrap();
+                let sym_name = format!("operator{}", op.encode_name());
+                let method_sym = self.build_function(
+                    &sym_name,
+                    ret_ty,
+                    &param_tys,
+                    body,
+                    CxxSymbolKind::Method,
+                    Access::Public,
+                    Some(owner),
+                    false,
+                )?;
+                if let Some(info) = self.get_class_info_mut(class_id) {
+                    info.methods.push(method_sym);
+                }
+                Ok(())
+            }
             CppDecl::MemberVar { ty, name, .. } => {
                 let field_ty = self.convert_type(ty)?;
                 let field_sym = self.add_symbol(
@@ -2464,26 +3077,49 @@ impl Sema {
 
     // --- 入口方法 ---
 
+    /// 第一遍注册：递归扫描顶层声明，为所有类（含 namespace 内）注册前向符号。
+    fn register_classes_deep(&mut self, decls: &[CppDecl]) {
+        for decl in decls {
+            match decl {
+                CppDecl::Class(c) => {
+                    let access = if c.is_struct {
+                        Access::Public
+                    } else {
+                        Access::Public
+                    };
+                    // 只添加 class 符号到当前作用域
+                    let class_sym = self.add_symbol(
+                        c.name.clone(),
+                        CxxSymbolKind::Class,
+                        CxxType::Void,
+                        access,
+                    );
+                    let class_id = ClassId(class_sym.0);
+                    // 更新类型
+                    if let Some(sym) = self.symbols.get_mut(class_sym.0) {
+                        sym.ty = CxxType::Class(class_id);
+                    }
+                    // 确保 class_infos 长度足够
+                    while self.class_infos.len() <= class_id.0 {
+                        self.class_infos.push(ClassInfo::default());
+                    }
+                }
+                CppDecl::Namespace { body, .. } => {
+                    // 递归进入 namespace 作用域注册（不注册 namespace 符号，由第二遍处理）
+                    self.push_scope(ScopeKind::Namespace);
+                    self.register_classes_deep(body);
+                    self.pop_scope();
+                }
+                CppDecl::ExportBlock(inner) => self.register_classes_deep(inner),
+                _ => {}
+            }
+        }
+    }
+
     /// 将 parser 的 AST 声明列表转换为 HIR。
     pub fn build_hir_from_decls(&mut self, decls: &[CppDecl]) -> Result<(), String> {
         // 第一遍：注册所有类名（前向声明），只添加符号，不 push scope
-        for decl in decls {
-            if let CppDecl::Class(c) = decl {
-                let access = if c.is_struct { Access::Public } else { Access::Public };
-                // 只添加 class 符号到当前（全局）作用域
-                let class_sym =
-                    self.add_symbol(c.name.clone(), CxxSymbolKind::Class, CxxType::Void, access);
-                let class_id = ClassId(class_sym.0);
-                // 更新类型
-                if let Some(sym) = self.symbols.get_mut(class_sym.0) {
-                    sym.ty = CxxType::Class(class_id);
-                }
-                // 确保 class_infos 长度足够
-                while self.class_infos.len() <= class_id.0 {
-                    self.class_infos.push(ClassInfo::default());
-                }
-            }
-        }
+        self.register_classes_deep(decls);
 
         // 第二遍：完整构建
         for decl in decls {
@@ -2674,6 +3310,7 @@ mod tests {
                     ty: MangleType::Int,
                     name: "value".into(),
                     is_mutable: false,
+                    is_volatile: false,
                 },
                 CppDecl::MemberFn {
                     class: "Counter".into(),
@@ -2795,6 +3432,7 @@ mod tests {
                         ty: MangleType::Int,
                         name: "s".into(),
                         init: Some(CppExpr::IntLit(0)),
+                        is_volatile: false,
                     },
                     CppStmt::For {
                         init: Some(Box::new(CppStmt::Expr(CppExpr::BinOp(
@@ -3081,6 +3719,7 @@ mod tests {
                         ty: MangleType::Int,
                         name: "b".into(),
                         is_mutable: false,
+                        is_volatile: false,
                     },
                     CppDecl::Ctor {
                         class: "Base".into(),
@@ -3111,6 +3750,7 @@ mod tests {
                         ty: MangleType::Int,
                         name: "d".into(),
                         is_mutable: false,
+                        is_volatile: false,
                     },
                     CppDecl::Ctor {
                         class: "Derived".into(),
@@ -3171,6 +3811,7 @@ mod tests {
                     ty: MangleType::Int,
                     name: "x".into(),
                     is_mutable: false,
+                    is_volatile: false,
                 },
                 CppDecl::Ctor {
                     class: "Foo".into(),
@@ -3402,6 +4043,7 @@ mod tests {
                     ty: MangleType::Int,
                     name: "b".into(),
                     is_mutable: false,
+                    is_volatile: false,
                 }],
             }),
             CppDecl::Class(ClassDecl {
@@ -3477,6 +4119,7 @@ mod tests {
                     ty: MangleType::Int,
                     name: "x".into(),
                     is_mutable: false,
+                    is_volatile: false,
                 }],
             }),
             CppDecl::Class(ClassDecl {
@@ -3493,6 +4136,7 @@ mod tests {
                     ty: MangleType::Int,
                     name: "y".into(),
                     is_mutable: false,
+                    is_volatile: false,
                 }],
             }),
         ];

@@ -16,13 +16,28 @@ Thumbs.db
 
 # WorkBuddy
 .workbuddy/
+.codebuddy/
+.codebuddy-cn/
+.codebuddy-server
+.codebuddy-server-cn
 
 # Qoder IDE
 .qoder/
+.qoder-cn/
+.qoder-server
+.qoder-cn-server
 
 # Trae IDE workspace
 .trae/
+.trae-cn/
+.trae-server
+.trae-cn-server
 
+# Zcode IDE workspace
+.zcode
+.zcode-cn
+.zcode-server
+.zcode-cn-server
 # GCC torture and dg Test Suites (populated by scripts/setup_torture.sh and gcc-dg.yml workflow)
 tests/gcc-torture/
 tests/gcc-dg/

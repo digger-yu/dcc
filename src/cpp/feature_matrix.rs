@@ -143,6 +143,13 @@ impl CppFeature {
                 | CppFeature::ClassTemplate
                 | CppFeature::Exception
                 | CppFeature::DtorCleanup
+                | CppFeature::NewDelete
+                | CppFeature::InitializerList
+                | CppFeature::Namespace
+                | CppFeature::OperatorOverload
+                | CppFeature::StaticInitGuard
+                | CppFeature::PartialSpecialization
+                | CppFeature::Concept
         )
     }
 }

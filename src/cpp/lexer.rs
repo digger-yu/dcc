@@ -275,12 +275,17 @@ impl<'a> CppLexer<'a> {
         }
     }
 
-    /// 当前 span
+    /// 构造已扫描 token 的 span。
+    ///
+    /// 约定: 各 `next_tok` 分支先把 `pos`/`col` 前进 token 长度, 再调用
+    /// 本函数, 因此 token 起始列 = `self.col - len`。之前直接取 `self.col`
+    /// 导致所有 C++ 诊断的列号整体右移一个 token 长度 (例如 `case` 关键字
+    /// 的 span 指向它后面的空白), 与 C 端诊断位置不一致。
     fn mk_span(&self, len: u32) -> Span {
         Span {
             file: self.file.clone(),
             line: self.line,
-            col: self.col,
+            col: self.col.saturating_sub(len),
             len,
         }
     }
@@ -631,11 +636,14 @@ impl<'a> CppLexer<'a> {
             while self.pos < self.src.len() && self.src[self.pos] != q {
                 if self.src[self.pos] == b'\\' && self.pos + 1 < self.src.len() {
                     self.pos += 1;
+                    self.col += 1;
                 }
                 self.pos += 1;
+                self.col += 1;
             }
             if self.pos < self.src.len() {
                 self.pos += 1;
+                self.col += 1;
             }
             let len = (self.pos - start) as u32;
             let span = self.mk_span(len);

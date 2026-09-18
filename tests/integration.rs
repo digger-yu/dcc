@@ -8685,6 +8685,90 @@ fn m17_volatile_member() {
     let _ = fs::remove_file(_obj);
 }
 
+/// Test C++ native SSA control flow lowering
+/// (for / do-while / switch / break / continue / goto / label)
+#[test]
+#[cfg(unix)]
+fn cpp_ssa_control_flow() {
+    let src = include_str!("fixtures/cpp/ssa_control_flow.cpp");
+    let (out, obj) = run_cpp_object_test("cpp-ssa-control-flow", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!(
+        "dcc-cpp-ssa-control-flow-{}",
+        std::process::id()
+    ));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run control-flow binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        0,
+        "cpp_ssa_control_flow exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// C++ volatile semantics: scalar volatile locals must not be registerized
+/// (they must be loaded/stored from memory on every access).
+#[test]
+#[cfg(unix)]
+fn cpp_ssa_volatile_semantics() {
+    let src = include_str!("fixtures/cpp/ssa_volatile_semantics.cpp");
+    let (out, obj) = run_cpp_object_test("cpp-ssa-volatile-semantics", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!(
+        "dcc-cpp-ssa-volatile-semantics-{}",
+        std::process::id()
+    ));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run volatile binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        0,
+        "cpp_ssa_volatile_semantics exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// M17.0: vtable/typeinfo/member-offset 符号多文件链接不重复定义
 /// 两个 TU 包含相同 class 定义，链接器应通过 weak 解析而非报 multiple definition
 #[test]

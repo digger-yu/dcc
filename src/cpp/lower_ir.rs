@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, QualType, Type, UnOp};
+use crate::ast::{BinOp, QualifierFlags, QualType, Type, UnOp};
 use crate::diagnostics::Span;
 use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, ThisAdjust, VTableComponent};
 use crate::cpp::hir::*;
@@ -113,6 +113,17 @@ impl<'a> IrLowerer<'a> {
         // 先收集所有 vtable 数据（从已注册的 ABI 描述符）
         self.emit_vtables();
 
+        // 收集全局变量（HIR 顶层声明中的 Variable）
+        for decl in &self.hir.top_level {
+            if let HirTopLevelDecl::Variable(sym_id) = decl {
+                let sym = self.get_symbol(*sym_id)?;
+                let name = self.symbol_name(sym);
+                if !self.output.globals.contains(&name) {
+                    self.output.globals.push(name);
+                }
+            }
+        }
+
         for func in &self.hir.functions {
             let ssa_func = self.lower_function(func)?;
             self.output.functions.push(ssa_func);
@@ -169,6 +180,11 @@ impl<'a> IrLowerer<'a> {
         self.symbols
             .get(id.0)
             .ok_or_else(|| LowerIrError::Internal(format!("symbol {} not found", id.0)))
+    }
+
+    /// 获取符号的有效名称（优先使用 linkage_name，否则用 name）
+    fn symbol_name(&self, sym: &CxxSymbol) -> String {
+        sym.linkage_name.clone().unwrap_or_else(|| sym.name.clone())
     }
 
     // === type conversion: CxxType -> ast::Type ===
@@ -495,6 +511,14 @@ struct FuncLowerer<'a, 'b> {
     versions: HashMap<String, u32>,
     /// BB 计数器
     bb_counter: u32,
+    /// break 目标栈（循环/switch 退出块）
+    break_stack: Vec<String>,
+    /// continue 目标栈（循环继续块）
+    continue_stack: Vec<String>,
+    /// label 名 -> BB 名映射（支持 goto 前向引用）
+    label_map: HashMap<String, String>,
+    /// init_list 临时变量计数器
+    init_list_counter: u32,
 }
 
 impl<'a, 'b> FuncLowerer<'a, 'b> {
@@ -503,10 +527,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         func: &'a HirFunction,
     ) -> Result<Self, LowerIrError> {
         let sym = lowerer.get_symbol(func.symbol)?;
+        let fn_name = lowerer.symbol_name(sym);
         let ret_ty = lowerer.lower_type(&func.ret_ty)?;
         let span = dummy_span();
 
-        let mut ssa = Function::new(sym.name.clone(), ret_ty.clone(), span);
+        let mut ssa = Function::new(fn_name, ret_ty.clone(), span);
 
         // 返回块 (void 函数或空函数收尾用)
         let return_bb = ssa.unique_bb("return");
@@ -537,6 +562,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             ssa.params.push(this_var.clone());
             ssa.local_types.insert("this".to_string(), this_ty);
             ssa.original_locals.insert("this".to_string());
+            ssa.local_quals.insert("this".to_string(), QualifierFlags::NONE);
             locals.insert("this".to_string(), this_var);
             versions.insert("this".to_string(), 0);
         }
@@ -554,6 +580,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             ssa.params.push(var.clone());
             ssa.local_types.insert(param_sym.name.clone(), param_ty);
             ssa.original_locals.insert(param_sym.name.clone());
+            let param_quals = if param_sym.is_volatile {
+                QualifierFlags::VOLATILE
+            } else {
+                QualifierFlags::NONE
+            };
+            ssa.local_quals.insert(param_sym.name.clone(), param_quals);
             locals.insert(param_sym.name.clone(), var);
             versions.insert(param_sym.name.clone(), 0);
             let _ = i;
@@ -570,6 +602,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             return_bb,
             versions,
             bb_counter: 0,
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
+            label_map: HashMap::new(),
+            init_list_counter: 0,
         })
     }
 
@@ -648,6 +684,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         &self.ssa.blocks[&self.current_bb]
     }
 
+    /// Collect all blocks whose terminator is Unreachable.
+    /// Used to find implicit fall-through exits after lowering a statement.
+    fn unreachable_blocks(&self) -> Vec<String> {
+        let mut result = Vec::new();
+        for (name, bb) in &self.ssa.blocks {
+            if matches!(bb.term, Terminator::Unreachable) {
+                result.push(name.clone());
+            }
+        }
+        result
+    }
+
     fn push_inst(&mut self, inst: Inst) {
         let bb = self.current_bb.clone();
         self.ssa.blocks.get_mut(&bb).unwrap().insts.push(inst);
@@ -683,7 +731,63 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::Local(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 let name = sym.name.clone();
+                let sym_is_volatile = sym.is_volatile;
+                let sym_ty = sym.ty.clone();
+                let linkage_name = sym.linkage_name.clone();
+                drop(sym);
+
+                // 如果有 linkage_name，说明是静态局部变量的引用，走全局变量路径
+                if let Some(lname) = linkage_name {
+                    let lowered_ty = self.lowerer.lower_type(&sym_ty)?;
+                    let ptr_ty = Type::Ptr(Box::new(QualType::new(lowered_ty.clone())));
+                    let addr = Operand::SymAddr(lname, ptr_ty);
+                    // 加载值
+                    let dest = self.fresh_var("static_load", lowered_ty.clone());
+                    let load_inst = Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::Load {
+                            e: addr,
+                            ty: lowered_ty,
+                            is_volatile: sym_is_volatile,
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(load_inst);
+                    return Ok(Operand::Var(dest));
+                }
+
                 if let Some(var) = self.locals.get(&name) {
+                    // volatile 标量局部变量: 从栈内存加载, 不走 SSA 版本
+                    // 复合类型(数组/结构体/联合体)直接返回 SSA 变量:
+                    // 它们的子访问 (MemberLoad/IndexLoad) 已带 is_volatile 标志
+                    if sym_is_volatile {
+                        let ty = self.lowerer.lower_type(&sym_ty)?;
+                        match ty {
+                            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                                return Ok(Operand::Var(var.clone()));
+                            }
+                            _ => {}
+                        }
+                        let addr = self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                        let addr_inst = Inst {
+                            dest: Some(addr.clone()),
+                            kind: InstKind::AddrOf { base: name.clone() },
+                            span: dummy_span(),
+                        };
+                        self.push_inst(addr_inst);
+                        let dest = self.fresh_var("vload", ty);
+                        let load_inst = Inst {
+                            dest: Some(dest.clone()),
+                            kind: InstKind::Load {
+                                e: Operand::Var(addr),
+                                ty: dest.ty.clone(),
+                                is_volatile: true,
+                            },
+                            span: dummy_span(),
+                        };
+                        self.push_inst(load_inst);
+                        return Ok(Operand::Var(dest));
+                    }
                     Ok(Operand::Var(var.clone()))
                 } else {
                     Err(LowerIrError::Internal(format!(
@@ -694,7 +798,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
-                let name = sym.name.clone();
+                let name = self.lowerer.symbol_name(sym);
                 let ty = self.lowerer.lower_type(&sym.ty)?;
                 // 全局变量地址
                 Ok(Operand::SymAddr(name, ty))
@@ -718,8 +822,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.lower_unary_op(*op, *operand, &expr_ty)
             }
 
+            HirExprKind::Index { array, index } => {
+                self.lower_index(*array, *index, &expr_ty)
+            }
+
             HirExprKind::Assign { lhs, rhs } => {
-                self.lower_assign(*lhs, *rhs)
+                let rhs_val = self.lower_expr(*rhs)?;
+                self.lower_assign(*lhs, rhs_val)
+            }
+
+            HirExprKind::CompoundAssign { op, lhs, rhs } => {
+                self.lower_compound_assign(*op, *lhs, *rhs)
             }
 
             HirExprKind::Call { callee, args } => {
@@ -786,6 +899,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirExprKind::Throw { object, ty } => self.lower_throw(*object, ty),
 
+            HirExprKind::New {
+                ty,
+                args,
+                placement,
+                is_array,
+            } => self.lower_new(ty, args, placement.as_deref(), *is_array),
+
+            HirExprKind::Delete { ptr, is_array } => {
+                self.lower_delete(*ptr, *is_array)
+            }
+
             HirExprKind::Conditional {
                 cond,
                 then_expr,
@@ -806,6 +930,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 });
                 Ok(Operand::Var(result))
+            }
+
+            HirExprKind::Comma { lhs, rhs } => {
+                // 逗号表达式: 先求 lhs (丢弃结果), 再求 rhs (作为结果)
+                let _ = self.lower_expr(*lhs)?;
+                self.lower_expr(*rhs)
+            }
+
+            HirExprKind::InitList { elems, target_ty: _ } => {
+                self.lower_init_list(elems, &expr_ty)
             }
 
             _ => Err(LowerIrError::Unsupported(format!(
@@ -884,7 +1018,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             _ => return Err(LowerIrError::Unsupported(format!("binary op {:?}", op))),
         };
 
-        let dest = self.fresh_var("tmp", result_ty.clone());
+        let dest = self.fresh_var("_tmp", result_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Bin {
@@ -932,7 +1066,6 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Ok(Operand::Var(dest))
             }
             PreInc | PreDec | PostInc | PostDec => {
-                // x++/++x 等目前只支持局部变量 (SSA 版本重绑定)
                 let operand_expr = self.get_expr(operand_id)?;
                 let sym_id = match &operand_expr.kind {
                     HirExprKind::Local(sid) => *sid,
@@ -944,6 +1077,84 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 let sym = self.lowerer.get_symbol(sym_id)?;
                 let name = sym.name.clone();
+                let sym_is_volatile = sym.is_volatile;
+                let sym_ty = sym.ty.clone();
+                let ty = self.lowerer.lower_type(&sym_ty)?;
+
+                // volatile 标量局部变量: 走内存路径 (load -> op -> store)
+                if sym_is_volatile {
+                    match &ty {
+                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
+                        _ => {
+                            let addr = self.fresh_var(
+                                "vaddr",
+                                Type::Ptr(Box::new(QualType::new(ty.clone()))),
+                            );
+                            let addr_inst = Inst {
+                                dest: Some(addr.clone()),
+                                kind: InstKind::AddrOf { base: name.clone() },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(addr_inst);
+                            let load_dest = self.fresh_var("vload", ty.clone());
+                            let load_inst = Inst {
+                                dest: Some(load_dest.clone()),
+                                kind: InstKind::Load {
+                                    e: Operand::Var(addr.clone()),
+                                    ty: ty.clone(),
+                                    is_volatile: true,
+                                },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(load_inst);
+                            let ast_op = match op {
+                                PreInc | PostInc => BinOp::Add,
+                                PreDec | PostDec => BinOp::Sub,
+                                _ => unreachable!(),
+                            };
+                            let new_val = self.fresh_var(&name, ty.clone());
+                            self.push_inst(Inst {
+                                dest: Some(new_val.clone()),
+                                kind: InstKind::Bin {
+                                    op: ast_op,
+                                    l: Operand::Var(load_dest.clone()),
+                                    r: Operand::Int(1),
+                                },
+                                span: dummy_span(),
+                            });
+                            let store_inst = Inst {
+                                dest: None,
+                                kind: InstKind::Store {
+                                    e: Operand::Var(addr),
+                                    src: Operand::Var(new_val.clone()),
+                                    is_volatile: true,
+                                },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(store_inst);
+                            self.locals.insert(name, new_val.clone());
+                            // 前缀返回新值; 后缀要把"自增前读到的值"固化到独立
+                            // 临时变量, 避免 SSA 重建按 base 名解析成新值。
+                            return Ok(Operand::Var(if matches!(op, PreInc | PreDec) {
+                                new_val
+                            } else {
+                                let post = self.fresh_tmp("postinc", ty.clone());
+                                self.push_inst(Inst {
+                                    dest: Some(post.clone()),
+                                    kind: InstKind::Bin {
+                                        op: BinOp::Add,
+                                        l: Operand::Var(load_dest),
+                                        r: Operand::Int(0),
+                                    },
+                                    span: dummy_span(),
+                                });
+                                post
+                            }));
+                        }
+                    }
+                }
+
+                // 非 volatile: 纯 SSA 版本重绑定
                 let old = match self.locals.get(&name) {
                     Some(v) => v.clone(),
                     None => {
@@ -970,12 +1181,25 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 });
                 self.locals.insert(name, new_var.clone());
-                // 前缀返回新值, 后缀返回旧值 (简化为同名旧版本变量)
-                Ok(Operand::Var(if matches!(op, PreInc | PreDec) {
-                    new_var
+                // 前缀返回新值, 后缀返回旧值。
+                // 后缀不能直接返回 `old`: SSA→AST 重建时 Operand::Var 只按
+                // base 名解析到"当前版本", 此时 x 已经是新值, 于是 `a = x++`
+                // 会拿到自增后的值。必须先把旧值固化到一个独立命名的临时变量。
+                if matches!(op, PreInc | PreDec) {
+                    Ok(Operand::Var(new_var))
                 } else {
-                    old
-                }))
+                    let post = self.fresh_tmp("postinc", result_ty.clone());
+                    self.push_inst(Inst {
+                        dest: Some(post.clone()),
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: Operand::Var(old),
+                            r: Operand::Int(0),
+                        },
+                        span: dummy_span(),
+                    });
+                    Ok(Operand::Var(post))
+                }
             }
         }
     }
@@ -1089,28 +1313,54 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     fn lower_assign(
         &mut self,
         lhs_id: HirExprId,
-        rhs_id: HirExprId,
+        rhs: Operand,
     ) -> Result<Operand, LowerIrError> {
-        let rhs = self.lower_expr(rhs_id)?;
         let lhs_expr = self.get_expr(lhs_id)?;
 
         match &lhs_expr.kind {
             HirExprKind::Local(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 let name = sym.name.clone();
-                // 创建新版本变量（SSA 赋值）
-                let ty = self.lowerer.lower_type(&sym.ty)?;
+                let sym_is_volatile = sym.is_volatile;
+                let sym_ty = sym.ty.clone();
+                let ty = self.lowerer.lower_type(&sym_ty)?;
                 let new_var = self.fresh_var(&name, ty.clone());
 
                 let inst = Inst {
                     dest: Some(new_var.clone()),
                     kind: InstKind::Cast {
-                        ty,
+                        ty: ty.clone(),
                         e: rhs,
                     },
                     span: dummy_span(),
                 };
                 self.push_inst(inst);
+
+                // volatile 标量局部变量: 赋值后写回内存
+                if sym_is_volatile {
+                    match &ty {
+                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
+                        _ => {
+                            let addr = self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                            let addr_inst = Inst {
+                                dest: Some(addr.clone()),
+                                kind: InstKind::AddrOf { base: name.clone() },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(addr_inst);
+                            let store_inst = Inst {
+                                dest: None,
+                                kind: InstKind::Store {
+                                    e: Operand::Var(addr),
+                                    src: Operand::Var(new_var.clone()),
+                                    is_volatile: true,
+                                },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(store_inst);
+                        }
+                    }
+                }
 
                 self.locals.insert(name, new_var.clone());
                 Ok(Operand::Var(new_var))
@@ -1135,11 +1385,65 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::FieldAccess { object, field } => {
                 self.lower_field_store(*object, *field, rhs)
             }
+            HirExprKind::Index { array, index } => {
+                // a[i] = v → IndexStore
+                let arr = self.lower_expr(*array)?;
+                let idx = self.lower_expr(*index)?;
+                let is_volatile = self.index_is_volatile(*array);
+                let inst = Inst {
+                    dest: None,
+                    kind: InstKind::IndexStore {
+                        arr,
+                        idx,
+                        src: rhs,
+                        is_volatile,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(inst);
+                Ok(Operand::Void)
+            }
+            // sema 把 `*p` 统一表示为 `UnaryOp { op: Deref }`, 因此
+            // `*p = v` 会走到这里而不是上面的 Dereference 分支。
+            HirExprKind::UnaryOp {
+                op: crate::cpp::hir::UnaryOp::Deref,
+                operand,
+            } => {
+                let ptr = self.lower_expr(*operand)?;
+                let inner_expr = self.get_expr(*operand)?;
+                let is_volatile = inner_expr.ty.is_volatile();
+                let inst = Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: ptr,
+                        src: rhs,
+                        is_volatile,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(inst);
+                Ok(Operand::Void)
+            }
             _ => Err(LowerIrError::Unsupported(format!(
                 "assignment to lvalue kind: {:?}",
                 expr_kind_name(&lhs_expr.kind)
             ))),
         }
+    }
+
+    // --- compound assignment ---
+
+    fn lower_compound_assign(
+        &mut self,
+        op: BinaryOp,
+        lhs_id: HirExprId,
+        rhs_id: HirExprId,
+    ) -> Result<Operand, LowerIrError> {
+        // 分解为: tmp = lhs op rhs; lhs = tmp
+        let lhs_expr = self.get_expr(lhs_id)?;
+        let result_ty = self.lowerer.lower_type(&lhs_expr.ty)?;
+        let value = self.lower_binary_op(op, lhs_id, rhs_id, &result_ty)?;
+        self.lower_assign(lhs_id, value)
     }
 
     // --- call ---
@@ -1153,7 +1457,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         match callee {
             HirCallee::Direct(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
-                let fn_name = sym.name.clone();
+                let fn_name = self.lowerer.symbol_name(sym);
                 let fn_ty = self.lowerer.lower_type(&sym.ty)?;
 
                 // 判断是否为成员方法（有 owner class）
@@ -1657,8 +1961,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         match &inner_expr.kind {
             HirExprKind::Local(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
-                // Stage 3 简化：局部变量地址 → SymAddr 风格
-                Ok(Operand::SymAddr(sym.name.clone(), result_ty.clone()))
+                let name = sym.name.clone();
+                // 局部变量地址 → AddrOf 指令
+                let dest = self.fresh_var("addr", result_ty.clone());
+                let inst = Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::AddrOf { base: name },
+                    span: dummy_span(),
+                };
+                self.push_inst(inst);
+                Ok(Operand::Var(dest))
             }
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
@@ -1672,6 +1984,77 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 "address of complex expression".to_string(),
             )),
         }
+    }
+
+    /// 生成唯一命名的临时 SSA 变量。
+    ///
+    /// `fresh_var` 用 (base, version) 区分同名变量, 而同一个 base 的所有
+    /// version 共享同一个栈槽 —— 这对"真正的局部变量"是对的, 但用于表达式
+    /// 临时值时会让同时存活的两个临时值互相覆盖 (如 `a[0] + a[1]` 的两次
+    /// 下标读取都写到同一个槽)。临时值因此必须带自增序号, 与 C 前端
+    /// `Builder::fresh` 的 `_t<n>_<base>` 命名保持一致。
+    fn fresh_tmp(&mut self, base: &str, ty: Type) -> SsaVar {
+        let n = self.versions.get("__tmp_seq").copied().unwrap_or(0) + 1;
+        self.versions.insert("__tmp_seq".to_string(), n);
+        SsaVar {
+            base: format!("_t{}_{}", n, base),
+            version: 0,
+            ty,
+            span: dummy_span(),
+        }
+    }
+
+    /// 判断下标访问 `a[i]` 是否为 volatile 访问。
+    ///
+    /// `CxxType` 目前不在标量类型上携带 cv 限定符, 因此 volatile 信息挂在
+    /// 符号上 (`CxxSymbol::is_volatile`)。这里对数组基址回溯到它对应的
+    /// 局部/全局符号来判定, 保证 `volatile int a[2]` 的元素读写都带
+    /// `is_volatile`, 不会被 DCE/DSE 消除。
+    fn index_is_volatile(&self, array_id: HirExprId) -> bool {
+        let expr = match self.get_expr(array_id) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        // 指针/数组元素本身带 volatile (如 `volatile int *p`)
+        if expr.ty.is_volatile() {
+            return true;
+        }
+        match &expr.kind {
+            HirExprKind::Local(sym_id) | HirExprKind::Global(sym_id) => self
+                .lowerer
+                .get_symbol(*sym_id)
+                .map(|s| s.is_volatile)
+                .unwrap_or(false),
+            HirExprKind::FieldAccess { object, field } => {
+                let _ = field;
+                self.index_is_volatile(*object)
+            }
+            _ => false,
+        }
+    }
+
+    /// 降低下标访问 `a[i]`（读）→ `IndexLoad`
+    fn lower_index(
+        &mut self,
+        array_id: HirExprId,
+        index_id: HirExprId,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        let arr = self.lower_expr(array_id)?;
+        let idx = self.lower_expr(index_id)?;
+        let is_volatile = self.index_is_volatile(array_id);
+        let dest = self.fresh_tmp("idx", result_ty.clone());
+        let inst = Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::IndexLoad {
+                arr,
+                idx,
+                is_volatile,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(inst);
+        Ok(Operand::Var(dest))
     }
 
     fn lower_dereference(
@@ -2181,10 +2564,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let class_sym = self.lowerer.get_symbol(class.as_symbol())?;
 
         // 构造函数名：<class>_<variant>
+        let class_name = self.lowerer.symbol_name(class_sym);
         let ctor_name = match variant {
-            CtorVariant::Complete => format!("{}_ctor_complete", class_sym.name),
-            CtorVariant::Base => format!("{}_ctor_base", class_sym.name),
-            CtorVariant::Allocating => format!("{}_ctor_allocating", class_sym.name),
+            CtorVariant::Complete => format!("{}_ctor_complete", class_name),
+            CtorVariant::Base => format!("{}_ctor_base", class_name),
+            CtorVariant::Allocating => format!("{}_ctor_allocating", class_name),
         };
 
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
@@ -2223,10 +2607,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let class_sym = self.lowerer.get_symbol(class.as_symbol())?;
 
         // 析构函数名：<class>_dtor_<variant>
+        let class_name = self.lowerer.symbol_name(class_sym);
         let dtor_name = match variant {
-            DtorVariant::Complete => format!("{}_dtor_complete", class_sym.name),
-            DtorVariant::Base => format!("{}_dtor_base", class_sym.name),
-            DtorVariant::Deleting => format!("{}_dtor_deleting", class_sym.name),
+            DtorVariant::Complete => format!("{}_dtor_complete", class_name),
+            DtorVariant::Base => format!("{}_dtor_base", class_name),
+            DtorVariant::Deleting => format!("{}_dtor_deleting", class_name),
         };
 
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
@@ -2368,6 +2753,263 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
     }
 
+    // --- new / delete ---
+
+    /// new 表达式 lowering。
+    ///
+    /// - scalar new: 调用 operator new(size_t) + 可选构造函数
+    /// - array new: 调用 operator new[](size_t)
+    /// - placement new: 不分配内存，直接在指定地址构造
+    fn lower_new(
+        &mut self,
+        ty: &CxxType,
+        args: &[HirExprId],
+        placement: Option<&[HirExprId]>,
+        is_array: bool,
+    ) -> Result<Operand, LowerIrError> {
+        use crate::cpp::runtime::CxxRuntimeSymbol;
+
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let ret_ty = self.lowerer.lower_type(&CxxType::Pointer(Box::new(ty.clone())))?;
+
+        if let Some(place_args) = placement {
+            // placement new: 不分配内存，直接在 ptr 上构造
+            // 返回值就是 placement 地址（cast 到目标类型指针）
+            let ptr_val = self.lower_expr(place_args[0])?;
+
+            // 如果是类类型且有构造参数，调用构造函数
+            if let CxxType::Class(class_id) = ty {
+                if !args.is_empty() {
+                    // 构造函数需要 this 指针，placement ptr 就是 this
+                    self.lower_construct(*class_id, place_args[0], args, CtorVariant::Complete)?;
+                }
+            }
+
+            // 把 void* / 其他指针类型 cast 到目标类型指针
+            let typed_ptr_var = self.fresh_var("new_result", ret_ty.clone());
+            let cast_inst = Inst {
+                dest: Some(typed_ptr_var.clone()),
+                kind: InstKind::Cast {
+                    ty: ret_ty,
+                    e: ptr_val,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(cast_inst);
+            return Ok(Operand::Var(typed_ptr_var));
+        }
+
+        // 计算分配大小
+        let alloc_size = if is_array {
+            // array new: size = sizeof(T) * count
+            // args[0] 是数组大小表达式
+            if args.is_empty() {
+                return Err(LowerIrError::Internal(
+                    "array new missing size argument".to_string(),
+                ));
+            }
+            let elem_size = self.compute_type_size(ty)?;
+            let count_val = self.lower_expr(args[0])?;
+            let elem_size_op = Operand::Int(elem_size as i128);
+            let size_var = self.fresh_var("alloc_size", Type::ULong);
+            let mul_inst = Inst {
+                dest: Some(size_var.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Mul,
+                    l: elem_size_op,
+                    r: count_val,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(mul_inst);
+            Operand::Var(size_var)
+        } else {
+            // scalar new: size = sizeof(T)
+            let sz = self.compute_type_size(ty)?;
+            Operand::Int(sz as i128)
+        };
+
+        // 调用 operator new / operator new[]
+        let op_sym = if is_array {
+            CxxRuntimeSymbol::NewArray
+        } else {
+            CxxRuntimeSymbol::New
+        };
+        let new_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let new_callee = Operand::FnAddr(op_sym.name().to_string(), new_fn_ty.clone());
+        let raw_ptr_var = self.fresh_var("raw_new", void_ptr_ty.clone());
+        let new_call = Inst {
+            dest: Some(raw_ptr_var.clone()),
+            kind: InstKind::Call {
+                callee: new_callee,
+                args: vec![alloc_size],
+                ret_ty: void_ptr_ty.clone(),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(new_call);
+
+        // 如果是类类型且有构造参数，调用构造函数（scalar new  only）
+        if !is_array {
+            if let CxxType::Class(class_id) = ty {
+                if !args.is_empty() {
+                    // 构造函数需要 this 指针
+                    // 先把 raw_ptr 转成目标类型指针
+                    let typed_ptr_var = self.fresh_var(
+                        "typed_new",
+                        Type::Ptr(Box::new(QualType::new(self.lowerer.lower_type(ty)?))),
+                    );
+                    let cast_inst = Inst {
+                        dest: Some(typed_ptr_var.clone()),
+                        kind: InstKind::Cast {
+                            ty: Type::Ptr(Box::new(QualType::new(
+                                self.lowerer.lower_type(ty)?,
+                            ))),
+                            e: Operand::Var(raw_ptr_var.clone()),
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(cast_inst);
+
+                    // 调用构造函数
+                    // 注意：这里需要用 HirExprId 来表示指针，但我们只有 Operand
+                    // 简化：直接生成构造函数调用，this 指针就是 typed_ptr_var
+                    let class_sym = self.lowerer.get_symbol(class_id.as_symbol())?;
+                    let ctor_name = format!("{}_ctor_complete", class_sym.name);
+                    let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+                    let mut ctor_args = vec![Operand::Var(typed_ptr_var)];
+                    for arg_id in args {
+                        ctor_args.push(self.lower_expr(*arg_id)?);
+                    }
+                    let ctor_callee = Operand::FnAddr(ctor_name, fn_ty);
+                    let ctor_call = Inst {
+                        dest: None,
+                        kind: InstKind::Call {
+                            callee: ctor_callee,
+                            args: ctor_args,
+                            ret_ty: Type::Void,
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(ctor_call);
+                }
+            }
+        }
+
+        // 把 void* 转成目标类型指针
+        let result_var = self.fresh_var("new_result", ret_ty.clone());
+        let cast_inst = Inst {
+            dest: Some(result_var.clone()),
+            kind: InstKind::Cast {
+                ty: ret_ty,
+                e: Operand::Var(raw_ptr_var),
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_inst);
+        Ok(Operand::Var(result_var))
+    }
+
+    /// delete 表达式 lowering。
+    ///
+    /// - scalar delete: 调用 operator delete(void*)
+    /// - array delete: 调用 operator delete[](void*)
+    fn lower_delete(&mut self, ptr: HirExprId, is_array: bool) -> Result<Operand, LowerIrError> {
+        use crate::cpp::runtime::CxxRuntimeSymbol;
+
+        let ptr_val = self.lower_expr(ptr)?;
+
+        let op_sym = if is_array {
+            CxxRuntimeSymbol::DeleteArray
+        } else {
+            CxxRuntimeSymbol::Delete
+        };
+
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let delete_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let delete_callee = Operand::FnAddr(op_sym.name().to_string(), delete_fn_ty);
+
+        // 把指针转成 void*
+        let void_ptr_var = self.fresh_var("del_void", void_ptr_ty.clone());
+        let cast_inst = Inst {
+            dest: Some(void_ptr_var.clone()),
+            kind: InstKind::Cast {
+                ty: void_ptr_ty,
+                e: ptr_val,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(cast_inst);
+
+        let delete_call = Inst {
+            dest: None,
+            kind: InstKind::Call {
+                callee: delete_callee,
+                args: vec![Operand::Var(void_ptr_var)],
+                ret_ty: Type::Void,
+            },
+            span: dummy_span(),
+        };
+        self.push_inst(delete_call);
+
+        Ok(Operand::Void)
+    }
+
+    /// 花括号初始化列表 lowering。
+    ///
+    /// 创建一个临时数组局部变量，逐个存入元素，返回数组首地址。
+    fn lower_init_list(
+        &mut self,
+        elems: &[HirExprId],
+        arr_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use std::sync::Arc;
+
+        // 生成唯一的临时变量名
+        let tmp_name = format!("__init_list_{}", self.init_list_counter);
+        self.init_list_counter += 1;
+
+        // 注册为局部变量
+        self.ssa.local_types.insert(tmp_name.clone(), arr_ty.clone());
+        self.ssa.original_locals.insert(tmp_name.clone());
+
+        let var = self.fresh_var(&tmp_name, arr_ty.clone());
+        self.locals.insert(tmp_name.clone(), var.clone());
+
+        // 逐个存储元素
+        for (i, elem_id) in elems.iter().enumerate() {
+            let elem_val = self.lower_expr(*elem_id)?;
+            let idx_op = Operand::Int(i as i128);
+            let store_inst = Inst {
+                dest: None,
+                kind: InstKind::IndexStore {
+                    arr: Operand::Var(var.clone()),
+                    idx: idx_op,
+                    src: elem_val,
+                    is_volatile: false,
+                },
+                span: dummy_span(),
+            };
+            self.push_inst(store_inst);
+        }
+
+        // 返回数组首地址（退化为指针）
+        let elem_qt = match arr_ty {
+            Type::Array(inner, _) => inner.as_ref().clone(),
+            _ => QualType::new(arr_ty.clone()),
+        };
+        let ptr_ty = Type::Ptr(Box::new(elem_qt));
+        let addr_var = self.fresh_var("init_list_ptr", ptr_ty.clone());
+        let addr_inst = Inst {
+            dest: Some(addr_var.clone()),
+            kind: InstKind::AddrOf { base: tmp_name },
+            span: dummy_span(),
+        };
+        self.push_inst(addr_inst);
+
+        Ok(Operand::Var(addr_var))
+    }
+
     /// 计算类型的大小（字节）
     fn compute_type_size(&mut self, ty: &CxxType) -> Result<u64, LowerIrError> {
         let ir_ty = self.lowerer.lower_type(ty)?;
@@ -2438,6 +3080,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let sym = self.lowerer.get_symbol(*symbol)?;
                 let name = sym.name.clone();
                 let ty = self.lowerer.lower_type(&sym.ty)?;
+                let sym_is_volatile = sym.is_volatile;
+                drop(sym);
 
                 // 创建局部变量（version 0）
                 let var = self.fresh_var(&name, ty.clone());
@@ -2445,6 +3089,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     .local_types
                     .insert(name.clone(), ty.clone());
                 self.ssa.original_locals.insert(name.clone());
+                let decl_quals = if sym_is_volatile {
+                    QualifierFlags::VOLATILE
+                } else {
+                    QualifierFlags::NONE
+                };
+                self.ssa.local_quals.insert(name.clone(), decl_quals);
 
                 if let Some(init_id) = init {
                     let init_val = self.lower_expr(*init_id)?;
@@ -2464,6 +3114,106 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Ok(())
             }
 
+            HirStmtKind::StaticDecl {
+                symbol,
+                guard_symbol,
+                init,
+            } => {
+                use crate::cpp::runtime::CxxRuntimeSymbol;
+
+                let var_sym = self.lowerer.get_symbol(*symbol)?;
+                let var_name = self.lowerer.symbol_name(&var_sym);
+                let var_ty = self.lowerer.lower_type(&var_sym.ty)?;
+                drop(var_sym);
+
+                let guard_sym = self.lowerer.get_symbol(*guard_symbol)?;
+                let guard_name = self.lowerer.symbol_name(&guard_sym);
+                drop(guard_sym);
+
+                // guard 变量类型: i64* (指针)
+                let guard_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Long)));
+                // __cxa_guard_acquire 参数类型: i64*，返回类型: int
+                let guard_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
+
+                // 获取 guard 变量地址
+                let guard_addr = Operand::SymAddr(guard_name, guard_ptr_ty.clone());
+
+                // 调用 __cxa_guard_acquire(guard_ptr)
+                let acquire_callee = Operand::FnAddr(
+                    CxxRuntimeSymbol::GuardAcquire.name().to_string(),
+                    guard_fn_ty.clone(),
+                );
+                let acquire_result = self.fresh_var("guard_acquire", Type::Int);
+                let acquire_call = Inst {
+                    dest: Some(acquire_result.clone()),
+                    kind: InstKind::Call {
+                        callee: acquire_callee,
+                        args: vec![guard_addr.clone()],
+                        ret_ty: Type::Int,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(acquire_call);
+
+                // 如果 acquire 返回非零，需要初始化
+                // 创建 init_bb 和 end_bb
+                let init_bb = self.unique_bb("static_init");
+                let end_bb = self.unique_bb("static_init_end");
+
+                // 条件分支: acquire_result != 0 → init_bb, 否则 → end_bb
+                self.set_term(Terminator::Branch {
+                    cond: Operand::Var(acquire_result),
+                    t: init_bb.clone(),
+                    f: end_bb.clone(),
+                });
+
+                // init 块: 执行初始化，然后 release
+                self.current_bb = init_bb.clone();
+
+                if let Some(init_id) = init {
+                    // 计算初始化值
+                    let init_val = self.lower_expr(*init_id)?;
+                    // 获取静态变量地址
+                    let var_ptr_ty = Type::Ptr(Box::new(QualType::new(var_ty.clone())));
+                    let var_addr = Operand::SymAddr(var_name.clone(), var_ptr_ty.clone());
+                    // 存储初始化值到静态变量
+                    let store_inst = Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: var_addr,
+                            src: init_val,
+                            is_volatile: false,
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(store_inst);
+                }
+
+                // 调用 __cxa_guard_release(guard_ptr)
+                let release_callee = Operand::FnAddr(
+                    CxxRuntimeSymbol::GuardRelease.name().to_string(),
+                    Type::Ptr(Box::new(QualType::new(Type::Void))),
+                );
+                let release_call = Inst {
+                    dest: None,
+                    kind: InstKind::Call {
+                        callee: release_callee,
+                        args: vec![guard_addr.clone()],
+                        ret_ty: Type::Void,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(release_call);
+
+                // init 块跳转到 end_bb
+                self.set_term(Terminator::Jump(end_bb.clone()));
+
+                // end 块: 继续后续代码
+                self.current_bb = end_bb.clone();
+
+                Ok(())
+            }
+
             HirStmtKind::If {
                 cond,
                 then_body,
@@ -2475,6 +3225,30 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirStmtKind::While { cond, body } => {
                 self.lower_while(*cond, *body)
             }
+
+            HirStmtKind::DoWhile { body, cond } => {
+                self.lower_do_while(*body, *cond)
+            }
+
+            HirStmtKind::For { init, cond, inc, body } => {
+                self.lower_for(*init, *cond, *inc, *body)
+            }
+
+            HirStmtKind::Switch { cond, body } => {
+                self.lower_switch(*cond, *body)
+            }
+
+            HirStmtKind::Break => self.lower_break(),
+
+            HirStmtKind::Continue => self.lower_continue(),
+
+            HirStmtKind::Goto(label) => self.lower_goto(label.clone()),
+
+            HirStmtKind::Label(name, body) => self.lower_label(name.clone(), *body),
+
+            HirStmtKind::Null => Ok(()),
+
+            HirStmtKind::Fallthrough => Ok(()),
 
             HirStmtKind::CtorInitBase { base, args } => {
                 self.lower_ctor_init_base(*base, args)
@@ -2503,6 +3277,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         then_id: HirStmtId,
         else_id: Option<HirStmtId>,
     ) -> Result<(), LowerIrError> {
+        // Snapshot unreachable blocks BEFORE creating structural BBs.
+        // BBs whose terminators we set manually are added to the
+        // "old" set so the fall-through logic skips them.
+        let mut before_set: std::collections::HashSet<String> =
+            self.unreachable_blocks().into_iter().collect();
+
         let then_bb = self.unique_bb("if_then");
         let else_bb = if else_id.is_some() {
             self.unique_bb("if_else")
@@ -2510,6 +3290,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             self.unique_bb("if_end")
         };
         let end_bb = self.unique_bb("if_end");
+        before_set.insert(end_bb.clone()); // left as fall-through
 
         let cond = self.lower_expr(cond_id)?;
         self.set_term(Terminator::Branch {
@@ -2521,28 +3302,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // then 块
         self.current_bb = then_bb.clone();
         self.lower_stmt(then_id)?;
-        // 如果 then 块还没有终结符，跳到 end
-        let then_term = self.ssa.blocks[&then_bb].term.clone();
-        if matches!(then_term, Terminator::Unreachable) {
-            self.ssa
-                .blocks
-                .get_mut(&then_bb)
-                .unwrap()
-                .term = Terminator::Jump(end_bb.clone());
-        }
 
         // else 块（如果有）
         if let Some(else_stmt) = else_id {
             self.current_bb = else_bb.clone();
             self.lower_stmt(else_stmt)?;
-            let else_term = self.ssa.blocks[&else_bb].term.clone();
-            if matches!(else_term, Terminator::Unreachable) {
-                self.ssa
-                    .blocks
-                    .get_mut(&else_bb)
-                    .unwrap()
-                    .term = Terminator::Jump(end_bb.clone());
-            }
         } else {
             // 无 else：else_bb 直接跳到 end
             self.ssa
@@ -2552,7 +3316,192 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 .term = Terminator::Jump(end_bb.clone());
         }
 
+        // All new unreachable blocks added by then/else branches are
+        // implicit fall-through exits — redirect them to end_bb.
+        let after = self.unreachable_blocks();
+        for name in after {
+            if !before_set.contains(&name) {
+                self.ssa
+                    .blocks
+                    .get_mut(&name)
+                    .unwrap()
+                    .term = Terminator::Jump(end_bb.clone());
+            }
+        }
+
         self.current_bb = end_bb;
+        Ok(())
+    }
+
+    /// 扫描 switch body 收集 case/default 标签，为每个标签创建 BB
+    fn collect_switch_cases(
+        &mut self,
+        stmt: &HirStmt,
+    ) -> Result<(Vec<(i128, String)>, Option<String>), LowerIrError> {
+        let mut cases: Vec<(i128, String)> = Vec::new();
+        let mut default: Option<String> = None;
+
+        match &stmt.kind {
+            HirStmtKind::Compound(stmts) => {
+                for sid in stmts {
+                    let s = self.get_stmt(*sid)?;
+                    self.collect_cases_from_stmt(&s, &mut cases, &mut default)?;
+                }
+            }
+            _ => {
+                self.collect_cases_from_stmt(stmt, &mut cases, &mut default)?;
+            }
+        }
+
+        Ok((cases, default))
+    }
+
+    fn collect_cases_from_stmt(
+        &mut self,
+        stmt: &HirStmt,
+        cases: &mut Vec<(i128, String)>,
+        default: &mut Option<String>,
+    ) -> Result<(), LowerIrError> {
+        match &stmt.kind {
+            HirStmtKind::Case { value, body } => {
+                let bb = self.unique_bb(&format!("case_{}", value));
+                cases.push((*value, bb));
+                let body_stmt = self.get_stmt(*body)?;
+                self.collect_cases_from_stmt(&body_stmt, cases, default)?;
+            }
+            HirStmtKind::Default(body) => {
+                let bb = self.unique_bb("case_default");
+                *default = Some(bb);
+                let body_stmt = self.get_stmt(*body)?;
+                self.collect_cases_from_stmt(&body_stmt, cases, default)?;
+            }
+            HirStmtKind::Compound(stmts) => {
+                for sid in stmts {
+                    let s = self.get_stmt(*sid)?;
+                    self.collect_cases_from_stmt(&s, cases, default)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Lower switch body: 遇到 case/default 切换到对应 BB，其他语句正常 lower
+    fn lower_switch_body(&mut self, body_id: HirStmtId) -> Result<(), LowerIrError> {
+        let body_stmt = self.get_stmt(body_id)?;
+        match &body_stmt.kind {
+            HirStmtKind::Compound(stmts) => {
+                // 找到第一个 case/default 作为起始 BB
+                // 先找到第一个标签的 BB 作为当前 BB
+                let first_label_bb = self.find_first_case_bb(&body_stmt)?;
+                if let Some(bb) = first_label_bb {
+                    self.current_bb = bb;
+                }
+                for sid in stmts {
+                    self.lower_switch_stmt(*sid)?;
+                }
+            }
+            _ => {
+                self.lower_switch_stmt(body_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn find_first_case_bb(&mut self, stmt: &HirStmt) -> Result<Option<String>, LowerIrError> {
+        match &stmt.kind {
+            HirStmtKind::Case { value, .. } => {
+                let name = format!("case_{}", value);
+                // 从已创建的 BB 中找
+                for (bb_name, _) in &self.ssa.blocks {
+                    if bb_name.starts_with(&name) {
+                        return Ok(Some(bb_name.clone()));
+                    }
+                }
+                Ok(None)
+            }
+            HirStmtKind::Default(_) => {
+                for (bb_name, _) in &self.ssa.blocks {
+                    if bb_name.starts_with("case_default") {
+                        return Ok(Some(bb_name.clone()));
+                    }
+                }
+                Ok(None)
+            }
+            HirStmtKind::Compound(stmts) => {
+                for sid in stmts {
+                    let s = self.get_stmt(*sid)?;
+                    if let Some(bb) = self.find_first_case_bb(&s)? {
+                        return Ok(Some(bb));
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn lower_switch_stmt(&mut self, stmt_id: HirStmtId) -> Result<(), LowerIrError> {
+        let stmt = self.get_stmt(stmt_id)?;
+        match &stmt.kind {
+            HirStmtKind::Case { value, body } => {
+                // 切换到 case 对应的 BB
+                let name = format!("case_{}", value);
+                let bb = self
+                    .ssa
+                    .blocks
+                    .keys()
+                    .find(|k| k.starts_with(&name))
+                    .cloned()
+                    .unwrap_or_else(|| self.unique_bb(&name));
+                // 如果当前块没有 terminator，且当前块不是目标块本身，
+                // fallthrough 到这个 case（第一个 case 已经是 current_bb，
+                // 不需要跳转）
+                let cur = self.current_bb.clone();
+                if cur != bb {
+                    let cur_term = self.ssa.blocks[&cur].term.clone();
+                    if matches!(cur_term, Terminator::Unreachable) {
+                        self.set_term(Terminator::Jump(bb.clone()));
+                    }
+                }
+                self.current_bb = bb;
+                self.lower_switch_stmt(*body)?;
+            }
+            HirStmtKind::Default(body) => {
+                let bb = self
+                    .ssa
+                    .blocks
+                    .keys()
+                    .find(|k| k.starts_with("case_default"))
+                    .cloned()
+                    .unwrap_or_else(|| self.unique_bb("case_default"));
+                let cur = self.current_bb.clone();
+                if cur != bb {
+                    let cur_term = self.ssa.blocks[&cur].term.clone();
+                    if matches!(cur_term, Terminator::Unreachable) {
+                        self.set_term(Terminator::Jump(bb.clone()));
+                    }
+                }
+                self.current_bb = bb;
+                self.lower_switch_stmt(*body)?;
+            }
+            HirStmtKind::Compound(stmts) => {
+                for sid in stmts {
+                    self.lower_switch_stmt(*sid)?;
+                    let cur = self.current_bb.clone();
+                    let cur_term = self.ssa.blocks[&cur].term.clone();
+                    if !matches!(cur_term, Terminator::Unreachable) {
+                        break;
+                    }
+                }
+            }
+            HirStmtKind::Break => {
+                self.lower_break()?;
+            }
+            _ => {
+                self.lower_stmt(stmt_id)?;
+            }
+        }
         Ok(())
     }
 
@@ -2561,9 +3510,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         cond_id: HirExprId,
         body_id: HirStmtId,
     ) -> Result<(), LowerIrError> {
+        // Snapshot unreachable blocks BEFORE creating structural BBs.
+        // BBs whose terminators we set manually are added to the
+        // "old" set so the fall-through logic skips them.
+        let mut before_set: std::collections::HashSet<String> =
+            self.unreachable_blocks().into_iter().collect();
+
         let cond_bb = self.unique_bb("while_cond");
         let body_bb = self.unique_bb("while_body");
         let end_bb = self.unique_bb("while_end");
+        before_set.insert(cond_bb.clone()); // we set its Branch
+        before_set.insert(end_bb.clone());  // left as fall-through
 
         // 跳到条件块
         self.set_term(Terminator::Jump(cond_bb.clone()));
@@ -2578,16 +3535,239 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         });
 
         // 循环体
+        self.break_stack.push(end_bb.clone());
+        self.continue_stack.push(cond_bb.clone());
         self.current_bb = body_bb.clone();
         self.lower_stmt(body_id)?;
-        let body_term = self.ssa.blocks[&body_bb].term.clone();
-        if matches!(body_term, Terminator::Unreachable) {
-            self.ssa
-                .blocks
-                .get_mut(&body_bb)
-                .unwrap()
-                .term = Terminator::Jump(cond_bb.clone());
+        // New unreachable blocks (including body_bb) fall through to cond
+        let after_body = self.unreachable_blocks();
+        for name in after_body {
+            if !before_set.contains(&name) {
+                self.ssa
+                    .blocks
+                    .get_mut(&name)
+                    .unwrap()
+                    .term = Terminator::Jump(cond_bb.clone());
+            }
         }
+        self.break_stack.pop();
+        self.continue_stack.pop();
+
+        self.current_bb = end_bb;
+        Ok(())
+    }
+
+    fn lower_do_while(
+        &mut self,
+        body_id: HirStmtId,
+        cond_id: HirExprId,
+    ) -> Result<(), LowerIrError> {
+        // Snapshot unreachable blocks BEFORE creating structural BBs.
+        // BBs whose terminators we set manually are added to the
+        // "old" set so the fall-through logic skips them.
+        let mut before_set: std::collections::HashSet<String> =
+            self.unreachable_blocks().into_iter().collect();
+
+        let body_bb = self.unique_bb("do_body");
+        let cond_bb = self.unique_bb("do_cond");
+        let end_bb = self.unique_bb("do_end");
+        before_set.insert(cond_bb.clone()); // we set its Branch
+        before_set.insert(end_bb.clone());  // left as fall-through
+
+        self.set_term(Terminator::Jump(body_bb.clone()));
+
+        // body (continue 跳到 cond_bb)
+        self.break_stack.push(end_bb.clone());
+        self.continue_stack.push(cond_bb.clone());
+        self.current_bb = body_bb.clone();
+        self.lower_stmt(body_id)?;
+        // New unreachable blocks (including body_bb) fall through to cond
+        let after_body = self.unreachable_blocks();
+        for name in after_body {
+            if !before_set.contains(&name) {
+                self.ssa
+                    .blocks
+                    .get_mut(&name)
+                    .unwrap()
+                    .term = Terminator::Jump(cond_bb.clone());
+            }
+        }
+        self.break_stack.pop();
+        self.continue_stack.pop();
+
+        // cond: true -> body, false -> end
+        self.current_bb = cond_bb.clone();
+        let cond = self.lower_expr(cond_id)?;
+        self.set_term(Terminator::Branch {
+            cond,
+            t: body_bb.clone(),
+            f: end_bb.clone(),
+        });
+
+        self.current_bb = end_bb;
+        Ok(())
+    }
+
+    fn lower_for(
+        &mut self,
+        init: Option<HirStmtId>,
+        cond: Option<HirExprId>,
+        inc: Option<HirExprId>,
+        body: HirStmtId,
+    ) -> Result<(), LowerIrError> {
+        // Snapshot unreachable blocks BEFORE creating structural BBs.
+        // BBs whose terminators we set manually are added to the
+        // "old" set so the fall-through logic skips them.
+        let mut before_set: std::collections::HashSet<String> =
+            self.unreachable_blocks().into_iter().collect();
+
+        let cond_bb = self.unique_bb("for_cond");
+        let body_bb = self.unique_bb("for_body");
+        let inc_bb = self.unique_bb("for_inc");
+        let end_bb = self.unique_bb("for_end");
+        before_set.insert(cond_bb.clone()); // we set its Branch/Jump
+        before_set.insert(inc_bb.clone());  // we set its Jump to cond
+        before_set.insert(end_bb.clone());  // left as fall-through
+
+        // init
+        if let Some(init_id) = init {
+            self.lower_stmt(init_id)?;
+        }
+        self.set_term(Terminator::Jump(cond_bb.clone()));
+
+        // cond
+        self.current_bb = cond_bb.clone();
+        if let Some(cond_id) = cond {
+            let cond_val = self.lower_expr(cond_id)?;
+            self.set_term(Terminator::Branch {
+                cond: cond_val,
+                t: body_bb.clone(),
+                f: end_bb.clone(),
+            });
+        } else {
+            // 无条件循环
+            self.set_term(Terminator::Jump(body_bb.clone()));
+        }
+
+        // body (break -> end, continue -> inc)
+        self.break_stack.push(end_bb.clone());
+        self.continue_stack.push(inc_bb.clone());
+        self.current_bb = body_bb.clone();
+        self.lower_stmt(body)?;
+        // New unreachable blocks (including body_bb) fall through to inc
+        let after_body = self.unreachable_blocks();
+        for name in after_body {
+            if !before_set.contains(&name) {
+                self.ssa
+                    .blocks
+                    .get_mut(&name)
+                    .unwrap()
+                    .term = Terminator::Jump(inc_bb.clone());
+            }
+        }
+        self.break_stack.pop();
+        self.continue_stack.pop();
+
+        // inc
+        self.current_bb = inc_bb.clone();
+        if let Some(inc_id) = inc {
+            let _ = self.lower_expr(inc_id)?;
+        }
+        self.set_term(Terminator::Jump(cond_bb.clone()));
+
+        self.current_bb = end_bb;
+        Ok(())
+    }
+
+    fn lower_break(&mut self) -> Result<(), LowerIrError> {
+        let target = self
+            .break_stack
+            .last()
+            .cloned()
+            .ok_or_else(|| LowerIrError::Internal("break without enclosing loop/switch".into()))?;
+        self.set_term(Terminator::Jump(target));
+        Ok(())
+    }
+
+    fn lower_continue(&mut self) -> Result<(), LowerIrError> {
+        let target = self
+            .continue_stack
+            .last()
+            .cloned()
+            .ok_or_else(|| LowerIrError::Internal("continue without enclosing loop".into()))?;
+        self.set_term(Terminator::Jump(target));
+        Ok(())
+    }
+
+    fn lower_goto(&mut self, label: String) -> Result<(), LowerIrError> {
+        let target = if let Some(bb) = self.label_map.get(&label) {
+            bb.clone()
+        } else {
+            // 前向引用: 创建占位 BB
+            let bb = self.unique_bb(&format!("label_{}", label));
+            self.label_map.insert(label, bb.clone());
+            bb
+        };
+        self.set_term(Terminator::Jump(target));
+        Ok(())
+    }
+
+    fn lower_label(&mut self, name: String, body: HirStmtId) -> Result<(), LowerIrError> {
+        let label_bb = if let Some(bb) = self.label_map.get(&name) {
+            // 已有前向引用
+            bb.clone()
+        } else {
+            let bb = self.unique_bb(&format!("label_{}", name));
+            self.label_map.insert(name, bb.clone());
+            bb
+        };
+
+        // 从当前块跳到 label 块（label 是一个入口点）
+        self.set_term(Terminator::Jump(label_bb.clone()));
+        self.current_bb = label_bb;
+        self.lower_stmt(body)?;
+        Ok(())
+    }
+
+    fn lower_switch(
+        &mut self,
+        cond_id: HirExprId,
+        body_id: HirStmtId,
+    ) -> Result<(), LowerIrError> {
+        let end_bb = self.unique_bb("switch_end");
+        let switch_bb = self.unique_bb("switch_dispatch");
+
+        // 计算 switch 表达式
+        let cond = self.lower_expr(cond_id)?;
+        self.set_term(Terminator::Jump(switch_bb.clone()));
+
+        // 扫描 body 收集 case/default 标签及其对应的 BB
+        let body_stmt = self.get_stmt(body_id)?;
+        let (cases, default_bb) = self.collect_switch_cases(&body_stmt)?;
+
+        // switch 分发块
+        self.current_bb = switch_bb.clone();
+        let values: Vec<i128> = cases.iter().map(|(v, _)| *v).collect();
+        let targets: Vec<String> = cases.into_iter().map(|(_, bb)| bb).collect();
+        let default = default_bb.unwrap_or_else(|| end_bb.clone());
+        self.set_term(Terminator::SwitchTable {
+            idx: cond,
+            values,
+            targets,
+            default,
+        });
+
+        // 处理 body 语句
+        // 注意: case/default 标签已经在 collect_switch_cases 中创建了 BB，
+        // body 中的其他语句在这些 BB 中生成。
+        // 为了正确处理 fallthrough，我们需要按顺序 lower body，
+        // 遇到 case/default 标签时切换到对应 BB。
+        self.break_stack.push(end_bb.clone());
+        self.lower_switch_body(body_id)?;
+        self.break_stack.pop();
+
+        // 如果最后一个 case/default 块没有 terminator，跳到 end
+        // (lower_switch_body 已经处理了)
 
         self.current_bb = end_bb;
         Ok(())
@@ -2638,6 +3818,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             .local_types
             .insert("__eh_ctx".to_string(), ctx_ty.clone());
         self.ssa.original_locals.insert("__eh_ctx".to_string());
+        self.ssa.local_quals.insert("__eh_ctx".to_string(), QualifierFlags::NONE);
         self.locals.insert("__eh_ctx".to_string(), ctx_var.clone());
 
         // 获取上下文指针（数组名退化为指针）
@@ -2819,6 +4000,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             if let Some(param_sym_id) = handler.param {
                 let param_sym = self.lowerer.get_symbol(param_sym_id)?;
                 let param_name = param_sym.name.clone();
+                let param_is_volatile = param_sym.is_volatile;
+                drop(param_sym);
                 let param_ir_ty = self.lowerer.lower_type(&handler.param_ty)?;
 
                 // 创建参数变量
@@ -2827,6 +4010,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     .local_types
                     .insert(param_name.clone(), param_ir_ty.clone());
                 self.ssa.original_locals.insert(param_name.clone());
+                let catch_quals = if param_is_volatile {
+                    QualifierFlags::VOLATILE
+                } else {
+                    QualifierFlags::NONE
+                };
+                self.ssa.local_quals.insert(param_name.clone(), catch_quals);
 
                 // 把 void* 异常指针转为参数类型并赋值
                 // 对于引用类型：直接绑定指针（引用即指针）
@@ -3617,6 +4806,7 @@ fn expr_kind_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::Dereference(_) => "Dereference",
         HirExprKind::BinaryOp { .. } => "BinaryOp",
         HirExprKind::UnaryOp { .. } => "UnaryOp",
+        HirExprKind::Index { .. } => "Index",
         HirExprKind::Assign { .. } => "Assign",
         HirExprKind::CompoundAssign { .. } => "CompoundAssign",
         HirExprKind::Conditional { .. } => "Conditional",
@@ -3628,6 +4818,7 @@ fn expr_kind_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::Delete { .. } => "Delete",
         HirExprKind::SizeOf(_) => "SizeOf",
         HirExprKind::Comma { .. } => "Comma",
+        HirExprKind::InitList { .. } => "InitList",
         _ => "Other",
     }
 }
@@ -3650,6 +4841,7 @@ fn stmt_kind_name(kind: &HirStmtKind) -> &'static str {
         HirStmtKind::Goto(_) => "Goto",
         HirStmtKind::Label(_, _) => "Label",
         HirStmtKind::Decl { .. } => "Decl",
+        HirStmtKind::StaticDecl { .. } => "StaticDecl",
         HirStmtKind::Try { .. } => "Try",
         HirStmtKind::CtorInitMember { .. } => "CtorInitMember",
         HirStmtKind::CtorInitBase { .. } => "CtorInitBase",
@@ -3782,6 +4974,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: a_sym,
@@ -3792,6 +4985,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: b_sym,
@@ -3802,6 +4996,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
         ];
 
@@ -4036,6 +5231,7 @@ mod tests {
             access: Access::Public,
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
+            is_volatile: false,
         }];
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -4107,6 +5303,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: x_sym,
@@ -4117,6 +5314,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: derived_sym,
@@ -4127,6 +5325,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: y_sym,
@@ -4137,6 +5336,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
         ];
 
@@ -4305,6 +5505,7 @@ mod tests {
             access: Access::Public,
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
+            is_volatile: false,
         });
         symbols.push(CxxSymbol {
             id: fn_sym,
@@ -4321,6 +5522,7 @@ mod tests {
             access: Access::Public,
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
+            is_volatile: false,
         });
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -4414,6 +5616,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: a_field_sym,
@@ -4424,6 +5627,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: b_sym,
@@ -4434,6 +5638,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: b_field_sym,
@@ -4444,6 +5649,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: c_sym,
@@ -4454,6 +5660,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: c_field_sym,
@@ -4464,6 +5671,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
         ];
 
@@ -4625,6 +5833,7 @@ mod tests {
             access: Access::Public,
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
+            is_volatile: false,
         });
         symbols.push(CxxSymbol {
             id: fn_sym,
@@ -4641,6 +5850,7 @@ mod tests {
             access: Access::Public,
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
+            is_volatile: false,
         });
 
         let mut lowerer2 = IrLowerer::new(&hir, &symbols);
@@ -4824,6 +6034,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: b_sym,
@@ -4834,6 +6045,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: c_sym,
@@ -4844,6 +6056,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: ctor_sym,
@@ -4860,6 +6073,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: this_sym,
@@ -4870,6 +6084,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
         ];
 
@@ -5016,6 +6231,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: b_sym,
@@ -5026,6 +6242,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: c_sym,
@@ -5036,6 +6253,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: dtor_sym,
@@ -5052,6 +6270,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
             CxxSymbol {
                 id: this_sym,
@@ -5062,6 +6281,7 @@ mod tests {
                 access: Access::Public,
                 linkage_name: None,
                 scope: crate::cpp::sema::ScopeId(0),
+                is_volatile: false,
             },
         ];
 
