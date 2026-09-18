@@ -73,9 +73,13 @@ pub enum MangleType {
         member: String,
     },
     /// M30.1: 非类型模板实参 (`conditional<false, T, F>` 的 `false`,
-    /// `arr<int, 16>` 的 `16`). 编译期常量, 不作为 C 类型出现;
-    /// 参与实例 key / 偏特化匹配. Itanium 编码 `Li<val>E`.
+    /// `arr<int, 16>` 的 `16`). 编译期常量，不作为 C 类型出现;
+    /// 参与实例 key / 偏特化匹配。Itanium 编码 `Li<val>E`.
     NonType(i64),
+    /// 可变参数模板的参数包展开 (C++11 variadic templates).
+    /// 表示一组类型的 pack，用于 `std::tuple<int, double, char>` 等.
+    /// Itanium 编码时作为多个连续参数处理.
+    VariadicPack(Vec<MangleType>),
 }
 
 impl MangleType {
@@ -147,12 +151,23 @@ impl MangleType {
                     out.push_str(&format!("Li{}E", v));
                 }
             }
+            // G12: 参数包展开 - 依次编码包内的每个类型
+            Self::VariadicPack(packed) => {
+                for ty in packed {
+                    ty.encode(out);
+                }
+            }
         }
     }
 
     /// 推断类型是否"待解析" (M17.0: auto / decltype(auto) 在 lower 阶段解析)
     pub fn is_unresolved(&self) -> bool {
-        matches!(self, Self::Auto | Self::DecltypeAuto)
+        match self {
+            Self::Auto | Self::DecltypeAuto => true,
+            // G12: 参数包中的子类型也需要检查
+            Self::VariadicPack(packed) => packed.iter().any(|t| t.is_unresolved()),
+            _ => false,
+        }
     }
 }
 

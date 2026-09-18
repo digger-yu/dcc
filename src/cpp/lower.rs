@@ -7025,12 +7025,14 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
             format!("struct {}", s)
         }
         // M30: TplMember 应在 Lower::mangle_to_c_ns 中展开为实例类
-        // typedef 成员的真实类型; 到达此模块级函数说明展开未发生,
+        // typedef 成员的真实类型；到达此模块级函数说明展开未发生，
         // 输出占位并注释 (同 Auto 处理).
         MangleType::TplMember { .. } => "int /*M30 unresolved tpl-member*/".into(),
-        // M30.1: 非类型实参不是 C 类型, 到达此处说明它被误当类型使用;
+        // M30.1: 非类型实参不是 C 类型，到达此处说明它被误当类型使用;
         // 输出占位 int 便于后续 C 后端报错定位.
         MangleType::NonType(_) => "int /*M30 non-type arg*/".into(),
+        // G12: 参数包在类型系统中出现，降级为 pack<int,double,...>形式
+        MangleType::VariadicPack(_) => "/*G12 variadic_pack_placeholder*/".into(),
     }
 }
 
@@ -7080,8 +7082,17 @@ fn template_arg_to_c(ty: &MangleType) -> String {
             s.push_str(member);
             s
         }
-        // M30.1: 非类型实参序列化为 `n<值>` 标识符片段
+        // M30.1: 非类型实参序列化为 `n<值>`标识符片段
         MangleType::NonType(v) => format!("n{}", v),
+        // G12: 参数包展开为 pack_<type1>_<type2>_...形式
+        MangleType::VariadicPack(tys) => {
+            let mut s = String::from("pack_");
+            for (i, t) in tys.iter().enumerate() {
+                if i > 0 { s.push('_'); }
+                s.push_str(&template_arg_to_c(t));
+            }
+            s
+        }
     }
 }
 

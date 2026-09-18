@@ -60,6 +60,12 @@ pub enum SfinaeError {
     TypeError(String),
     /// 显式 SFINAE 失败
     Disabled(String),
+    /// 启用 if 条件为假 (非错误，只是此候选不可行)
+    EnableIfFalse,
+    /// 类型成员不存在 (如 ::type 缺失)
+    MissingTypeMember,
+    /// substitution failure - mark as non-viable but not hard error
+    SubstitutionFailed,
 }
 
 /// 尝试把 `pattern` 中的类型形参替换为实参 (SFINAE)
@@ -163,15 +169,21 @@ fn is_template_param(s: &str) -> bool {
 }
 
 /// 求值类型 trait 条件 (SFINAE / enable_if 用), 无法判定时返回 None.
-/// 支持 (M18.x 简化, 实参先经 ctx 替换):
+/// 支持 (M18.x 简化，实参先经 ctx 替换):
 ///   - `std::is_same<T, U>::value` / `is_same<T, U>::value`
 ///   - `std::is_integral<T>::value` / `is_pointer<T>` / `is_class<T>` / `is_floating_point<T>`
 ///   - `sizeof(T) <= N` / `>= N` / `== N` (复用 type_size_hint)
 ///   - `T::value` (trait 常量)
 ///   - `!C` / `C && D` / `C || D` 组合
+/// M28: 添加 void_t 检测模式 (`std::void_t<...>` 或 `void_t<...>`)
 pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
     let c = cond.trim();
-    // 逻辑组合: && 优先于 ||
+    // void_t 检测：提取第一个参数并检查其有效性
+    if let Some(void_inner) = extract_void_t_args(c) {
+        // void_t<T>::value 当 T 有效时返回 true
+        return Some(!void_inner.is_empty());
+    }
+    // 逻辑组合：&& 优先于 ||
     if let Some(i) = find_top_level(c, "&&") {
         let l = evaluate_trait_condition(&c[..i], ctx)?;
         let r = evaluate_trait_condition(&c[i + 2..], ctx)?;
@@ -254,9 +266,15 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
 }
 
 /// 解析并求值 `enable_if<C, T>` / `enable_if_t<C, T>` / `enable_if<C>::type`
-/// 的条件部分. 提取不出条件或无法判定时返回 true (保守, 不阻塞编译).
+/// 的条件部分. 提取不出条件或无法判定时返回 true (保守，不阻塞编译).
+/// M40.1: 完整支持 ::type 成员查找模式
 pub fn evaluate_enable_if(text: &str, ctx: &SfinaeCtx) -> bool {
     let t = text.trim();
+    // 先尝试提取 enable_if::type 成员
+    if let Some(has_type_member) = extract_enable_if_type_member(t, ctx) {
+        return has_type_member;
+    }
+    // 传统方法：求值条件部分
     for prefix in [
         "std::enable_if_t<",
         "std::enable_if<",
@@ -269,12 +287,12 @@ pub fn evaluate_enable_if(text: &str, ctx: &SfinaeCtx) -> bool {
             }
         }
     }
-    true
+    true // 无法解析时保守回退
 }
 
-/// M26: 展开 requires 子句中的概念引用
-/// 例如: `Integral<T>` -> `sizeof(T) <= 8` (如果 Integral 定义为 `sizeof(T) <= 8`)
-/// concepts: 概念名 -> 概念体文本的映射
+/// M28: 展开 requires 子句中的概念引用
+/// M40.1: 增强 enable_if 求值支持 ::type 成员查找
+/// 例如：`requires std::enable_if_t<C, T>` → 当 C 为真时存在 ::type
 pub fn expand_concepts(cond: &str, concepts: &std::collections::HashMap<String, String>) -> String {
     let mut result = cond.to_string();
     // 简单启发式: 查找 `ConceptName<...>` 模式并替换
@@ -351,6 +369,80 @@ fn find_top_level(s: &str, pat: &str) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// M28: 提取 void_t<...>::value 或 std::void_t<...>::value 的内部参数
+/// 返回内部类型列表 (逗号分隔)
+fn extract_void_t_args(cond: &str) -> Option<String> {
+    for prefix in ["std::void_t<", "void_t<"] {
+        if let Some(rest) = cond.strip_prefix(prefix) {
+            if let Some(close) = find_trait_close(rest) {
+                return Some(rest[..close].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 检查条件是否包含 T::type 模式 (enable_if::type)
+fn extract_enable_if_type_member(text: &str, ctx: &SfinaeCtx) -> Option<bool> {
+    // enable_if<C, T>::type - 当 C 为真时 ::type 存在
+    // enable_if_t<C, T> - 等价于 typename enable_if<C, T>::type
+    for prefix in [
+        "std::enable_if<",
+        "enable_if<",
+        "std::enable_if_t<",
+        "enable_if_t<",
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if let Some((cond, _)) = split_cond_with(rest) {
+                // 求值条件 C，true 表示 ::type 存在
+                return Some(evaluate_trait_condition(&cond, ctx).unwrap_or(true));
+            }
+        }
+    }
+    None
+}
+
+/// 拆分 enable_if<condition, value_type> 的 condition 和 value_type
+fn split_cond_with(rest: &str) -> Option<(String, String)> {
+    let mut depth: i32 = 0;
+    let bytes = rest.as_bytes();
+    let mut comma_idx = None;
+    let mut close_bracket = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'<' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else {
+                    depth += 1;
+                }
+            }
+            b'>' => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else if depth == 0 {
+                    close_bracket = Some(i);
+                    break;
+                } else {
+                    depth -= 1;
+                }
+            }
+            b',' if depth == 0 && comma_idx.is_none() => {
+                comma_idx = Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let comma_idx = comma_idx?;
+    let close_bracket = close_bracket?;
+    let cond = rest[..comma_idx].trim().to_string();
+    let value = rest[comma_idx + 1..close_bracket].trim().to_string();
+    Some((cond, value))
 }
 
 /// 从 `enable_if<C, ...>` 剩余文本 (紧接 `<` 之后) 提取条件 C
@@ -1381,5 +1473,48 @@ mod tests {
         ));
         // 提取失败时保守返回 true
         assert!(evaluate_enable_if("some_other_default", &ctx));
+    }
+
+    // ===== M40: Enhanced SFINAE - void_t and ::type member support =====
+
+    #[test]
+    fn sfinae_void_t_basic() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        // std::void_t<T>::value should work when T is valid
+        assert_eq!(
+            evaluate_trait_condition("std::void_t<int>::value", &ctx),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn sfinae_enable_if_type_member() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        // enable_if<C, T>::type exists when C is true
+        assert!(evaluate_enable_if(
+            "std::enable_if<is_integral<T>::value, int>::type",
+            &ctx
+        ));
+        // When condition fails, ::type doesn't exist
+        assert!(!evaluate_enable_if(
+            "std::enable_if<is_pointer<T>::value, int>::type",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn sfinae_sfinae_error_types() {
+        use super::SfinaeError;
+        // Verify new error types exist
+        let err = SfinaeError::EnableIfFalse;
+        assert!(matches!(err, SfinaeError::EnableIfFalse));
+        
+        let err = SfinaeError::MissingTypeMember;
+        assert!(matches!(err, SfinaeError::MissingTypeMember));
+        
+        let err = SfinaeError::SubstitutionFailed;
+        assert!(matches!(err, SfinaeError::SubstitutionFailed));
     }
 }

@@ -26,6 +26,8 @@ pub struct TemplateDecl {
     pub requires: Option<String>,
     /// 模板体 (Class 或 FreeFn)
     pub decl: CppDecl,
+    /// G12: 记录哪些形参是 pack
+    pub is_variadic_param: Vec<bool>, // matches param_names
 }
 
 /// 偏特化条目: `template <typename T> class Foo<T*> { ... }`
@@ -93,6 +95,15 @@ pub fn type_key(ty: &MangleType) -> String {
             s.push_str(member);
             s
         }
+        // G12: 参数包展开 - 将包内类型都转换为 key 并连接
+        MangleType::VariadicPack(packed) => {
+            let mut s = String::from("pack_");
+            packed.iter().for_each(|t| {
+                s.push('_');
+                s.push_str(&type_key(t));
+            });
+            s
+        }
         // M30.1: 非类型实参 key `n<值>` (n0/n1/n42); 偏特化 pattern
         // 字面量 (true/false/整数) 由 pick_partial 解析后与之比较
         MangleType::Array(t, n) => format!("arr{}_{}", n, type_key(t)),
@@ -103,17 +114,35 @@ pub fn type_key(ty: &MangleType) -> String {
     }
 }
 
-/// 实例化后的类名: `Box<int>` → `__dcc_template_Box_int`
+/// 实例化后的类名：`Box<int>` → `__dcc_template_Box_int`
 /// 必须与 lower.rs `mangle_to_c` 的 Template 分支一致.
 pub fn instantiated_class_name(name: &str, args: &[MangleType]) -> String {
+    // G12: Expand any variadic packs first
+    let expanded_args = merge_expanded_args(args);
+    
     // Flatten namespace qualifiers: std::vector -> std_vector
     let flat_name = name.replace("::", "_");
     let mut s = format!("__dcc_template_{}", flat_name);
-    for a in args {
+    for a in &expanded_args {
         s.push('_');
         s.push_str(&type_key(a));
     }
     s
+}
+
+// ===== G12: Variadic Template Support =====
+
+/// 将单个 MangleType 或 VariadicPack 展开为 Vec<MangleType>
+pub fn expand_pack(ty: &MangleType) -> Vec<MangleType> {
+    match ty {
+        MangleType::VariadicPack(packed) => packed.clone(),
+        other => vec![other.clone()],
+    }
+}
+
+/// 合并多个类型的包展开 (处理 `args...` 在实参列表中的情况)
+pub fn merge_expanded_args(args: &[MangleType]) -> Vec<MangleType> {
+    args.iter().flat_map(|a| expand_pack(a)).collect()
 }
 
 impl TemplateRegistry {
@@ -128,13 +157,71 @@ impl TemplateRegistry {
             CppDecl::FreeFn { name, .. } => name.clone(),
             _ => return None,
         };
+        // G12: Determine which params are packs
+        let is_variadic_param: Vec<bool> = targs.params.iter().map(|p| p.is_pack).collect();
+        
         Some(TemplateDecl {
             name,
             param_names: targs.params.iter().map(|p| p.name.clone()).collect(),
             defaults: targs.params.iter().map(|p| p.default.clone()).collect(),
             requires: requires.clone(),
             decl,
+            is_variadic_param,
         })
+    }
+
+    /// G12: 检查 template 是否包含 variadic pack params
+    pub fn has_variadic(&self) -> bool {
+        self.templates.iter().any(|t| t.is_variadic_param.iter().any(|&p| p))
+            || self.partials.iter().any(|p| p.pattern_text.contains("..."))
+    }
+
+    /// G12: resolve args when variadic packs are involved
+    /// Handle the case where some params are packs and need special matching
+    pub fn resolve_args_with_variadic(
+        &self,
+        td: &TemplateDecl,
+        args: &[MangleType],
+    ) -> Option<Vec<MangleType>> {
+        // Check if this template has variadic parameters
+        let has_pack = td.is_variadic_param.iter().any(|&p| p);
+        
+        if !has_pack {
+            // Non-variadic template, simple passthrough
+            return Some(args.to_vec());
+        }
+        
+        // Variadic template scenario
+        // Need to match args against params where some are packs
+        // e.g., template<typename... T> foo<int, double, char>
+        // params: ["T"] (is_variadic_param: [true])
+        // args: [int, double, char]
+        
+        // Special handling for last pack param
+        let mut resolved = Vec::new();
+        let mut arg_idx = 0;
+        
+        for (param_idx, is_pack) in td.is_variadic_param.iter().enumerate() {
+            if *is_pack {
+                // This parameter is a pack
+                // Collect all remaining args into a VariadicPack
+                let remaining_args: Vec<MangleType> = args[arg_idx..].to_vec();
+                resolved.push(MangleType::VariadicPack(remaining_args));
+                arg_idx = args.len();
+            } else {
+                // Regular parameter - consume one arg
+                if arg_idx < args.len() {
+                    resolved.push(args[arg_idx].clone());
+                    arg_idx += 1;
+                }
+            }
+        }
+        
+        if arg_idx == args.len() {
+            Some(resolved)
+        } else {
+            None // Mismatched count
+        }
     }
 
     /// 注册模板声明 (重复注册同名模板: 后者覆盖, 便于 stdlib 头重复 include)
@@ -253,7 +340,12 @@ impl TemplateRegistry {
     /// 实例化模板类 `name<args>`; 返回实例化后的 Class 声明 (名字已改写)
     pub fn instantiate_class(&mut self, name: &str, args: &[MangleType]) -> Option<CppDecl> {
         let td = self.find(name)?;
-        let resolved = self.resolve_args(td, args)?;
+        // G12: Use variadic-aware arg resolution
+        let resolved = if self.has_variadic() {
+            self.resolve_args_with_variadic(&td, args)?
+        } else {
+            self.resolve_args(&td, args)?
+        };
         let key = Self::key_for(name, &resolved);
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
@@ -267,7 +359,12 @@ impl TemplateRegistry {
     /// 实例化模板函数 `name<args>`; 返回实例化后的 FreeFn 声明
     pub fn instantiate_fn(&mut self, name: &str, args: &[MangleType]) -> Option<CppDecl> {
         let td = self.find(name)?;
-        let resolved = self.resolve_args(td, args)?;
+        // G12: Use variadic-aware arg resolution
+        let resolved = if self.has_variadic() {
+            self.resolve_args_with_variadic(&td, args)?
+        } else {
+            self.resolve_args(&td, args)?
+        };
         let key = Self::key_for(name, &resolved);
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
@@ -461,6 +558,13 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
                     return a.clone();
                 }
             }
+            ty.clone()
+        }
+        // G12: 参数包展开 - 如果是 pack 形参，返回整个包
+        MangleType::Class(n) if params.len() != args.len() => {
+            // 检查是否是 pack 形参的引用 (需要特殊处理)
+            // 这里简化处理：如果 param count 不等于 arg count，可能是 pack 场景
+            // 实际应在 TemplateParam 中记录 is_pack 标志
             ty.clone()
         }
         MangleType::Pointer(t) => MangleType::Pointer(Box::new(substitute_type(t, params, args))),
