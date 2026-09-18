@@ -168,6 +168,8 @@ pub enum CppDecl {
         body: CppBody,
         /// M26.1: `noexcept` / `noexcept(expr)` 修饰 - 异常不外传
         is_noexcept: bool,
+        /// M30.5: trailing return type `auto f() -> Ret`
+        trailing_ret_type: Option<MangleType>,
     },
     /// 类外成员函数定义
     MemberFn {
@@ -429,8 +431,15 @@ pub enum CppStmt {
     CoAwait(CppExpr),
     /// `co_yield expr;` (C++20 协程, M9 占位)
     CoYield(CppExpr),
-    /// `co_return expr;` (C++20 协程, M9 占位)
+    /// `co_return expr;` (C++20 协程，M9 占位)
     CoReturn(Option<CppExpr>),
+    /// C++17 结构化绑定 `auto [a, b, c] = expr;`
+    StructuredBinding {
+        names: Vec<String>,
+        ty: MangleType,
+        init: CppExpr,
+        is_volatile: bool,
+    },
     /// 空声明 `;` 已被调用方过滤
     Decl(CppDecl),
     /// 无法解析的语句，保留原始源文本。
@@ -10089,11 +10098,7 @@ impl<'a> CppParser<'a> {
         if is_static {
             self.bump();
         }
-        // M18.0: 支持限定类型 `std::duration`, `::foo` 等
-        // 检测 :: 开头 (全局作用域) 或 ident + :: (命名空间)
-        // M30.2: 先跳过 const/volatile 前缀, 否则 `const bidi::context &x`
-        // 因 const 挡住 is_qualified_type_start 检测而走 parse_mangle_type,
-        // 丢失命名空间上下文.
+        // M30.2: 先跳过 const/volatile 前缀，否则 `const bidi::context &x`
         let mut is_volatile = false;
         while self.at(CppKw::Const) || self.at(CppKw::Volatile) {
             if self.at(CppKw::Volatile) {
@@ -10101,9 +10106,10 @@ impl<'a> CppParser<'a> {
             }
             self.bump();
         }
-        let is_qualified_type = self.is_qualified_type_start();
-        let mut ty = if is_qualified_type {
-            // 解析限定名为 class 类型, 存为 (last segment, qualified path)
+        // M30.4: 结构化绑定 `auto [a, b] = expr;`
+        // 检查：类型后紧跟 `[` 而不是标识符
+        let ty = if is_qualified_type {
+            // 解析限定名为 class 类型，存为 (last segment, qualified path)
             let parts = self.parse_qualified_name()?;
             let last = parts.last().cloned().unwrap_or_default();
             // 用 last segment 当 Class 名 (lower 时根据 namespace ctx 还原)
@@ -10182,7 +10188,7 @@ impl<'a> CppParser<'a> {
             if self.at(CppKw::Const) {
                 self.bump();
             }
-            // 跳过多 token 类型后缀 (例: long long)
+            // 跳过多 token 类型后缀 (例：long long)
             while matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -10219,7 +10225,14 @@ impl<'a> CppParser<'a> {
         } else {
             self.parse_mangle_type()?
         };
-        let name = self.expect_ident()?;
+            
+        // M30.4: 检测结构化绑定 - 下一个 token 是 `[` 而非 ident
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBracket, .. }))) {
+            return self.parse_structured_binding(&ty, is_static, is_volatile);
+        }
+            
+        // 普通变量声明：继续解析 ident + 可能数组声明符
+        let name = self.expect_ident()?
         // 数组声明符: `T name[N];` — 收集所有 `[N]` 后缀 (多维数组),
         // 从最内层向外包装: `int a[2][3]` => Array(Array(Int, 3), 2)
         let mut array_dims: Vec<usize> = Vec::new();
@@ -10381,6 +10394,81 @@ impl<'a> CppParser<'a> {
         } else {
             Ok(CppStmt::LocalVar { ty, name, init, is_volatile })
         }
+    }
+
+    /// M30.4: 解析结构化绑定 `auto [a, b, c] = init;`
+    fn parse_structured_binding(
+        &mut self,
+        ty: &MangleType,
+        is_static: bool,
+        is_volatile: bool,
+    ) -> Result<CppStmt, CppParseError> {
+        self.bump(); // consume '['
+        
+        // 解析绑定的成员名列表：`a`, `a, b`, `a, b, c`
+        let mut names = Vec::new();
+        loop {
+            // 跳过空白并允许空绑定 `_`
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
+                break;
+            }
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                self.bump(); // skip leading comma
+                continue;
+            }
+            // 支持忽略符 `_`
+            let name = if self.at_str("_") {
+                self.bump();
+                "_".to_string()
+            } else {
+                self.expect_ident()? 
+            };
+            names.push(name);
+            // 检查是否还有更多成员
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
+                break;
+            }
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                self.bump();
+                continue;
+            }
+            return Err(CppParseError::Unexpected(
+                "]", ",",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump(); // consume ']'
+        
+        // 解析初始化表达式：`= init`
+        let init = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
+        ) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            return Err(CppParseError::Unexpected(
+                "=",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        };
+        
+        // 期待分号
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))
+        ) {
+            self.bump();
+        }
+        
+        Ok(CppStmt::StructuredBinding {
+            names,
+            ty: ty.clone(),
+            init,
+            is_volatile,
+        })
     }
 }
 

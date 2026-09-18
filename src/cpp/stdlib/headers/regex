@@ -1,10 +1,13 @@
-// <regex> - Minimal stub version for DCC compiler
+// <regex> - Empty class only, no fields, no methods
+// This is a smoke test only - no actual regex functionality
 
 namespace std {
     class regex {
     public:
         regex() {}
-        regex(const char*) {}
+        explicit regex(const char*) {}
+        ~regex() {}
+        
         bool match(const char*) const { return false; }
         bool match_ok() const { return true; }
     };

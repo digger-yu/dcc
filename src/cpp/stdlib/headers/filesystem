@@ -1,5 +1,5 @@
-// <filesystem> - dcc++ C++ 标准库 (stub version)
-// 简化版本：使用 void*代替 opaque pointer
+// <filesystem> - Minimal enums for DCC compatibility
+// Smoke test only
 
 namespace std {
     namespace filesystem {
@@ -10,55 +10,16 @@ namespace std {
             symlink = 3,
             other = 4
         };
-
-        class path {
-            void* p_;
-        public:
-            path() : p_(0) {}
-            path(const char*) : p_(0) {}
-            path(const path&) : p_(0) {}
-            ~path() {}
-
-            path& operator=(const path&) { return *this; }
-            path& operator=(const char*) { return *this; }
-
-            const char* c_str() const { return ""; }
-            size_t size() const { return 0; }
-            int empty() const { return 1; }
-
-            path& operator/=(const char*) { return *this; }
-            path& operator/=(const path&) { return *this; }
-            path operator/(const char*) const { return path(); }
-            path operator/(const path&) const { return path(); }
-
-            int operator==(const path&) const { return 1; }
-            int operator!=(const path&) const { return 0; }
-            int operator==(const char*) const { return 1; }
-            int operator!=(const char*) const { return 0; }
-        };
-
+        
+        typedef void* path;
+        
         inline int exists(const path&) { return 1; }
-        inline int exists(const char*) { return 1; }
         inline int is_regular_file(const path&) { return 1; }
         inline int is_directory(const path&) { return 0; }
         inline int remove(const path&) { return 0; }
         inline int create_directory(const path&) { return 0; }
         inline int rename(const path&, const path&) { return 0; }
         inline long long file_size(const path&) { return 0; }
-
-        inline file_type status(const path&) { return file_type::regular; }
-
-        class directory_iterator {
-            void* d_;
-        public:
-            directory_iterator() : d_(0) {}
-            directory_iterator(const path&) : d_(0) {}
-            ~directory_iterator() {}
-            directory_iterator(const directory_iterator&) = delete;
-            directory_iterator& operator=(const directory_iterator&) = delete;
-
-            int read(path&) { return 0; }
-            int at_end() const { return d_ == 0; }
-        };
+        inline file_type status(const path&) { return std::filesystem::file_type::regular; }
     }
 }

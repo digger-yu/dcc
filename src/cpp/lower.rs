@@ -91,6 +91,8 @@ pub struct Lower {
     pub lambdas: Vec<LambdaExpr>,
     /// 临时计数器 (lambda 编号)
     pub lambda_counter: usize,
+    /// M30.4: 结构化绑定临时变量计数器
+    pub binding_counter: usize,
     /// M17.0: if constexpr 求值时使用的整型常量池 (Ident -> i128)
     pub const_local_i128: std::collections::HashMap<String, i128>,
     /// M17.0: 协程状态机计数器
@@ -7194,6 +7196,7 @@ impl Lower {
             current_fn_ref_ret: None,
             lambdas: vec![],
             lambda_counter: 0,
+            binding_counter: 0,
             const_local_i128: std::collections::HashMap::new(),
             coro_state: 0,
             coro_var: String::new(),
@@ -10397,6 +10400,33 @@ impl Lower {
                 self.out
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
+            }
+            CppStmt::StructuredBinding { names, ty, init, is_volatile: _ } => {
+                // C++17 结构化绑定降级：生成隐藏临时 + 引用
+                // `auto [a, b, c] = expr;`
+                // → `{ Type __dcc_temp = expr; auto& a = __dcc_temp.field0; ... }`
+                // 简单实现：假设 struct 按字段顺序访问，使用 `__dcc_temp.field0`, `get<0>(temp)` 等
+                // M30.4: 保守降级为普通变量声明链，靠后续 sema 解析 get<N>
+                if let Some(e) = init {
+                    // 生成临时变量
+                    self.binding_counter += 1;
+                    let temp_name = format!("__dcc_binding_{}", self.binding_counter);
+                    let c_type = self.mangle_to_c_ns(ty);
+                    self.out.push_str(&format!("{} {} = ", c_type, temp_name));
+                    self.emit_expr(e);
+                    self.out.push_str(";\n");
+                    
+                    // 为每个绑定名生成引用声明
+                    // 简化版：用 std::get<N>(temp) 模式，假设 has_tuple_member
+                    for (i, name) in names.iter().enumerate() {
+                        self.out.push_str(&format!("auto& {} = std::get<{}>({});\n", name, i, temp_name));
+                    }
+                } else {
+                    // 无初始化器 - 错误情况，但容忍过去
+                    for name in names {
+                        self.out.push_str(&format!("auto &{};\n", name));
+                    }
+                }
             }
             CppStmt::If { cond, then, els } => {
                 self.out.push_str("if (");

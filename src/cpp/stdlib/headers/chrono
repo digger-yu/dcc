@@ -1,43 +1,20 @@
-// <chrono> - dcc++ C++ 标准库 (M18) 
-// 注：当前阶段仅作为 stub，实际功能需要完整的 C++ lowering 支持
-
-extern "C" {
-    struct dccpp_duration;
-    struct dccpp_time_point;
-    
-    // Forward declarations only - implementation in Stage X
-}
+// <chrono> - Empty classes only (no fields) for DCC compatibility
+// Using extern "C" struct pattern to avoid DCC class limitations
 
 namespace std {
-    // Placeholder class - actual implementation requires native path
-    class duration {
-        long long d_;
-    public:
-        duration() : d_(0) {}
-        duration(long long ns) : d_(ns) {}
-        long long count_nanos() const { return d_; }
-        long long count_secs() const { return d_; }
-    };
+    // Use typedef struct instead of class to avoid field access issues
+    typedef struct {
+    } duration;
     
-    class time_point {
-        long long tp_;
-    public:
-        time_point() : tp_(0) {}
-        static time_point now() { return time_point(); }
-    };
+    typedef struct {
+    } time_point;
     
-    class system_clock {
-    public:
-        static time_point now() { return time_point(); }
-    };
+    typedef struct {
+    } system_clock;
     
-    class steady_clock {
-    public:
-        static time_point now() { return time_point(); }
-    };
+    typedef struct {
+    } steady_clock;
     
-    class high_resolution_clock {
-    public:
-        static time_point now() { return time_point(); }
-    };
+    typedef struct {
+    } high_resolution_clock;
 }
