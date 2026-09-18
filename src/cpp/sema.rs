@@ -1412,12 +1412,21 @@ impl Sema {
             }
             CppExpr::Member(obj, name) => {
                 let obj_id = self.build_expr(obj)?;
-                // 简化：假设 obj 是类类型，直接做成员查找
                 let obj_ty = self.hir.exprs[obj_id.0].ty.clone();
-                let (class_id, is_pointer) = match obj_ty {
-                    CxxType::Class(id) => (id, false),
-                    CxxType::Pointer(ref t) => match t.as_ref() {
+                // 先对引用类型做隐式解引用: LValueRef(T) → T, RValueRef(T) → T
+                let deref_obj_ty = match obj_ty.clone() {
+                    CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => *inner,
+                    other => other,
+                };
+                let (class_id, is_pointer) = match &deref_obj_ty {
+                    CxxType::Class(id) => (*id, false),
+                    CxxType::Pointer(t) => match t.as_ref() {
                         CxxType::Class(id) => (*id, true),
+                        // Pointer(LValueRef(Class)) — 再解一次
+                        CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => match inner.as_ref() {
+                            CxxType::Class(id) => (*id, true),
+                            _ => return Err("member access on non-class pointer".into()),
+                        },
                         _ => return Err("member access on non-class pointer".into()),
                     },
                     _ => return Err("member access on non-class type".into()),
@@ -2161,7 +2170,42 @@ impl Sema {
                 Ok(self.add_stmt(HirStmtKind::Compound(body_stmts)))
             }
             CppStmt::LocalVar { ty, name, init, is_volatile } => {
-                let var_ty = self.convert_type(ty)?;
+                // 计算变量类型 + (可选的) 已预先 build 的 init expr
+                // Auto/DecltypeAuto: 优先检测 ctor call 模式, 否则从 init 推导
+                let (var_ty, prebuilt_init): (CxxType, Option<HirExprId>) = match ty {
+                    MangleType::Auto | MangleType::DecltypeAuto => {
+                        let init_expr = init.as_ref().ok_or_else(|| {
+                            "auto variable must have an initializer".to_string()
+                        })?;
+                        // ctor call: Call(Ident("Class"), args) + ClassName 是 Class
+                        let ctor_class_name = if let CppExpr::Call(callee, _) = init_expr {
+                            if let CppExpr::Ident(n) = callee.as_ref() {
+                                let syms = self.lookup_unqualified(n);
+                                if syms.iter().any(|&s| {
+                                    matches!(
+                                        self.get_symbol(s).map(|sym| sym.kind),
+                                        Some(CxxSymbolKind::Class)
+                                    )
+                                }) {
+                                    Some(n.clone())
+                                } else { None }
+                            } else { None }
+                        } else { None };
+                        if let Some(cn) = ctor_class_name {
+                            // 用 ClassName 得到 Class 类型, 留待下面 ctor 块处理
+                            let class_ty = self.convert_type(
+                                &MangleType::Class(cn),
+                            )?;
+                            (class_ty, None)
+                        } else {
+                            // 普通 auto 推导: build init expr 拿类型
+                            let init_id = self.build_expr(init_expr)?;
+                            let init_ty = self.hir.exprs[init_id.0].ty.clone();
+                            (init_ty, Some(init_id))
+                        }
+                    }
+                    _ => (self.convert_type(ty)?, None),
+                };
                 let sym = self.add_symbol(
                     name.clone(),
                     CxxSymbolKind::Variable,
@@ -2174,12 +2218,11 @@ impl Sema {
                     }
                 }
                 // 检测类类型的构造函数调用: Call(Ident("Class"), args)
-                // 这种模式来自 parser 对 `Wrap w(42)` 的编码
+                // 这种模式来自 parser 对 `Wrap w(42)` 和 `auto w = Widget(7)`
                 if let Some(init_expr) = init {
                     if let CxxType::Class(class_id) = &var_ty {
                         if let CppExpr::Call(callee, args) = init_expr {
                             if let CppExpr::Ident(class_name) = callee.as_ref() {
-                                // 验证 Ident 确实解析为当前 Class 符号
                                 let syms = self.lookup_unqualified(class_name);
                                 let is_class_ident = syms.iter().any(|&s| {
                                     matches!(
@@ -2188,7 +2231,6 @@ impl Sema {
                                     )
                                 });
                                 if is_class_ident {
-                                    // 这是构造函数调用，构建 Construct HirExpr
                                     let local_expr = self.add_expr(
                                         HirExprKind::Local(sym),
                                         var_ty.clone(),
@@ -2226,9 +2268,13 @@ impl Sema {
                         }
                     }
                 }
-                let init_id = match init {
-                    Some(e) => Some(self.build_expr(e)?),
-                    None => None,
+                let init_id = if let Some(pre_id) = prebuilt_init {
+                    Some(pre_id)
+                } else {
+                    match init {
+                        Some(e) => Some(self.build_expr(e)?),
+                        None => None,
+                    }
                 };
                 Ok(self.add_stmt(HirStmtKind::Decl {
                     symbol: sym,
@@ -2247,7 +2293,7 @@ impl Sema {
                 let var_link = format!("__dcc_static_{}", counter);
                 let guard_link = format!("__dcc_static_guard_{}", counter);
 
-                // 切换到全局作用域注册变量符号
+                // 在全局作用域创建 symbol (linkage 用 var_link)
                 let saved_scope = self.current_scope;
                 self.current_scope = self.global_scope;
                 let var_sym = self.add_symbol(
@@ -2267,17 +2313,22 @@ impl Sema {
                 );
                 self.current_scope = saved_scope;
 
-                // 设置 linkage name
+                // 设置 linkage name (symbol.name 就是 link name)
                 if let Some(s) = self.symbols.get_mut(var_sym.0) {
                     s.linkage_name = Some(var_link.clone());
                 }
                 if let Some(s) = self.symbols.get_mut(guard_sym.0) {
                     s.linkage_name = Some(guard_link.clone());
                 }
+
+                // 关键: 在当前函数体 scope 用原始名 `name` 注册同一个 symbol,
+                // 使得函数内 `n` 能被 lookup 到
+                let cur_scope = &mut self.scopes[saved_scope.0];
+                cur_scope.add_symbol(name.clone(), var_sym);
+
                 // 注册为顶层全局变量
                 self.hir.top_level.push(HirTopLevelDecl::Variable(var_sym));
                 self.hir.top_level.push(HirTopLevelDecl::Variable(guard_sym));
-                let _ = name;
                 Ok(self.add_stmt(HirStmtKind::StaticDecl {
                     symbol: var_sym,
                     guard_symbol: guard_sym,

@@ -1077,140 +1077,204 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             }
             PreInc | PreDec | PostInc | PostDec => {
                 let operand_expr = self.get_expr(operand_id)?;
-                let sym_id = match &operand_expr.kind {
-                    HirExprKind::Local(sid) => *sid,
+                match &operand_expr.kind {
+                    HirExprKind::Local(sid) => {
+                        // 局部变量: 走完整的 SSA 重绑定或 volatile 路径
+                        return self.lower_incdec_local(*sid, op, result_ty);
+                    }
+                    HirExprKind::FieldAccess { object, field } => {
+                        // 成员字段: 走 load-op-store 路径 (总是内存路径,
+                        // 因为对象可能是 lvalue/const/pointer 等任意形态)
+                        return self.lower_incdec_field(*object, *field, op, result_ty);
+                    }
                     _ => {
                         return Err(LowerIrError::Unsupported(
                             "increment/decrement of non-local object".to_string(),
                         ))
                     }
                 };
-                let sym = self.lowerer.get_symbol(sym_id)?;
-                let name = sym.name.clone();
-                let sym_is_volatile = sym.is_volatile;
-                let sym_ty = sym.ty.clone();
-                let ty = self.lowerer.lower_type(&sym_ty)?;
+            }
+        }
+    }
 
-                // volatile 标量局部变量: 走内存路径 (load -> op -> store)
-                if sym_is_volatile {
-                    match &ty {
-                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
-                        _ => {
-                            let addr = self.fresh_var(
-                                "vaddr",
-                                Type::Ptr(Box::new(QualType::new(ty.clone()))),
-                            );
-                            let addr_inst = Inst {
-                                dest: Some(addr.clone()),
-                                kind: InstKind::AddrOf { base: name.clone() },
-                                span: dummy_span(),
-                            };
-                            self.push_inst(addr_inst);
-                            let load_dest = self.fresh_var("vload", ty.clone());
-                            let load_inst = Inst {
-                                dest: Some(load_dest.clone()),
-                                kind: InstKind::Load {
-                                    e: Operand::Var(addr.clone()),
-                                    ty: ty.clone(),
-                                    is_volatile: true,
-                                },
-                                span: dummy_span(),
-                            };
-                            self.push_inst(load_inst);
-                            let ast_op = match op {
-                                PreInc | PostInc => BinOp::Add,
-                                PreDec | PostDec => BinOp::Sub,
-                                _ => unreachable!(),
-                            };
-                            let new_val = self.fresh_var(&name, ty.clone());
-                            self.push_inst(Inst {
-                                dest: Some(new_val.clone()),
-                                kind: InstKind::Bin {
-                                    op: ast_op,
-                                    l: Operand::Var(load_dest.clone()),
-                                    r: Operand::Int(1),
-                                },
-                                span: dummy_span(),
-                            });
-                            let store_inst = Inst {
-                                dest: None,
-                                kind: InstKind::Store {
-                                    e: Operand::Var(addr),
-                                    src: Operand::Var(new_val.clone()),
-                                    is_volatile: true,
-                                },
-                                span: dummy_span(),
-                            };
-                            self.push_inst(store_inst);
-                            self.locals.insert(name, new_val.clone());
-                            // 前缀返回新值; 后缀要把"自增前读到的值"固化到独立
-                            // 临时变量, 避免 SSA 重建按 base 名解析成新值。
-                            return Ok(Operand::Var(if matches!(op, PreInc | PreDec) {
-                                new_val
-                            } else {
-                                let post = self.fresh_tmp("postinc", ty.clone());
-                                self.push_inst(Inst {
-                                    dest: Some(post.clone()),
-                                    kind: InstKind::Bin {
-                                        op: BinOp::Add,
-                                        l: Operand::Var(load_dest),
-                                        r: Operand::Int(0),
-                                    },
-                                    span: dummy_span(),
-                                });
-                                post
-                            }));
-                        }
-                    }
-                }
+    /// lower Inc/Dec 对局部变量 (Local HirExprKind): 保持原有 SSA 重绑定
+    /// 逻辑, volatile 标量仍走内存路径。
+    fn lower_incdec_local(
+        &mut self,
+        sym_id: SymbolId,
+        op: UnaryOp,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use UnaryOp::*;
+        let sym = self.lowerer.get_symbol(sym_id)?;
+        let name = sym.name.clone();
+        let sym_is_volatile = sym.is_volatile;
+        let sym_ty = sym.ty.clone();
+        let ty = self.lowerer.lower_type(&sym_ty)?;
 
-                // 非 volatile: 纯 SSA 版本重绑定
-                let old = match self.locals.get(&name) {
-                    Some(v) => v.clone(),
-                    None => {
-                        return Err(LowerIrError::Internal(format!(
-                            "local variable '{}' not found",
-                            name
-                        )))
-                    }
-                };
-                let delta = Operand::Int(1);
-                let ast_op = match op {
-                    PreInc | PostInc => BinOp::Add,
-                    PreDec | PostDec => BinOp::Sub,
-                    _ => unreachable!(),
-                };
-                let new_var = self.fresh_var(&name, result_ty.clone());
-                self.push_inst(Inst {
-                    dest: Some(new_var.clone()),
-                    kind: InstKind::Bin {
-                        op: ast_op,
-                        l: Operand::Var(old.clone()),
-                        r: delta,
-                    },
-                    span: dummy_span(),
-                });
-                self.locals.insert(name, new_var.clone());
-                // 前缀返回新值, 后缀返回旧值。
-                // 后缀不能直接返回 `old`: SSA→AST 重建时 Operand::Var 只按
-                // base 名解析到"当前版本", 此时 x 已经是新值, 于是 `a = x++`
-                // 会拿到自增后的值。必须先把旧值固化到一个独立命名的临时变量。
-                if matches!(op, PreInc | PreDec) {
-                    Ok(Operand::Var(new_var))
-                } else {
-                    let post = self.fresh_tmp("postinc", result_ty.clone());
+        // volatile 标量局部变量: 走内存路径 (load -> op -> store)
+        if sym_is_volatile {
+            match &ty {
+                Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
+                _ => {
+                    let addr = self.fresh_var(
+                        "vaddr",
+                        Type::Ptr(Box::new(QualType::new(ty.clone()))),
+                    );
+                    let addr_inst = Inst {
+                        dest: Some(addr.clone()),
+                        kind: InstKind::AddrOf { base: name.clone() },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(addr_inst);
+                    let load_dest = self.fresh_var("vload", ty.clone());
+                    let load_inst = Inst {
+                        dest: Some(load_dest.clone()),
+                        kind: InstKind::Load {
+                            e: Operand::Var(addr.clone()),
+                            ty: ty.clone(),
+                            is_volatile: true,
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(load_inst);
+                    let ast_op = match op {
+                        PreInc | PostInc => BinOp::Add,
+                        PreDec | PostDec => BinOp::Sub,
+                        _ => unreachable!(),
+                    };
+                    let new_val = self.fresh_var(&name, ty.clone());
                     self.push_inst(Inst {
-                        dest: Some(post.clone()),
+                        dest: Some(new_val.clone()),
                         kind: InstKind::Bin {
-                            op: BinOp::Add,
-                            l: Operand::Var(old),
-                            r: Operand::Int(0),
+                            op: ast_op,
+                            l: Operand::Var(load_dest.clone()),
+                            r: Operand::Int(1),
                         },
                         span: dummy_span(),
                     });
-                    Ok(Operand::Var(post))
+                    let store_inst = Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: Operand::Var(addr),
+                            src: Operand::Var(new_val.clone()),
+                            is_volatile: true,
+                        },
+                        span: dummy_span(),
+                    };
+                    self.push_inst(store_inst);
+                    self.locals.insert(name, new_val.clone());
+                    return Ok(Operand::Var(if matches!(op, PreInc | PreDec) {
+                        new_val
+                    } else {
+                        let post = self.fresh_tmp("postinc", ty.clone());
+                        self.push_inst(Inst {
+                            dest: Some(post.clone()),
+                            kind: InstKind::Bin {
+                                op: BinOp::Add,
+                                l: Operand::Var(load_dest),
+                                r: Operand::Int(0),
+                            },
+                            span: dummy_span(),
+                        });
+                        post
+                    }));
                 }
             }
+        }
+
+        // 非 volatile: 纯 SSA 版本重绑定
+        let old = match self.locals.get(&name) {
+            Some(v) => v.clone(),
+            None => {
+                return Err(LowerIrError::Internal(format!(
+                    "local variable '{}' not found",
+                    name
+                )))
+            }
+        };
+        let ast_op = match op {
+            PreInc | PostInc => BinOp::Add,
+            PreDec | PostDec => BinOp::Sub,
+            _ => unreachable!(),
+        };
+        let new_var = self.fresh_var(&name, result_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(new_var.clone()),
+            kind: InstKind::Bin {
+                op: ast_op,
+                l: Operand::Var(old.clone()),
+                r: Operand::Int(1),
+            },
+            span: dummy_span(),
+        });
+        self.locals.insert(name, new_var.clone());
+        if matches!(op, PreInc | PreDec) {
+            Ok(Operand::Var(new_var))
+        } else {
+            let post = self.fresh_tmp("postinc", result_ty.clone());
+            self.push_inst(Inst {
+                dest: Some(post.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(old),
+                    r: Operand::Int(0),
+                },
+                span: dummy_span(),
+            });
+            Ok(Operand::Var(post))
+        }
+    }
+
+    /// lower Inc/Dec 对成员字段 (FieldAccess HirExprKind):
+    /// 总是走内存 load-op-store 路径, 因为对象可以是任意形态
+    /// (lvalue/rvalue/pointer/const method 里的 mutable 成员 等)。
+    fn lower_incdec_field(
+        &mut self,
+        object_id: HirExprId,
+        field_id: SymbolId,
+        op: UnaryOp,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use UnaryOp::*;
+        // 1. load old value (via lower_field_access → MemberLoad)
+        let old_val = self.lower_field_access(object_id, field_id, result_ty)?;
+
+        // 2. compute new = old ± 1
+        let ast_op = match op {
+            PreInc | PostInc => BinOp::Add,
+            PreDec | PostDec => BinOp::Sub,
+            _ => unreachable!(),
+        };
+        let new_var = self.fresh_var("field_inc", result_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(new_var.clone()),
+            kind: InstKind::Bin {
+                op: ast_op,
+                l: old_val.clone(),
+                r: Operand::Int(1),
+            },
+            span: dummy_span(),
+        });
+
+        // 3. store new value back (via lower_field_store → MemberStore)
+        self.lower_field_store(object_id, field_id, Operand::Var(new_var.clone()))?;
+
+        // 4. prefix 返回新值; suffix 返回旧值 (固化到独立临时)
+        if matches!(op, PreInc | PreDec) {
+            Ok(Operand::Var(new_var))
+        } else {
+            let post = self.fresh_tmp("postinc", result_ty.clone());
+            self.push_inst(Inst {
+                dest: Some(post.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: old_val,
+                    r: Operand::Int(0),
+                },
+                span: dummy_span(),
+            });
+            Ok(Operand::Var(post))
         }
     }
 
@@ -4460,40 +4524,52 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.push_inst(inst);
             }
             _ => {
-                // 标量成员：直接赋值（单参数）
-                if args.len() == 1 {
-                    let init_val = self.lower_expr(args[0])?;
-                    let this = Operand::Var(self.ssa.params[0].clone());
-                    let fn_sym = self.lowerer.get_symbol(self.func.symbol)?;
-                    let owner_class = match fn_sym.owner {
-                        Some(owner_id) => ClassId::from(owner_id),
-                        None => {
-                            return Err(LowerIrError::Internal(
-                                "constructor without owning class".to_string(),
-                            ));
+                // 标量成员: 空参数 → 零值初始化; 单参数 → 直接 Store;
+                // 多参数 → 仍报错 (构造函数参数包展开尚未支持)
+                let init_val = if args.is_empty() {
+                    match &member_ty {
+                        CxxType::Integer { .. } => Operand::Int(0),
+                        CxxType::Float { bits } => {
+                            let v = match bits { 32 => 0.0f32 as f64, _ => 0.0f64 };
+                            Operand::Float(v, Type::Double)
                         }
-                    };
-                    let is_volatile = fn_sym.ty.is_volatile();
-                    drop(fn_sym);
-                    let obj_ty = self.lowerer.lower_type(&CxxType::Class(owner_class))?;
-                    let inst = Inst {
-                        dest: None,
-                        kind: InstKind::MemberStore {
-                            obj: this,
-                            obj_ty,
-                            field: member_name,
-                            src: init_val,
-                            is_volatile,
-                            is_arrow: true,
-                        },
-                        span: dummy_span(),
-                    };
-                    self.push_inst(inst);
+                        CxxType::Bool => Operand::Int(0),
+                        CxxType::Pointer(_) => Operand::Int(0),
+                        _ => return Err(LowerIrError::Unsupported(format!(
+                            "empty-arg member init for type: {:?}", member_ty
+                        ))),
+                    }
+                } else if args.len() == 1 {
+                    self.lower_expr(args[0])?
                 } else {
                     return Err(LowerIrError::Unsupported(
                         "multi-arg non-class member init".to_string(),
-                    ));
-                }
+                    ))
+                };
+                let this = Operand::Var(self.ssa.params[0].clone());
+                let fn_sym = self.lowerer.get_symbol(self.func.symbol)?;
+                let owner_class = match fn_sym.owner {
+                    Some(owner_id) => ClassId::from(owner_id),
+                    None => return Err(LowerIrError::Internal(
+                        "constructor without owning class".to_string()
+                    )),
+                };
+                let is_volatile = fn_sym.ty.is_volatile();
+                drop(fn_sym);
+                let obj_ty = self.lowerer.lower_type(&CxxType::Class(owner_class))?;
+                let inst = Inst {
+                    dest: None,
+                    kind: InstKind::MemberStore {
+                        obj: this,
+                        obj_ty,
+                        field: member_name,
+                        src: init_val,
+                        is_volatile,
+                        is_arrow: true,
+                    },
+                    span: dummy_span(),
+                };
+                self.push_inst(inst);
             }
         }
 
