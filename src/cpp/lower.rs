@@ -7905,6 +7905,18 @@ impl Lower {
                     self.ns.stack.pop();
                 }
             }
+            CppDecl::InlineNamespace { name, body } => {
+                // Inline namespace treated same as regular namespace for name resolution
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.collect_classes(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
+            }
             // M26: 模板声明只注册 (不再展开); 模板体在实例化时替换形参
             CppDecl::Template {
                 params,
@@ -7913,6 +7925,12 @@ impl Lower {
                 ..
             } => {
                 self.templates.register(params, requires, decl);
+            }
+            CppDecl::ExternTemplate(decl) => {
+                // Extern template suppresses implicit instantiation.
+                // Register the declaration but don't emit instantiation here.
+                // The actual instantiation should come from explicit instantiation elsewhere.
+                self.collect_classes(decl);
             }
             CppDecl::PartialSpec {
                 params,
@@ -7993,6 +8011,18 @@ impl Lower {
                 }
             }
             CppDecl::Namespace { name, body } => {
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.collect_class_bases(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
+            }
+            CppDecl::InlineNamespace { name, body } => {
+                // Inline namespace treated same as regular namespace for base class collection
                 if let Some(n) = name {
                     self.ns.stack.push(n.clone());
                 }
@@ -8380,6 +8410,12 @@ impl Lower {
                     self.collect_noexcept_fns(x);
                 }
             }
+            CppDecl::InlineNamespace { body, .. } => {
+                // Inline namespace treated same as regular namespace for noexcept collection
+                for x in body {
+                    self.collect_noexcept_fns(x);
+                }
+            }
             CppDecl::Class(c) => {
                 for m in &c.members {
                     self.collect_noexcept_fns(m);
@@ -8501,6 +8537,12 @@ impl Lower {
                 self.scan_body_types(body);
             }
             CppDecl::Namespace { body, .. } => {
+                for x in body {
+                    self.scan_decl_types(x);
+                }
+            }
+            CppDecl::InlineNamespace { body, .. } => {
+                // Inline namespace treated same as regular namespace for type scanning
                 for x in body {
                     self.scan_decl_types(x);
                 }
@@ -8838,6 +8880,10 @@ impl Lower {
         match d {
             CppDecl::Template { decl, .. } => self.decl_needs_system_headers(decl),
             CppDecl::Namespace { body, .. } => {
+                body.iter().any(|x| self.decl_needs_system_headers(x))
+            }
+            CppDecl::InlineNamespace { body, .. } => {
+                // Inline namespace treated same as regular namespace for header detection
                 body.iter().any(|x| self.decl_needs_system_headers(x))
             }
             CppDecl::Class(c) => {
@@ -9231,6 +9277,22 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
+            }
+            CppDecl::InlineNamespace { name, body } => {
+                // Inline namespace members are visible at outer scope (ABI versioning)
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.lower_decl(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
+            }
+            CppDecl::ExternTemplate(inner) => {
+                // Extern template: just lower the inner declaration (suppresses implicit instantiation)
+                self.lower_decl(inner);
             }
             CppDecl::Using { is_namespace, path } => {
                 // M8: 仅注释提示 (lower 阶段忽略)

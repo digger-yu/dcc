@@ -354,27 +354,23 @@ impl<'a> CppLexer<'a> {
 
     /// G1: Lex raw string literal R"delim(...)delim"
     fn lex_raw_string(&mut self) -> Option<CppTok> {
-        // 首先检查是否有 '\"'
+        // Check if we have '"' after R
         if self.pos + 1 >= self.src.len() || self.src[self.pos + 1] != b'"' {
             return None; // Not a raw string
         }
-        
-        // Skip 'R' and '"'
+            
+        // Skip 'R' and first '"'
         self.pos += 2;
         self.col += 2;
-            
+                
         // Read optional delimiter (<=16 chars)
         let delim_start = self.pos;
         while self.pos < self.src.len() {
             let c = self.src[self.pos];
-            // Delimiter ends at '"' (no delimiter case) or invalid char
-            if c == b'"' || c.is_ascii_whitespace()
+            // Delimiter ends at '(' for custom delimiter or '"' for no delimiter
+            if c == b'(' || c == b'"' || c.is_ascii_whitespace()
                 || c == b'/' || c == b'\\' || c > 127 {
                 break;
-            }
-            // Stop at '(' only if we've read some characters (custom delimiter like R"delim"(...))
-            if c == b'(' && self.pos > delim_start {
-                break; // Found custom delimiter followed by '('
             }
             if self.pos - delim_start >= 16 {
                 break; // Max 16 chars for delimiter
@@ -383,18 +379,33 @@ impl<'a> CppLexer<'a> {
             self.col += 1;
         }
             
+        // Check what kind of raw string this is
         let has_delim = self.pos > delim_start && self.src[self.pos] == b'"';
         let delimiter = if has_delim {
-            eprintln!("DEBUG: Found delimiter {:?}", std::str::from_utf8(&self.src[delim_start..self.pos]));
+            // Custom delimiter: R"delim"(...)
             Some(std::str::from_utf8(&self.src[delim_start..self.pos])
                 .unwrap_or("").to_string())
         } else {
+            // No delimiter: R"(...) -- will use current position as opening paren
             None
         };
-            
-        // Expect '"' after delimiter
-        if self.pos >= self.src.len() || self.src[self.pos] != b'"' {
-            eprintln!("DEBUG: Invalid raw string at pos {}, expected '\"', got {:?}", self.pos, self.src.get(self.pos..self.pos+10));
+                    
+        // Expect '(' before content (either after closing '"' for delimited, or current position for no-delim)
+        if self.pos >= self.src.len() {
+            return None;
+        }
+                
+        if has_delim {
+            // After delimiter, expect '"' then '('
+            if self.src[self.pos] != b'"' {
+                return None;
+            }
+            self.pos += 1;
+            self.col += 1;
+        }
+                
+        // Now expect '(' before content
+        if self.src[self.pos] != b'(' {
             return None;
         }
         self.pos += 1;
@@ -411,26 +422,29 @@ impl<'a> CppLexer<'a> {
             // Check for closing sequence: ')' + optional delimiter + '"'
             if self.src[self.pos] == b')' {
                 let mut check_pos = self.pos + 1;
-                let mut matched = true;
                     
                 // If there's a delimiter, it must match
                 if let Some(ref delim) = delimiter {
                     if check_pos + delim.len() > self.src.len() {
-                        matched = false;
+                        continue; // Keep looking
                     } else {
+                        let mut matches_delim = true;
                         for delim_byte in delim.bytes() {
                             if self.src[check_pos] != delim_byte {
-                                matched = false;
+                                matches_delim = false;
                                 break;
                             }
                             check_pos += 1;
+                        }
+                        if !matches_delim {
+                            continue; // Keep looking
                         }
                     }
                 }
                     
                 // Check for closing '"'
-                if matched && check_pos < self.src.len() && self.src[check_pos] == b'"' {
-                    // End of raw string
+                if check_pos < self.src.len() && self.src[check_pos] == b'"' {
+                    // End of raw string!
                     let full_len = (check_pos + 1 - content_start) as u32;
                     let span = Span {
                         file: self.file.clone(),

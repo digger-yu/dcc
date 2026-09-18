@@ -322,11 +322,18 @@ pub enum CppDecl {
         /// `volatile` 修饰
         is_volatile: bool,
     },
-    /// M30: typedef 声明. M30: 带目标类型与别名, 使模板实例别名
+    /// M30: typedef 声明。M30: 带目标类型与别名，使模板实例别名
     /// (`typedef Name<Args> alias`) 和模板类内 typedef
     /// (`typedef T type;`) 可被记录与实例化替换; lower 对普通
     /// typedef 仍不产生 C 输出 (类型由后续引用处展开).
     Typedef { target: MangleType, name: String },
+    /// G9: inline namespace (for ABI versioning like __cxx11)
+    InlineNamespace {
+        name: Option<String>,
+        body: Vec<CppDecl>,
+    },
+    /// G10: extern template (suppresses implicit instantiation)
+    ExternTemplate(Box<CppDecl>),
     /// M18.0: 空占位声明 (enum / 修饰后无实际声明时使用)
     Empty,
     /// C++ enum declaration with scoped members and optional underlying type.
@@ -1265,22 +1272,24 @@ impl<'a> CppParser<'a> {
         }
         // M30.2: `extern` 链接性说明 + 普通声明 (`extern void f(...);`,
         // `extern T g;`) - 无 "C" 字面量时跳过 extern, 按普通声明解析.
-        // 之前 KwExtern 不在任何分发分支, 直接落到 declaration form 错误.
+        // G10: 特殊处理 `extern template ...;`
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
                 kind: TokKind::KwExtern,
                 ..
             }))
-        ) && !matches!(
-            self.peek_token_at(1),
-            Some(CppTok::C(Tok {
-                kind: TokKind::StringLit,
-                ..
-            }))
         ) {
-            self.bump();
-            return self.parse_decl();
+            self.bump(); // consume 'extern'
+            // Check for 'template'
+            if matches!(
+                self.peek_token_at(0),
+                Some(CppTok::Kw(CppKw::Template, ..))
+            ) {
+                return self.parse_extern_template_decl();
+            } else {
+                return self.parse_decl();
+            }
         }
         // C++20: `constinit` / `consteval` / `constexpr` 说明符
         // dcc 降级时剥离这些关键字, 解析时直接跳过后按普通声明解析.
@@ -1623,6 +1632,18 @@ impl<'a> CppParser<'a> {
         Err(CppParseError::Unsupported("declaration form", self.span()))
     }
 
+    /// G10: Parse 'extern template <...>;'
+    /// Suppresses implicit instantiation of template (explicit instantiation TU has it)
+    fn parse_extern_template_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        // Expect 'template'
+        self.expect_kw(CppKw::Template)?;
+        
+        // Parse the inner declaration (class/struct/function/etc.)
+        let inner_decl = self.parse_decl()?;
+        
+        Ok(CppDecl::ExternTemplate(Box::new(inner_decl)))
+    }
+
     /// 解析 template <typename T> ...
     /// is_export: `export template` 时为 true
     fn parse_template_decl(&mut self, is_export: bool) -> Result<CppDecl, CppParseError> {
@@ -1940,18 +1961,13 @@ impl<'a> CppParser<'a> {
 
     /// 解析 namespace foo { ... } 或 namespace { ... }
     fn parse_namespace_decl(&mut self) -> Result<CppDecl, CppParseError> {
-        self.expect_kw(CppKw::Namespace)?;
-        if let Some(CppTok::C(Tok {
-            kind: TokKind::Ident,
-            text,
-            ..
-        })) = &self.peek
-        {
-            // inline 关键字 (C++17) 跳过
-            if text == "inline" {
-                self.bump();
-            }
+        // Check for 'inline' keyword
+        let is_inline = self.at(CppKw::Inline);
+        if is_inline {
+            self.bump();
         }
+        
+        self.expect_kw(CppKw::Namespace)?;
         let real_name: Option<String> = if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
             text,
@@ -1994,10 +2010,18 @@ impl<'a> CppParser<'a> {
             body.push(self.parse_decl()?);
         }
         self.bump();
-        Ok(CppDecl::Namespace {
-            name: real_name,
-            body,
-        })
+        
+        if is_inline {
+            Ok(CppDecl::InlineNamespace {
+                name: real_name,
+                body,
+            })
+        } else {
+            Ok(CppDecl::Namespace {
+                name: real_name,
+                body,
+            })
+        }
     }
 
     /// 解析 using namespace std; 或 using std::cout; 或 using Base::Base;
@@ -7599,10 +7623,14 @@ impl<'a> CppParser<'a> {
                     self.check_fallthrough_decl(m);
                 }
             }
-            CppDecl::Namespace { body, .. } => {
-                for d in body {
-                    self.check_fallthrough_decl(d);
+            CppDecl::Namespace { body, .. } | CppDecl::InlineNamespace { body, .. } => {
+                // Regular and inline namespaces
+                for x in body {
+                    self.check_fallthrough_decl(x);
                 }
+            }
+            CppDecl::ExternTemplate(_) => {
+                // Extern templates: no fallthrough check needed (declaration only)
             }
             CppDecl::Template { decl, .. }
             | CppDecl::PartialSpec { decl, .. } => {
