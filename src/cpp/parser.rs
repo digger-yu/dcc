@@ -276,13 +276,23 @@ pub enum CppDecl {
         is_export: bool,
     },
     /// C++20 partial specialization (M10+):
-    ///   `template <typename T> class Foo<T*> { ... };`
+    ///   `template <typename T> class Foo<T*> { ... }`
     ///   `template <typename T> void foo<T>(T) { ... }` 不被支持
     PartialSpec {
         params: TemplateArgs,
-        /// 特化模式, 字符串形式: `T*`, `int`, `std::vector<T>` 等
+        /// 特化模式，字符串形式：`T*`, `int`, `std::vector<T>` 等
         pattern_text: String,
         decl: Box<CppDecl>,
+    },
+    /// G13: Full specialization (显式特化)
+    /// `template<> class Foo<void> { ... }`
+    /// `template<> struct Allocator<int> { typedef int value_type; };`
+    /// 注意：<>() 为空表示全特化；有具体参数也是全特化
+    /// 与偏特化的区别：无模板形参列表，直接指定具体类型
+    FullSpec {
+        primary_name: String,      // e.g., "Allocator"
+        specific_args: Vec<MangleType>,  // e.g., [void] or [int]
+        body: CppBody,
     },
     /// `using Base::Base;` 继承构造函数 (M10+)
     InheritingCtor { class: String, base: String },
@@ -1648,6 +1658,9 @@ impl<'a> CppParser<'a> {
     /// is_export: `export template` 时为 true
     fn parse_template_decl(&mut self, is_export: bool) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Template)?;
+        
+        // G13: Check if this is a full specialization: `template<>` or `template<int>`
+        // Key difference: no type parameters between <>
         if !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -1661,7 +1674,22 @@ impl<'a> CppParser<'a> {
                 self.span(),
             ));
         }
-        self.bump();
+        
+        let saved_lex = self.lex.clone();
+        let saved_peek = self.peek.clone();
+        
+        self.bump(); // consume <
+        
+        // Look ahead to determine if this is full specialization or regular/partial
+        let is_full_spec = self.lookahead_is_full_specialization();
+        
+        if is_full_spec {
+            // This is a full specialization: `template<>` or `template<void>` etc.
+            return self.parse_full_specialization(None, None);
+        }
+        
+        // Regular partial/primary template with type parameters
+        self.bump(); // consume <
         let mut params = vec![];
         loop {
             // class / typename Name (= default)?
@@ -2091,6 +2119,189 @@ impl<'a> CppParser<'a> {
             self.bump();
         }
         Ok(CppDecl::Using { is_namespace, path })
+    }
+
+    /// G13: Look ahead to determine if we have full specialization syntax
+    /// Full specializations are:
+    /// 1. `template<> identifier ...` (empty parens)
+    /// 2. `template<specific_type> identifier ...` (explicit types like template<void>)
+    /// Not full spec: `template<typename T> identifier<T*> ...` (partial with type params + pattern)
+    fn lookahead_is_full_specialization(&self) -> bool {
+        let mut depth = 1;
+        
+        // Peek at tokens starting from current position
+        let mut idx = 0usize;
+        while let Some(tok) = self.peek_token_at(idx) {
+            match tok {
+                CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                    depth += 1;
+                }
+                CppTok::C(Tok { kind: TokKind::Gt, .. }) | CppTok::C(Tok { kind: TokKind::Shr, .. }) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true; // Reached end without typename/class
+                    }
+                }
+                // If we see typename/class as a type parameter keyword
+                CppTok::Kw(CppKw::Typename, _) | CppTok::Kw(CppKw::Class, _) => {
+                    return false; // Has type parameters = not full spec
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        
+        true // Default to full spec if uncertain
+    }
+
+    /// G13: Parse full specialization body after determining it's full spec
+    fn parse_full_specialization(
+        &mut self,
+        _saved_lex: Option<CppTok>,
+        _saved_peek: Option<CppTok>,
+    ) -> Result<CppDecl, CppParseError> {
+        // Simplified approach: manually parse until we hit the identifier name
+        let mut specific_args: Vec<MangleType> = vec![];
+        let mut depth = 1;
+        let mut arg_buffer = String::new();
+        
+        // Collect arguments inside <>
+        while let Some(tok) = self.peek.clone() {
+            match tok {
+                CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                    self.bump();
+                    depth += 1;
+                    continue;
+                }
+                CppTok::C(Tok { kind: TokKind::Gt, .. }) | CppTok::C(Tok { kind: TokKind::Shr, .. }) => {
+                    self.bump();
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                CppTok::C(Tok { kind: TokKind::Comma, .. }) => {
+                    if depth == 1 {
+                        // End of args - parse what we have
+                        if !arg_buffer.trim().is_empty() {
+                            if let Ok(ty) = self.parse_mangle_type_from_str(arg_buffer.trim()) {
+                                specific_args.push(ty);
+                            }
+                        }
+                        break;
+                    } else {
+                        self.bump();
+                        arg_buffer.push(',');
+                        continue;
+                    }
+                }
+                CppTok::C(Tok { kind: TokKind::Ident, text, .. }) => {
+                    if depth == 1 && !arg_buffer.is_empty() {
+                        arg_buffer.push(' ');
+                    }
+                    arg_buffer.push_str(&text);
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+        
+        // Now parse the primary name (class/struct/etc.)
+        let primary_name = self.expect_ident()?;
+        
+        // Check for optional <args> after name (e.g. `Allocator<void>`)
+        if matches!(self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+            // Template syntax after name - skip this part
+            // The args were already captured in the first <>
+        }
+        
+        // Parse the body
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBrace,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                "{",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump(); // {
+        
+        let mut stmts = Vec::<CppStmt>::new();
+        while let Some(t) = self.peek.clone() {
+            if matches!(
+                t,
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                })
+            ) {
+                break;
+            }
+            let decl = self.parse_member_decl_with_class(&primary_name)?;
+            // Convert declaration to a statement for the body
+            stmts.push(CppStmt::Decl(decl));
+        }
+        self.bump(); // }
+        
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+        }
+        
+        Ok(CppDecl::FullSpec {
+            primary_name,
+            specific_args,
+            body: CppBody {
+                stmts,
+                is_decl: false,
+            },
+        })
+    }
+
+    /// Helper: parse MangleType from string representation (for full spec args)
+    fn parse_mangle_type_from_str(&self, s: &str) -> Result<MangleType, CppParseError> {
+        match s {
+            "void" => Ok(MangleType::Void),
+            "bool" => Ok(MangleType::Bool),
+            "char" => Ok(MangleType::Char),
+            "signed char" | "schar" => Ok(MangleType::Schar),
+            "unsigned char" | "uchar" => Ok(MangleType::Uchar),
+            "short" | "short int" => Ok(MangleType::Short),
+            "unsigned short" | "unsigned short int" => Ok(MangleType::Ushort),
+            "int" => Ok(MangleType::Int),
+            "unsigned int" | "unsigned" => Ok(MangleType::Uint),
+            "long" | "long int" => Ok(MangleType::Long),
+            "unsigned long" | "unsigned long int" => Ok(MangleType::Ulong),
+            "long long" | "long long int" => Ok(MangleType::LongLong),
+            "unsigned long long" | "unsigned long long int" => Ok(MangleType::UlongLong),
+            "float" => Ok(MangleType::Float),
+            "double" => Ok(MangleType::Double),
+            "long double" => Ok(MangleType::LongDouble),
+            _ => {
+                // Try parsing as template type like "std::allocator"
+                if s.contains("::") || s.contains("<") {
+                    // Simple heuristic: wrap in Template type
+                    Ok(MangleType::Template {
+                        name: s.replace("::", "_").replace("<", "").replace(">", ""),
+                        args: vec![],
+                    })
+                } else {
+                    // Regular class/type name
+                    Ok(MangleType::Class(s.to_string()))
+                }
+            }
+        }
     }
 
     /// 解析 `module foo;` / `module foo:part1;` / `module;` / `module :private;` / `export module foo;` (M9 占位)
@@ -7632,9 +7843,17 @@ impl<'a> CppParser<'a> {
             CppDecl::ExternTemplate(_) => {
                 // Extern templates: no fallthrough check needed (declaration only)
             }
-            CppDecl::Template { decl, .. }
-            | CppDecl::PartialSpec { decl, .. } => {
+            CppDecl::Template { decl, .. } => {
                 self.check_fallthrough_decl(decl);
+            }
+            CppDecl::PartialSpec { decl, .. } => {
+                self.check_fallthrough_decl(decl);
+            }
+            CppDecl::FullSpec { body, .. } => {
+                // Full spec has body with statements to check
+                for stmt in &body.stmts {
+                    self.check_fallthrough_stmt(stmt);
+                }
             }
             CppDecl::ExportBlock(decls) => {
                 for d in decls {

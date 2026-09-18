@@ -9736,6 +9736,11 @@ impl Lower {
             } => {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
+            // G13: Full specialization - emit as weak symbol
+            CppDecl::FullSpec { primary_name, specific_args, body } => {
+                // Skip full spec in legacy mode for now - native will handle properly
+                // TODO: Implement proper lowering for FullSpec when needed
+            }
             CppDecl::Opaque(text) => {
                 // 无法解析的声明，原样输出到 C 代码中。
                 // 包裹在注释标记中便于调试追踪。

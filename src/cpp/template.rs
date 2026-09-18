@@ -13,6 +13,15 @@
 use crate::cpp::mangle::MangleType;
 use crate::cpp::parser::{ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, SizeofArg, TemplateArgs};
 
+/// G13: Result of template matching with priority resolution
+#[derive(Debug, Clone)]
+pub enum BestMatchResult<'a> {
+    FullSpec(&'a FullSpecEntry),
+    PartialSpec((CppDecl, Vec<String>, Vec<MangleType>)),
+    Primary(&'a TemplateDecl),
+    NotFound,
+}
+
 /// 模板声明 (类模板或函数模板的统一包装)
 #[derive(Debug, Clone)]
 pub struct TemplateDecl {
@@ -30,14 +39,23 @@ pub struct TemplateDecl {
     pub is_variadic_param: Vec<bool>, // matches param_names
 }
 
-/// 偏特化条目: `template <typename T> class Foo<T*> { ... }`
+/// 偏特化条目：`template <typename T> class Foo<T*> { ... }`
 #[derive(Debug, Clone)]
 pub struct PartialSpecEntry {
     pub name: String,
     pub param_names: Vec<String>,
-    /// 特化模式, 逗号分隔的多形参文本 (M23 增强)
+    /// 特化模式，逗号分隔的多形参文本 (M23 增强)
     pub pattern_text: String,
     pub decl: CppDecl,
+}
+
+/// G13: 全特化条目：`template<> class Foo<void> { ... }`
+#[derive(Debug, Clone)]
+pub struct FullSpecEntry {
+    pub name: String,
+    /// 指定的类型实参 [void] 或 [int, double] 等
+    pub specific_args: Vec<MangleType>,
+    pub body: crate::cpp::parser::CppBody,
 }
 
 /// 模板注册表 + 实例化缓存
@@ -45,9 +63,11 @@ pub struct PartialSpecEntry {
 pub struct TemplateRegistry {
     pub templates: Vec<TemplateDecl>,
     pub partials: Vec<PartialSpecEntry>,
-    /// 实例化缓存: key = `name<arg0,arg1,...>` 编码 → 实例化结果
+    /// G13: 全特化注册表
+    pub full_specs: Vec<FullSpecEntry>,
+    /// 实例化缓存：key = `name<arg0,arg1,...>` 编码 → 实例化结果
     pub inst_cache: std::collections::HashMap<String, CppDecl>,
-    /// 实例化顺序记录 (key 列表, 供 lower 按依赖序输出)
+    /// 实例化顺序记录 (key 列表，供 lower 按依赖序输出)
     pub inst_order: Vec<String>,
     /// M26: 概念定义注册表 (concept name -> body_text)
     pub concepts: std::collections::HashMap<String, String>,
@@ -248,6 +268,20 @@ impl TemplateRegistry {
         });
     }
 
+    /// G13: 注册全特化
+    pub fn register_full(
+        &mut self,
+        name: String,
+        specific_args: Vec<MangleType>,
+        body: &crate::cpp::parser::CppBody,
+    ) {
+        self.full_specs.push(FullSpecEntry {
+            name,
+            specific_args,
+            body: body.clone(),
+        });
+    }
+
     /// 查找模板 (按名)
     pub fn find(&self, name: &str) -> Option<&TemplateDecl> {
         self.templates.iter().find(|t| t.name == name)
@@ -337,10 +371,29 @@ impl TemplateRegistry {
         self.resolve_args(td, &args)
     }
 
-    /// 实例化模板类 `name<args>`; 返回实例化后的 Class 声明 (名字已改写)
+    /// G13: 实例化模板类 - 优先匹配全特化 > 偏特化 > 主模板
     pub fn instantiate_class(&mut self, name: &str, args: &[MangleType]) -> Option<CppDecl> {
+        // First try full specialization (exact match)
+        if let Some(full) = self.find_full_spec(name, args) {
+            // Full spec is already concrete, no instantiation needed
+            // Convert body to a class declaration
+            return Some(self.full_body_to_class_decl(&full.name, &full.body));
+        }
+        
+        // Try partial specialization
+        if let Some((decl, param_names, bound)) = self.pick_partial(name, args) {
+            let key = Self::key_for(name, args);
+            if let Some(cached) = self.inst_cache.get(&key) {
+                return Some(cached.clone());
+            }
+            let inst = instantiate_decl(&decl, &param_names, &bound, Some(name), args);
+            self.inst_cache.insert(key.clone(), inst.clone());
+            self.inst_order.push(key);
+            return Some(inst);
+        }
+        
+        // Fallback to primary template
         let td = self.find(name)?;
-        // G12: Use variadic-aware arg resolution
         let resolved = if self.has_variadic() {
             self.resolve_args_with_variadic(&td, args)?
         } else {
@@ -422,10 +475,10 @@ impl TemplateRegistry {
                     }
                 };
                 if pat.ends_with('*') && arg.starts_with("p_") {
-                    // 指针模式: `T*` 匹配 `p_<T>` 编码
+                    // 指针模式：`T*` 匹配 `p_<T>` 编码
                     if pat_key == "T" || arg.contains(&pat_key) {
                         specificity += 2; // 指针模式比通配符更特化
-                        if Self::is_param_name(pat, &p.param_names) {
+                        if Self::is_param_name_internal(pat, &p.param_names) {
                             bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
                         }
                     } else {
@@ -436,7 +489,7 @@ impl TemplateRegistry {
                     all_match = false;
                     break;
                 } else if pat_key == *arg {
-                    // 精确匹配: 最特化
+                    // 精确匹配：最特化
                     specificity += 3;
                 } else if let (Some(pv), Some(av)) = (
                     Self::parse_non_type_pattern(&pat_key),
@@ -444,14 +497,14 @@ impl TemplateRegistry {
                 ) {
                     // M30.1: 非类型实参匹配 (`conditional<false, T, F>` 的
                     // pattern `false` 与实参 NonType(0)). pattern 与实参
-                    // key 都是编译期常量字面量, 值相等才匹配.
+                    // key 都是编译期常量字面量，值相等才匹配.
                     if pv == av {
                         specificity += 3;
                     } else {
                         all_match = false;
                         break;
                     }
-                } else if Self::is_param_name(pat, &p.param_names) {
+                } else if Self::is_param_name_internal(pat, &p.param_names) {
                     // 通配符: 匹配任意类型, 最不特化; 需绑定一致
                     bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
                     specificity += 1;
@@ -498,15 +551,113 @@ impl TemplateRegistry {
         Some((p.decl.clone(), p.param_names.clone(), bound))
     }
 
-    /// 判断 pattern 文本是否是形参名 (通配符)
-    fn is_param_name(pat: &str, param_names: &[String]) -> bool {
-        param_names.iter().any(|p| p == pat)
+    /// G13: 查找全特化：精确匹配优先
+    pub fn find_full_spec(
+        &self,
+        name: &str,
+        args: &[MangleType],
+    ) -> Option<&FullSpecEntry> {
+        self.full_specs.iter().find(|full| {
+            if full.name != name {
+                return false;
+            }
+            // Full specialization must match exactly
+            if full.specific_args.len() != args.len() {
+                return false;
+            }
+            for (spec_arg, req_arg) in full.specific_args.iter().zip(args.iter()) {
+                if type_key(spec_arg) != type_key(req_arg) {
+                    return false;
+                }
+            }
+            true
+        })
     }
 
-    /// M30.1: 把 pattern/key 文本解析为非类型常量值.
-    /// 接受 true/false 及十/十六进制整数; 非 NonType 文本返回 None.
-    /// (arg key 由 type_key(NonType) 生成, 形如 `n0` / `n1` / `n-3`.)
-    fn parse_non_type_pattern(s: &str) -> Option<i64> {
+    /// G13: Find the best matching instantiation with priority:
+    /// 1. Full specializations (exact match required)
+    /// 2. Partial specializations (most specialized)
+    /// 3. Primary template (fallback)
+    pub fn get_best_match(
+        &self,
+        name: &str,
+        args: &[MangleType],
+    ) -> BestMatchResult {
+        // First try full spec
+        if let Some(full) = self.find_full_spec(name, args) {
+            return BestMatchResult::FullSpec(full);
+        }
+        
+        // Then try partial specs
+        if let Some(partial) = self.pick_partial(name, args) {
+            return BestMatchResult::PartialSpec(partial);
+        }
+        
+        // Finally fallback to primary template
+        if let Some(prim) = self.find(name) {
+            return BestMatchResult::Primary(prim);
+        }
+        
+        BestMatchResult::NotFound
+    }
+}
+
+impl TemplateRegistry {
+    /// G13: Convert full specialization body to a class declaration
+    fn full_body_to_class_decl(&self, name: &str, body: &CppBody) -> CppDecl {
+        // For now, create a minimal struct - the body members will be properly handled in lowering
+        let mut members = Vec::new();
+        
+        // Extract members from the full spec body if any
+        for stmt in &body.stmts {
+            if let CppStmt::Decl(decl) = stmt {
+                match decl {
+                    CppDecl::MemberVar { ty, name: member_name, .. } => {
+                        members.push(CppDecl::MemberVar {
+                            ty: ty.clone(),
+                            name: member_name.clone(),
+                            is_mutable: false,
+                            is_volatile: false,
+                        });
+                    }
+                    CppDecl::Typedef { target, name: alias } => {
+                        members.push(CppDecl::Typedef {
+                            target: target.clone(),
+                            name: alias.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        // Simple hash using String as key
+        let hash_val = format!("{}", name.len() * 17);
+        
+        CppDecl::Class(ClassDecl {
+            name: format!("__dcc_fullspec_{}_{}", name, hash_val),
+            is_struct: true,
+            is_union: false,
+            bases: vec![],
+            members,
+        })
+    }
+}
+
+///判断 pattern 文本是否是形参名 (通配符)
+fn is_param_name(pat: &str, param_names: &[String]) -> bool {
+    param_names.iter().any(|p| p == pat)
+}
+
+impl TemplateRegistry {
+    fn is_param_name_internal(pat: &str, param_names: &[String]) -> bool {
+        is_param_name(pat, param_names)
+    }
+
+    /// M30.1: Parse non-type pattern key from string.
+    /// Accepts true/false and decimal/hex integers;
+    /// returns None for non-NonType text.
+    pub fn parse_non_type_pattern(s: &str) -> Option<i64> {
         match s {
             "true" => return Some(1),
             "false" => return Some(0),

@@ -104,6 +104,10 @@ fn collect_templates_from_decl(d: &CppDecl, reg: &mut TemplateRegistry) {
                 reg.register_partial(c.name.clone(), &names, pattern_text.clone(), decl);
             }
         }
+        // G13: Collect full specializations
+        CppDecl::FullSpec { primary_name, specific_args, body } => {
+            reg.register_full(primary_name.clone(), specific_args.clone(), body);
+        }
         CppDecl::Namespace { body, .. } => {
             for inner in body {
                 collect_templates_from_decl(inner, reg);
