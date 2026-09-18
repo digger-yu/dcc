@@ -284,12 +284,45 @@ impl Function {
 // ============================================================
 
 /// 计算 BB 的 dominator set (经典迭代算法)。
+/// Derive successor block names from a BB's terminator.
+/// `bb.succs` can become stale after SSA passes mutate terminators
+/// without updating it, so every analysis that needs successors must
+/// derive them from the Terminator directly.
+fn term_succs<'a>(term: &'a Terminator) -> Vec<&'a str> {
+    match term {
+        Terminator::Jump(t) => vec![t.as_str()],
+        Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
+        Terminator::SwitchTable { targets, default, .. } => {
+            let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
+            if !s.contains(&default.as_str()) {
+                s.push(default.as_str());
+            }
+            s
+        }
+        _ => vec![],
+    }
+}
+
+/// Derive predecessor block names from all BB terminators.
+/// Same rationale as `term_succs`: `bb.preds` can become stale.
+fn collect_all_preds(func: &Function) -> HashMap<String, Vec<String>> {
+    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    for (from_name, bb) in &func.blocks {
+        for t in term_succs(&bb.term) {
+            preds.entry(t.to_string()).or_default().push(from_name.clone());
+        }
+    }
+    preds
+}
+
 pub fn compute_dominators(func: &Function) -> HashMap<String, HashSet<String>> {
     let mut doms: HashMap<String, HashSet<String>> = HashMap::new();
     if !func.blocks.contains_key(&func.entry) {
         return doms;
     }
-    // reverse postorder
+    // Derive preds from terminators to avoid stale bb.preds
+    let derived_preds = collect_all_preds(func);
+    // reverse postorder (now correctly derived from terminators)
     let rpo = reverse_postorder(func);
     let all: HashSet<String> = func.blocks.keys().cloned().collect();
     for b in func.blocks.keys() {
@@ -307,10 +340,10 @@ pub fn compute_dominators(func: &Function) -> HashMap<String, HashSet<String>> {
             if *b == func.entry {
                 continue;
             }
-            let preds = &func.blocks[b].preds;
-            if preds.is_empty() {
-                continue;
-            }
+            let preds = match derived_preds.get(b) {
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
+            };
             // intersect of preds
             let mut new: HashSet<String> = all.clone();
             for p in preds {
@@ -340,7 +373,8 @@ fn dfs_rpo(bb: &str, func: &Function, visited: &mut HashSet<String>, order: &mut
     if !visited.insert(bb.to_string()) {
         return;
     }
-    for s in &func.blocks[bb].succs {
+    let succs = term_succs(&func.blocks[bb].term);
+    for s in succs {
         dfs_rpo(s, func, visited, order);
     }
     order.push(bb.to_string());
