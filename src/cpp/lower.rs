@@ -9087,6 +9087,8 @@ impl Lower {
                         layout: None,
                     });
                 }
+                // 注册用户定义的自由函数，供调用处 mangled name 使用
+                self.plain_fns.insert(name.clone());
                 // M26.1: noexcept 函数体按声明输出 __attribute__((nothrow))
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");

@@ -412,8 +412,10 @@ impl TemplateRegistry {
         }
         // G11: 使用模板模板参数增强的实例化
         let primary_params = &td.template_params;
+        // 类实例化必须使用实例化后的名称 (如 __dcc_template_Box_int)
+        let inst_name = instantiated_class_name(name, &resolved);
         let inst = instantiate_decl_with_template_params(
-            &td.decl, &td.param_names, &resolved, Some(name), primary_params);
+            &td.decl, &td.param_names, &resolved, Some(&inst_name), primary_params);
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
