@@ -762,6 +762,142 @@ fn type_size_hint(ty: &str) -> usize {
     }
 }
 
+// ===== M50: GCC Built-in Type Traits Support (Critical for libstdc++) =====
+/// Compare two MangleType structures recursively for identical types
+fn compare_types_identical(t1: &MangleType, t2: &MangleType) -> bool {
+    t1 == t2
+}
+
+/// Check if type A can be converted to type B
+/// Supports:
+/// - Identity conversions (A == B)  
+/// - Pointer/reference conversions to compatible types
+/// - Numeric promotions (smaller int → larger int, char→int, float→double)
+/// - Conversions to void (any type → void)
+fn is_convertible(from: &MangleType, to: &MangleType) -> bool {
+    // Identity conversion
+    if from == to {
+        return true;
+    }
+    
+    // Pointer conversions (recursive on pointee)
+    if let (MangleType::Pointer(inner_from), MangleType::Pointer(inner_to)) = (from, to) {
+        return is_convertible(inner_from, inner_to);
+    }
+    
+    // Reference conversions (recursive on referent)  
+    if let (MangleType::Reference(inner_from), MangleType::Reference(inner_to)) = (from, to) {
+        return is_convertible(inner_from, inner_to);
+    }
+    
+    // Any type can convert to void
+    if matches!(to, MangleType::Void) {
+        return true;
+    }
+    
+    // Built-in numeric promotions:
+    // Small integral types to larger ones:
+    // bool, char, signed char, unsigned char -> short/unsigned short -> int/uint -> long/ulong -> long long/ulong long
+    match (from, to) {
+        // Character types to any integral type
+        (MangleType::Char | MangleType::Schar | MangleType::Uchar, 
+         MangleType::Short | MangleType::Ushort | MangleType::Int | MangleType::Uint | 
+         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+            return true;
+        }
+        // Bool to any integral type
+        (MangleType::Bool, 
+         MangleType::Short | MangleType::Ushort | MangleType::Int | MangleType::Uint | 
+         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+            return true;
+        }
+        // Short/Ushort to larger integral types
+        (MangleType::Short | MangleType::Ushort,
+         MangleType::Int | MangleType::Uint | MangleType::Long | MangleType::Ulong | 
+         MangleType::LongLong | MangleType::UlongLong) => {
+            return true;
+        }
+        // Int/Uint to larger integral types
+        (MangleType::Int | MangleType::Uint,
+         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+            return true;
+        }
+        // Long/Ulong to long long
+        (MangleType::Long | MangleType::Ulong,
+         MangleType::LongLong | MangleType::UlongLong) => {
+            return true;
+        }
+        // Float to double
+        (MangleType::Float, MangleType::Double | MangleType::LongDouble) => {
+            return true;
+        }
+        // Double to long double
+        (MangleType::Double, MangleType::LongDouble) => {
+            return true;
+        }
+        _ => {}
+    }
+    
+    false
+}
+
+/// Evaluate GCC built-in type trait expressions
+/// M50.0: Add __is_same, __is_convertible, __is_constructible, __is_assignable
+pub fn evaluate_gcc_type_trait(trait_name: &str, types: &[MangleType]) -> Option<bool> {
+    match trait_name {
+        // __is_same<T,U>: T 和 U 是相同的类型
+        "__is_same" => {
+            if types.len() >= 2 {
+                Some(compare_types_identical(&types[0], &types[1]))
+            } else {
+                None
+            }
+        }
+        
+        // __is_convertible<A,B>: A 是否可以隐式转换为 B
+        "__is_convertible" => {
+            if types.len() >= 2 {
+                Some(is_convertible(&types[0], &types[1]))
+            } else {
+                None
+            }
+        }
+        
+        // __is_constructible<T, Args...>: 是否可以用 Args 构造 T
+        // Simplified M10: check if any argument type matches the target type directly
+        "__is_constructible" => {
+            if types.len() >= 2 {
+                let target = &types[0];
+                let args = &types[1..];
+                // Direct construction possible if any argument matches target
+                Some(args.iter().any(|arg| compare_types_identical(target, arg)))
+            } else {
+                None
+            }
+        }
+        
+        // __is_assignable<T, U>: T 是否可以赋值 U
+        // Simplified M10: identical or convertible means assignable
+        "__is_assignable" => {
+            if types.len() >= 2 {
+                let target = &types[0];
+                let source = &types[1];
+                // Identical types are assignable
+                if compare_types_identical(target, source) {
+                    return Some(true);
+                }
+                // If source can convert to target, assignment is possible
+                Some(is_convertible(source, target))
+            } else {
+                None
+            }
+        }
+        
+        // Other GCC traits can be added here
+        _ => None,
+    }
+}
+
 /// partial specialization 匹配并实例化
 /// 对每个 partial spec, 检查 pattern 是否匹配实参, 若匹配则用 spec 替换主模板
 pub fn instantiate_partial_spec(
@@ -1560,5 +1696,327 @@ mod tests {
         
         // Successful results are never rejections
         assert!(!is_sfinae_candidate_rejection::<i32>(&Ok(42)));
+    }
+
+    // ===== M50: Tests for GCC Built-in Type Traits (is_same, is_convertible, etc.) =====
+
+    #[test]
+    fn gcc_trait_is_same_identical_types() {
+        use super::MangleType;
+        // __is_same<int, int> should be true
+        let types = vec![
+            MangleType::Int,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_same<double, double> should be true
+        let types = vec![
+            MangleType::Double,
+            MangleType::Double,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_same_different_types() {
+        use super::MangleType;
+        // __is_same<int, long> should be false
+        let types = vec![
+            MangleType::Int,
+            MangleType::Long,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(false));
+        
+        // __is_same<float, double> should be false
+        let types = vec![
+            MangleType::Float,
+            MangleType::Double,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(false));
+        
+        // __is_same<bool, char> should be false
+        let types = vec![
+            MangleType::Bool,
+            MangleType::Char,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn gcc_trait_is_same_with_pointers() {
+        use super::MangleType;
+        // __is_same<int*, int*> should be true
+        let types = vec![
+            MangleType::Pointer(Box::new(MangleType::Int)),
+            MangleType::Pointer(Box::new(MangleType::Int)),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_same<int*, long*> should be false
+        let types = vec![
+            MangleType::Pointer(Box::new(MangleType::Int)),
+            MangleType::Pointer(Box::new(MangleType::Long)),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn gcc_trait_is_convertible_identity() {
+        use super::MangleType;
+        // __is_convertible<int, int> should be true (identity)
+        let types = vec![
+            MangleType::Int,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_convertible_numeric_promotions() {
+        use super::MangleType;
+        // __is_convertible<char, int> should be true
+        let types = vec![
+            MangleType::Char,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<bool, int> should be true
+        let types = vec![
+            MangleType::Bool,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<short, long> should be true
+        let types = vec![
+            MangleType::Short,
+            MangleType::Long,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<int, long long> should be true
+        let types = vec![
+            MangleType::Int,
+            MangleType::LongLong,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<float, double> should be true
+        let types = vec![
+            MangleType::Float,
+            MangleType::Double,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<double, long double> should be true
+        let types = vec![
+            MangleType::Double,
+            MangleType::LongDouble,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_convertible_to_void() {
+        use super::MangleType;
+        // Any type can convert to void
+        let types = vec![
+            MangleType::Int,
+            MangleType::Void,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        let types = vec![
+            MangleType::Class("Foo".to_string()),
+            MangleType::Void,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_convertible_pointers() {
+        use super::MangleType;
+        // __is_convertible<int*, int*> should be true (pointer identity)
+        let types = vec![
+            MangleType::Pointer(Box::new(MangleType::Int)),
+            MangleType::Pointer(Box::new(MangleType::Int)),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_convertible<char*, void*> via pointee conversion (char -> any integral)
+        let types = vec![
+            MangleType::Pointer(Box::new(MangleType::Char)),
+            MangleType::Pointer(Box::new(MangleType::Int)),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_convertible_not_convertible() {
+        use super::MangleType;
+        // __is_convertible<long, int> should be false (no reverse promotion)
+        let types = vec![
+            MangleType::Long,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(false));
+        
+        // __is_convertible<double, float> should be false (no downcast)
+        let types = vec![
+            MangleType::Double,
+            MangleType::Float,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn gcc_trait_is_constructible_direct_match() {
+        use super::MangleType;
+        // __is_constructible<int, int> should be true
+        let types = vec![
+            MangleType::Int,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_constructible<Foo, Foo> should be true
+        let types = vec![
+            MangleType::Class("Foo".to_string()),
+            MangleType::Class("Foo".to_string()),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_constructible_multiple_args() {
+        use super::MangleType;
+        // __is_constructible<int, int, long> - int matches one arg
+        let types = vec![
+            MangleType::Int,
+            MangleType::Int,
+            MangleType::Long,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_constructible<Foo, int, double> - no match
+        let types = vec![
+            MangleType::Class("Foo".to_string()),
+            MangleType::Int,
+            MangleType::Double,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn gcc_trait_is_assignable_identical() {
+        use super::MangleType;
+        // __is_assignable<int, int> should be true (identical)
+        let types = vec![
+            MangleType::Int,
+            MangleType::Int,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_assignable<Foo, Foo> should be true (identical)
+        let types = vec![
+            MangleType::Class("Foo".to_string()),
+            MangleType::Class("Foo".to_string()),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_assignable_convertible() {
+        use super::MangleType;
+        // __is_assignable<long, short> should be true (short can convert to long)
+        let types = vec![
+            MangleType::Long,
+            MangleType::Short,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_assignable<double, float> should be true (float can convert to double)
+        let types = vec![
+            MangleType::Double,
+            MangleType::Float,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(true));
+        
+        // __is_assignable<void*, char*> should be true (via pointee: char -> int)
+        let types = vec![
+            MangleType::Pointer(Box::new(MangleType::Void)),
+            MangleType::Pointer(Box::new(MangleType::Char)),
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(true));
+    }
+
+    #[test]
+    fn gcc_trait_is_assignable_not_assignable() {
+        use super::MangleType;
+        // __is_assignable<int, long> should be false (long cannot convert to int)
+        let types = vec![
+            MangleType::Int,
+            MangleType::Long,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(false));
+        
+        // __is_assignable<float, double> should be false (double cannot convert to float)
+        let types = vec![
+            MangleType::Float,
+            MangleType::Double,
+        ];
+        let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    fn gcc_trait_insufficient_args() {
+        use super::MangleType;
+        // __is_same with only 1 arg should return None
+        let types = vec![MangleType::Int];
+        let result = super::evaluate_gcc_type_trait("__is_same", &types);
+        assert_eq!(result, None);
+        
+        // __is_convertible with 0 args should return None
+        let types: Vec<MangleType> = vec![];
+        let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
+        assert_eq!(result, None);
+        
+        // Unknown trait should return None
+        let types = vec![MangleType::Int, MangleType::Long];
+        let result = super::evaluate_gcc_type_trait("__unknown_trait", &types);
+        assert_eq!(result, None);
     }
 }
