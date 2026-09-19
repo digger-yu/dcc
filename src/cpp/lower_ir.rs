@@ -5379,55 +5379,10 @@ mod tests {
         );
         sema.set_owner(y_sym, derived_sym);
 
-        let hir = sema.into_hir();
+        // Save symbols before consuming sema into hir
+        let symbols = sema.take_symbols();
 
-        // 重建符号表（sema 已被消费）
-        let symbols = vec![
-            CxxSymbol {
-                id: base_sym,
-                name: "Base".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(base_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: x_sym,
-                name: "x".to_string(),
-                kind: CxxSymbolKind::Field,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: Some(base_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: derived_sym,
-                name: "Derived".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(derived_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: y_sym,
-                name: "y".to_string(),
-                kind: CxxSymbolKind::Field,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: Some(derived_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-        ];
+        let hir = sema.into_hir();
 
         (hir, symbols, base_id, derived_id)
     }
