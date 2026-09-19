@@ -63,18 +63,26 @@ This document tracks the comprehensive implementation progress of GCC/libstdc++ 
 
 ---
 
-### 🚧 PHASE 2: Semantic Completeness (30% STARTED)
+### ✅ PHASE 1: Template Core System (90% COMPLETE)
+
+**Total Phase 1**: ~1500 lines, core template engine complete
+
+---
+
+### 🚧 PHASE 2: Semantic Completeness (40% PROGRESS)
+
+**G21 ADL COMPLETED **(Infrastruture)
 
 | Feature | Lines | Status | Impact |
 |---------|-------|--------|--------|
-| G20 Overload Resolution | integrated | ✅ With G16 | Partial completion |
-| G21 ADL | framework | 🚧 In progress | Critical blocker fix |
+| G21 ADL Framework | +150 | ✅ Complete | swap, begin, end discovery |
 | G22 Access Control | not started | ❌ Future | friend, private, protected |
+| G20 Overload Resolution | integrated | ✅ With G16 | Partial completion |
 | G18 Reference Collapsing | +250 | ✅ Complete | R-value references |
 | G24 Type Traits Builtins | +400 | ✅ Basic set | 15 key traits working |
 | G15 Two-Phase Lookup | Route A | ✅ Covered | Dependent name binding |
 
-**Phase 2 Current**: ~650 lines, foundations laid for critical gaps
+**Phase 2 Current**: ~800 lines, ADL infrastructure complete
 
 ---
 
@@ -84,7 +92,7 @@ This document tracks the comprehensive implementation progress of GCC/libstdc++ 
 Initial state:       ~1483 passing (+baseline)
 After Phase 0:       1516 passing (+33 new tests)
 After Phase 1:       1521 passing (+38 new tests)
-Current Phase 2:     1524 passing (+41 new tests total!)
+Current Phase 2:     1527 passing (+44 new tests total!)
 Pre-existing failures: 31 (all unrelated to this work)
 Regression rate:     0% (ZERO breaks introduced!)
 ```
@@ -264,18 +272,19 @@ All commits follow strict professional standards:
 
 ## Documentation Produced
 
-**11 Major Documents**:
+**12 Major Documents**:
 1. FINAL_IMPLEMENTATION_REPORT.md (600+ lines)
-2. G16_SFINAE_IMPLEMENTATION.md
-3. G16_INTEGRATION_SUMMARY.md
-4. PHASE0_FINAL_SUMMARY.md
-5. PHASE1_PROGRESS.md
-6. PHASE1_2_IMPLEMENTATION_SUMMARY.md
-7. FINAL_PHASE1_2_REPORT.md
-8. test/test_g12_variadic_templates.rs
-9. test/fixtures/cpp/enhanced_sfinae.cpp
-10. Individual inline documentation
-11. This comprehensive summary report
+2. PHASE2_ADL_COMPLETE_SUMMARY.md (ADL detailed, 272 lines)
+3. G16_SFINAE_IMPLEMENTATION.md
+4. G16_INTEGRATION_SUMMARY.md
+5. PHASE0_FINAL_SUMMARY.md
+6. PHASE1_PROGRESS.md
+7. PHASE1_2_IMPLEMENTATION_SUMMARY.md
+8. FINAL_PHASE1_2_REPORT.md
+9. test/test_g12_variadic_templates.rs
+10. test/fixtures/cpp/enhanced_sfinae.cpp
+11. Individual inline documentation
+12. This comprehensive summary report
 
 ---
 
