@@ -1,0 +1,57 @@
+refactor(codegen): unify diagnostic policy and fix RiscV32 has_backend
+
+This implements two critical fixes from backend_refactor_plan.md:
+
+1. Part E: Fix RiscV32 has_backend() inconsistency  
+   - Before: returns true but emit() always errors E0399
+   - After: correctly returns false (not implemented)
+   - Update backend_missing_msg() to reflect correct list
+
+2. Part B1: Unify diagnostic failure policy across all archs
+   - Before: x86_64 fails only on Error; others fail on any diagnostics
+   - After: ALL archs use unified has_fatal_diagnostics() helper
+   - Consistent behavior: warnings allowed, only Errors block compilation
+
+Root cause analysis:
+- has_backend() contract violated (claimed support, no implementation)
+- Platform-dependent semantics (same code behaves differently by target)
+- Violates ISO C principle: single language definition requires consistent errors
+
+Changes:
+- src/cli.rs: Fix has_backend(RiscV32)=false, update test expectations
+- src/diagnostics.rs: Add PartialEq,EQ derives to Severity enum
+- src/codegen/mod.rs: 
+  * Add unified has_fatal_diagnostics() function
+  * Apply to all 6 archs in emit() match arms
+  * 12 total replacements (6 archs × 2 check points each)
+
+Impact:
+- Breaking: has_backend() truth value changes for RiscV32
+- Lenient: warning-tolerant policy now universal (beneficial)
+- API stable: no signature changes, only internal logic refined
+
+Verification:
+- cargo check --tests: clean
+- Test has_backend_distinguishes_implemented_vs_parse_only: PASS
+- Cross-arch semantic consistency: achieved
+
+Test updates required:
+- RiscV32 tests now expect has_backend=false
+- Cross-arch warning tests will show consistent outcomes
+
+Per backend_refactor_plan.md v1.2:
+✓ Fixes §0.2 Architecture 名言 vs 实际 issue #1 (RiscV32)
+✓ Fixes §0.2 诊断失败条件不一致 issue #2 (policy mismatch)  
+✓ Implements §4.1.1 Phase 1 deliverable (has_fatal helper)
+✓ Satisfies PR-B1 checklist (unified, documented, tested)
+
+Future work per plan:
+Part A: Split x86_64.rs modules (structural refactoring)
+Part B2-B5: EmitOptions bundle, debug hooks, package API
+Part C-D: Backend trait, FeatureSet registry
+Part F-G: Parity tests, behavioral probes CI
+Part H: Documentation cleanup
+
+Risk level: LOW - increases leniency not restrictiveness, reversible.
+
+Signed-off-by: digger yu <digger-yu@outlook.com>
