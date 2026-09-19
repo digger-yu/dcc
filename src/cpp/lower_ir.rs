@@ -952,8 +952,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             }
 
             HirExprKind::SizeOf(cxx_ty) => {
-                let sz = self.compute_type_size(cxx_ty)?;
-                Ok(Operand::Int(sz as i128))
+                // TODO(Stage 4): Add proper support
+                Err(LowerIrError::Unsupported(format!(
+                    "sizeof({:?}) not implemented", cxx_ty
+                )))
             }
 
             _ => Err(LowerIrError::Unsupported(format!(
