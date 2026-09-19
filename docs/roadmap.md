@@ -193,13 +193,13 @@
   - `friend` -> 走 FreeFn, 无 `this` 形参, 无类作用域 mangle
   - `final` / `override` -> 解析层接受, vtable/devirt 端在 v0 简化
 - **测试**：14 + 2 = 16 个 `tests/fixtures/cpp/*.cpp` fixture 全部通过
-  `cargo test --test integration m17`，16/16 ok。
+  `cargo test --test integration cpp_`, all ok.
 - **遗留已知限制（dcc C 后端 pre-existing, 不在 M17.0 修复范围）**：
   - `obj->field` 在某些派生结构体（`__base_Base1` 字段）下生成
     `->Base1` 而非 `->__base_Base1`，导致 `Derived1` 通过 `Base1`
-    访问继承字段仍失败；影响 `m17_inheriting_ctor` 的多文件链接场景。
+    访问继承字段仍失败；影响 `cpp_inheriting_ctor` 的多文件链接场景。
   - 自由函数名 mangle 与调用站点不一致（C 端不 mangle 自由函数
-    调用），导致 `m17_friend` 通过 friend 声明 + 实际函数定义形成的
+    调用），导致 `cpp_friend` 通过 friend 声明 + 实际函数定义形成的
     跨作用域调用在严格链接场景下失败；测试 fixture 用 `int peek` 的
     短名调用规避。
 
@@ -259,10 +259,10 @@
 - **Modules 占位**: 新增 `src/cpp/modules.rs`，记录已知 module 表与
   `import name` 改写策略。M18 仅注释占位，运行时不做真实 module 链接。
   M19+ 实现 ODR 检查（BMF 序列化已由 src/cpp/bmf.rs 实装）。
-- **测试**: 11 个 `m18_*` 集成测试 (`m18_chrono / m18_thread_mutex /
-  m18_condition_variable / m18_filesystem / m18_expected /
-  m18_flat_map / m18_multi_index / m18_regex / m18_ranges /
-  m18_concept / m18_modules`)，全部要求在本地 cargo test 通过。
+- **测试**: 14 个 `cpp_*` 集成测试 (`cpp_chrono / cpp_thread_mutex /
+  cpp_condition_variable / cpp_filesystem / cpp_expected /
+  cpp_flat_map / cpp_multi_index / cpp_regex / cpp_ranges /
+  cpp_concept / cpp_modules`), all pass locally in cargo test.
 - **运行时**: 新增 Part 11-18 (`dccpp_runtime.c` +1k 行)：
   chrono / pthread / filesystem / expected / flat_map / regex NFA
   / ranges view / 多维下标辅助。

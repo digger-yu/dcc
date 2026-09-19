@@ -343,8 +343,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ partial specialization | `template <T> class Foo<T*> {}` 偏特化匹配；多形参 pattern |
 | dcc++ 完整 concept 求值 | `sizeof(T)<=N` / `same_as<T,U>` / `derived_from<T,Base>`；解析 + 简化求值；运行时测试 `semantic_enum_type_traits_runtime` |
 | dcc++ enum 语义保留 | 常规 enum / scoped enum (`enum class`) / 匿名 enum；运行时测试验证枚举值与底层类型 |
-| dcc++ 协程 | `co_await` / `co_yield` / `co_return` Duff's device 状态机 + promise type 推导；运行时测试 `m26_coroutine_runtime` + `coroutine_co_await_runtime` |
-| dcc++ module BMF 序列化 | DCC_BMF_V1 文本格式；`to_bmf`/`from_bmf` round-trip；运行时测试 `m26_modules_bmf` + `m26_module_cross_tu_import` + `m26_module_partition_import` + ODR 测试 |
+| dcc++ coroutines | `co_await` / `co_yield` / `co_return` Duff's device state machine + promise type deduction; runtime tests `cpp_coroutine_runtime` + `cpp_coroutine_co_await_runtime` |
+| dcc++ module BMF serialization | DCC_BMF_V1 text format; `to_bmf`/`from_bmf` round-trip; runtime tests `cpp_modules_bmf` + `cpp_module_cross_tu_import` + `cpp_module_partition_import_runtime` + ODR tests |
 | dcc++ GCC 兼容运行时 | `__cxa_guard_acquire/release/abort` / `__dynamic_cast` / `initializer_list`（均 weak，多 TU 安全） |
 | dcc++ operator-> 重载链 | 类型名含 `Ptr` / `Wrapper` / `Iter` 识别 |
 | dcc++ 完整 RTTI dynamic_cast | 跨虚继承通过 vtable RTTI 查找 |

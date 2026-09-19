@@ -8394,9 +8394,9 @@ fn m16_function_attr() {
 /// M17.0: auto 真类型推导 (int / StringLit / class)
 #[test]
 #[cfg(unix)]
-fn m17_auto_deduce() {
+fn cpp_auto_deduce() {
     let src = include_str!("fixtures/cpp/auto_deduce.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-auto-deduce", src);
+    let (out, _obj) = run_cpp_object_test("cpp-auto-deduce", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8408,9 +8408,9 @@ fn m17_auto_deduce() {
 /// M17.0: decltype(expr) 真类型查询
 #[test]
 #[cfg(unix)]
-fn m17_decltype() {
+fn cpp_decltype() {
     let src = include_str!("fixtures/cpp/decltype.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-decltype", src);
+    let (out, _obj) = run_cpp_object_test("cpp-decltype", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8422,9 +8422,9 @@ fn m17_decltype() {
 /// M17.0: decltype(auto) 变量类型推导
 #[test]
 #[cfg(unix)]
-fn m17_decltype_auto() {
+fn cpp_decltype_auto() {
     let src = include_str!("fixtures/cpp/decltype_auto.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-decltype-auto", src);
+    let (out, _obj) = run_cpp_object_test("cpp-decltype-auto", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8436,9 +8436,9 @@ fn m17_decltype_auto() {
 /// M17.0: explicit 构造函数
 #[test]
 #[cfg(unix)]
-fn m17_explicit_ctor() {
+fn cpp_explicit_ctor() {
     let src = include_str!("fixtures/cpp/explicit_ctor.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-explicit-ctor", src);
+    let (out, _obj) = run_cpp_object_test("cpp-explicit-ctor", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8450,9 +8450,9 @@ fn m17_explicit_ctor() {
 /// M17.0: final / override 关键字
 #[test]
 #[cfg(unix)]
-fn m17_final_override() {
+fn cpp_final_override() {
     let src = include_str!("fixtures/cpp/final_override.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-final-override", src);
+    let (out, _obj) = run_cpp_object_test("cpp-final-override", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8461,12 +8461,12 @@ fn m17_final_override() {
     let _ = fs::remove_file(_obj);
 }
 
-/// M17.0: friend 关键字 (lower 接受 friend 声明, 不强求链接)
+/// M17.0: friend 关键字 (lower 接受 friend 声明，不强求链接)
 #[test]
 #[cfg(unix)]
-fn m17_friend() {
+fn cpp_friend() {
     let src = include_str!("fixtures/cpp/friend.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-friend", src);
+    let (out, _obj) = run_cpp_object_test("cpp-friend", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8478,9 +8478,9 @@ fn m17_friend() {
 /// M17.0: if constexpr 编译期分支
 #[test]
 #[cfg(unix)]
-fn m17_if_constexpr() {
+fn cpp_if_constexpr() {
     let src = include_str!("fixtures/cpp/if_constexpr.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-if-constexpr", src);
+    let (out, _obj) = run_cpp_object_test("cpp-if-constexpr", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8492,9 +8492,9 @@ fn m17_if_constexpr() {
 /// M17.0: using Base::Base; 继承构造
 #[test]
 #[cfg(unix)]
-fn m17_inheriting_ctor() {
+fn cpp_inheriting_ctor() {
     let src = include_str!("fixtures/cpp/inheriting_ctor.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-inheriting-ctor", src);
+    let (out, _obj) = run_cpp_object_test("cpp-inheriting-ctor", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8506,9 +8506,9 @@ fn m17_inheriting_ctor() {
 /// M17.0: 成员指针 obj.*ptr_to_member
 #[test]
 #[cfg(unix)]
-fn m17_member_ptr() {
+fn cpp_member_ptr() {
     let src = include_str!("fixtures/cpp/member_ptr.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-member-ptr", src);
+    let (out, _obj) = run_cpp_object_test("cpp-member-ptr", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8520,9 +8520,9 @@ fn m17_member_ptr() {
 /// M17.0: mutable 独立字段
 #[test]
 #[cfg(unix)]
-fn m17_mutable() {
+fn cpp_mutable() {
     let src = include_str!("fixtures/cpp/mutable.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-mutable", src);
+    let (out, _obj) = run_cpp_object_test("cpp-mutable", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8534,9 +8534,9 @@ fn m17_mutable() {
 /// M27: mutable 成员 const 方法中可写
 #[test]
 #[cfg(unix)]
-fn m27_mutable_const_method() {
+fn cpp_mutable_const_method() {
     let src = include_str!("fixtures/cpp/mutable.cpp");
-    let (out, _obj) = run_cpp_object_test("m27-mutable-const", src);
+    let (out, _obj) = run_cpp_object_test("cpp-mutable-const", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8548,9 +8548,9 @@ fn m27_mutable_const_method() {
 /// M27: MemberStar/PtrMemberStar 真实字段类型解引
 #[test]
 #[cfg(unix)]
-fn m27_member_ptr_deref_typed() {
+fn cpp_member_ptr_deref() {
     let src = include_str!("fixtures/cpp/member_ptr_deref.cpp");
-    let (out, _obj) = run_cpp_object_test("m27-member-ptr-deref", src);
+    let (out, _obj) = run_cpp_object_test("cpp-member-ptr-deref", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8563,9 +8563,9 @@ fn m27_member_ptr_deref_typed() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m27_typeid_dynamic_rtti() {
+fn cpp_typeid_dynamic_rtti() {
     let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
-    let (out, _obj) = run_cpp_object_test("m27-typeid-rtti", src);
+    let (out, _obj) = run_cpp_object_test("cpp-typeid-dynamic-rtti", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8577,9 +8577,9 @@ fn m27_typeid_dynamic_rtti() {
 /// M27: 模板偏特化 specialization 排序
 #[test]
 #[cfg(unix)]
-fn m27_template_specialization() {
+fn cpp_template_specialization() {
     let src = include_str!("fixtures/cpp/template_specialization.cpp");
-    let (out, _obj) = run_cpp_object_test("m27-tpl-spec", src);
+    let (out, _obj) = run_cpp_object_test("cpp-template-spec", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8591,9 +8591,9 @@ fn m27_template_specialization() {
 /// M27: C++20 Modules ODR 检查
 #[test]
 #[cfg(unix)]
-fn m27_modules_odr() {
+fn cpp_modules_odr() {
     let src = include_str!("fixtures/cpp/modules_odr.cpp");
-    let (out, _obj) = run_cpp_object_test("m27-modules-odr", src);
+    let (out, _obj) = run_cpp_object_test("cpp-modules-odr", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8605,9 +8605,9 @@ fn m27_modules_odr() {
 /// M17.0: new T[n] 数组分配 + operator new[]/delete[]
 #[test]
 #[cfg(unix)]
-fn m17_new_array() {
+fn cpp_new_array() {
     let src = include_str!("fixtures/cpp/new_array.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-new-array", src);
+    let (out, _obj) = run_cpp_object_test("cpp-new-array", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8619,9 +8619,9 @@ fn m17_new_array() {
 /// M17.0: noexcept 关键字
 #[test]
 #[cfg(unix)]
-fn m17_noexcept() {
+fn cpp_noexcept() {
     let src = include_str!("fixtures/cpp/noexcept.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-noexcept", src);
+    let (out, _obj) = run_cpp_object_test("cpp-noexcept", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8633,9 +8633,9 @@ fn m17_noexcept() {
 /// M17.0: placement new
 #[test]
 #[cfg(unix)]
-fn m17_placement_new() {
+fn cpp_placement_new() {
     let src = include_str!("fixtures/cpp/placement_new.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-placement-new", src);
+    let (out, _obj) = run_cpp_object_test("cpp-placement-new", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8647,9 +8647,9 @@ fn m17_placement_new() {
 /// M17.0: smoke 测试 (最小可工作 C++ 程序)
 #[test]
 #[cfg(unix)]
-fn m17_smoke() {
+fn cpp_smoke() {
     let src = include_str!("fixtures/cpp/smoke.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-smoke", src);
+    let (out, _obj) = run_cpp_object_test("cpp-smoke", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8661,9 +8661,9 @@ fn m17_smoke() {
 /// M17.0: typeid(e) vtable RTTI
 #[test]
 #[cfg(unix)]
-fn m17_typeid() {
+fn cpp_typeid() {
     let src = include_str!("fixtures/cpp/typeid.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-typeid", src);
+    let (out, _obj) = run_cpp_object_test("cpp-typeid", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8675,9 +8675,9 @@ fn m17_typeid() {
 /// M17.0: volatile 成员函数
 #[test]
 #[cfg(unix)]
-fn m17_volatile_member() {
+fn cpp_volatile_member() {
     let src = include_str!("fixtures/cpp/volatile_member.cpp");
-    let (out, _obj) = run_cpp_object_test("m17-volatile-member", src);
+    let (out, _obj) = run_cpp_object_test("cpp-volatile-member", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8776,11 +8776,11 @@ fn cpp_ssa_volatile_semantics() {
 #[ignore = "TODO: native path needs runtime/stdlib support"]
 /// M17: Weak vtable symbols - compile-only smoke test
 #[test]
-fn m17_weak_vtable_multi_file_link() {
+fn cpp_weak_vtable_multifile_link() {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     // 共享 class 定义（含 virtual + 数据成员 + 显式构造）
-    let class_def = "\
+    let class_def = "\"
 class Foo {\n\
 public:\n\
     Foo() : x(0) {}\n\
@@ -8797,11 +8797,11 @@ int helper() {{ Foo f; f.x = 1; return f.val(); }}\n"
         "{class_def}\
 int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
     );
-    let p1 = dir.join(format!("dcc-m17-weak-tu1-{pid}.cpp"));
-    let p2 = dir.join(format!("dcc-m17-weak-tu2-{pid}.cpp"));
-    let o1 = dir.join(format!("dcc-m17-weak-tu1-{pid}.o"));
-    let o2 = dir.join(format!("dcc-m17-weak-tu2-{pid}.o"));
-    let exe = dir.join(format!("dcc-m17-weak-{pid}"));
+    let p1 = dir.join(format!("dcc-cpp-weak-tu1-{pid}.cpp"));
+    let p2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.cpp"));
+    let o1 = dir.join(format!("dcc-cpp-weak-tu1-{pid}.o"));
+    let o2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.o"));
+    let exe = dir.join(format!("dcc-cpp-weak-{pid}"));
     fs::write(&p1, &tu1).unwrap();
     fs::write(&p2, &tu2).unwrap();
     let dcc = env!("CARGO_BIN_EXE_dcc");
@@ -8836,15 +8836,15 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
 }
 
 // =========================================================================
-// M18: C++ 标准库扩展 (filesystem / thread / mutex / chrono / expected /
+// C++: Standard Library Extensions (filesystem / thread / mutex / chrono / expected /
 // flat_map / multi_index / regex / ranges / concepts / modules)
 // =========================================================================
 
 #[test]
 #[cfg(unix)]
-fn m18_chrono() {
+fn cpp_chrono() {
     let src = include_str!("fixtures/cpp/chrono.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-chrono", src);
+    let (out, _obj) = run_cpp_object_test("cpp-chrono", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8855,9 +8855,9 @@ fn m18_chrono() {
 
 #[test]
 #[cfg(unix)]
-fn m18_thread_mutex() {
+fn cpp_thread_mutex() {
     let src = include_str!("fixtures/cpp/thread_mutex.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-thread-mutex", src);
+    let (out, _obj) = run_cpp_object_test("cpp-thread-mutex", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8868,7 +8868,7 @@ fn m18_thread_mutex() {
 
 #[test]
 #[cfg(unix)]
-fn m18_condition_variable() {
+fn cpp_condition_variable() {
     // Minimal test avoiding system header conflicts with DCC internal mangling (p_<T> prefix)
     let src = r#"
 namespace std {
@@ -8877,7 +8877,7 @@ namespace std {
 }
 int main() { return 0; }  // Compile-only smoke test
 "#;
-    let (out, _obj) = run_cpp_object_test("m18-cv", src);
+    let (out, _obj) = run_cpp_object_test("cpp-condition-variable", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8888,9 +8888,9 @@ int main() { return 0; }  // Compile-only smoke test
 
 #[test]
 #[cfg(unix)]
-fn m18_filesystem() {
+fn cpp_filesystem() {
     let src = include_str!("fixtures/cpp/filesystem.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-filesystem", src);
+    let (out, _obj) = run_cpp_object_test("cpp-filesystem", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8901,9 +8901,9 @@ fn m18_filesystem() {
 
 #[test]
 #[cfg(unix)]
-fn m18_expected() {
+fn cpp_expected() {
     let src = include_str!("fixtures/cpp/expected.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-expected", src);
+    let (out, _obj) = run_cpp_object_test("cpp-expected", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8914,9 +8914,9 @@ fn m18_expected() {
 
 #[test]
 #[cfg(unix)]
-fn m18_flat_map() {
+fn cpp_flat_map() {
     let src = include_str!("fixtures/cpp/flat_map.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-flat-map", src);
+    let (out, _obj) = run_cpp_object_test("cpp-flat-map", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8927,9 +8927,9 @@ fn m18_flat_map() {
 
 #[test]
 #[cfg(unix)]
-fn m18_multi_index() {
+fn cpp_multi_index() {
     let src = include_str!("fixtures/cpp/multi_index.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-multi-index", src);
+    let (out, _obj) = run_cpp_object_test("cpp-multi-index", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8940,9 +8940,9 @@ fn m18_multi_index() {
 
 #[test]
 #[cfg(unix)]
-fn m18_regex() {
+fn cpp_regex() {
     let src = include_str!("fixtures/cpp/regex.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-regex", src);
+    let (out, _obj) = run_cpp_object_test("cpp-regex", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8954,9 +8954,9 @@ fn m18_regex() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m18_ranges() {
+fn cpp_ranges() {
     let src = include_str!("fixtures/cpp/ranges.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-ranges", src);
+    let (out, _obj) = run_cpp_object_test("cpp-ranges", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8968,9 +8968,9 @@ fn m18_ranges() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m18_concept() {
+fn cpp_concept() {
     let src = include_str!("fixtures/cpp/concept.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-concept", src);
+    let (out, _obj) = run_cpp_object_test("cpp-concept", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -8981,9 +8981,9 @@ fn m18_concept() {
 
 #[test]
 #[cfg(unix)]
-fn m18_modules() {
+fn cpp_modules() {
     let src = include_str!("fixtures/cpp/modules.cpp");
-    let (out, _obj) = run_cpp_object_test("m18-modules", src);
+    let (out, _obj) = run_cpp_object_test("cpp-modules", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -11793,13 +11793,13 @@ int main(void) {
 ///   并走 MemberStar / PtrMemberStar 路径.
 #[test]
 #[cfg(unix)]
-fn p2_1_member_ptr_dotstar() {
+fn cpp_member_ptr_dotstar() {
     let src = include_str!("fixtures/cpp/member_ptr_deref.cpp");
-    let (out, obj) = run_cpp_object_test("p2-1-member-ptr", src);
+    let (out, obj) = run_cpp_object_test("cpp-member-ptr-dotstar", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_1_member_ptr compile failed: {}",
+        "cpp_member_ptr_dotstar compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -11811,30 +11811,30 @@ fn p2_1_member_ptr_dotstar() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn p2_2_typeid_rtti() {
+fn cpp_typeid_rtti() {
     let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
-    let (out, obj) = run_cpp_object_test("p2-2-typeid", src);
+    let (out, obj) = run_cpp_object_test("cpp-typeid-rtti", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_2_typeid compile failed: {}",
+        "cpp_typeid_rtti compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 /// P2.3: C++ 模板实参语法 T<U> (Section 6 表格 模板实例化行).
 /// 验证 dcc cpp 解析器 `parse_mangle_type` (M18 阶段实装)
-/// 在 ident 后识别 `<` 触发 `MangleType::Template` 分支, 接受
-/// `Holder<int>` / `Holder<Holder<int>>` (嵌套 >> 视作两层 `>)
-/// 语法, 不再走 M8 简化版对模板实参的剥离.
+/// 在 ident 后识别 `<` 触发 `MangleType::Template` 分支，接受
+/// `Holder<int>` / `Holder<Holder<int>>` (嵌套 >>视作两层 `>)
+/// 语法，不再走 M8 简化版对模板实参的剥离.
 #[test]
 #[cfg(unix)]
-fn p2_3_template_arg_syntax() {
+fn cpp_template_arg_syntax() {
     let src = include_str!("fixtures/cpp/template_arg.cpp");
-    let (out, obj) = run_cpp_object_test("p2-3-template-arg", src);
+    let (out, obj) = run_cpp_object_test("cpp-template-arg-syntax", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_3_template_arg compile failed: {}",
+        "cpp_template_arg_syntax compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -11844,13 +11844,13 @@ fn p2_3_template_arg_syntax() {
 /// 同时覆盖深层嵌套 `>>` 拆 token 的正确闭合 (template_depth.cpp).
 #[test]
 #[cfg(unix)]
-fn m18_template_depth_ok() {
+fn cpp_template_depth_ok() {
     let src = include_str!("fixtures/cpp/template_depth.cpp");
-    let (out, obj) = run_cpp_object_test("m18-template-depth-ok", src);
+    let (out, obj) = run_cpp_object_test("cpp-template-depth-ok", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "m18_template_depth_ok compile failed: {}",
+        "cpp_template_depth_ok compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -11864,7 +11864,7 @@ fn m18_template_depth_ok() {
 /// M18.x: 模板深度限制验证 (compile-only smoke test)
 #[test]
 #[cfg(unix)]
-fn m18_template_depth_limit_enforced() {
+fn cpp_template_depth_limit_rejected() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-depth-limit-{}.cpp", std::process::id()));
     let object_path = dir.join(format!("dcc-cpp-depth-limit-{}.o", std::process::id()));
@@ -11895,30 +11895,30 @@ fn m18_template_depth_limit_enforced() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m18_sfinae_smoke() {
+fn cpp_sfinae_smoke() {
     let src = include_str!("fixtures/cpp/sfinae.cpp");
-    let (out, obj) = run_cpp_object_test("m18-sfinae", src);
+    let (out, obj) = run_cpp_object_test("cpp-sfinae", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "m18_sfinae_smoke compile failed: {}",
+        "cpp_sfinae_smoke compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 /// P2.4: operator new[] / operator delete[] 走 _Znam / _ZdaPv
 /// (Section 6). 验证 dcc lower 阶段对 `new T[n]` 和 `delete[] p`
-/// 调用 mangle_op_new_array() / mangle_op_delete_array() 命名常量,
+/// 调用 mangle_op_new_array() / mangle_op_delete_array() 命名常量，
 /// 即 Itanium C++ ABI 数组分配/释放符号 _Znam / _ZdaPv.
 #[test]
 #[cfg(unix)]
-fn p2_4_new_arr_mangler() {
+fn cpp_new_arr_mangler() {
     let src = include_str!("fixtures/cpp/new_arr_mangler.cpp");
-    let (out, obj) = run_cpp_object_test("p2-4-new-arr-mangler", src);
+    let (out, obj) = run_cpp_object_test("cpp-new-arr-mangler", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_4_new_arr_mangler compile failed: {}",
+        "cpp_new_arr_mangler compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -11926,35 +11926,35 @@ fn p2_4_new_arr_mangler() {
 /// P2.5: new T[n] 数组分配 (Section 6). 验证 dcc parser
 /// 在 `new T[n]` 形式下识别 `[` 触发 CppExpr::NewArr, lower
 /// 阶段 emit `((T*)mangle_op_new_array()(sizeof(T) * n))`, 即
-/// Itanium C++ ABI 数组分配符号 _Znam 调用. 配合
+/// Itanium C++ ABI 数组分配符号 _Znam 调用。配合
 /// `delete[] p` 走 _ZdaPv (P2.4) 走完整 array 生命周期.
 #[test]
 #[cfg(unix)]
-fn p2_5_new_array_alloc() {
+fn cpp_new_array_alloc() {
     let src = include_str!("fixtures/cpp/new_array_alloc.cpp");
-    let (out, obj) = run_cpp_object_test("p2-5-new-array-alloc", src);
+    let (out, obj) = run_cpp_object_test("cpp-new-array-alloc", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_5_new_array_alloc compile failed: {}",
+        "cpp_new_array_alloc compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
 /// P2.6: placement new 走裸 malloc 替身 (Section 6). 验证 dcc
-/// parser 检测 `new (ptr) T(args)` 形式, lower 阶段 emit 构造
+/// parser 检测 `new (ptr) T(args)` 形式，lower 阶段 emit 构造
 /// 链 `(void*)(ptr), mangle_ctor(&n, ...)(ptr, args)`, 不调用
-/// operator new 分配新内存, 模拟 Itanium C++ ABI placement
+/// operator new 分配新内存，模拟 Itanium C++ ABI placement
 /// new 语义 (M17.0 阶段实装).
 #[test]
 #[cfg(unix)]
-fn p2_6_placement_new() {
+fn cpp_placement_new_ctor() {
     let src = include_str!("fixtures/cpp/placement_new_ctor.cpp");
-    let (out, obj) = run_cpp_object_test("p2-6-placement-new", src);
+    let (out, obj) = run_cpp_object_test("cpp-placement-new-ctor", src);
     let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
-        "p2_6_placement_new compile failed: {}",
+        "cpp_placement_new_ctor compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -12982,9 +12982,9 @@ fn c23_typeof_unqual() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 2: implement Duff's device lowering (current: compile-only smoke test)"]
-fn m26_coroutine_state_machine() {
+fn cpp_coroutine_state_machine() {
     let src = include_str!("fixtures/cpp/coroutine_state.cpp");
-    let (out, _obj) = run_cpp_object_test("m26-coroutine-state", src);
+    let (out, _obj) = run_cpp_object_test("cpp-coroutine-state", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -12996,9 +12996,9 @@ fn m26_coroutine_state_machine() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 1: Implement module system (BMF format + import/export parser + ODR validation)"]
-fn m26_modules_bmf() {
+fn cpp_modules_bmf() {
     let src = include_str!("fixtures/cpp/modules_bmf.cpp");
-    let (out, _obj) = run_cpp_object_test("m26-modules-bmf", src);
+    let (out, _obj) = run_cpp_object_test("cpp-modules-bmf", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13009,10 +13009,10 @@ fn m26_modules_bmf() {
 
 #[test]
 #[cfg(unix)]
-fn m26_enum_semantics_runtime() {
+fn cpp_enum_semantics_runtime() {
     // enum 保留枚举值 + scoped + 底层类型; dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/enum_semantics.cpp");
-    let (out, obj) = run_cpp_object_test("m26-enum-semantics", src);
+    let (out, obj) = run_cpp_object_test("cpp-enum-semantics", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13046,10 +13046,10 @@ fn m26_enum_semantics_runtime() {
 
 #[test]
 #[cfg(unix)]
-fn m26_member_parser_runtime() {
+fn cpp_member_parser_runtime() {
     // 引用成员 + operator new/delete + hex/oct/bin/float/转义字面量.
     let src = include_str!("fixtures/cpp/member_parser.cpp");
-    let (out, obj) = run_cpp_object_test("m26-member-parser", src);
+    let (out, obj) = run_cpp_object_test("cpp-member-parser", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13084,10 +13084,10 @@ fn m26_member_parser_runtime() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m26_auto_deduction_runtime() {
+fn cpp_auto_deduction_runtime() {
     // auto 从 函数调用 / 成员调用 / 成员访问 / new 推导真实类型.
     let src = include_str!("fixtures/cpp/auto_deduction.cpp");
-    let (out, obj) = run_cpp_object_test("m26-auto-deduction", src);
+    let (out, obj) = run_cpp_object_test("cpp-auto-deduction", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13121,10 +13121,10 @@ fn m26_auto_deduction_runtime() {
 
 #[test]
 #[cfg(unix)]
-fn m26_noexcept_expr_runtime() {
+fn cpp_noexcept_expr_runtime() {
     // noexcept(expr) 分析表达式抛异常可能性; dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/noexcept_expr.cpp");
-    let (out, obj) = run_cpp_object_test("m26-noexcept-expr", src);
+    let (out, obj) = run_cpp_object_test("cpp-noexcept-expr", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13159,11 +13159,11 @@ fn m26_noexcept_expr_runtime() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 2: implement Duff's device lowering (current: compile-only smoke test)"]
-fn m26_coroutine_runtime() {
-    // 协程 co_yield/co_return 降级为 Duff's device 状态机, 状态跨调用
+fn cpp_coroutine_runtime() {
+    // 协程 co_yield/co_return 降级为 Duff's device 状态机，状态跨调用
     // 保持 (文件作用域 static 全局); dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/coroutine_runtime.cpp");
-    let (out, obj) = run_cpp_object_test("m26-coroutine-runtime", src);
+    let (out, obj) = run_cpp_object_test("cpp-coroutine-runtime", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13198,11 +13198,11 @@ fn m26_coroutine_runtime() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
-fn m26_virtual_inheritance_runtime() {
-    // 菱形虚继承 Itanium ABI 布局: vbtable + vbptr + 尾部共享虚基子对象,
+fn cpp_virtual_inheritance_runtime() {
+    // 菱形虚继承 Itanium ABI 布局：vbtable + vbptr + 尾部共享虚基子对象，
     // 成员访问与上转型经 vbtable this-adjust; dcc -c + host gcc 链接运行.
     let src = include_str!("fixtures/cpp/virtual_inheritance.cpp");
-    let (out, obj) = run_cpp_object_test("m26-virtual-inheritance", src);
+    let (out, obj) = run_cpp_object_test("cpp-virtual-inheritance", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -13240,7 +13240,7 @@ fn m26_virtual_inheritance_runtime() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 1: Implement module system (BMF format + import/export parser + cross-TU symbol resolution)"]
-fn m26_module_cross_tu_import() {
+fn cpp_module_cross_tu_import() {
     // M26.4: 跨 TU module import.
     // 导出 TU (export module) 经 --emit-module-file 写出 BMF 接口;
     // 导入 TU (import mymod) 从 BMF 生成 extern 声明 + 类布局;
@@ -13336,7 +13336,7 @@ int main() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 1: Implement partition module support (.partx BMF format + cross-partition linking)"]
-fn m26_module_partition_import() {
+fn cpp_module_partition_import_runtime() {
     // M26.4: module partition 跨 TU.
     // part TU `export module mymod:part;` -> mymod.part.bmf (P 行);
     // primary TU `export module mymod; import :part;` -> mymod.bmf (X 行),
@@ -13443,7 +13443,7 @@ fn m26_module_partition_import() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 1: Implement module ODR validation (detect cross-module symbol conflicts + emit E0103 errors)"]
-fn m26_odr_conflict_rejected() {
+fn cpp_odr_conflict_rejected() {
     // M26.5: 两个模块导出同名 `foo` 但定义 (签名) 不同, 同时 import 二者
     // 时 driver 必须报 E0103 ODR violations, 而不是静默生成代码.
     let dir = std::env::temp_dir().join(format!("dcc-odr-{}", std::process::id()));
@@ -13506,7 +13506,7 @@ fn m26_odr_conflict_rejected() {
         .output()
         .expect("run dcc on import TU");
     let _ = fs::remove_dir_all(&dir);
-    assert!(!out.status.success(), "ODR conflict should be rejected");
+    assert!(!out.status.success(), "cpp_odr_conflict_rejected should be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
     assert!(stderr.contains("foo"), "stderr: {}", stderr);
@@ -13519,7 +13519,7 @@ fn m26_odr_conflict_rejected() {
 
 #[test]
 #[cfg(unix)]
-fn m26_odr_identical_imports_ok() {
+fn cpp_odr_identical_imports_ok() {
     // M26.5: 两个模块导出同名同定义 (签名一致) 的 foo, 同时 import 不报错
     let dir = std::env::temp_dir().join(format!("dcc-odr-ok-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
@@ -13635,9 +13635,9 @@ int main(void) {
 
 #[test]
 #[cfg(unix)]
-fn m26_gcc_compat_runtime() {
+fn cpp_gcc_compat() {
     let src = include_str!("fixtures/cpp/gcc_compat.cpp");
-    let (out, _obj) = run_cpp_object_test("m26-gcc-compat", src);
+    let (out, _obj) = run_cpp_object_test("cpp-gcc-compat", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -16099,12 +16099,12 @@ fn semantic_enum_type_traits_runtime() {
 #[test]
 #[cfg(unix)]
 #[ignore = "TODO Phase 2: implement promise object + awaitable protocol (current: compile-only smoke test)"]
-fn coroutine_co_await_runtime() {
+fn cpp_coroutine_co_await_runtime() {
     // Coroutine co_await state machine runtime test
     // Verifies: co_await suspends and resumes correctly
     // dcc -c + host gcc link + execute
     let src = include_str!("fixtures/cpp/coroutine_co_await.cpp");
-    let (out, obj) = run_cpp_object_test("coroutine-coawait-runtime", src);
+    let (out, obj) = run_cpp_object_test("cpp-coroutine-coawait-runtime", src);
     assert!(
         out.status.success(),
         "compile: {}",
@@ -18939,7 +18939,7 @@ int main(void) { return add(1, 2); }
 }
 
 #[test]
-fn comdat_group_cpp_template_instantiation() {
+fn cpp_comdat_template_instantiation() {
     // C++ template instantiation generates COMDAT groups.
     // Test that dcc can parse GCC-generated C++ objects with COMDAT.
     if Command::new("g++").arg("--version").output().is_err() {

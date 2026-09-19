@@ -12186,10 +12186,10 @@ mod tests {
         );
     }
 
-    // ===== M10+ tests =====
+    // ===== C++ lower unit tests =====
 
     #[test]
-    fn m10_sfinae_substitute_basic() {
+    fn cpp_sfinae_substitute() {
         use crate::cpp::feature_degrade::{try_substitute, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
@@ -12198,7 +12198,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_partial_spec_pointer_matches() {
+    fn cpp_partial_spec_pointer_matches() {
         use crate::cpp::feature_degrade::pattern_matches;
         assert!(pattern_matches("T*", "int*"));
         assert!(pattern_matches("T*", "MyClass*"));
@@ -12206,7 +12206,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_concept_size_le() {
+    fn cpp_concept_size_le() {
         use crate::cpp::feature_degrade::{Concept, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
@@ -12217,7 +12217,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_concept_same_as() {
+    fn cpp_concept_same_as() {
         use crate::cpp::feature_degrade::{Concept, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
@@ -12226,8 +12226,8 @@ mod tests {
     }
 
     #[test]
-    fn m26_concept_sfinae_integration() {
-        // M26: concept 定义与 requires 子句联动
+    fn cpp_concept_sfinae_integration() {
+        // C++: concept definition with requires clause
         // concept Integral = sizeof(T) <= 4;
         // template <typename T> requires Integral<T> T add(T a, T b) { return a + b; }
         use crate::cpp::feature_degrade::expand_concepts;
@@ -12242,7 +12242,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_cxa_guard_state_machine() {
+    fn cpp_cxa_guard_state_machine() {
         use crate::cpp::feature_degrade::CxaGuard;
         let mut g = CxaGuard::new("var".to_string());
         assert!(g.acquire());
@@ -12252,7 +12252,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_init_list_emit_c() {
+    fn cpp_init_list_emit_c() {
         use crate::cpp::feature_degrade::InitList;
         let mut il = InitList::new("int".to_string());
         il.push("1".to_string());
@@ -12264,7 +12264,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_module_partition_signature() {
+    fn cpp_module_partition_signature() {
         use crate::cpp::feature_degrade::ModulePartition;
         let p = ModulePartition {
             name: "foo".to_string(),
@@ -12275,7 +12275,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_coroutine_await_yield_state() {
+    fn cpp_coroutine_await_yield_state() {
         use crate::cpp::feature_degrade::CoroutineMachine;
         let mut cm = CoroutineMachine::new();
         let s1 = cm.co_await("x");
@@ -12286,7 +12286,7 @@ mod tests {
     }
 
     #[test]
-    fn m10_arrow_chain_resolve() {
+    fn cpp_arrow_chain_resolve() {
         use crate::cpp::feature_degrade::ArrowChainResolver;
         assert!(ArrowChainResolver::has_arrow_overload("MyPtr"));
         assert!(ArrowChainResolver::has_arrow_overload("Iterator"));
@@ -12294,28 +12294,28 @@ mod tests {
     }
 
     #[test]
-    fn m10_dynamic_cast_cross_virtual() {
+    fn cpp_dynamic_cast_cross_virtual() {
         use crate::cpp::feature_degrade::DynamicCast;
         let s = DynamicCast::cross_virtual("p", "Derived", "Base");
         assert!(s.contains("__dynamic_cast"));
     }
 
     #[test]
-    fn m10_ctor_delegation() {
+    fn cpp_ctor_delegation() {
         use crate::cpp::feature_degrade::CtorExpander;
         let s = CtorExpander::emit_delegation("D", "B", "/* body */");
         assert!(s.contains("delegating ctor"));
     }
 
     #[test]
-    fn m10_member_ptr_emit() {
+    fn cpp_member_ptr_emit() {
         use crate::cpp::feature_degrade::MemberPtr;
         assert_eq!(MemberPtr::emit("Foo", "bar"), "&_member_fn_Foo_bar");
     }
 
     #[test]
-    fn lower_m10_static_local_emit_cxa_guard() {
-        // 静态局部变量触发 __cxa_guard_* 调用
+    fn cpp_static_local_cxa_guard() {
+        // Static local variable triggers __cxa_guard_* call
         let src = b"void f() { static int x = 42; }";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
@@ -12328,7 +12328,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_m10_partial_spec_parse() {
+    fn cpp_partial_spec_parse() {
         // 偏特化 parse
         let src = b"template <typename T> class Foo<T*> { public: T value; };";
         let mut p = CppParser::new(src, "test.cpp");
@@ -12342,7 +12342,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_m10_module_partition_parse() {
+    fn cpp_module_partition_parse() {
         // module foo:part1;
         let src = b"module foo:part1;";
         let mut p = CppParser::new(src, "test.cpp");

@@ -328,7 +328,7 @@ pub struct ThisAdjust {
 验收:
 
 - diamond virtual inheritance 测试通过。
-- `m26_virtual_inheritance_runtime` 走 native path 后通过。
+- `cpp_virtual_inheritance_runtime` passes after native path implementation.
 - legacy 的 `__vbptr` C 表达式模拟不再是主路径。
 
 ### Stage 7: RTTI 与 dynamic_cast
@@ -501,7 +501,7 @@ match cxx_native_mode {
 
 - C++ 默认路径不再生成临时 C 源文件。
 - 当前所有 C++ 集成测试 native path 通过。
-- `m26_virtual_inheritance_runtime` 不依赖 `__vbptr` C 表达式模拟。
+- `cpp_virtual_inheritance_runtime` does not rely on `__vbptr` C expression simulation.
 - class layout、vtable、RTTI 与 g++ 对照测试通过。
 - 模板基础场景由 sema 实例化, 不依赖字符串替换。
 - throw/catch 基础场景可链接并运行。
