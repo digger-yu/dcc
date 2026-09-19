@@ -37,6 +37,8 @@ pub struct TemplateDecl {
     pub decl: CppDecl,
     /// G12: 记录哪些形参是 pack
     pub is_variadic_param: Vec<bool>, // matches param_names
+    /// G11: 原始模板参数定义（用于识别模板模板参数）
+    pub template_params: Vec<crate::cpp::parser::TemplateParam>,
 }
 
 /// 偏特化条目：`template <typename T> class Foo<T*> { ... }`
@@ -191,6 +193,7 @@ impl TemplateRegistry {
             requires: requires.clone(),
             decl,
             is_variadic_param,
+            template_params: targs.params.clone(),
         })
     }
 
@@ -407,7 +410,10 @@ impl TemplateRegistry {
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
         }
-        let inst = instantiate_decl(&td.decl, &td.param_names, &resolved, Some(name), &resolved);
+        // G11: 使用模板模板参数增强的实例化
+        let primary_params = &td.template_params;
+        let inst = instantiate_decl_with_template_params(
+            &td.decl, &td.param_names, &resolved, Some(name), primary_params);
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
@@ -426,7 +432,10 @@ impl TemplateRegistry {
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
         }
-        let inst = instantiate_decl(&td.decl, &td.param_names, &resolved, None, &resolved);
+        // G11: 使用模板模板参数增强的实例化
+        let primary_params = &td.template_params;
+        let inst = instantiate_decl_with_template_params(
+            &td.decl, &td.param_names, &resolved, None, primary_params);
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
@@ -1718,3 +1727,132 @@ mod g14_tests {
         assert!(ctx.lookup_dependent_member("X", "anything").is_none());
     }
 }
+
+
+// ===== G11: 模板模板参数实例化逻辑 =====
+
+/// G11: 替换类型中的模板模板参数引用
+fn substitute_template_refs_in_type(
+    ty: &MangleType,
+    bindings: &std::collections::HashMap<String, MangleType>,
+) -> MangleType {
+    match ty {
+        // 检查是否是模板模板参数引用
+        MangleType::Class(name) => {
+            if let Some(bound) = bindings.get(name) {
+                return bound.clone();
+            }
+            ty.clone()
+        }
+        
+        MangleType::Pointer(inner) => {
+            MangleType::Pointer(Box::new(substitute_template_refs_in_type(inner, bindings)))
+        }
+        MangleType::Reference(inner) => {
+            MangleType::Reference(Box::new(substitute_template_refs_in_type(inner, bindings)))
+        }
+        MangleType::Array(inner, size) => {
+            MangleType::Array(
+                Box::new(substitute_template_refs_in_type(inner, bindings)),
+                *size,
+            )
+        }
+        
+        MangleType::Template { name, args } => {
+            let new_args: Vec<MangleType> = args
+                .iter()
+                .map(|a| substitute_template_refs_in_type(a, bindings))
+                .collect();
+            MangleType::Template {
+                name: name.clone(),
+                args: new_args,
+            }
+        }
+        
+        MangleType::TplMember { name, args, member } => {
+            let new_args: Vec<MangleType> = args
+                .iter()
+                .map(|a| substitute_template_refs_in_type(a, bindings))
+                .collect();
+            MangleType::TplMember {
+                name: name.clone(),
+                args: new_args,
+                member: member.clone(),
+            }
+        }
+        
+        _ => ty.clone(),
+    }
+}
+
+/// G11: 替换声明中的模板模板参数引用（简化版本）
+fn substitute_template_refs_in_decl(
+    decl: &CppDecl,
+    bindings: &std::collections::HashMap<String, MangleType>,
+) -> CppDecl {
+    // 先执行普通的类型参数替换
+    let substituted = substitute_decl(decl, &[], &[], None);
+    
+    // 然后对关键成员进行模板模板参数替换
+    match &substituted {
+        CppDecl::Class(c) => {
+            // 递归替换类成员中的模板模板参数
+            let new_members: Vec<CppDecl> = c.members.iter().map(|m| {
+                match m {
+                    CppDecl::MemberVar { ty, name, is_mutable, is_volatile } => {
+                        CppDecl::MemberVar {
+                            ty: substitute_template_refs_in_type(ty, bindings),
+                            name: name.clone(),
+                            is_mutable: *is_mutable,
+                            is_volatile: *is_volatile,
+                        }
+                    }
+                    _ => m.clone(),
+                }
+            }).collect();
+            
+            CppDecl::Class(ClassDecl {
+                name: c.name.clone(),
+                is_struct: c.is_struct,
+                is_union: c.is_union,
+                bases: c.bases.clone(),
+                members: new_members,
+            })
+        }
+        _ => substituted,
+    }
+}
+
+/// G11: 增强版的 instantiate_decl，支持模板模板参数替换
+pub fn instantiate_decl_with_template_params(
+    decl: &CppDecl,
+    params: &[String],
+    args: &[MangleType],
+    class_rename: Option<&str>,
+    primary_params: &[crate::cpp::parser::TemplateParam],
+) -> CppDecl {
+    // Step 1: 构建普通参数和模板模板参数的绑定
+    let mut bindings = std::collections::HashMap::new();
+    for (i, param_name) in params.iter().enumerate() {
+        if let Some(arg) = args.get(i) {
+            bindings.insert(param_name.clone(), arg.clone());
+        }
+    }
+    
+    // Step 2: 识别模板模板参数并添加到绑定中
+    for (i, param_name) in params.iter().enumerate() {
+        if let Some(primary_param) = primary_params.get(i) {
+            if let Some(_arity) = primary_param.template_params {
+                if let Some(arg) = args.get(i) {
+                    bindings.insert(param_name.clone(), arg.clone());
+                }
+            }
+        }
+    }
+    
+    // Step 3: 先执行普通替换，再执行模板模板参数的特殊替换
+    let substituted = substitute_decl(decl, params, args, class_rename);
+    substitute_template_refs_in_decl(&substituted, &bindings)
+}
+
+// ===== END OF G11 CODE =====
