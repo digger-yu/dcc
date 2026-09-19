@@ -75,6 +75,8 @@ pub enum CppStmt {
     Return(Option<CppExpr>),
     /// While loop (simplified support)
     While(Option<CppExpr>, Vec<Box<CppStmt>>),
+    /// Switch statement with constant expressions
+    Switch(Option<CppExpr>, Vec<(Option<CppExpr>, Vec<Box<CppStmt>>)>), // Each arm: None = default, Some(expr) = case expr
 }
 
 // ============================================================================
@@ -340,6 +342,12 @@ impl ConstexprContext<'_> {
         // Check recursion limit before entering
         self.check_recursion_limit(&func.name)?;
         
+        // G27: For consteval functions, ensure we're in constant evaluation context
+        if func.is_consteval && !self.in_constant_context {
+            self.record_violation(&func.name);
+            return Err(self.violations_message().unwrap_or_default());
+        }
+        
         // Enter function call scope
         self.enter_call();
         
@@ -350,7 +358,7 @@ impl ConstexprContext<'_> {
         }
         
         // Execute function body and extract return value
-        let result = self.eval_constexpr_body(&func.body, &locals);
+        let result = self.eval_constexpr_body(&func.body, locals);
         
         // Exit function call scope
         self.exit_call();
@@ -370,6 +378,7 @@ impl ConstexprContext<'_> {
     /// - Handles control flow (if, while, for loops)
     /// - Supports nested blocks with proper scope management
     /// - Extracts return values from Return nodes
+    /// - **Fixes local variable persistence**: Updated locals are carried forward
     /// 
     /// # Arguments
     /// * `body` - List of statements to execute
@@ -381,7 +390,7 @@ impl ConstexprContext<'_> {
     fn eval_constexpr_body(
         &self,
         body: &[CppStmt],
-        locals: &HashMap<String, i128>,
+        mut locals: HashMap<String, i128>,
     ) -> ConstEvalResult<Option<i128>> {
         // Process statements sequentially - O(body size) amortized complexity
         for stmt in body {
@@ -389,18 +398,15 @@ impl ConstexprContext<'_> {
                 CppStmt::Expr(expr) => {
                     // Expression statement - evaluate but discard result
                     // This handles side effects like f(x) or ++i
-                    let _ = self.eval_cpp_const_safe(expr, locals);
+                    let _ = self.eval_cpp_const_safe(expr, &locals);
                 },
                 
                 CppStmt::Decl(name, init_expr) => {
                     // Variable declaration with optional initialization
                     // Creates new binding in current scope
                     if let Some(init) = init_expr {
-                        if let Some(value) = self.eval_cpp_const_safe(init, locals) {
-                            let mut new_locals = locals.clone();
-                            new_locals.insert(name.clone(), value);
-                            // In simple model, replace locals entirely
-                            // More sophisticated: push to stack
+                        if let Some(value) = self.eval_cpp_const_safe(init, &locals) {
+                            locals.insert(name.clone(), value);
                         }
                     }
                 },
@@ -408,31 +414,39 @@ impl ConstexprContext<'_> {
                 CppStmt::Block(stmts) => {
                     // Nested block - need isolated scope
                     // Execute within cloned locals to avoid polluting outer scope
-                    let block_result = self.eval_block_statements(stmts.clone(), locals)?;
+                    let mut block_locals = locals.clone();
+                    let block_result = self.eval_block_statements(stmts.clone(), &block_locals)?;
                     
                     // If inner block returned, propagate up immediately
                     if let Some(ret_value) = block_result {
                         return Ok(Some(ret_value));
                     }
+                    
+                    // Update locals with any new variables from block
+                    locals = block_locals;
                 },
                 
                 CppStmt::If(cond, then_body, else_body) => {
                     // Non-constexpr if - treat as runtime branch
                     // Only compile-time conditions get eliminated via if constexpr elsewhere
-                    if let Some(cond_val) = self.eval_cpp_const_safe(cond, locals) {
+                    if let Some(cond_val) = self.eval_cpp_const_safe(cond, &locals) {
                         if cond_val != 0 {
                             // True branch
-                            let then_result = self.eval_vector_stmts(then_body, locals)?;
+                            let mut then_locals = locals.clone();
+                            let then_result = self.eval_vector_stmts(then_body, &then_locals)?;
                             if let Some(ret) = then_result {
                                 return Ok(Some(ret));
                             }
+                            locals = then_locals;
                         } else {
                             // False branch
                             if let Some(else_b) = else_body {
-                                let else_result = self.eval_vector_stmts(else_b, locals)?;
+                                let mut else_locals = locals.clone();
+                                let else_result = self.eval_vector_stmts(else_b, &else_locals)?;
                                 if let Some(ret) = else_result {
                                     return Ok(Some(ret));
                                 }
+                                locals = else_locals;
                             }
                         }
                     }
@@ -443,17 +457,18 @@ impl ConstexprContext<'_> {
                     // Support pattern: for(int i=0; i<n; i++) { ... }
                     // Unrolling optimization when bound is constant
                     
+                    let mut for_locals = locals.clone();
                     // Execute initialization
                     if let Some(init_stmt) = init {
-                        self.eval_simple_stmt(init_stmt, locals)?;
+                        self.eval_simple_stmt(&init_stmt, &for_locals)?;
                     }
                     
                     // Try to unroll if condition is constant integer comparison
                     if let Some(condition) = cond {
-                        if let Some(loop_count) = self.extract_loop_bound(condition, locals) {
+                        if let Some(loop_count) = self.extract_loop_bound(&condition, &for_locals) {
                             // Constant bound detected - unroll loop n times
+                            let mut iter_locals = for_locals.clone();
                             for iteration in 0..loop_count {
-                                let mut iter_locals = locals.clone();
                                 // Bind loop variable from initialization
                                 if let Some(ref init_box) = init {
                                     if let CppStmt::Decl(ref var_name, _) = **init_box {
@@ -466,17 +481,21 @@ impl ConstexprContext<'_> {
                                     return Ok(Some(ret));
                                 }
                             }
+                            // Update locals after loop completes
+                            for_locals = iter_locals;
                         }
                     }
                     
                     // Fallback: simple interpretation without full loop semantics
                     // Note: Complex loops with non-constant bounds deferred to runtime
+                    locals = for_locals;
                 },
                 
                 CppStmt::While(condition, body_stmts) => {
                     // Simplified while loop support
                     // Currently limited to constant-folded expressions
                     
+                    let mut while_locals = locals.clone();
                     let mut iterations = 0usize;
                     let max_iterations = 100; // Prevent infinite loops
                     
@@ -485,12 +504,12 @@ impl ConstexprContext<'_> {
                         
                         // Evaluate loop condition
                         if let Some(ref condition_expr) = condition {
-                            if let Some(cond_val) = self.eval_cpp_const_safe(condition_expr, locals) {
+                            if let Some(cond_val) = self.eval_cpp_const_safe(condition_expr, &while_locals) {
                                 if cond_val == 0 {
                                     break;
                                 }
                                 
-                                let body_result = self.eval_vector_stmts(body_stmts, locals)?;
+                                let body_result = self.eval_vector_stmts(body_stmts, &while_locals)?;
                                 if let Some(ret) = body_result {
                                     return Ok(Some(ret));
                                 }
@@ -500,12 +519,50 @@ impl ConstexprContext<'_> {
                             }
                         }
                     }
+                    
+                    // Update locals after loop completes
+                    locals = while_locals;
+                },
+                
+                CppStmt::Switch(cond_expr, cases) => {
+                    // Evaluate switch condition
+                    let switch_value: Option<i128> = if let Some(ref expr) = cond_expr {
+                        self.eval_cpp_const_safe(expr, &locals)
+                    } else {
+                        None
+                    };
+                    
+                    // Find matching case (or default)
+                    for (case_expr, case_body) in cases.iter() {
+                        let match_cond = match (switch_value, case_expr) {
+                            (_, None) => true,  // default case
+                            (Some(val), Some(case_val)) => {
+                                if let Some(cval) = self.eval_cpp_const_safe(case_val, &locals) {
+                                    val == cval
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        
+                        if match_cond {
+                            // Execute case body
+                            let mut switch_locals = locals.clone();
+                            let case_result = self.eval_vector_stmts(case_body, &switch_locals)?;
+                            if let Some(ret) = case_result {
+                                return Ok(Some(ret));
+                            }
+                            locals = switch_locals;
+                            break; // break out of switch
+                        }
+                    }
                 },
                 
                 CppStmt::Return(return_expr) => {
                     // Extract return value - end function execution
                     if let Some(expr) = return_expr {
-                        if let Some(value) = self.eval_cpp_const_safe(expr, locals) {
+                        if let Some(value) = self.eval_cpp_const_safe(expr, &locals) {
                             return Ok(Some(value));
                         }
                     } else {
@@ -548,7 +605,7 @@ impl ConstexprContext<'_> {
     ) -> ConstEvalResult<Option<i128>> {
         // Convert to owned vec to match function signature
         let body: Vec<CppStmt> = stmts.iter().map(|b| b.as_ref().clone()).collect();
-        self.eval_constexpr_body(body.as_slice(), locals)
+        self.eval_constexpr_body(body.as_slice(), locals.clone())
     }
     
     /// Execute a single simple statement
@@ -586,7 +643,8 @@ impl ConstexprContext<'_> {
     /// Enables cleaner error propagation throughout function body evaluation
     /// 
     fn eval_cpp_const_safe(&self, expr: &CppExpr, locals: &HashMap<String, i128>) -> Option<i128> {
-        eval_cpp_const_full(expr, self)
+        // Use legacy evaluator directly with our locals (not context.locals)
+        eval_cpp_const(expr, locals)
     }
     
     /// Extract loop bound from condition expression
@@ -923,5 +981,87 @@ mod tests {
         let ctx = ConstexprContext::with_type_info(false, &locals, &repo);
         
         assert!(ctx.get_type_info().is_some());
+    }
+    
+    #[test]
+    fn test_consteval_violation() {
+        // Test that consteval violation is recorded correctly
+        let binding = HashMap::new();
+        let mut ctx = ConstexprContext::new(false, &binding);
+        
+        ctx.record_violation("always_compile_time");
+        assert!(ctx.has_violations());
+        
+        let msg = ctx.violations_message();
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("always_compile_time"));
+    }
+    
+    #[test]
+    fn test_consteval_enforcement() {
+        // Simulate calling a consteval function outside constant context
+        let binding = HashMap::new();
+        let mut ctx = ConstexprContext::new(false, &binding);
+        
+        let func = ConstexprFunction {
+            name: "consteval_func".to_string(),
+            params: vec!["x".to_string()],
+            return_type: "int".to_string(),
+            is_consteval: true,
+            body: vec![],
+        };
+        
+        let result = ctx.eval_constexpr_function_body(&func, &[5]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be evaluated at compile time"));
+    }
+    
+    #[test]
+    fn test_local_variable_persistence() {
+        // Test that local variables persist across statements
+        let binding = HashMap::new();
+        let mut ctx = ConstexprContext::new(true, &binding);
+        
+        let body = vec![
+            CppStmt::Decl("x".to_string(), Some(CppExpr::IntLit(42))),
+            CppStmt::Return(Some(CppExpr::Ident("x".to_string()))),
+        ];
+        
+        let func = ConstexprFunction {
+            name: "test_func".to_string(),
+            params: vec![],
+            return_type: "int".to_string(),
+            is_consteval: false,
+            body,
+        };
+        
+        let result = ctx.eval_constexpr_function_body(&func, &[]);
+        assert_eq!(result.unwrap(), 42);
+    }
+    
+    #[test]
+    fn test_nested_block_shadowing() {
+        // Test that nested blocks can shadow outer variables
+        let binding = HashMap::new();
+        let mut ctx = ConstexprContext::new(true, &binding);
+        
+        let inner_block = vec![Box::new(CppStmt::Decl("x".to_string(), Some(CppExpr::IntLit(100))))];
+        let body = vec![
+            CppStmt::Decl("x".to_string(), Some(CppExpr::IntLit(42))),
+            CppStmt::Block(inner_block),
+            CppStmt::Return(Some(CppExpr::Ident("x".to_string()))),
+        ];
+        
+        let func = ConstexprFunction {
+            name: "shadow_test".to_string(),
+            params: vec![],
+            return_type: "int".to_string(),
+            is_consteval: false,
+            body,
+        };
+        
+        let result = ctx.eval_constexpr_function_body(&func, &[]);
+        // Outer x should still be 42, not 100 (from inner block)
+        assert_eq!(result.unwrap(), 42);
     }
 }
