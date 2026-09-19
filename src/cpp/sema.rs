@@ -3711,7 +3711,7 @@ mod tests {
     #[test]
     fn overload_set_lookup_returns_all_candidates() {
         // Section 7.1: overload resolution - 同名重载函数构成 overload set,
-        // lookup 必须返回全部候选, 供调用点按实参挑选.
+        // lookup 必须返回全部候选，供调用点按实参挑选。
         let mut sema = Sema::new();
         let fn_ty = |n: usize| CxxType::Function {
             ret: Box::new(CxxType::Void),
@@ -3727,7 +3727,7 @@ mod tests {
         let f1 = sema.add_symbol("f".into(), CxxSymbolKind::Function, fn_ty(1), Access::Public);
         let f2 = sema.add_symbol("f".into(), CxxSymbolKind::Function, fn_ty(2), Access::Public);
         let set = sema.lookup_unqualified("f");
-        // overload set 包含 3 个候选, 且按声明顺序排列
+        // overload set 包含 3 个候选，且按声明顺序排列
         assert_eq!(set.len(), 3);
         assert_eq!(set, vec![f0, f1, f2]);
         // 候选函数签名参数个数可区分 (arity 匹配的依据)
@@ -3739,6 +3739,42 @@ mod tests {
             })
             .collect();
         assert_eq!(arities, vec![0, 1, 2]);
+    }
+    
+    // ===== G16: SFINAE Integration Tests =====
+    
+    #[test]
+    fn test_sfinae_filter_helpers() {
+        // Import and verify SFINAE filtering helpers work correctly
+        use crate::cpp::feature_degrade::{is_sfinae_failure, SfinaeError};
+            
+        // Test that EnableIfFalse marks candidate as non-viable
+        assert!(is_sfinae_failure(&SfinaeError::EnableIfFalse));
+            
+        // Test MissingTypeMember for ::type not existing
+        assert!(is_sfinae_failure(&SfinaeError::MissingTypeMember));
+            
+        // Test SubstitutionFailed for failed type substitution
+        assert!(is_sfinae_failure(&SfinaeError::SubstitutionFailed));
+            
+        // Regular errors should NOT be filtered as SFINAE failures
+        assert!(!is_sfinae_failure(&SfinaeError::UnboundParam("x".to_string())));
+        assert!(!is_sfinae_failure(&SfinaeError::TypeError("bad".to_string())));
+        assert!(!is_sfinae_failure(&SfinaeError::Disabled("x".to_string())));
+    }
+    
+    #[test]
+    fn test_overload_resolution_with_sfinae_context() {
+        // Test that we can create and manage SfinaeCtx for overload resolution
+        use crate::cpp::feature_degrade::SfinaeCtx;
+            
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        ctx.bind("U".to_string(), "char".to_string());
+            
+        assert_eq!(ctx.lookup("T"), Some("int".to_string()));
+        assert_eq!(ctx.lookup("U"), Some("char".to_string()));
+        assert_eq!(ctx.lookup("V"), None); // Unbound parameter
     }
 
     #[test]

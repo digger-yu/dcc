@@ -68,6 +68,27 @@ pub enum SfinaeError {
     SubstitutionFailed,
 }
 
+/// 判断错误是否属于 SFINAE 类别（用于 overload resolution 过滤）
+/// SFINAE 错误不是硬错误，而是表示该候选在重载集中不可行（non-viable）
+pub fn is_sfinae_failure(err: &SfinaeError) -> bool {
+    matches!(err, 
+        SfinaeError::EnableIfFalse |
+        SfinaeError::MissingTypeMember |
+        SfinaeError::SubstitutionFailed
+    )
+}
+
+/// 判断一个 SfinaeResult 是否是 SFINAE 失败（而非真正的编译错误）
+/// true = 这是 SFINAE 失败（非 viable candidate），应被过滤掉
+/// false = 这不是 SFINAE 问题（真正的错误或成功）
+pub fn is_sfinae_candidate_rejection<T>(result: &SfinaeResult<T>) -> bool {
+    if let Err(err) = result {
+        is_sfinae_failure(err)
+    } else {
+        false
+    }
+}
+
 /// 尝试把 `pattern` 中的类型形参替换为实参 (SFINAE)
 /// pattern 形如 `T*`, `std::vector<T>`, `T::value_type`
 pub fn try_substitute(pattern: &str, ctx: &SfinaeCtx) -> SfinaeResult<String> {
@@ -1516,5 +1537,28 @@ mod tests {
         
         let err = SfinaeError::SubstitutionFailed;
         assert!(matches!(err, SfinaeError::SubstitutionFailed));
+    }
+
+    #[test]
+    fn sfinae_is_rejection_helper() {
+        use super::{is_sfinae_failure, is_sfinae_candidate_rejection, SfinaeError};
+        
+        // Test EnableIfFalse - should be rejected as non-viable
+        assert!(is_sfinae_failure(&SfinaeError::EnableIfFalse));
+        assert!(is_sfinae_candidate_rejection::<&str>(&Err(SfinaeError::EnableIfFalse)));
+        
+        // Test MissingTypeMember - should be rejected as non-viable
+        assert!(is_sfinae_failure(&SfinaeError::MissingTypeMember));
+        
+        // Test SubstitutionFailed - should be rejected as non-viable
+        assert!(is_sfinae_failure(&SfinaeError::SubstitutionFailed));
+        
+        // Test regular errors - should NOT be rejected
+        assert!(!is_sfinae_failure(&SfinaeError::UnboundParam("x".to_string())));
+        assert!(!is_sfinae_failure(&SfinaeError::TypeError("bad".to_string())));
+        assert!(!is_sfinae_failure(&SfinaeError::Disabled("x".to_string())));
+        
+        // Successful results are never rejections
+        assert!(!is_sfinae_candidate_rejection::<i32>(&Ok(42)));
     }
 }
