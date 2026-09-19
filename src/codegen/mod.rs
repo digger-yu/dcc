@@ -30,6 +30,34 @@ fn has_fatal_diagnostics(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.sev == Severity::Error)
 }
 
+/// Compile-time options passed to backend codegen
+/// Bundles all parameters that were previously scattered as individual arguments
+/// This enables API unification across all target architectures
+#[derive(Debug, Clone)]
+pub struct EmitOptions<'a> {
+    // Core settings
+    pub relocatable: bool,
+    pub emit_asm: bool,
+    pub source_name: String,
+    
+    // Debug and diagnostics
+    pub debug_level: u8,
+    pub dwarf_version: u8,
+    pub sanitizers: SanitizerFlags,
+    
+    // Optimization features
+    pub lto_enabled: bool,
+    pub function_sections: bool,
+    pub parallel_codegen: bool,
+    pub bounds_check: bool,
+    pub trapv: bool,
+    
+    // Optional sections
+    pub offload: Option<&'a crate::profile::offload::OffloadSection>,
+    pub line_map: &'a [LineSpan],
+    pub verbose: bool,
+}
+
 pub fn validate_inline_asm_constraints(module: &Module) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     validate_inline_asm_program(module.source(), &mut diags);
@@ -1227,48 +1255,31 @@ fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn emit(
-    module: &Module,
-    target: &Target,
-    relocatable: bool,
-    emit_asm: bool,
-    source_name: &str,
-    debug_level: u8,
-    dwarf_version: u8,
-    sanitizers: SanitizerFlags,
-    lto_enabled: bool,
-    function_sections: bool,
-    parallel_codegen: bool,
-    bounds_check: bool,
-    trapv: bool,
-    offload: Option<&crate::profile::offload::OffloadSection>,
-    line_map: &[LineSpan],
-    verbose: bool,
-) -> Result<Vec<u8>, Vec<Diagnostic>> {
+pub fn emit(module: &Module, target: &Target, opts: EmitOptions) -> Result<Vec<u8>, Vec<Diagnostic>> {
     Ok(match target.arch {
         crate::cli::Arch::X86_64 => {
             let mut cg = x86_64::Codegen::new(target.clone());
-            cg.relocatable = relocatable || emit_asm;
-            cg.function_sections = function_sections || lto_enabled;
-            cg.emit_asm_text = emit_asm;
-            cg.parallel_codegen = parallel_codegen && !emit_asm;
-            cg.source_name = source_name.to_string();
-            cg.line_map = line_map.to_vec();
-            cg.debug_level = debug_level;
-            cg.emit_cfi = debug_level > 0 || target.frame_pointer;
-            cg.bounds_check = bounds_check;
-            cg.trapv = trapv;
-            cg.kasan = sanitizers.kasan;
+            cg.relocatable = opts.relocatable || opts.emit_asm;
+            cg.function_sections = opts.function_sections || opts.lto_enabled;
+            cg.emit_asm_text = opts.emit_asm;
+            cg.parallel_codegen = opts.parallel_codegen && !opts.emit_asm;
+            cg.source_name = opts.source_name.clone();
+            cg.line_map = opts.line_map.to_vec();
+            cg.debug_level = opts.debug_level;
+            cg.emit_cfi = opts.debug_level > 0 || target.frame_pointer;
+            cg.bounds_check = opts.bounds_check;
+            cg.trapv = opts.trapv;
+            cg.kasan = opts.sanitizers.kasan;
             cg.compile(module);
             // Unified policy: fail only on Error severity (not warnings)
             let has_errors = has_fatal_diagnostics(&cg.diagnostics);
             if has_errors {
                 return Err(cg.diagnostics);
             }
-            if emit_asm {
+            if opts.emit_asm {
                 return Ok(cg.build_asm_output(module.source()).into_bytes());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 // Build func_pcs with actual sizes from codegen
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
@@ -1320,14 +1331,14 @@ pub fn emit(
                         .then_with(|| a.discriminator.cmp(&b.discriminator))
                 });
                 // Always use build_dwarf_cu with rich IR info
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, combined_line_entries);
-                let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, combined_line_entries);
+                let debug_opts = debug::DebugOptions {
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     ..Default::default()
                 };
-                let dbg = debug::build_dwarf_full(&cu, &opts);
+                let dbg = debug::build_dwarf_full(&cu, &debug_opts);
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
                 // Build .rela.debug_info for function address relocations
                 if !dbg.debug_info_relocs.is_empty() {
@@ -1439,7 +1450,7 @@ pub fn emit(
                     });
                 }
             }
-            if cg.emit_cfi && relocatable && target.unwind_tables {
+            if cg.emit_cfi && opts.relocatable && target.unwind_tables {
                 // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
                 // 正确解析 PC begin / PC range. 之前 (M15 阶段) 临时跳过是因 R_X86_64_PC32
                 // 未生成, 报 "PHDR segment not covered by LOAD segment". 现 relocation 已
@@ -1461,17 +1472,17 @@ pub fn emit(
             // if relocatable && (!target.unwind_tables || cg.emit_cfi) {
             //     cg.build_orc_sections(module);
             // }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.extra_sections.push(elf::ElfSection {
                         name: ".dcc.offload".to_string(),
@@ -1485,7 +1496,7 @@ pub fn emit(
             }
             // ifunc 属性: 收集所有 ifunc 函数, 生成 .dcc.ifunc 节
             // 格式: 每条记录 = u16 name_len + name bytes + u16 resolver_len + resolver bytes
-            if relocatable {
+            if opts.relocatable {
                 let mut ifunc_data = Vec::new();
                 let prog = module.source();
                 for decl in &prog.decls {
@@ -1511,10 +1522,10 @@ pub fn emit(
                     });
                 }
             }
-            if lto_enabled {
+            if opts.lto_enabled {
                 // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
-                let bc = crate::link::lto_bitcode::serialize_module(module, source_name);
-                if verbose {
+                let bc = crate::link::lto_bitcode::serialize_module(module, &opts.source_name);
+               if opts.verbose {
                     eprintln!(
                         "dcc: lto    = .dcc.lto {} bytes ({} funcs, {} globals)",
                         bc.len(),
@@ -1542,9 +1553,9 @@ pub fn emit(
                         (f.name.as_str(), sz, true)
                     })
                     .collect();
-                let summary_unit = crate::lto::build_unit(source_name, &funcs);
+                let summary_unit = crate::lto::build_unit(&opts.source_name, &funcs);
                 let summary_data = crate::lto::serialize_summary(&summary_unit);
-                if verbose {
+               if opts.verbose {
                     eprintln!(
                         "dcc: lto    = .llvm.lto {} bytes ({} funcs)",
                         summary_data.len(),
@@ -1560,7 +1571,7 @@ pub fn emit(
                     group_name: None,
                 });
             }
-            if relocatable {
+            if opts.relocatable {
                 if target.triple.os == crate::cli::Os::Windows {
                     coff::build_coff_rel_x86_64(
                         &cg.code,
@@ -1616,13 +1627,13 @@ pub fn emit(
             }
         }
         crate::cli::Arch::AArch64 => {
-            let mut cg = aarch64::Aarch64Codegen::new(target.clone(), relocatable || emit_asm);
-            cg.set_source_name(source_name);
-            cg.set_asm_text_mode(emit_asm);
+            let mut cg = aarch64::Aarch64Codegen::new(target.clone(), opts.relocatable || opts.emit_asm);
+            cg.set_source_name(&opts.source_name);
+            cg.set_asm_text_mode(opts.emit_asm);
             // HWASAN (-fsanitize=hwaddress) 在 AArch64 上启用 MTE 硬件 tag:
             // prologue tag 栈帧 + 指针 tag 流程由后端直接发射 IRG/ADDG/STG。
-            cg.set_mte_enabled(sanitizers.hwasan);
-            if emit_asm {
+            cg.set_mte_enabled(opts.sanitizers.hwasan);
+            if opts.emit_asm {
                 cg.compile(module);
                 // Unified policy: fail only on Error severity (not warnings)
                 let has_errors = has_fatal_diagnostics(&cg.diagnostics);
@@ -1637,7 +1648,7 @@ pub fn emit(
             if has_errors {
                 return Err(cg.diagnostics.clone());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
@@ -1646,9 +1657,9 @@ pub fn emit(
                     })
                     .collect();
                 let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     arch: debug::ArchKind::AArch64,
                     ..debug::DebugOptions::default()
                 };
@@ -1664,7 +1675,7 @@ pub fn emit(
                         basic_block: false,
                     }
                 }).collect();
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, aarch64_line_entries);
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, aarch64_line_entries);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1701,7 +1712,7 @@ pub fn emit(
                     });
                 }
             }
-            if relocatable && target.unwind_tables {
+            if opts.relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
@@ -1714,17 +1725,17 @@ pub fn emit(
                     });
                 }
             }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".dcc.offload".to_string(),
@@ -1739,10 +1750,10 @@ pub fn emit(
             cg.build_output()
         }
         crate::cli::Arch::RiscV64 => {
-            let mut cg = riscv64::Riscv64Codegen::new(target.clone(), relocatable || emit_asm);
-            cg.set_source_name(source_name);
-            cg.set_asm_text_mode(emit_asm);
-            if emit_asm {
+            let mut cg = riscv64::Riscv64Codegen::new(target.clone(), opts.relocatable || opts.emit_asm);
+            cg.set_source_name(&opts.source_name);
+            cg.set_asm_text_mode(opts.emit_asm);
+            if opts.emit_asm {
                 cg.compile(module);
                 // Unified policy: fail only on Error severity (not warnings)
                 let has_errors = has_fatal_diagnostics(&cg.diagnostics);
@@ -1757,7 +1768,7 @@ pub fn emit(
             if has_errors {
                 return Err(cg.diagnostics.clone());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
@@ -1766,9 +1777,9 @@ pub fn emit(
                     })
                     .collect();
                 let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     arch: debug::ArchKind::RiscV64,
                     ..debug::DebugOptions::default()
                 };
@@ -1784,7 +1795,7 @@ pub fn emit(
                         basic_block: false,
                     }
                 }).collect();
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, riscv_line_entries);
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, riscv_line_entries);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1821,7 +1832,7 @@ pub fn emit(
                     });
                 }
             }
-            if relocatable && target.unwind_tables {
+            if opts.relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
@@ -1834,17 +1845,17 @@ pub fn emit(
                     });
                 }
             }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".dcc.offload".to_string(),
@@ -1859,10 +1870,10 @@ pub fn emit(
             cg.build_output()
         }
         crate::cli::Arch::Mips => {
-            let mut cg = mips::MipsCodegen::new(target.clone(), relocatable || emit_asm);
-            cg.set_source_name(source_name);
-            cg.set_asm_text_mode(emit_asm);
-            if emit_asm {
+            let mut cg = mips::MipsCodegen::new(target.clone(), opts.relocatable || opts.emit_asm);
+            cg.set_source_name(&opts.source_name);
+            cg.set_asm_text_mode(opts.emit_asm);
+            if opts.emit_asm {
                 cg.compile(module);
                 // Unified policy: fail only on Error severity (not warnings)
                 let has_errors = has_fatal_diagnostics(&cg.diagnostics);
@@ -1877,7 +1888,7 @@ pub fn emit(
             if has_errors {
                 return Err(cg.diagnostics.clone());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
@@ -1886,13 +1897,13 @@ pub fn emit(
                     })
                     .collect();
                 let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     arch: debug::ArchKind::Mips,
                     ..debug::DebugOptions::default()
                 };
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1907,7 +1918,7 @@ pub fn emit(
                     cg.push_extra_section(sec);
                 }
             }
-            if relocatable {
+            if opts.relocatable {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
@@ -1920,17 +1931,17 @@ pub fn emit(
                     });
                 }
             }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".dcc.offload".to_string(),
@@ -1945,10 +1956,10 @@ pub fn emit(
             cg.build_output()
         }
         crate::cli::Arch::Mips64 => {
-            let mut cg = mips64::Mips64Codegen::new(target.clone(), relocatable || emit_asm);
-            cg.set_source_name(source_name);
-            cg.set_asm_text_mode(emit_asm);
-            if emit_asm {
+            let mut cg = mips64::Mips64Codegen::new(target.clone(), opts.relocatable || opts.emit_asm);
+            cg.set_source_name(&opts.source_name);
+            cg.set_asm_text_mode(opts.emit_asm);
+            if opts.emit_asm {
                 cg.compile(module);
                 // Unified policy: fail only on Error severity (not warnings)
                 let has_errors = has_fatal_diagnostics(&cg.diagnostics());
@@ -1963,7 +1974,7 @@ pub fn emit(
             if has_errors {
                 return Err(cg.diagnostics().to_vec());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
@@ -1972,13 +1983,13 @@ pub fn emit(
                     })
                     .collect();
                 let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     arch: debug::ArchKind::Mips64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1993,7 +2004,7 @@ pub fn emit(
                     cg.push_extra_section(sec);
                 }
             }
-            if relocatable {
+            if opts.relocatable {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
@@ -2006,17 +2017,17 @@ pub fn emit(
                     });
                 }
             }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".dcc.offload".to_string(),
@@ -2031,10 +2042,10 @@ pub fn emit(
             cg.build_output()
         }
         crate::cli::Arch::Arm => {
-            let mut cg = arm::ArmCodegen::new(target.clone(), relocatable || emit_asm);
-            cg.set_source_name(source_name);
-            cg.set_asm_text_mode(emit_asm);
-            if emit_asm {
+            let mut cg = arm::ArmCodegen::new(target.clone(), opts.relocatable || opts.emit_asm);
+            cg.set_source_name(&opts.source_name);
+            cg.set_asm_text_mode(opts.emit_asm);
+            if opts.emit_asm {
                 cg.compile(module);
                 // Unified policy: fail only on Error severity (not warnings)
                 let has_errors = has_fatal_diagnostics(&cg.diagnostics);
@@ -2049,7 +2060,7 @@ pub fn emit(
             if has_errors {
                 return Err(cg.diagnostics.clone());
             }
-            if debug_level > 0 && relocatable {
+            if opts.debug_level > 0 && opts.relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
@@ -2058,13 +2069,13 @@ pub fn emit(
                     })
                     .collect();
                 let opts = debug::DebugOptions {
-                    level: debug_level,
-                    dwarf_version,
-                    source_name: source_name.to_string(),
+                    level: opts.debug_level,
+                    dwarf_version: opts.dwarf_version,
+                    source_name: opts.source_name.clone(),
                     arch: debug::ArchKind::Arm,
                     ..debug::DebugOptions::default()
                 };
-                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
+                let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -2079,7 +2090,7 @@ pub fn emit(
                     cg.push_extra_section(sec);
                 }
             }
-            if relocatable {
+            if opts.relocatable {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
@@ -2092,17 +2103,17 @@ pub fn emit(
                     });
                 }
             }
-            if sanitizers.any() {
+            if opts.sanitizers.any() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),
-                    data: sanitizer_metadata(sanitizers),
+                    data: sanitizer_metadata(opts.sanitizers),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
                     group_name: None,
                 });
             }
-            if let Some(o) = offload {
+            if let Some(o) = opts.offload {
                 if !o.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".dcc.offload".to_string(),

@@ -1072,24 +1072,26 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
     let function_sections = cfg.function_sections || lto_enabled;
-    let bytes = codegen::emit(
-        &module,
-        &target,
-        cfg.relocatable,
-        cfg.emit_asm,
-        &file_name,
-        cfg.debug_level,
-        cfg.dwarf_version,
-        cfg.sanitizers,
+    
+    // Create EmitOptions bundle for unified backend API
+    let opts = codegen::EmitOptions {
+        relocatable: cfg.relocatable,
+        emit_asm: cfg.emit_asm,
+        source_name: file_name.to_string(),
+        debug_level: cfg.debug_level,
+        dwarf_version: cfg.dwarf_version,
+        sanitizers: cfg.sanitizers,
         lto_enabled,
         function_sections,
-        cfg.parallel_codegen,
-        cfg.bounds_check,
-        cfg.trapv,
-        offload_section.as_ref(),
-        &line_map,
-        cfg.verbose,
-    )?;
+        parallel_codegen: cfg.parallel_codegen,
+        bounds_check: cfg.bounds_check,
+        trapv: cfg.trapv,
+        offload: offload_section.as_ref(),
+        line_map: &line_map,
+        verbose: cfg.verbose,
+    };
+    
+    let bytes = codegen::emit(&module, &target, opts)?;
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }
@@ -2039,24 +2041,26 @@ fn emit_native_program(
 
     let lto_enabled = cfg.lto_enabled;
     let function_sections = cfg.function_sections || lto_enabled;
-    let bytes = codegen::emit(
-        &module,
-        &target,
-        cfg.relocatable,
-        cfg.emit_asm,
-        file_name,
-        cfg.debug_level,
-        cfg.dwarf_version,
-        cfg.sanitizers,
+    
+    // Create EmitOptions bundle for unified backend API
+    let opts = codegen::EmitOptions {
+        relocatable: cfg.relocatable,
+        emit_asm: cfg.emit_asm,
+        source_name: file_name.to_string(),
+        debug_level: cfg.debug_level,
+        dwarf_version: cfg.dwarf_version,
+        sanitizers: cfg.sanitizers,
         lto_enabled,
         function_sections,
-        cfg.parallel_codegen,
-        cfg.bounds_check,
-        cfg.trapv,
-        None, // offload_section: native backend 暂不支持 offload
-        &line_map,
-        cfg.verbose,
-    )?;
+        parallel_codegen: cfg.parallel_codegen,
+        bounds_check: cfg.bounds_check,
+        trapv: cfg.trapv,
+        offload: None,
+        line_map: &line_map,
+        verbose: cfg.verbose,
+    };
+    
+    let bytes = codegen::emit(&module, &target, opts)?;
 
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
