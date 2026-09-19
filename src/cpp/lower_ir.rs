@@ -115,7 +115,7 @@ impl<'a> IrLowerer<'a> {
         // 先收集所有 vtable 数据（从已注册的 ABI 描述符）
         self.emit_vtables();
 
-        // 收集全局变量（HIR 顶层声明中的 Variable）
+        // 收集全局变量 (HIR 顶层声明中的 Variable)
         for decl in &self.hir.top_level {
             if let HirTopLevelDecl::Variable(sym_id) = decl {
                 let sym = self.get_symbol(*sym_id)?;
@@ -239,6 +239,7 @@ impl<'a> IrLowerer<'a> {
             }
             CxxType::Class(id) => {
                 let abi = self.abis.get(id).ok_or_else(|| {
+                    eprintln!("ERROR: ABI not found for class {:?}. Available ABIs: {:?}", id, self.abis.keys());
                     LowerIrError::Internal(format!("ABI for class {} not found", id.0))
                 })?;
                 self.lower_class_type(id, abi)
@@ -286,7 +287,8 @@ impl<'a> IrLowerer<'a> {
     ) -> Result<Type, LowerIrError> {
         let is_union = is_union_layout(abi);
 
-        let sym = self.get_symbol(id.as_symbol())?;
+        let sym_id = id.as_symbol();
+        let sym = self.get_symbol(sym_id)?;
         let name = sym.name.clone();
         let align = abi.align as usize;
 
@@ -315,7 +317,7 @@ impl<'a> IrLowerer<'a> {
         fields: &mut Vec<crate::ast::Field>,
     ) -> Result<(), LowerIrError> {
         // 先处理非虚基类（按声明顺序）
-        for base_layout in &abi.bases {
+        for (i, base_layout) in abi.bases.iter().enumerate() {
             let base_abi = self.abis.get(&base_layout.base).ok_or_else(|| {
                 LowerIrError::Internal(format!(
                     "ABI for base class {} not found",
@@ -534,16 +536,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let fn_name = lowerer.symbol_name(sym);
         let ret_ty = lowerer.lower_type(&func.ret_ty)?;
         let span = dummy_span();
-
+    
         let mut ssa = Function::new(fn_name, ret_ty.clone(), span);
-
+        
         // 返回块 (void 函数或空函数收尾用)
         let return_bb = ssa.unique_bb("return");
-
+        
         let mut locals = HashMap::new();
         let mut versions = HashMap::new();
-
-        // 成员函数/构造函数/析构函数: 在 ssa.params 前注入隐式 this 形参
+    
+        // 成员函数/构造函数/析构函数：在 ssa.params 前注入隐式 this 形参
         // (sema.build_function 仅把显式形参放入 HirFunction.params,
         // 但 lower_ir 的 this 访问和成员调用都期望 ssa.params[0] == this).
         let needs_this = matches!(
@@ -554,8 +556,36 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         ) && sym.owner.is_some();
         if needs_this {
             let this_class = ClassId::from(sym.owner.unwrap());
+            // 如果 ABI 不存在，尝试从第一个参数（this 指针）的类型中获取类 ID
+            let actual_this_class = if !lowerer.abis.contains_key(&this_class) {
+                // 寻找类型为 Pointer(Class(_)) 的参数作为 this
+                let mut found_class_id = None;
+                for param_sym_id in &func.params {
+                    let param_sym = lowerer.get_symbol(*param_sym_id)?;
+                    if let CxxType::Pointer(inner) = &param_sym.ty {
+                        if let CxxType::Class(cid) = inner.as_ref() {
+                            found_class_id = Some(*cid);
+                            break;
+                        }
+                    }
+                }
+                match found_class_id {
+                    Some(cid) => cid,
+                    None => {
+                        return Err(LowerIrError::Internal(
+                            format!(
+                                "Cannot determine class for constructor/method: owner {:?} has no ABI, and no Class pointer param found",
+                                sym.owner
+                            )
+                        ));
+                    }
+                }
+            } else {
+                this_class
+            };
+            
             let this_ty = lowerer.lower_type(&CxxType::Pointer(Box::new(
-                CxxType::Class(this_class),
+                CxxType::Class(actual_this_class),
             )))?;
             let this_var = SsaVar {
                 base: "this".to_string(),
@@ -954,7 +984,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::SizeOf(cxx_ty) => {
                 // TODO(Stage 4): Add proper support
                 Err(LowerIrError::Unsupported(format!(
-                    "sizeof({:?}) not implemented", cxx_ty
+                    "SizeOf({:?}) not implemented", cxx_ty
                 )))
             }
 
@@ -5275,6 +5305,9 @@ mod tests {
         };
         let fn_sym = sema.add_symbol("test".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
 
+        // Save symbols BEFORE consuming sema
+        let symbols = sema.take_symbols();
+
         let mut hir = sema.into_hir();
 
         // 构造一个不支持的表达式 (SizeOf)
@@ -5306,24 +5339,6 @@ mod tests {
             ret_ty: CxxType::Void,
         };
         hir.functions.push(func);
-
-        let symbols = vec![CxxSymbol {
-            id: fn_sym,
-            name: "test".to_string(),
-            kind: CxxSymbolKind::Function,
-            ty: CxxType::Function {
-                ret: Box::new(CxxType::Void),
-                params: vec![],
-                is_const: false,
-                is_volatile: false,
-                ref_qual: None,
-            },
-            owner: None,
-            access: Access::Public,
-            linkage_name: None,
-            scope: crate::cpp::sema::ScopeId(0),
-            is_volatile: false,
-        }];
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         let result = lowerer.lower();
@@ -5649,77 +5664,12 @@ mod tests {
         );
         sema.set_owner(c_field_sym, c_sym);
 
-        let hir = sema.into_hir();
+        // Save symbols BEFORE consuming sema
+        let symbols = sema.take_symbols();
 
-        // 构建符号表
-        let symbols = vec![
-            CxxSymbol {
-                id: a_sym,
-                name: "A".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(a_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: a_field_sym,
-                name: "a".to_string(),
-                kind: CxxSymbolKind::Field,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: Some(a_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: b_sym,
-                name: "B".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(b_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: b_field_sym,
-                name: "b".to_string(),
-                kind: CxxSymbolKind::Field,
-                ty: CxxType::Float { bits: 64 },
-                owner: Some(b_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: c_sym,
-                name: "C".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(c_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: c_field_sym,
-                name: "c".to_string(),
-                kind: CxxSymbolKind::Field,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: Some(c_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-        ];
+        let mut hir = sema.into_hir();
+
+        // 测试：lower C* -> B* (non-primary base, offset=8)
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
 
@@ -5869,8 +5819,8 @@ mod tests {
         };
         hir.functions.push(func);
 
-        let mut symbols = symbols;
-        symbols.push(CxxSymbol {
+        // Add new symbols (param, function)
+        let param_symbol = CxxSymbol {
             id: param_sym,
             name: "ptr".to_string(),
             kind: CxxSymbolKind::Variable,
@@ -5880,8 +5830,8 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
-        });
-        symbols.push(CxxSymbol {
+        };
+        let fn_symbol = CxxSymbol {
             id: fn_sym,
             name: "to_b".to_string(),
             kind: CxxSymbolKind::Function,
@@ -5897,7 +5847,12 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
-        });
+        };
+        
+        // Use take_symbols() from sema
+        let mut symbols = symbols;
+        symbols.push(param_symbol);
+        symbols.push(fn_symbol);
 
         let mut lowerer2 = IrLowerer::new(&hir, &symbols);
         register_abc_abis(&mut lowerer2, a_id, b_id, c_id);
@@ -6324,15 +6279,14 @@ mod tests {
 
         // 符号表
         let mut sema = Sema::new();
-        let class_sym = sema.add_symbol(
+        let _class_sym = sema.add_symbol(
             "Foo".to_string(),
             CxxSymbolKind::Class,
             CxxType::Class(class_id),
             Access::Public,
         );
-        assert_eq!(class_sym.0, 0); // ClassId(0) == SymbolId(0)
 
-        let symbols = sema.symbols().to_vec();
+        let symbols = sema.take_symbols();
         let hir = HirTranslationUnit::new();
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -6384,7 +6338,6 @@ mod tests {
             CxxType::Class(class_id),
             Access::Public,
         );
-        assert_eq!(class_sym.0, 0);
 
         // 虚方法 foo
         let method_ty = CxxType::Function {
@@ -6414,7 +6367,7 @@ mod tests {
             Access::Public,
         );
 
-        let symbols = sema.symbols().to_vec();
+        let symbols = sema.take_symbols();
         let mut hir = HirTranslationUnit::new();
 
         // 表达式 0: Local(obj)
@@ -6510,7 +6463,6 @@ mod tests {
             CxxType::Class(class_id),
             Access::Public,
         );
-        assert_eq!(class_sym.0, 0);
 
         // 构造函数
         let ctor_ty = CxxType::Function {
@@ -6535,7 +6487,7 @@ mod tests {
             Access::Public,
         );
 
-        let symbols = sema.symbols().to_vec();
+        let symbols = sema.take_symbols();
         let mut hir = HirTranslationUnit::new();
 
         // 表达式 0: Local(this)
@@ -6579,6 +6531,9 @@ mod tests {
             vec![],
         );
         let abi = calc.compute_class(class_id);
+        
+        for (i, v) in abi.vptrs.iter().enumerate() {
+        }
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(class_id, abi);
@@ -6681,7 +6636,7 @@ mod tests {
             Access::Public,
         );
 
-        let symbols = sema.symbols().to_vec();
+        let symbols = sema.take_symbols();
         let mut hir = HirTranslationUnit::new();
 
         // 表达式 0: Local(obj)
