@@ -4,6 +4,7 @@
 pub mod aarch64;
 pub mod arm;
 pub mod asm_constraints;
+pub mod asm_event;
 pub mod coff;
 pub mod disasm;
 pub mod elf;

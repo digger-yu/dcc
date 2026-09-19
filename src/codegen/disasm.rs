@@ -536,8 +536,13 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
             }
             _ => {
-                self.pos = start + 1;
-                None
+                let len = decode_unknown_len(self.code, start);
+                self.pos = start + len;
+                // Output the full unknown instruction as .byte sequence
+                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
+                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
             }
         }
     }
@@ -594,8 +599,13 @@ impl<'a> Dec<'a> {
                 }
             }
             _ => {
-                self.pos = start + 1;
-                None
+                let len = decode_unknown_len(self.code, start);
+                self.pos = start + len;
+                // Output the full unknown instruction as .byte sequence
+                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
+                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
             }
         }
     }
@@ -890,8 +900,13 @@ impl<'a> Dec<'a> {
             0x9D => { self.take(); Some((self.pos - start, "popfq".into())) }
             // --- Fallback ---
             _ => {
-                self.pos = start + 1;
-                None
+                let len = decode_unknown_len(self.code, start);
+                self.pos = start + len;
+                // Output the full unknown instruction as .byte sequence
+                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
+                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
             }
         }
     }
@@ -973,8 +988,13 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
             }
             _ => {
-                self.pos = start + 1;
-                None
+                let len = decode_unknown_len(self.code, start);
+                self.pos = start + len;
+                // Output the full unknown instruction as .byte sequence
+                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
+                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
             }
         }
     }
@@ -1265,8 +1285,13 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, %eax")))
             }
             _ => {
-                self.pos = start + 1;
-                None
+                let len = decode_unknown_len(self.code, start);
+                self.pos = start + len;
+                // Output the full unknown instruction as .byte sequence
+                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                    .map(|b| format!("0x{:02x}", b))
+                    .collect();
+                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
             }
         }
     }
@@ -1740,6 +1765,144 @@ pub fn slice_directives<'a>(
     size: u64,
 ) -> BTreeMap<u64, Vec<&'a str>> {
     slice_labels(directives, base, size)
+}
+
+/// Fallback helper: estimate length of unknown instruction
+/// to prevent instruction pointer desync in disassembler.
+/// Returns the estimated instruction length in bytes.
+fn decode_unknown_len(code: &[u8], start: usize) -> usize {
+    if start >= code.len() {
+        return 1;
+    }
+    let mut pos = start;
+    
+    // Consume prefix bytes
+    loop {
+        match code.get(pos) {
+            Some(0xF0) => { pos += 1; }      // lock
+            Some(0xF3) => { pos += 1; }      // rep
+            Some(0xF2) => { pos += 1; }      // repne
+            Some(0x66) => { pos += 1; }      // data16
+            Some(0x40..=0x4F) => { pos += 1; } // REX
+            _ => break,
+        }
+    }
+    
+    if pos >= code.len() {
+        return pos - start + 1;
+    }
+    
+    let opcode = code[pos];
+    pos += 1;
+    
+    // Two-byte opcode (0x0F)
+    if opcode == 0x0F {
+        if pos >= code.len() {
+            return pos - start + 1;
+        }
+        let op2 = code[pos];
+        pos += 1;
+        
+        // Instructions with ModRM: most common SSE and general instructions
+        // 0F 10-12, 20-2C, 58-5A, 6E, 7E: SSE scalar/vector load/store
+        // 0F 40-4F: cmovcc
+        // 0F 90-9F: setcc  
+        // 0F B0-B1: cmpxchg/xadd
+        // 0F B6-BF: movzx/movsx
+        // 0F AF: imul
+        // 0F 80-8F: jcc (rel8)
+        if matches!(op2, 0x10..=0x12 | 0x20..=0x2C | 0x58..=0x5A | 0x6E | 0x7E |
+                       0x40..=0x4F | 0x90..=0x9F | 0xB0..=0xB1 | 0xB6..=0xBF | 0xAF | 0x80..=0x8F) {
+            if pos >= code.len() {
+                return pos - start + 1;
+            }
+            pos += consume_modrm_and_optional_parts(code, pos);
+            return pos - start;
+        }
+        
+        // Other extensions: VEX/EVEX would need longer analysis - conservative estimate
+        return pos - start;
+    }
+    
+    // Single-byte opcodes
+    match opcode {
+        // REG-MEM instructions: need ModRM (+ optional disp/imm)
+        0x00..=0x09 | 0x10..=0x1B | 0x20..=0x29 | 0x30..=0x3B | 0x60..=0x69 | 0x6B | 0x80..=0x8F |
+        0xA0..=0xA5 | 0xA8..=0xAA | 0xB8..=0xBF | 0xC6..=0xC7 | 0xD0..=0xD3 | 0xF0..=0xFF => {
+            if pos < code.len() {
+                pos += 1; // ModRM
+                pos += consume_optional_disp_imm(code, pos, opcode);
+            }
+        }
+        // PUSH imm8/immm32, CALL/JMP near, RET imm16
+        0x6A..=0x6F | 0xCA..=0xCF | 0xC8..=0xC9 => {
+            pos += consume_immediate_for_opcode(opcode);
+        }
+        _ => {}
+    }
+    
+    pos - start
+}
+
+/// Helper to consume ModRM byte and potential SIB/disp/imm parts
+fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
+    if pos >= code.len() {
+        return 0;
+    }
+    let mut len = 1; // already consumed ModRM
+    let modrm = code[pos];
+    let mod_ = modrm >> 6;
+    let rm = modrm & 7;
+    
+    // Check for SIB byte
+    if rm == 4 && mod_ != 0 {
+        if pos + 1 < code.len() {
+            len += 1; // SIB
+            let sib = code[pos + 1];
+            let base = sib & 7;
+            // If SIB has disp32 (base=5 and mod=0)
+            if mod_ == 0 && base == 5 {
+                len += 4;
+            }
+        }
+    }
+    
+    // Displacement
+    if mod_ == 1 && pos + len < code.len() {
+        len += 1; // disp8
+    } else if mod_ == 2 && pos + len < code.len() {
+        len += 4; // disp32
+    } else if rm == 5 && mod_ == 0 && pos + len < code.len() {
+        len += 4; // disp32 (RIP-relative)
+    }
+    
+    len.min(code.len() - pos)
+}
+
+/// Estimate displacement and immediate based on opcode
+fn consume_optional_disp_imm(code: &[u8], pos: usize, opcode: u8) -> usize {
+    let mut len = 0;
+    
+    // Some ALU and MOV instructions have immediate operand
+    if matches!(opcode, 0x81 | 0x83 | 0xC7) {
+        if pos + 4 <= code.len() {
+            len += 4; // imm32
+        }
+    }
+    
+    len.min(code.len() - pos)
+}
+
+/// Estimate immediate size for specific opcodes
+fn consume_immediate_for_opcode(opcode: u8) -> usize {
+    match opcode {
+        0x6A => 1,   // PUSH imm8
+        0x6B => 1,   // IMUL imm8
+        0xC0..=0xC2 => 1, // ROL/ROR/etc imm8
+        0xCA..=0xCF => 2, // RET/CALL/JMP near (imm16 in legacy mode, but usually handled differently)
+        0xC8 => 6,   // LEA w/ imm16 (w/disp16 for lea)
+        _ => 4,      // default: assume imm32
+    }
 }
 
 #[cfg(test)]

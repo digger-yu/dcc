@@ -295,10 +295,12 @@ pub struct Codegen {
     /// asm 块 DWARF 行号记录: (pc_start, pc_end, src_line)
     /// 用于在 -g 下生精确的 .debug_line 条目
     pub asm_line_entries: Vec<(u64, u64, u32)>,
-    /// asm 块内逐指令 DWARF 调试记录: (pc, src_line, discriminator)
+    /// asm 块内逐指令 DWARF 调试记录：(pc, src_line, discriminator)
     /// 用于在 -g 下生成 per-instruction .debug_line 条目,
     /// 使 GDB 能单步进入 asm 块内部每条指令 (类似 GCC .debug_insn 效果)
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
+    // --- AsmEvent structured logging for -S output ---
+    pub asm_events: Vec<crate::codegen::asm_event::AsmEvent>,
     /// rodata 中被字符串初始化指针占位的变量名列表 (resolve 阶段修补绝对地址)
     rodata_string_init_globals: Vec<String>,
     /// rodata 中字符串初始化指针槽的偏移列表 (compile_exec/ET_EXEC 路径的
@@ -1552,6 +1554,8 @@ impl Codegen {
             func_asm_layout: HashMap::new(),
             asm_line_entries: Vec::new(),
             asm_insn_debug_entries: Vec::new(),
+            // --- AsmEvent structured logging ---
+            asm_events: Vec::new(),
             current_asm_line: 0,
             current_asm_src_line: 0,
             diagnostics: Vec::new(),
@@ -31375,12 +31379,93 @@ impl Codegen {
         self.emit(&[0x8E, (seg_code & 7) << 3]);
     }
 
-    /// 构建 asm 输出文件 (-S 模式)：按节分组反汇编全部函数机器码。
+    /// 构建 asm 输出文件 (-S 模式)：优先使用 AsmEvent 结构化日志，disassembler 作为 fallback。
     pub fn build_asm_output(&self, prog: &Program) -> String {
         use crate::codegen::disasm;
+        use crate::codegen::asm_event::{AsmFormatter, AsmEvent};
+        
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
 
+        // --- Phase 9: Event-based formatter as default path ---
+        if self.emit_asm_text && !self.asm_events.is_empty() {
+            // Use structured event log (primary path)
+            let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
+            let directives =
+                disasm::directive_map(self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())));
+            let calls_map = self.disasm_calls.clone();
+            let data_map = self.disasm_data.clone();
+            
+            // Build symbol addresses for label references
+            let mut symbol_addrs = std::collections::HashMap::new();
+            for (name, addr) in &self.labels {
+                symbol_addrs.insert(name.clone(), *addr);
+            }
+            
+            let mut formatter = AsmFormatter::new()
+                .with_symbol_addr(".text".to_string(), 0);
+            for (name, addr) in &self.labels {
+                formatter = formatter.with_symbol_addr(name.clone(), *addr);
+            }
+            
+            // Filter events for text section and format
+            let text_events: Vec<&AsmEvent> = self.asm_events.iter()
+                .filter(|e| matches!(e, AsmEvent::Inst(_) | AsmEvent::Label { .. } | AsmEvent::Directive { .. }))
+                .collect();
+            
+            if !text_events.is_empty() {
+                out.push_str("\t.text\n");
+                out.push_str(&formatter.format_events(&text_events));
+            }
+            
+            // Output rodata as raw bytes (simplified)
+            if !self.rodata.is_empty() {
+                out.push_str("\t.section .rodata\n");
+                for chunk in self.rodata.chunks(8) {
+                    let bytes: Vec<String> = chunk.iter().map(|b| format!("0x{:02x}", b)).collect();
+                    out.push_str(&format!("\t.byte {}\n", bytes.join(", ")));
+                }
+            }
+            
+            // Fallback: emit function-level output using old disassembler if needed
+            // For complete implementation, we'd migrate all functions to event logging
+            // Here we keep existing behavior as transitional baseline
+            let mut funcs = Vec::new();
+            Self::collect_all_funcs(prog, &mut funcs);
+            funcs.sort_by_key(|name| self.labels.get(name).copied().unwrap_or(u64::MAX));
+            
+            for name in &funcs {
+                if let Some(layout) = self.func_asm_layout.get(name) {
+                    let is_static = prog.decls.iter().any(|d| matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static));
+                    if !is_static {
+                        out.push_str(&format!("\t.globl {name}\n"));
+                        out.push_str(&format!("\t.type {}, @function\n", name));
+                        if self.emit_cfi {
+                            out.push_str("\t.cfi_startproc\n");
+                        }
+                        out.push_str(&disasm::disassemble_range(
+                            &layout.bytes,
+                            0,
+                            layout.bytes.len(),
+                            layout.text_start,
+                            &labels,
+                            &directives,
+                            &calls_map,
+                            &data_map,
+                        ));
+                        if self.emit_cfi {
+                            out.push_str("\t.cfi_endproc\n");
+                        }
+                        out.push_str(&format!("\t.size {}, .-{}\n", name, name));
+                    }
+                }
+            }
+            return out;
+        }
+        
+        // --- Legacy disassembly-only path (fallback/transition) ---
+        // Keep existing implementation for non-event mode
+        use std::collections::BTreeMap;
         let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
         let directives =
             disasm::directive_map(self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())));
@@ -31413,7 +31498,7 @@ impl Codegen {
                     .filter(|l| l.section != ".text")
                     .map(|l| l.text_start)
                     .collect();
-                let prologue_labels: std::collections::BTreeMap<u64, Vec<&str>> = labels
+                let prologue_labels: BTreeMap<u64, Vec<&str>> = labels
                     .iter()
                     .filter(|(off, _)| !custom_starts.contains(off))
                     .map(|(off, names)| (*off, names.clone()))
