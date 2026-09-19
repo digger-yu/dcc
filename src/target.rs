@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::SysV);
-        assert!(t.arch.has_backend());
+        assert!(!t.arch.has_backend());  // RiscV32 not implemented
         assert!(t.is_ilp32());
         assert!(!t.is_lp64());
     }
