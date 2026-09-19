@@ -19,6 +19,7 @@ fn test_variadic_template_declaration() {
             default: None,
             non_type: None,
             is_pack: true,
+            template_params: None,
         }
     ];
     
@@ -47,6 +48,7 @@ fn test_instantiate_variadic_tuple() {
             default: None,
             non_type: None,
             is_pack: true,
+            template_params: None,
         }
     ];
     
@@ -136,6 +138,7 @@ fn test_regular_template_still_works() {
             default: None,
             non_type: None,
             is_pack: false,
+            template_params: None,
         }
     ];
     

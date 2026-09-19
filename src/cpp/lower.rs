@@ -27,6 +27,7 @@ use crate::cpp::mangle::{
 };
 use crate::cpp::parser::*;
 use crate::cpp::template::{instantiated_class_name, type_key, TemplateRegistry};
+use crate::cpp::cpp_const_eval::{eval_cpp_const_full, ConstexprContext};
 
 /// 降级选项
 #[derive(Debug, Clone, Default)]
@@ -10513,42 +10514,45 @@ impl Lower {
                     self.out.push_str("}\n");
                 }
             }
-            // M17.0: `if constexpr` 真编译期分支 - 使用 cpp_const_eval::eval_cpp_const 求值,
-            // 选 then 或 els (整段被消除, 不进入输出 C).
+            // M17.0 + Phase 3: `if constexpr` with enhanced compile-time evaluation
             CppStmt::IfConstexpr { cond, then, els } => {
-                // 用 cpp_const_eval helper 求值条件
-                let v = crate::cpp::cpp_const_eval::eval_cpp_const(cond, &self.const_local_i128);
-                match v {
-                    Some(v) if v != 0 => {
+                // Phase 3: Try full evaluation with context awareness first
+                let context = ConstexprContext::new(true, &self.const_local_i128);
+                let result = eval_cpp_const_full(cond, &context);
+                            
+                if let Some(v) = result {
+                    if v != 0 {
+                        // ✅ Condition is true: emit ONLY then branch
+                        // Dead code completely eliminated!
                         for s in &then.stmts {
                             self.emit_stmt(s);
                         }
-                    }
-                    Some(_) => {
+                    } else {
+                        // ✅ Condition is false: emit ONLY else branch
+                        // DEAD CODE ELIMINATED - both branches never compiled!
                         if let Some(e) = els {
                             for s in &e.stmts {
                                 self.emit_stmt(s);
                             }
                         }
                     }
-                    // 求值失败 (例如依赖模板参数 / SFINAE 探测): 保守地两段都保留
-                    // 降级为运行时 if-else，添加明确标记注释
-                    None => {
-                        self.out.push_str("/* dcc: if constexpr fallback - condition not evaluable at compile time, degraded to runtime if */\n");
-                        self.out.push_str("if (");
-                        self.emit_expr(cond);
-                        self.out.push_str(") {\n");
-                        for s in &then.stmts {
+                } else {
+                    // ❌ Cannot evaluate at compile time → fall back to runtime if
+                    // Both branches emitted (preserves existing behavior)
+                    self.out.push_str("/* dcc: if constexpr fallback - condition not evaluable at compile time, degraded to runtime if */\n");
+                    self.out.push_str("if (");
+                    self.emit_expr(cond);
+                    self.out.push_str(") {\n");
+                    for s in &then.stmts {
+                        self.emit_stmt(s);
+                    }
+                    self.out.push_str("}\n");
+                    if let Some(e) = els {
+                        self.out.push_str("else {\n");
+                        for s in &e.stmts {
                             self.emit_stmt(s);
                         }
                         self.out.push_str("}\n");
-                        if let Some(e) = els {
-                            self.out.push_str("else {\n");
-                            for s in &e.stmts {
-                                self.emit_stmt(s);
-                            }
-                            self.out.push_str("}\n");
-                        }
                     }
                 }
             }

@@ -11239,6 +11239,7 @@ mod tests {
                         ("BLUE".to_string(), None),
                     ]
                 );
+                if variants.is_empty() { println!("DEBUG: variants is EMPTY!"); } else { println!("DEBUG: variants: {:?}", variants); }
             }
             other => panic!("expected Enum, got {:?}", other),
         }

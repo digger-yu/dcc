@@ -1388,6 +1388,19 @@ impl Sema {
                     return Err(format!("member '{}' not found", name));
                 }
                 let field_sym = syms[0];
+                
+                // G22: Basic access control check (permissive mode)
+                let field_access = self
+                    .get_symbol(field_sym)
+                    .map(|s| s.access)
+                    .unwrap_or(Access::Public);
+                
+                // Log access level for debugging but don't block compilation
+                if field_access != Access::Public {
+                    eprintln!("[G22] Access check: '{}' is {:?} (context: class {:?})", 
+                        name, field_access, self.current_class);
+                }
+                
                 let field_ty = self
                     .get_symbol(field_sym)
                     .map(|s| s.ty.clone())
@@ -1484,6 +1497,19 @@ impl Sema {
                     return Err(format!("member '{}' not found", name));
                 }
                 let field_sym = syms[0];
+                
+                // G22: Basic access control check (permissive mode)
+                let field_access = self
+                    .get_symbol(field_sym)
+                    .map(|s| s.access)
+                    .unwrap_or(Access::Public);
+                
+                // Log access level for debugging but don't block compilation
+                if field_access != Access::Public {
+                    eprintln!("[G22] Access check: '{}' is {:?} (context: class {:?})", 
+                        name, field_access, self.current_class);
+                }
+                
                 let field_ty = self
                     .get_symbol(field_sym)
                     .map(|s| s.ty.clone())
