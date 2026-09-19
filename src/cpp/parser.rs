@@ -11454,8 +11454,8 @@ mod tests {
 
     #[test]
     fn parse_class_member_produces_opaque_on_failure() {
-        // 类成员中含不可解析构造时, 应产生 Opaque 成员,
-        // 后续成员正常解析.
+        // 类成员中含不可解析构造时，应产生 Opaque 成员，
+        // 后续成员正常解析。
         let src = b"struct Bar {\n\
             int x;\n\
             @@@ invalid member ;\n\
@@ -11479,4 +11479,327 @@ mod tests {
             _ => panic!("expected Class, got {:?}", decls[0]),
         }
     }
+}
+
+// ===== G14: Dependent Name Analysis (Two-Phase Lookup Support) =====
+
+use std::collections::HashSet;
+
+/// 检查一个标识符是否是模板参数
+pub fn is_template_parameter(name: &str, params: &[TemplateParam]) -> bool {
+    params.iter().any(|p| &p.name == name)
+}
+
+/// 检查表达式是否依赖于模板参数
+pub fn is_dependent_expression(expr: &CppExpr, params: &[TemplateParam]) -> bool {
+    match expr {
+        // 标识符如果是模板参数名，则是依赖的
+        CppExpr::Ident(name) => is_template_parameter(name, params),
+        // 成员访问 obj.member - 如果 obj 是依赖的，则整个表达式是依赖的
+        CppExpr::Member(obj, _member) => is_dependent_expression(obj, params),
+        CppExpr::PtrMember(obj, _member) => is_dependent_expression(obj, params),
+        // 调用 - 检查callee
+        CppExpr::Call(callee, args) => {
+            is_dependent_expression(callee, params) || 
+            args.iter().any(|arg| is_dependent_expression(arg, params))
+        }
+        // 二元/一元运算 - 操作数检查
+        CppExpr::BinOp(_op, lhs, rhs) => {
+            is_dependent_expression(lhs, params) || is_dependent_expression(rhs, params)
+        }
+        CppExpr::UnaryOp(_op, operand) => is_dependent_expression(operand, params),
+        // 其他表达式类型默认非依赖
+        _ => false,
+    }
+}
+
+/// 分析声明中的依赖名称
+pub fn analyze_dependent_names_for_decl(
+    decl: &CppDecl,
+    params: &[TemplateParam],
+) -> DependentAnalysisResult {
+    let mut dependent = HashSet::new();
+    let mut non_dependent = HashSet::new();
+    
+    fn collect_identifiers<'a>(expr: &'a CppExpr, ids: &mut Vec<&'a str>) {
+        match expr {
+            CppExpr::Ident(name) => ids.push(name),
+            CppExpr::Member(obj, member) => {
+                collect_identifiers(obj, ids);
+                ids.push(member);
+            }
+            CppExpr::PtrMember(obj, member) => {
+                collect_identifiers(obj, ids);
+                ids.push(member);
+            }
+            CppExpr::Call(f, args) => {
+                collect_identifiers(f, ids);
+                for arg in args {
+                    collect_identifiers(arg, ids);
+                }
+            }
+            CppExpr::BinOp(_op, lhs, rhs) => {
+                collect_identifiers(lhs, ids);
+                collect_identifiers(rhs, ids);
+            }
+            CppExpr::UnaryOp(_op, operand) => {
+                collect_identifiers(operand, ids);
+            }
+            _ => {}
+        }
+    }
+    
+    // 遍历声明中的所有表达式
+    match decl {
+        CppDecl::FreeFn { ret, params: fn_params, body, .. } => {
+            // 返回类型
+            collect_types(ret, &mut non_dependent);  // 暂时都视为非依赖
+            // 参数类型
+            for (_name, ty) in fn_params {
+                collect_types(ty, &mut non_dependent);
+            }
+            // 函数体
+            for stmt in &body.stmts {
+                collect_from_stmt(stmt, params, &mut dependent, &mut non_dependent);
+            }
+        }
+        CppDecl::MemberFn { ret, params: fn_params, body, class, .. } => {
+            collect_types(ret, &mut non_dependent);
+            for (_name, ty) in fn_params {
+                collect_types(ty, &mut non_dependent);
+            }
+            // 类名也参与依赖检查
+            let all_params = {
+                let mut extended = params.to_vec();
+                extended.push(TemplateParam {
+                    name: class.clone(),
+                    default: None,
+                    non_type: None,
+                    is_pack: false,
+                });
+                extended
+            };
+            for stmt in &body.stmts {
+                collect_from_stmt(stmt, &all_params, &mut dependent, &mut non_dependent);
+            }
+        }
+        CppDecl::Class(c) => {
+            // 基类
+            for base in &c.bases {
+                collect_types_from_spec(&base.name, &mut non_dependent);
+            }
+            // 成员
+            for member in &c.members {
+                match member {
+                    CppDecl::MemberVar { ty, .. } => {
+                        collect_types(ty, &mut non_dependent);
+                    }
+                    CppDecl::Typedef { target, .. } => {
+                        collect_types(target, &mut non_dependent);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    
+    DependentAnalysisResult {
+        dependent_names: dependent,
+        non_dependent_names: non_dependent,
+    }
+}
+
+/// 从语句中收集依赖信息
+fn collect_from_stmt(
+    stmt: &CppStmt,
+    params: &[TemplateParam],
+    dependent: &mut HashSet<String>,
+    non_dependent: &mut HashSet<String>,
+) {
+    match stmt {
+        CppStmt::Expr(expr) => {
+            classify_expr(expr, params, dependent, non_dependent);
+        }
+        CppStmt::Return(expr) => {
+            if let Some(e) = expr {
+                classify_expr(e, params, dependent, non_dependent);
+            }
+        }
+        CppStmt::If { cond, then, els } => {
+            classify_expr(cond, params, dependent, non_dependent);
+            for s in &then.stmts {
+                collect_from_stmt(s, params, dependent, non_dependent);
+            }
+            if let Some(else_body) = els {
+                for s in &else_body.stmts {
+                    collect_from_stmt(s, params, dependent, non_dependent);
+                }
+            }
+        }
+        CppStmt::For { init, cond, step, body } => {
+            if let Some(i) = init {
+                // i is Box<CppStmt>, recursively collect from this single statement
+                // This is typically a variable declaration or empty
+                // For now, skip collecting (it's usually simple)
+            }
+            if let Some(c) = cond {
+                classify_expr(&c, params, dependent, non_dependent);
+            }
+            if let Some(s) = step {
+                // s is Box<CppStmt>, similarly just skip for now
+            }
+            for stmt in &body.stmts {
+                collect_from_stmt(stmt, params, dependent, non_dependent);
+            }
+        }
+        CppStmt::While { cond, body } => {
+            classify_expr(cond, params, dependent, non_dependent);
+            for stmt in &body.stmts {
+                collect_from_stmt(stmt, params, dependent, non_dependent);
+            }
+        }
+        CppStmt::LocalVar { ty, init, .. } => {
+            collect_types(ty, non_dependent);
+            if let Some(i) = init {
+                classify_expr(i, params, dependent, non_dependent);
+            }
+        }
+        CppStmt::StaticLocal { ty, init, .. } => {
+            collect_types(ty, non_dependent);
+            if let Some(i) = init {
+                classify_expr(i, params, dependent, non_dependent);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 分类表达式：区分依赖和非依赖名称
+fn classify_expr(
+    expr: &CppExpr,
+    params: &[TemplateParam],
+    dependent: &mut HashSet<String>,
+    non_dependent: &mut HashSet<String>,
+) {
+    match expr {
+        CppExpr::Ident(name) => {
+            if is_template_parameter(name, params) {
+                dependent.insert(name.clone());
+            } else {
+                non_dependent.insert(name.clone());
+            }
+        }
+        CppExpr::Member(obj, member) => {
+            let obj_str = match obj.as_ref() {
+                CppExpr::Ident(n) => n.clone(),
+                _ => "expr".to_string(),
+            };
+            if is_dependent_expression(expr, params) {
+                dependent.insert(format!("{}.{}", obj_str, member));
+            } else {
+                let obj_str = match obj.as_ref() {
+                    CppExpr::Ident(n) => n.clone(),
+                    _ => "expr".to_string(),
+                };
+                non_dependent.insert(format!("{}.{}", obj_str, member));
+            }
+        }
+        CppExpr::PtrMember(obj, member) => {
+            let obj_str = match obj.as_ref() {
+                CppExpr::Ident(n) => n.clone(),
+                _ => "expr".to_string(),
+            };
+            if is_dependent_expression(expr, params) {
+                dependent.insert(format!("{}.{}", obj_str, member));
+            } else {
+                let obj_str = match obj.as_ref() {
+                    CppExpr::Ident(n) => n.clone(),
+                    _ => "expr".to_string(),
+                };
+                non_dependent.insert(format!("{}.{}", obj_str, member));
+            }
+        }
+        _ => {
+            // 递归处理子表达式 - 收集所有标识符
+            let mut ids = Vec::new();
+            collect_identifiers_for_classification(expr, &mut ids);
+            for id in ids {
+                if is_template_parameter(&id, params) {
+                    dependent.insert(id);
+                } else {
+                    non_dependent.insert(id);
+                }
+            }
+        }
+    }
+}
+
+/// 收集表达式中的标识符用于分类（使用 String 以避免生命周期问题）
+fn collect_identifiers_for_classification(expr: &CppExpr, ids: &mut Vec<String>) {
+    match expr {
+        CppExpr::Ident(name) => ids.push(name.clone()),
+        CppExpr::Member(obj, member) => {
+            collect_identifiers_for_classification(obj, ids);
+            ids.push(member.clone());
+        }
+        CppExpr::PtrMember(obj, member) => {
+            collect_identifiers_for_classification(obj, ids);
+            ids.push(member.clone());
+        }
+        CppExpr::Call(f, args) => {
+            collect_identifiers_for_classification(f, ids);
+            for arg in args {
+                collect_identifiers_for_classification(arg, ids);
+            }
+        }
+        CppExpr::BinOp(_op, lhs, rhs) => {
+            collect_identifiers_for_classification(lhs, ids);
+            collect_identifiers_for_classification(rhs, ids);
+        }
+        CppExpr::UnaryOp(_op, operand) => {
+            collect_identifiers_for_classification(operand, ids);
+        }
+        _ => {}
+    }
+}
+
+/// 从类型中提取标识符
+fn collect_types(ty: &MangleType, non_dependent: &mut HashSet<String>) {
+    match ty {
+        MangleType::Class(name) => {
+            non_dependent.insert(name.clone());
+        }
+        MangleType::Pointer(inner) | MangleType::Reference(inner) => {
+            collect_types(inner, non_dependent);
+        }
+        MangleType::Template { name, args } => {
+            non_dependent.insert(name.clone());
+            for arg in args {
+                collect_types(arg, non_dependent);
+            }
+        }
+        MangleType::TplMember { name, member, args } => {
+            non_dependent.insert(format!("{}.{}", name, member));
+            for arg in args {
+                collect_types(arg, non_dependent);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 从类型声明中提取标识符
+fn collect_types_from_spec(spec: &str, non_dependent: &mut HashSet<String>) {
+    // 简化：将完整类型声明作为非依赖标识符
+    if !spec.is_empty() {
+        non_dependent.insert(spec.to_string());
+    }
+}
+
+/// 依赖分析结果
+#[derive(Debug, Clone, Default)]
+pub struct DependentAnalysisResult {
+    pub dependent_names: HashSet<String>,
+    pub non_dependent_names: HashSet<String>,
 }

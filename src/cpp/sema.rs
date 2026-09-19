@@ -4755,3 +4755,42 @@ mod tests {
         assert!(sema.is_base_of(gp_id, child_id));
     }
 }
+
+// ===== G14: Dependent Name Resolution Helper Types =====
+
+/// Context for dependent name resolution during template instantiation
+#[derive(Debug, Clone, Default)]
+pub struct InstantiationContext {
+    /// Template parameter names -> actual type bindings
+    pub param_bindings: Vec<(String, MangleType)>,
+}
+
+impl InstantiationContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    pub fn bind(&mut self, param_name: String, actual_type: MangleType) {
+        self.param_bindings.push((param_name, actual_type));
+    }
+    
+    /// Look up a member of a dependent type (e.g., T::member where T is bound)
+    pub fn lookup_dependent_member(&self, type_param: &str, member: &str) -> Option<CxxType> {
+        // Find the binding for this template parameter
+        for (param_name, actual_type) in &self.param_bindings {
+            if param_name == type_param {
+                // Check if actual type has the requested member
+                return match actual_type {
+                    MangleType::Template { name, args } => {
+                        // For std::vector<int>, we might have nested types like 'iterator'
+                        // This would be resolved via typedefs/typedef-like mechanisms
+                        // For now, return dependent type marker
+                        Some(CxxType::Dependent(format!("{}.{}", name, member)))
+                    }
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+}

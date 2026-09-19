@@ -10,6 +10,7 @@
 //! HIR 不直接输出 C 文本，而是由 lower_ir 降到 dcc typed IR。
 
 use crate::cpp::sema::{ClassId, CxxType, SymbolId};
+use std::collections::HashSet;
 
 // === ID 类型 ===
 
@@ -28,6 +29,35 @@ pub struct HirStmtId(pub usize);
 /// HIR 函数体 ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HirBodyId(pub usize);
+
+// === G14: Dependent Name Analysis Info ===
+
+/// 依赖名称分析信息（用于模板实例化的两阶段查找）
+#[derive(Debug, Clone, Default)]
+pub struct DependentInfo {
+    /// 依赖模板参数的名称集合（如 T::member 中的 member）
+    pub dependent_names: HashSet<String>,
+    /// 非依赖名称集合（可在定义点立即解析）
+    pub non_dependent_names: HashSet<String>,
+}
+
+impl DependentInfo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    pub fn add_dependent(&mut self, name: String) {
+        self.dependent_names.insert(name);
+    }
+    
+    pub fn add_non_dependent(&mut self, name: String) {
+        self.non_dependent_names.insert(name);
+    }
+    
+    pub fn is_dependent(&self, name: &str) -> bool {
+        self.dependent_names.contains(name)
+    }
+}
 
 // === 析构变体 ===
 
@@ -427,6 +457,29 @@ pub struct HirTranslationUnit {
     pub bodies: Vec<HirBody>,
     /// 顶层声明（函数、全局变量、类声明等）
     pub top_level: Vec<HirTopLevelDecl>,
+}
+
+/// 函数定义的扩展版本（支持依赖名分析）
+#[derive(Debug, Clone)]
+pub struct HirFunctionExtended {
+    pub symbol: SymbolId,
+    pub body: HirBodyId,
+    /// 参数符号列表（按顺序）
+    pub params: Vec<SymbolId>,
+    /// 返回类型
+    pub ret_ty: CxxType,
+    /// G14: 依赖名称信息
+    pub dependent_info: DependentInfo,
+}
+
+/// 类定义的扩展版本（支持依赖名分析）
+#[derive(Debug, Clone)]
+pub struct HirClassExtended {
+    pub symbol: SymbolId,
+    /// 成员列表
+    pub members: Vec<(SymbolId, CxxType)>,
+    /// G14: 依赖名称信息
+    pub dependent_info: DependentInfo,
 }
 
 /// 顶层声明种类
