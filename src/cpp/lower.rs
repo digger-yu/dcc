@@ -7032,6 +7032,8 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         // 输出占位 int 便于后续 C 后端报错定位.
         MangleType::NonType(_) => "int /*M30 non-type arg*/".into(),
         // G12: 参数包在类型系统中出现，降级为 pack<int,double,...>形式
+        // G11: Template template param placeholder - encode as template name
+        MangleType::TemplateParam(sym) => format!("tt_{}", sym.0),
         MangleType::VariadicPack(_) => "/*G12 variadic_pack_placeholder*/".into(),
     }
 }
@@ -7084,6 +7086,8 @@ fn template_arg_to_c(ty: &MangleType) -> String {
         }
         // M30.1: 非类型实参序列化为 `n<值>`标识符片段
         MangleType::NonType(v) => format!("n{}", v),
+        // G11: 模板模板参数 - 编码为 tt_模板名
+        MangleType::TemplateParam(sym) => format!("tt_{}", sym.0),
         // G12: 参数包展开为 pack_<type1>_<type2>_...形式
         MangleType::VariadicPack(tys) => {
             let mut s = String::from("pack_");

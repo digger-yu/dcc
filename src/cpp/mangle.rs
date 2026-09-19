@@ -80,7 +80,15 @@ pub enum MangleType {
     /// 表示一组类型的 pack，用于 `std::tuple<int, double, char>` 等.
     /// Itanium 编码时作为多个连续参数处理.
     VariadicPack(Vec<MangleType>),
+    /// G11: 模板模板参数 - 指向被传递的模板定义
+    /// 用于 `template<typename T, template<typename> class Container> Adapter<T, Container>`
+    /// 中的 `Container` 形参，实际传入时绑定到 `std::vector` 等模板符号
+    TemplateParam(SymbolId),
 }
+
+/// G11: 模板模板参数符号 ID - 引用一个模板名称
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolId(pub String);
 
 impl MangleType {
     /// 写出 Itanium 类型编码 (不含 <len> 前缀)
@@ -121,6 +129,10 @@ impl MangleType {
                 out.push_str(&format!("{}N{}E", n.len(), n));
             }
             Self::Ellipsis => out.push('z'),
+            // G11: TemplateParam - encode as class-like reference
+            Self::TemplateParam(sym) => {
+                out.push_str(&format!("{}N{}E", sym.0.len(), sym.0));
+            }
             // M17.0: Auto / DecltypeAuto 由 lower 阶段解析, 不进入 mangle.
             // 显式抛错: 若某条路径未完成 auto 推导, 编译时报错而非输出错符号.
             Self::Auto => out.push_str("__auto_unresolved__"),
@@ -164,6 +176,8 @@ impl MangleType {
     pub fn is_unresolved(&self) -> bool {
         match self {
             Self::Auto | Self::DecltypeAuto => true,
+            // G11: TemplateParam already bound to concrete template
+            Self::TemplateParam(_) => false,
             // G12: 参数包中的子类型也需要检查
             Self::VariadicPack(packed) => packed.iter().any(|t| t.is_unresolved()),
             _ => false,

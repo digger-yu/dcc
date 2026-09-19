@@ -114,6 +114,10 @@ pub struct TemplateParam {
     pub non_type: Option<MangleType>,
     /// C++11 参数包 (typename... Args). 解析时容忍, lower 时忽略 `...`.
     pub is_pack: bool,
+    /// G11: 是否为模板模板参数 (`template<typename> class C`)
+    /// Some(n) = 接受 n 个类型形参的模板模板参数 (如 `vector` 接受 1 个)
+    /// None = 普通类型参数
+    pub template_params: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1731,6 +1735,7 @@ impl<'a> CppParser<'a> {
                     default,
                     non_type: None,
                     is_pack: false,
+                    template_params: None,
                 });
                 if matches!(
                     &self.peek,
@@ -1785,8 +1790,10 @@ impl<'a> CppParser<'a> {
             params.push(TemplateParam {
                 name,
                 default,
-                non_type,
+                non_type: non_type.clone(),
                 is_pack,
+                // G11: Simple heuristic - class keyword without typename suggests template template param
+                template_params: if has_kw && !is_pack && !non_type.is_some() { Some(1) } else { None },
             });
             if matches!(
                 &self.peek,
@@ -2126,7 +2133,40 @@ impl<'a> CppParser<'a> {
     /// 1. `template<> identifier ...` (empty parens)
     /// 2. `template<specific_type> identifier ...` (explicit types like template<void>)
     /// Not full spec: `template<typename T> identifier<T*> ...` (partial with type params + pattern)
-    fn lookahead_is_full_specialization(&self) -> bool {
+    /// G11: Look ahead to detect template template parameter pattern
+    fn lookahead_is_template_template(&self) -> bool {
+        // Check pattern: `< typename/class Name > class/typename Name`
+        self.peek_token_at(0).map_or(false, |t0| {
+            matches!(t0, CppTok::C(Tok { kind: TokKind::Lt, .. })) &&
+            self.peek_token_at(1).map_or(false, |t1| {
+                let is_type_kw = matches!(t1, CppTok::C(Tok { 
+                    kind: TokKind::Ident, text, .. 
+                }) if text == "typename" || text == "class")
+                    || self.at(CppKw::Typename) || self.at(CppKw::Class);
+                is_type_kw &&
+                self.peek_token_at(2).map_or(false, |t2| {
+                    matches!(t2, CppTok::C(Tok { kind: TokKind::Ident, .. })) &&
+                    self.peek_token_at(3).map_or(false, |t3| {
+                        matches!(t3, CppTok::C(Tok { 
+                            kind: TokKind::Ellipsis | TokKind::Gt, .. 
+                        })) &&
+                        self.peek_token_at(4).map_or(false, |t4| {
+                            matches!(t4, CppTok::C(Tok { kind: TokKind::Gt, .. })) &&
+                            self.peek_token_at(5).map_or(false, |t5| {
+                                let is_actual_name_kw = matches!(t5, CppTok::C(Tok { 
+                                    kind: TokKind::Ident, text, .. 
+                                }) if text == "class")
+                                    || self.at(CppKw::Class) || self.at(CppKw::Typename);
+                                is_actual_name_kw
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+fn lookahead_is_full_specialization(&self) -> bool {
         let mut depth = 1;
         
         // Peek at tokens starting from current position
@@ -11576,6 +11616,7 @@ pub fn analyze_dependent_names_for_decl(
                     default: None,
                     non_type: None,
                     is_pack: false,
+                    template_params: None,
                 });
                 extended
             };

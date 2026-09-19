@@ -115,6 +115,10 @@ pub fn type_key(ty: &MangleType) -> String {
             s.push_str(member);
             s
         }
+        // G11: 模板模板参数符号
+        MangleType::TemplateParam(sym) => {
+            format!("tt_{}", sym.0.replace("::", "_"))
+        }
         // G12: 参数包展开 - 将包内类型都转换为 key 并连接
         MangleType::VariadicPack(packed) => {
             let mut s = String::from("pack_");
@@ -1322,6 +1326,7 @@ mod tests {
         reg.register(
             &TemplateArgs {
                 params: vec![crate::cpp::parser::TemplateParam {
+                    template_params: None,
                     name: "T".to_string(),
                     default: None,
                     non_type: None,
@@ -1386,12 +1391,14 @@ mod tests {
         let targs = TemplateArgs {
             params: vec![
                 crate::cpp::parser::TemplateParam {
+                    template_params: None,
                     name: "T".to_string(),
                     default: None,
                     non_type: None,
                     is_pack: false,
                 },
                 crate::cpp::parser::TemplateParam {
+                    template_params: None,
                     name: "U".to_string(),
                     default: None,
                     non_type: None,
@@ -1426,6 +1433,7 @@ mod tests {
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
+                    template_params: None,
                 name: "T".to_string(),
                 default: Some(MangleType::Int),
                 non_type: None,
@@ -1455,6 +1463,7 @@ mod tests {
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
+                    template_params: None,
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
@@ -1506,12 +1515,14 @@ mod g14_tests {
         // Verify basic parameter detection
         let params = vec![
             TemplateParam {
+                    template_params: None,
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
                 is_pack: false,
             },
             TemplateParam {
+                    template_params: None,
                 name: "U".to_string(),
                 default: None,
                 non_type: None,
@@ -1529,6 +1540,7 @@ mod g14_tests {
     fn test_dependent_expression_detection() {
         let params = vec![
             TemplateParam {
+                    template_params: None,
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
@@ -1579,6 +1591,7 @@ mod g14_tests {
         reg.register(
             &TemplateArgs {
                 params: vec![TemplateParam {
+                    template_params: None,
                     name: "T".to_string(),
                     default: None,
                     non_type: None,
@@ -1639,6 +1652,7 @@ mod g14_tests {
         reg.register(
             &TemplateArgs {
                 params: vec![TemplateParam {
+                    template_params: None,
                     name: "_Iterator".to_string(),
                     default: None,
                     non_type: None,
