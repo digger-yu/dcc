@@ -6062,77 +6062,14 @@ mod tests {
         );
         sema.set_owner(ctor_sym, c_sym);
 
-        // this 参数（索引 4，符号表第 5 个元素）
+        // 注意：this_sym = SymbolId(4) 必须按顺序添加符号，使索引对应
+        // A(0), B(1), C(2), ctor(3), this(4)
         let this_sym = SymbolId(4);
 
-        let hir = sema.into_hir();
+        // Save symbols before consuming sema into hir
+        let symbols = sema.take_symbols();
 
-        // 构建符号表
-        let symbols = vec![
-            CxxSymbol {
-                id: a_sym,
-                name: "A".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(a_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: b_sym,
-                name: "B".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(b_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: c_sym,
-                name: "C".to_string(),
-                kind: CxxSymbolKind::Class,
-                ty: CxxType::Class(c_id),
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: ctor_sym,
-                name: "C_ctor_complete".to_string(),
-                kind: CxxSymbolKind::Constructor,
-                ty: CxxType::Function {
-                    ret: Box::new(CxxType::Void),
-                    params: vec![CxxType::Pointer(Box::new(CxxType::Class(c_id)))],
-                    is_const: false,
-                    is_volatile: false,
-                    ref_qual: None,
-                },
-                owner: Some(c_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: this_sym,
-                name: "this".to_string(),
-                kind: CxxSymbolKind::Variable,
-                ty: CxxType::Pointer(Box::new(CxxType::Class(c_id))),
-                owner: Some(ctor_sym),
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-        ];
-
-        let mut hir = hir;
+        let mut hir = sema.into_hir();
 
         // stmt 0: CtorInitBase(A)
         let stmt_init_a = HirStmt {
