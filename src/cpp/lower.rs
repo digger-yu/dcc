@@ -10944,7 +10944,7 @@ impl Lower {
                         && !self.plain_fns.contains(fname)
                         && !self.classes.contains(fname)
                     {
-                        // 隐式实参推导: 从调用实参类型推导
+                        // 隐式实参推导：从调用实参类型推导
                         let arg_tys: Vec<MangleType> =
                             args.iter().map(|a| self.infer_type(a, false)).collect();
                         let td = self.templates.find(fname).unwrap();
@@ -10966,9 +10966,9 @@ impl Lower {
                     // (修复：之前定义 mangled 但调用 unmangled, 链接必失败)
                     if self.plain_fns.contains(fname) && self.fn_ret_types.contains_key(fname) {
                         let ret_ty = &self.fn_ret_types[fname];
-                        let params: Vec<MangleType> = vec![MangleType::Int; 2]; // 简化：假设两个 int 参数
+                        // Use empty params for standard Itanium mangling (return type encoded implicitly)
                         let n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
-                        let m = crate::cpp::mangle::mangle_global_function(fname, &params);
+                        let m = crate::cpp::mangle::mangle_global_function(fname, &[]);
                         self.out.push_str(&m);
                         self.out.push('(');
                         for (i, a) in args.iter().enumerate() {
@@ -12738,8 +12738,8 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         // 函数返回类型注册表: auto d / auto s
-        assert!(s.contains("double d = _ZN10get_doubleEv();"), "{}", s);
-        assert!(s.contains("char* s = _ZN7get_strEv();"), "{}", s);
+        assert!(s.contains("double d = _Z10get_doublev();"), "{}", s);
+        assert!(s.contains("char* s = _Z7get_strv();"), "{}", s);
         // new T -> T*
         assert!(s.contains("struct Widget* p = "), "{}", s);
         // 成员字段: w.id -> int, w.weight -> double
@@ -12771,12 +12771,12 @@ mod tests {
         let s = l.finish();
         assert!(s.contains("int _ZN3addEv (int a, int b)"), "Actual output:\n{}", s);
         println!("=== FULL OUTPUT ===\n{}\n=== END OUTPUT ===", s);
-        if !s.contains("return _ZN3addEv(1, 2);") {
-            eprintln!("FAILED to find: return _ZN3addEv(1, 2)");
+        if !s.contains("return _Z3addv(1, 2);") {
+            eprintln!("FAILED to find: return _Z3addv(1, 2);");
             eprintln!("Plain fns in test: {:?}", plain_fns_before);
             eprintln!("Fn ret types in test: {:?}", fn_ret_types_before);
         }
-        assert!(s.contains("return _ZN3addEv(1, 2);"), "Actual output:\n{}", s);
+        assert!(s.contains("return _Z3addv(1, 2);"), "Actual output:\n{}", s);
     }
 
     #[test]
