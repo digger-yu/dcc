@@ -883,6 +883,11 @@ impl Sema {
         self.hir
     }
 
+    /// 获取符号向量（用于测试和外部使用）
+    pub fn take_symbols(&mut self) -> Vec<CxxSymbol> {
+        std::mem::take(&mut self.symbols)
+    }
+
     // --- HIR 构建辅助 ---
 
     fn add_expr(&mut self, kind: HirExprKind, ty: CxxType) -> HirExprId {

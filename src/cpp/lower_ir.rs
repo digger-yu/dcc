@@ -5033,6 +5033,9 @@ mod tests {
             Access::Public,
         );
 
+        // Save symbols before consuming sema into hir
+        let symbols = sema.take_symbols();
+
         let mut hir = sema.into_hir();
 
         // 构建表达式: a + b
@@ -5085,52 +5088,6 @@ mod tests {
             ret_ty: CxxType::Integer { bits: 32, signed: true },
         };
         hir.functions.push(func);
-
-        // 重建符号表（sema 已经被消费，需要从外部构造）
-        let symbols = vec![
-            CxxSymbol {
-                id: fn_sym,
-                name: "add".to_string(),
-                kind: CxxSymbolKind::Function,
-                ty: CxxType::Function {
-                    ret: Box::new(CxxType::Integer { bits: 32, signed: true }),
-                    params: vec![
-                        CxxType::Integer { bits: 32, signed: true },
-                        CxxType::Integer { bits: 32, signed: true },
-                    ],
-                    is_const: false,
-                    is_volatile: false,
-                    ref_qual: None,
-                },
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: a_sym,
-                name: "a".to_string(),
-                kind: CxxSymbolKind::Variable,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-            CxxSymbol {
-                id: b_sym,
-                name: "b".to_string(),
-                kind: CxxSymbolKind::Variable,
-                ty: CxxType::Integer { bits: 32, signed: true },
-                owner: None,
-                access: Access::Public,
-                linkage_name: None,
-                scope: crate::cpp::sema::ScopeId(0),
-                is_volatile: false,
-            },
-        ];
 
         (hir, symbols)
     }
