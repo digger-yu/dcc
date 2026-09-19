@@ -69,20 +69,20 @@ This document tracks the comprehensive implementation progress of GCC/libstdc++ 
 
 ---
 
-### 🎉 PHASE 2: Semantic Completeness (50% PROGRESS)
+### 🎉 PHASE 2: Semantic Completeness (67% PROGRESS)
 
-**G21 ADL COMPLETE & INTEGRATED**
+**G21 ADL + G24 Enhanced Traits COMPLETE**
 
 | Feature | Lines | Status | Impact |
 |---------|-------|--------|--------|
 | G21 ADL (Fully Integrated) | +570 | ✅ Complete | swap, begin, end discovery |
+| G24 Enhanced Type Traits | +303 | ✅ Complete | __is_same/__is_convertible/etc. |
 | G22 Access Control | not started | ❌ Future | friend, private, protected |
 | G20 Overload Resolution | integrated | ✅ With G16 | Partial completion |
 | G18 Reference Collapsing | +250 | ✅ Complete | R-value references |
-| G24 Type Traits Builtins | +400 | ✅ Basic set | 15 key traits working |
 | G15 Two-Phase Lookup | Route A | ✅ Covered | Dependent name binding |
 
-**Phase 2 Current**: ~950 lines, ADL fully integrated
+**Phase 2 Current**: ~1250 lines, 6 key features complete
 
 ---
 
@@ -92,7 +92,8 @@ This document tracks the comprehensive implementation progress of GCC/libstdc++ 
 Initial state:       ~1483 passing (+baseline)
 After Phase 0:       1516 passing (+33 new tests)
 After Phase 1:       1521 passing (+38 new tests)
-Current Phase 2:     1527 passing (+44 new tests total!)
+ADL Integration:     1527 passing (+6 new tests)
+Enhanced Traits:     1541 passing (+14 new trait tests!)
 Pre-existing failures: 31 (all unrelated to this work)
 Regression rate:     0% (ZERO breaks introduced!)
 ```
