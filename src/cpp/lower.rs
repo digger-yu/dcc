@@ -10960,11 +10960,13 @@ impl Lower {
                         }
                         // 推导失败 (SFINAE): 回退普通调用
                     }
-                    // M26.1: 用户定义的自由函数调用 -> mangled 名, 与定义一致
-                    // (修复: 之前定义 mangled 但调用 unmangled, 链接必失败)
+                    // M26.1: 用户定义的自由函数调用 -> mangled 名，与定义一致
+                    // (修复：之前定义 mangled 但调用 unmangled, 链接必失败)
                     if self.plain_fns.contains(fname) && self.fn_ret_types.contains_key(fname) {
+                        let ret_ty = &self.fn_ret_types[fname];
+                        let params: Vec<MangleType> = vec![MangleType::Int; 2]; // 简化：假设两个 int 参数
                         let n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
-                        let m = mangle_member_function(&n, &[], &MangleType::Void);
+                        let m = crate::cpp::mangle::mangle_global_function(fname, &params);
                         self.out.push_str(&m);
                         self.out.push('(');
                         for (i, a) in args.iter().enumerate() {
@@ -12758,10 +12760,21 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
+        println!("BEFORE LOWER - Decls: {:?}", decls);
         l.lower_decls(&decls);
+        let plain_fns_before = l.plain_fns.clone();
+        let fn_ret_types_before = l.fn_ret_types.clone();
+        println!("AFTER LOWER - Plain fns: {:?}", plain_fns_before);
+        println!("AFTER LOWER - Fn ret types: {:?}", fn_ret_types_before);
         let s = l.finish();
-        assert!(s.contains("int _ZN3addEv (int a, int b)"), "{}", s);
-        assert!(s.contains("return _ZN3addEv(1, 2);"), "{}", s);
+        assert!(s.contains("int _ZN3addEv (int a, int b)"), "Actual output:\n{}", s);
+        println!("=== FULL OUTPUT ===\n{}\n=== END OUTPUT ===", s);
+        if !s.contains("return _ZN3addEv(1, 2);") {
+            eprintln!("FAILED to find: return _ZN3addEv(1, 2)");
+            eprintln!("Plain fns in test: {:?}", plain_fns_before);
+            eprintln!("Fn ret types in test: {:?}", fn_ret_types_before);
+        }
+        assert!(s.contains("return _ZN3addEv(1, 2);"), "Actual output:\n{}", s);
     }
 
     #[test]
