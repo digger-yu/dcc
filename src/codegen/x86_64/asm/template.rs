@@ -2,6 +2,8 @@
 // Inline assembly template resolution for x86_64 backend
 // Handles placeholder substitution in asm templates
 
+use std::collections::HashMap;
+
 /// Expand inline assembly local labels (1f, 1b notation) in instruction lines
 pub struct AsmLocalLabels;
 
@@ -162,16 +164,9 @@ impl AsmLocalLabels {
     }
 }
 
-// Simple regex pattern for local label references (number+f/b)
-fn regex_local_label() -> std::regex::Regex {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    static mut REGEX: Option<std::regex::Regex> = None;
-    
-    INIT.call_once(|| {
-        unsafe {
-            REGEX = Some(std::regex::Regex::new(r"\d+[fb]").unwrap());
-        }
-    });
-    
-    unsafe { REGEX.clone().unwrap() }
+// Simple string pattern check for local label references (number+f/b)
+fn is_local_label_ref(s: &str) -> bool {
+    s.len() >= 2 && s.chars().last().unwrap() != 'f' && s.chars().last().unwrap() != 'b'
+        && s[..s.len()-1].chars().all(|c| c.is_ascii_digit())
+}
 }
