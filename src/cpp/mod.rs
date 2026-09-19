@@ -45,6 +45,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod abi_layout;
+pub mod adl;
 pub mod bmf;
 pub mod coroutine;
 pub mod cpp_const_eval;
