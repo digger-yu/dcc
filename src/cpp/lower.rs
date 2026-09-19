@@ -9070,9 +9070,7 @@ impl Lower {
                 name,
                 params,
                 body,
-                is_noexcept,
-                trailing_ret_type,
-            } => {
+                is_noexcept, trailing_ret_type, .. } => {
                 // Use trailing return type if present (M30.5)
                 let final_ret = trailing_ret_type.as_ref().unwrap_or(ret);
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
@@ -9119,9 +9117,7 @@ impl Lower {
                 is_const,
                 is_final,
                 is_noexcept,
-                is_volatile,
-                is_friend,
-            } => {
+                is_volatile, is_friend, .. } => {
                 // M17.0: friend 函数声明是自由函数, 不属于类成员
                 // (即: 没有 this 形参, 不放在类作用域中, 也不做 mangle)
                 if *is_friend {
@@ -9197,9 +9193,7 @@ impl Lower {
                 inits,
                 body,
                 is_virtual,
-                is_explicit,
-                is_noexcept,
-            } => {
+                is_explicit, is_noexcept, .. } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
@@ -9237,9 +9231,7 @@ impl Lower {
             CppDecl::Dtor {
                 class,
                 body,
-                is_virtual,
-                is_noexcept,
-            } => {
+                is_virtual, is_noexcept, .. } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let m = mangle_dtor(&n, 1);

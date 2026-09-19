@@ -1046,9 +1046,7 @@ pub fn substitute_decl(
             name,
             params: ps,
             body,
-            is_noexcept,
-            trailing_ret_type,
-        } => CppDecl::FreeFn {
+            is_noexcept, trailing_ret_type, .. } => CppDecl::FreeFn {
             ret: substitute_type(ret, params, args),
             name: name.clone(),
             params: ps
@@ -1070,9 +1068,7 @@ pub fn substitute_decl(
             is_const,
             is_final,
             is_noexcept,
-            is_volatile,
-            is_friend,
-        } => {
+            is_volatile, is_friend, .. } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1100,9 +1096,7 @@ pub fn substitute_decl(
             inits,
             body,
             is_virtual,
-            is_explicit,
-            is_noexcept,
-        } => {
+            is_explicit, is_noexcept, .. } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1125,9 +1119,7 @@ pub fn substitute_decl(
         CppDecl::Dtor {
             class,
             body,
-            is_virtual,
-            is_noexcept,
-        } => {
+            is_virtual, is_noexcept, .. } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1141,9 +1133,7 @@ pub fn substitute_decl(
         CppDecl::MemberVar {
             ty,
             name,
-            is_mutable,
-            is_volatile,
-        } => CppDecl::MemberVar {
+            is_mutable, is_volatile, .. } => CppDecl::MemberVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             is_mutable: *is_mutable,
@@ -1799,7 +1789,7 @@ fn substitute_template_refs_in_decl(
             // 递归替换类成员中的模板模板参数
             let new_members: Vec<CppDecl> = c.members.iter().map(|m| {
                 match m {
-                    CppDecl::MemberVar { ty, name, is_mutable, is_volatile } => {
+                    CppDecl::MemberVar { ty, name, is_mutable, is_volatile, .. } => {
                         CppDecl::MemberVar {
                             ty: substitute_template_refs_in_type(ty, bindings),
                             name: name.clone(),
