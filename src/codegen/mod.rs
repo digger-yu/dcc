@@ -17,11 +17,18 @@ pub mod x86_64;
 use crate::ast::{Block, BlockItem, Decl, Designator, Expr, InitItem, Program, Stmt, Type};
 use crate::const_eval::{self, ConstValue};
 use crate::debug;
-use crate::diagnostics::{Diagnostic, Span};
+use crate::diagnostics::{Diagnostic, Severity, Span};
 use crate::ir::Module;
 use crate::preproc::LineSpan;
 use crate::sanitizer::{sanitizer_metadata, SanitizerFlags};
 use crate::target::Target;
+
+/// Unified diagnostic policy: fail only on Error severity (not warnings)
+/// This ensures consistent failure semantics across all architectures.
+/// Alignment with x86_64 behavior (see src/codegen/x86_64.rs line 1257)
+fn has_fatal_diagnostics(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics.iter().any(|d| d.sev == Severity::Error)
+}
 
 pub fn validate_inline_asm_constraints(module: &Module) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
@@ -1253,8 +1260,8 @@ pub fn emit(
             cg.trapv = trapv;
             cg.kasan = sanitizers.kasan;
             cg.compile(module);
-            // 仅在有实际错误时失败，警告不阻止编译
-            let has_errors = cg.diagnostics.iter().any(|d| matches!(d.sev, crate::diagnostics::Severity::Error));
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics);
             if has_errors {
                 return Err(cg.diagnostics);
             }
@@ -1617,13 +1624,17 @@ pub fn emit(
             cg.set_mte_enabled(sanitizers.hwasan);
             if emit_asm {
                 cg.compile(module);
-                if !cg.diagnostics.is_empty() {
+                // Unified policy: fail only on Error severity (not warnings)
+                let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+                if has_errors {
                     return Err(cg.diagnostics.clone());
                 }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
-            if !cg.diagnostics.is_empty() {
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+            if has_errors {
                 return Err(cg.diagnostics.clone());
             }
             if debug_level > 0 && relocatable {
@@ -1733,13 +1744,17 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
-                if !cg.diagnostics.is_empty() {
+                // Unified policy: fail only on Error severity (not warnings)
+                let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+                if has_errors {
                     return Err(cg.diagnostics.clone());
                 }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
-            if !cg.diagnostics.is_empty() {
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+            if has_errors {
                 return Err(cg.diagnostics.clone());
             }
             if debug_level > 0 && relocatable {
@@ -1849,13 +1864,17 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
-                if !cg.diagnostics.is_empty() {
+                // Unified policy: fail only on Error severity (not warnings)
+                let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+                if has_errors {
                     return Err(cg.diagnostics.clone());
                 }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
-            if !cg.diagnostics.is_empty() {
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+            if has_errors {
                 return Err(cg.diagnostics.clone());
             }
             if debug_level > 0 && relocatable {
@@ -1931,13 +1950,17 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
-                if !cg.diagnostics().is_empty() {
+                // Unified policy: fail only on Error severity (not warnings)
+                let has_errors = has_fatal_diagnostics(&cg.diagnostics());
+                if has_errors {
                     return Err(cg.diagnostics().to_vec());
                 }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
-            if !cg.diagnostics().is_empty() {
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics());
+            if has_errors {
                 return Err(cg.diagnostics().to_vec());
             }
             if debug_level > 0 && relocatable {
@@ -2013,13 +2036,17 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
-                if !cg.diagnostics.is_empty() {
+                // Unified policy: fail only on Error severity (not warnings)
+                let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+                if has_errors {
                     return Err(cg.diagnostics.clone());
                 }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
-            if !cg.diagnostics.is_empty() {
+            // Unified policy: fail only on Error severity (not warnings)
+            let has_errors = has_fatal_diagnostics(&cg.diagnostics);
+            if has_errors {
                 return Err(cg.diagnostics.clone());
             }
             if debug_level > 0 && relocatable {

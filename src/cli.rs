@@ -368,13 +368,13 @@ pub enum Arch {
 }
 
 impl Arch {
-    /// 第一性原理: 三类语义
-    ///   * has_backend == true  : 该 arch 有完整 codegen 后端,emit() 会成功
+    /// 第一性原理：三类语义
+    ///   * has_backend == true  : 该 arch 有完整 codegen 后端，emit() 会成功
     ///   * has_backend == false : 仅解析 triple (在 --target / 交叉编译场景
     ///     中合法),emit() 会 panic 报清楚
     ///
     /// 之所以区分而不是直接拒绝 mips/arm triple: Linux kernel 编译链
-    /// 经常在 host 端用 --target 探测目标架构,只解析不解码能避免误伤。
+    /// 经常在 host 端用 --target 探测目标架构，只解析不解码能避免误伤。
     pub fn has_backend(self) -> bool {
         match self {
             Arch::X86_64
@@ -383,16 +383,17 @@ impl Arch {
             | Arch::Mips64
             | Arch::Mips
             | Arch::Arm => true,
-            // RiscV32 backend is implemented in Phase 7
-            Arch::RiscV32 => true,
+            // RiscV32 backend is not yet implemented (Phase 7)
+            Arch::RiscV32 => false,
         }
     }
 
     /// 在 has_backend() == false 时的统一报错文本
     pub fn backend_missing_msg(self) -> String {
+        // RiscV32 is now disabled - update supported list accordingly
         format!(
             "target arch {:?} is parsed but has no codegen backend \
-             (supported backends: x86_64, aarch64, riscv64, riscv32, mips, mips64, arm)",
+             (supported backends: x86_64, aarch64, riscv64, mips, mips64, arm)",
             self
         )
     }
@@ -3695,13 +3696,15 @@ mod tests {
 
     #[test]
     fn has_backend_distinguishes_implemented_vs_parse_only() {
+        // Tier-1 architectures with full backend support
         assert!(Arch::X86_64.has_backend());
         assert!(Arch::AArch64.has_backend());
         assert!(Arch::RiscV64.has_backend());
-        assert!(Arch::RiscV32.has_backend());
         assert!(Arch::Mips.has_backend());
         assert!(Arch::Mips64.has_backend());
         assert!(Arch::Arm.has_backend());
+        // RiscV32: parsed but no codegen backend (E0399)
+        assert!(!Arch::RiscV32.has_backend());
     }
 
     #[test]

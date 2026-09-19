@@ -53,7 +53,7 @@ impl Span {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
     Error,
     Warning,
