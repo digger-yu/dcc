@@ -8772,7 +8772,6 @@ fn cpp_ssa_volatile_semantics() {
 
 /// M17.0: vtable/typeinfo/member-offset 符号多文件链接不重复定义
 /// 两个 TU 包含相同 class 定义，链接器应通过 weak 解析而非报 multiple definition
-#[test]
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
 /// M17: Weak vtable symbols - compile-only smoke test
