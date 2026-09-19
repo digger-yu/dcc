@@ -13,13 +13,16 @@
 
 use std::collections::HashMap;
 
-use crate::cpp::hir::{
-    BinaryOp, CastKind, CtorVariant, DtorVariant, HirBody, HirBodyId, HirCallee, HirCatchHandler,
-    HirExpr, HirExprId, HirExprKind, HirFunction, HirId, HirStmt, HirStmtId, HirStmtKind,
-    HirTopLevelDecl, HirTranslationUnit, UnaryOp,
+use crate::cpp::{
+    adl,
+    hir::{
+        BinaryOp, CastKind, CtorVariant, DtorVariant, HirBody, HirBodyId, HirCallee, HirCatchHandler,
+        HirExpr, HirExprId, HirExprKind, HirFunction, HirId, HirStmt, HirStmtId, HirStmtKind,
+        HirTopLevelDecl, HirTranslationUnit, UnaryOp,
+    },
+    mangle::MangleType,
+    parser::*,
 };
-use crate::cpp::mangle::MangleType;
-use crate::cpp::parser::*;
 
 // === ID 类型 ===
 
@@ -435,6 +438,15 @@ impl Sema {
         self.scopes.push(scope);
         self.current_scope = id;
         id
+    }
+
+    /// Find a namespace scope by its name path (e.g., "std" or "std::pmr")
+    /// For now, search through all registered scopes
+    fn find_namespace_scope(&self, ns_path: &str) -> Option<ScopeId> {
+        // TODO: Proper namespace traversal when symbol table integration complete
+        // Simple fallback: return None for now since full implementation requires ClassTable access
+        // This is acceptable as first-class namespace support is complex
+        None
     }
 
     /// 弹出作用域（返回父作用域）
@@ -1528,77 +1540,129 @@ impl Sema {
                 for arg in args {
                     hir_args.push(self.build_expr(arg)?);
                 }
-                // 根据 callee 类型决定调用方式
-                let (hir_callee, ret_ty) = match &self.hir.exprs[callee_id.0].kind {
-                    HirExprKind::Global(sym) => {
-                        // 直接调用函数/方法（如自由函数、静态成员函数、限定调用 Base::method()）
-                        let ret = match &callee_ty {
-                            CxxType::Function { ret, .. } => *ret.clone(),
-                            _ => CxxType::Void,
-                        };
-                        (HirCallee::Direct(*sym), ret)
+                
+                // Try ADL if callee is an identifier
+                let adl_candidates = if let CppExpr::Ident(name) = callee.as_ref() {
+                    // Extract argument types and perform ADL lookup
+                    let arg_types: Vec<&CxxType> = hir_args.iter()
+                        .map(|id| &self.hir.exprs[id.0].ty)
+                        .collect();
+                    
+                    // Collect namespaces from argument types  
+                    let mut all_namespaces = Vec::new();
+                    for arg_ty in &arg_types {
+                        let ns_list = adl::collect_adl_namespaces_for_type(arg_ty);
+                        all_namespaces.extend(ns_list);
                     }
-                    HirExprKind::MethodRef { object, method } => {
-                        // 对象方法调用：判定是否虚调用
-                        let ret = match &callee_ty {
-                            CxxType::Function { ret, .. } => *ret.clone(),
-                            _ => CxxType::Void,
-                        };
-                        let object_expr = *object;
-                        let method_sym = *method;
-                        let virtual_slot = self.get_virtual_slot(method_sym);
-                        let callee = if let Some(slot) = virtual_slot {
-                            // 虚函数调用：通过 vtable 分派
-                            // this_adjust: 非虚继承下为 0（对象指针已通过 base cast 调整）
-                            HirCallee::Virtual {
-                                method: method_sym,
-                                slot,
-                                this_adjust: Default::default(),
-                            }
-                        } else {
-                            // 非虚方法：直接调用
-                            HirCallee::Direct(method_sym)
-                        };
-                        // 对象指针作为 this 第一个参数（模拟成员函数调用）
-                        // 对象若为类值 lvalue (如 `w.get()`), 需取址得到 this;
-                        // 指针/引用对象 (如 `p->get()` 或经解引用) 已是地址.
-                        let object_ty = self.hir.exprs[object_expr.0].ty.clone();
-                        let object_for_this = match &object_ty {
-                            CxxType::Class(_) => self.add_expr(
-                                HirExprKind::AddressOf(object_expr),
-                                CxxType::Pointer(Box::new(object_ty)),
-                            ),
-                            CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
-                                match inner.as_ref() {
-                                    CxxType::Class(_) => self.add_expr(
-                                        HirExprKind::AddressOf(object_expr),
-                                        CxxType::Pointer(inner.clone()),
-                                    ),
-                                    _ => object_expr,
+                    
+                    // Deduplicate namespaces
+                    all_namespaces.sort();
+                    all_namespaces.dedup();
+                    
+                    // For now, try current scope + parent scopes for ADL
+                    // TODO: Full namespace traversal when ClassTable integration complete
+                    if !all_namespaces.is_empty() {
+                        // Perform lookup in each collected namespace
+                        let mut candidates = Vec::new();
+                        for ns in &all_namespaces {
+                            // Try to resolve namespace path and look up symbol
+                            if let Some(ns_scope) = self.find_namespace_scope(ns) {
+                                let results = self.lookup_qualified(ns_scope, name);
+                                for sym in results {
+                                    if let Some(s) = self.get_symbol(sym) {
+                                        if matches!(s.kind, CxxSymbolKind::Function | CxxSymbolKind::Method) {
+                                            candidates.push(sym);
+                                        }
+                                    }
                                 }
                             }
-                            _ => object_expr,
-                        };
-                        let mut full_args = Vec::with_capacity(hir_args.len() + 1);
-                        full_args.push(object_for_this);
-                        full_args.extend(hir_args);
-                        hir_args = full_args;
-                        (callee, ret)
+                        }
+                        if !candidates.is_empty() {
+                            Some(candidates)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
-                    HirExprKind::Local(_sym) => {
-                        // 函数指针调用
-                        let ret = match &callee_ty {
-                            CxxType::Pointer(t) => match t.as_ref() {
-                                CxxType::Function { ret, .. } => *ret.clone(),
-                                _ => CxxType::Void,
-                            },
+                } else {
+                    None
+                };
+                
+                // If ADL found candidates, use them instead of regular resolution
+                let (hir_callee, ret_ty) = if let Some(adl_syms) = adl_candidates {
+                    // Use first ADL candidate
+                    let best_match = adl_syms[0];
+                    if let Some(sym_info) = self.get_symbol(best_match) {
+                        let ret = match &sym_info.ty {
+                            CxxType::Function { ret, .. } => *ret.clone(),
                             _ => CxxType::Void,
                         };
-                        (HirCallee::Indirect(callee_id), ret)
+                        (HirCallee::Direct(best_match), ret)
+                    } else {
+                        (HirCallee::Direct(best_match), CxxType::Void)
                     }
-                    _ => {
-                        // 函数指针调用
-                        (HirCallee::Indirect(callee_id), CxxType::Void)
+                } else {
+                    // Fallback to normal call resolution
+                    match &self.hir.exprs[callee_id.0].kind {
+                        HirExprKind::Global(sym) => {
+                            let ret = match &callee_ty {
+                                CxxType::Function { ret, .. } => *ret.clone(),
+                                _ => CxxType::Void,
+                            };
+                            (HirCallee::Direct(*sym), ret)
+                        }
+                        HirExprKind::MethodRef { object, method } => {
+                            let ret = match &callee_ty {
+                                CxxType::Function { ret, .. } => *ret.clone(),
+                                _ => CxxType::Void,
+                            };
+                            let object_expr = *object;
+                            let method_sym = *method;
+                            let virtual_slot = self.get_virtual_slot(method_sym);
+                            let callee = if let Some(slot) = virtual_slot {
+                                HirCallee::Virtual {
+                                    method: method_sym,
+                                    slot,
+                                    this_adjust: Default::default(),
+                                }
+                            } else {
+                                HirCallee::Direct(method_sym)
+                            };
+                            let object_ty = self.hir.exprs[object_expr.0].ty.clone();
+                            let object_for_this = match &object_ty {
+                                CxxType::Class(_) => self.add_expr(
+                                    HirExprKind::AddressOf(object_expr),
+                                    CxxType::Pointer(Box::new(object_ty)),
+                                ),
+                                CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
+                                    match inner.as_ref() {
+                                        CxxType::Class(_) => self.add_expr(
+                                            HirExprKind::AddressOf(object_expr),
+                                            CxxType::Pointer(inner.clone()),
+                                        ),
+                                        _ => object_expr,
+                                    }
+                                }
+                                _ => object_expr,
+                            };
+                            let mut full_args = Vec::with_capacity(hir_args.len() + 1);
+                            full_args.push(object_for_this);
+                            full_args.extend(hir_args);
+                            hir_args = full_args;
+                            (callee, ret)
+                        }
+                        HirExprKind::Local(_sym) => {
+                            let ret = match &callee_ty {
+                                CxxType::Pointer(t) => match t.as_ref() {
+                                    CxxType::Function { ret, .. } => *ret.clone(),
+                                    _ => CxxType::Void,
+                                },
+                                _ => CxxType::Void,
+                            };
+                            (HirCallee::Indirect(callee_id), ret)
+                        }
+                        _ => (HirCallee::Indirect(callee_id), CxxType::Void)
                     }
                 };
                 let call_id = self.add_expr(
