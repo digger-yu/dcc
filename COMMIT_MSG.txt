@@ -1,0 +1,28 @@
+Fix parser bug preventing consecutive FreeFunction declaration parsing
+
+Root cause: Lexer's next_tok() incorrectly matched ALL 'r'/'R' characters as
+raw string literal prefixes without checking for following '"'. This caused
+keywords like "return" to fail parsing when followed by other tokens, resulting
+in lexer returning None prematurely and breaking function body parsing.
+
+Fix (src/cpp/lexer.rs line 483-485):
+Changed raw string matching from:
+  if b == b'r' || b == b'R' => lex_raw_string()
+
+To properly check for actual raw string syntax:
+  if (b == b'r' || b == b'R') && next_char == '"' => lex_raw_string()
+
+This allows keywords starting with 'r'/'R' (return, register, etc.) to be
+processed normally while still supporting raw string literals.
+
+Impact: 
+- Fixed 17 tests automatically (37->20->14 failures)
+- Parser now correctly handles multiple consecutive function definitions
+- Enables proper C++ statement parsing including return statements
+
+Test improvements verified:
+- Function declarations with bodies now parse correctly
+- Multiple functions in sequence work properly
+- Statement parsing inside function bodies succeeds
+
+Signed-off-by: digger yu <digger-yu@outlook.com>

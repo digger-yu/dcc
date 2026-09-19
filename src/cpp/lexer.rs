@@ -479,8 +479,8 @@ impl<'a> CppLexer<'a> {
             return None;
         }
         let b = self.src[self.pos];
-        // G1: Raw string literal check before :: handling
-        if b == b'r' || b == b'R' {
+        // G1: Raw string literal check (only if followed by ")
+        if (b == b'r' || b == b'R') && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'"' {
             return self.lex_raw_string();
         }
         if b == b':' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b':' {
