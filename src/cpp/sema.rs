@@ -2188,33 +2188,68 @@ impl Sema {
                 }))
             }
             CppStmt::IfConstexpr { cond, then, els } => {
-                // if constexpr: 编译期条件选择
-                // 尝试 const eval，成功则只编译选中的分支
-                // 失败则降级为普通 if（保守处理）
-                let then_stmts = self.build_body(then)?;
-                let then_stmt = self.add_stmt(HirStmtKind::Compound(then_stmts));
-                let else_body = match els {
-                    Some(e) => {
-                        let e_stmts = self.build_body(e)?;
-                        Some(self.add_stmt(HirStmtKind::Compound(e_stmts)))
-                    }
-                    None => None,
-                };
-                // 先尝试 const eval
+                // M17.0: `if constexpr` 真正的分支省略
+                // 先尝试在编译期求值条件，如果成功：
+                //   - true (非零): 只 build then 分支
+                //   - false (零): 只 build else 分支  
+                // 如果失败：回退到运行时 if（两个分支都要 build）
                 use crate::cpp::cpp_const_eval::eval_cpp_const;
-                let cond_value = eval_cpp_const(cond, &HashMap::new());
-                let cond_id = match cond_value {
-                    Some(v) => self.add_expr(
-                        HirExprKind::IntLiteral(v),
-                        CxxType::Integer { bits: 32, signed: true },
-                    ),
-                    None => self.build_expr(cond)?,
-                };
-                Ok(self.add_stmt(HirStmtKind::If {
-                    cond: cond_id,
-                    then_body: then_stmt,
-                    else_body,
-                }))
+                
+                let chosen_branch = eval_cpp_const(cond, &HashMap::new());
+                
+                match chosen_branch {
+                    Some(v) if v != 0 => {
+                        // 条件为 true（非零），只编译 then 分支
+                        let then_stmts = self.build_body(then)?;
+                        Ok(self.add_stmt(HirStmtKind::Compound(then_stmts)))
+                    }
+                    Some(0) => {
+                        // 条件为 false，只编译 else 分支
+                        match els {
+                            Some(e) => {
+                                let e_stmts = self.build_body(e)?;
+                                Ok(self.add_stmt(HirStmtKind::Compound(e_stmts)))
+                            }
+                            None => Ok(self.add_stmt(HirStmtKind::Compound(vec![]))),
+                        }
+                    }
+                    None => {
+                        // 无法确定，回退到运行时 if
+                        let cond_id = self.build_expr(cond)?;
+                        let then_stmts = self.build_body(then)?;
+                        let then_stmt = self.add_stmt(HirStmtKind::Compound(then_stmts));
+                        let else_body = match els {
+                            Some(e) => {
+                                let e_stmts = self.build_body(e)?;
+                                Some(self.add_stmt(HirStmtKind::Compound(e_stmts)))
+                            }
+                            None => None,
+                        };
+                        Ok(self.add_stmt(HirStmtKind::If {
+                            cond: cond_id,
+                            then_body: then_stmt,
+                            else_body,
+                        }))
+                    }
+                    _ => {
+                        // 无法确定，回退到运行时 if
+                        let cond_id = self.build_expr(cond)?;
+                        let then_stmts = self.build_body(then)?;
+                        let then_stmt = self.add_stmt(HirStmtKind::Compound(then_stmts));
+                        let else_body = match els {
+                            Some(e) => {
+                                let e_stmts = self.build_body(e)?;
+                                Some(self.add_stmt(HirStmtKind::Compound(e_stmts)))
+                            }
+                            None => None,
+                        };
+                        Ok(self.add_stmt(HirStmtKind::If {
+                            cond: cond_id,
+                            then_body: then_stmt,
+                            else_body,
+                        }))
+                    }
+                }
             }
             CppStmt::While { cond, body } => {
                 let cond_id = self.build_expr(cond)?;
