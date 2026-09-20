@@ -41,11 +41,11 @@ fn gen_ternary_operator(
     
     // Test condition and branch
     cg.test_register(0);
-    cg.jmp_rel32(&cond_false, crate::codegen::jump::JumpKind::Je);
+    cg.jmp_rel32(&cond_false, x86_64::JumpKind::Je);
     
     // Condition true: evaluate "then" branch
     cg.gen_expr(then, dst);
-    cg.jmp_rel32(&end_cond, crate::codegen::jump::JumpKind::Jmp);
+    cg.jmp_rel32(&end_cond, x86_64::JumpKind::Jmp);
     
     // Condition false: evaluate "else" branch
     cg.label(&cond_false);

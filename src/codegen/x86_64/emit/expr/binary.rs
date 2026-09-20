@@ -315,10 +315,10 @@ pub fn gen_binop_expr(cg: &mut crate::codegen::x86_64::Codegen, op: BinOp, l: &E
         let ok = cg.fresh_label();
         
         // jo trap_label: jump to trap if OF=1
-        cg.jmp_rel32(&trap_label, crate::codegen::jump::JumpKind::Jo);
+        cg.jmp_rel32(&trap_label, x86_64::JumpKind::Jo);
         
         // Not overflow: skip trap directly to ok
-        cg.jmp_rel32(&ok, crate::codegen::jump::JumpKind::Jmp);
+        cg.jmp_rel32(&ok, x86_64::JumpKind::Jmp);
         
         cg.label(&trap_label);
         cg.emit(&[0xe8, 0, 0, 0, 0]); // call rel32 placeholder
@@ -394,7 +394,7 @@ fn gen_logical_binary_op(
     match op {
         BinOp::AndAnd => {
             // && : false if left is zero
-            cg.jmp_rel32(&l_false, crate::codegen::jump::JumpKind::Je);
+            cg.jmp_rel32(&l_false, x86_64::JumpKind::Je);
             
             cg.gen_expr_decay(r, dst);
             
@@ -412,14 +412,14 @@ fn gen_logical_binary_op(
             let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
             cg.emit(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
             
-            cg.jmp_rel32(&l_end, crate::codegen::jump::JumpKind::Jmp);
+            cg.jmp_rel32(&l_end, x86_64::JumpKind::Jmp);
             cg.label(&l_false);
             cg.mov_imm(dst, 0);
             cg.label(&l_end);
         }
         BinOp::OrOr => {
             // || : false if left is non-zero
-            cg.jmp_rel32(&l_false, crate::codegen::jump::JumpKind::Jne);
+            cg.jmp_rel32(&l_false, x86_64::JumpKind::Jne);
             
             cg.gen_expr_decay(r, dst);
             
@@ -436,7 +436,7 @@ fn gen_logical_binary_op(
             let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
             cg.emit(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
             
-            cg.jmp_rel32(&l_end, crate::codegen::jump::JumpKind::Jmp);
+            cg.jmp_rel32(&l_end, x86_64::JumpKind::Jmp);
             cg.label(&l_false);
             cg.mov_imm(dst, 1);
             cg.label(&l_end);

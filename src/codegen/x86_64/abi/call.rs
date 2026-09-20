@@ -33,7 +33,7 @@ pub enum ArgLoc {
 /// - First 8 SSE/vector args: xmm0-xmm7
 /// - Overflow goes to stack (right-to-left)
 /// - Structs > 16 bytes or mixed-class always use sret pointer
-fn emit_sysv_call(
+pub(crate) fn emit_sysv_call(
     cg: &mut Codegen,
     direct: Option<&str>,
     callee: Option<&Expr>,

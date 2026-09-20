@@ -4,6 +4,7 @@
 // Implementation extracted from x86_64.rs gen_expr() function (~200 lines total)
 
 use crate::ast::{Expr, Type, UnOp};
+use crate::codegen::x86_64::emit::expr::lvalue::gen_lvalue_addr;
 
 /// Generate code for unary operator expressions.
 /// 
@@ -39,7 +40,7 @@ pub fn gen_unary_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: u
         Expr::Unary { op: UnOp::AddressOf, expr: lvalue } => {
             // Take address of lvalue (C semantics: &x → address)
             if !gen_lvalue_addr(cg, lvalue, dst) {
-                cg.emit_diagnostic(crate::diagnostics::DiagnosticError::new(
+                cg.emit_diagnostic(crate::diagnostics::Diagnostic::new(
                     crate::diagnostics::Severity::Error,
                     "cannot take address of rvalue",
                     None,
@@ -47,7 +48,7 @@ pub fn gen_unary_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: u
             }
         }
         _ => {
-            cg.emit_diagnostic(crate::diagnostics::DiagnosticError::new(
+            cg.emit_diagnostic(crate::diagnostics::Diagnostic::new(
                 crate::diagnostics::Severity::Error,
                 "unsupported unary operator",
                 None,

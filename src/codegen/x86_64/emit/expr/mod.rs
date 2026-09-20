@@ -3,7 +3,7 @@
 // Extracted from gen_expr() in x86_64.rs (~4.4k lines total)
 
 pub mod lvalue;
-pub mod binop;
+
 pub mod cast;
 pub mod call;
 pub mod unary;
@@ -63,25 +63,25 @@ pub fn gen_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: u8) {
             cg.gen_literal_expr(e, dst);
         }
         Expr::Ident { name, ty, .. } => {
-            lvalue::emit_ident(cg, name, ty, dst);
+            lvalue::gen_lvalue_addr(cg, e, dst);
         }
         Expr::Binop { op, l, r, .. } => {
-            binop::emit_binop(cg, *op, l, r, dst);
+            binary::gen_binop_expr(cg, *op, l.as_ref(), r.as_ref(), dst);
         }
         Expr::Unary { op, e: operand, .. } => {
-            unary::emit_unary(cg, *op, operand.as_ref(), dst);
+            unary::gen_unary_expr(cg, e, dst);
         }
         Expr::Cast { e: operand, type_name, .. } => {
-            cast::emit_cast(cg, operand.as_ref(), type_name, dst);
+            cast::gen_cast_expr(cg, operand.as_ref(), type_name, dst);
         }
         Expr::Call { f, args, .. } => {
-            call::emit_call(cg, f, args.as_deref(), dst);
+            call::gen_call_expr(cg, e, dst);
         }
         Expr::Assign { l, r, .. } => {
-            init::emit_assign(cg, l.as_ref(), r.as_ref(), dst);
+            init::gen_init_expr(cg, e, dst);
         }
         Expr::CompoundLit { ty: _, fields } => {
-            init::emit_compound_lit(cg, fields.as_deref());
+            compound::gen_compound_expr(cg, e, dst);
         }
         // Additional expression types as they are extracted...
         _ => unimplemented!("Expression type not yet migrated: {:?}", std::mem::discriminant(e)),

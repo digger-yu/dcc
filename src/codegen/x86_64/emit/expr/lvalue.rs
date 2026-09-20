@@ -41,7 +41,7 @@ pub fn gen_lvalue_addr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: 
             unimplemented!("extract pointer dereference operation from x86_64.rs gen_expr");
         }
         _ => {
-            cg.emit_diagnostic(crate::diagnostics::DiagnosticError::new(
+            cg.emit_diagnostic(crate::diagnostics::Diagnostic::new(
                 crate::diagnostics::Severity::Error,
                 "unexpected lvalue expression type",
                 None,
@@ -87,7 +87,8 @@ fn handle_identifier(
     
     // Vector variables: scalar element-by-element loading to frame temp slot 0
     if matches!(ty, Type::Vector(_, _)) {
-        cg.gen_vector_load(e);
+        // TODO: Implement vector load for identifier
+        // cg.gen_vector_load(e);
         return true;
     }
     

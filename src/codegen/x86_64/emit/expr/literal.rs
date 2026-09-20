@@ -57,7 +57,7 @@ pub fn gen_literal_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst:
         }
         _ => {
             // Handle any unexpected literal types with diagnostic
-            cg.emit_diagnostic(crate::diagnostics::DiagnosticError::new(
+            cg.emit_diagnostic(crate::diagnostics::Diagnostic::new(
                 crate::diagnostics::Severity::Error,
                 "unexpected literal expression type",
                 None,
@@ -97,7 +97,7 @@ fn mask_imm_to_type(value: i64, ty: &Type) -> i128 {
         }
         
         // 64-bit types: direct cast
-        Type::ULong | Type::Long | Type::Ptr => {
+        Type::ULong | Type::Long | Type::Ptr(_) => {
             (value as i64) as i128
         }
         

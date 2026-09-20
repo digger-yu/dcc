@@ -97,7 +97,7 @@ fn pass_sysv_args(cg: &mut crate::codegen::x86_64::Codegen, args: &[Expr]) {
         if is_passable_in_registers(arg_ty) {
             // Try register first
             if gp_idx < gp_regs.len() && matches!(arg_ty, 
-                Type::Int(_) | Type::Ptr | Type::Long | Type::UInt | Type::ULong)
+                Type::Int | Type::Ptr(_) | Type::Long | Type::UInt | Type::ULong)
             {
                 // Pass in general-purpose register
                 cg.gen_expr(arg, gp_regs[gp_idx]);

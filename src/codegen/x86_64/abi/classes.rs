@@ -164,7 +164,7 @@ fn has_field_data_in_range(ty: &crate::ast::Type, lo: usize, hi: usize) -> bool 
 
 /// Classify fields into parent's classes array.
 /// Each field classified to temporary array, then merged into parent.
-fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) {
+pub(crate) fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) {
     let size = ty.size();
     if size == 0 {
         return;
@@ -232,7 +232,7 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
 
 /// SysV ABI class merging table.
 /// Determines final class when two eightbyte classifications overlap.
-fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
+pub(crate) fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
     use AbiClass::*;
     
     if a == b {
@@ -272,7 +272,7 @@ fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
 }
 
 /// Leaf type ABI classification.
-fn leaf_abi_class(ty: &crate::ast::Type) -> AbiClass {
+pub(crate) fn leaf_abi_class(ty: &crate::ast::Type) -> AbiClass {
     match ty {
         crate::ast::Type::Float | crate::ast::Type::Double => AbiClass::Sse,
         crate::ast::Type::LongDouble => AbiClass::Memory,

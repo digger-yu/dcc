@@ -4,6 +4,8 @@
 // Implementation extracted from x86_64.rs gen_expr() function (~400+ lines total)
 
 use crate::ast::{Expr, Type};
+use crate::codegen::x86_64::emit::expr::lvalue::gen_lvalue_addr;
+use crate::const_eval;
 
 /// Generate code for initialization and assignment expressions.
 /// 
@@ -26,7 +28,7 @@ pub fn gen_init_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: u8
         Expr::CompoundLit { ty, inits } => gen_compound_literal(cg, ty, inits.as_slice()),
         Expr::SizeOf { ty, .. } => gen_sizeof(cg, ty, dst),
         _ => {
-            cg.emit_diagnostic(crate::diagnostics::DiagnosticError::new(
+            cg.emit_diagnostic(crate::diagnostics::Diagnostic::new(
                 crate::diagnostics::Severity::Error,
                 "unexpected initialization expression",
                 None,
@@ -454,7 +456,7 @@ fn store_to_memory_at_rdi(cg: &mut crate::codegen::x86_64::Codegen, ty: &Type) {
 }
 
 /// Generate compound literal initializer ({1, 2, 3})
-fn gen_compound_literal(cg: &mut crate::codegen::x86_64::Codegen, ty: &Type, inits: &[Expr]) {
+fn gen_compound_literal(cg: &mut crate::codegen::x86_64::Codegen, ty: &Type, inits: &[Expr], dst: u8) {
     // Allocate stack space for compound literal
     let size = ty.size();
     
