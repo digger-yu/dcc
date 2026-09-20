@@ -1,6 +1,6 @@
 // src/codegen/x86_64/emit/expr/mod.rs
 // Expression code generation for x86_64 backend
-// Dispatcher to specialized expression handlers by type
+// Extracted from gen_expr() in x86_64.rs (~4.4k lines total)
 
 pub mod lvalue;
 pub mod binop;
@@ -11,60 +11,79 @@ pub mod literal;
 pub mod init;
 pub mod compound;
 
-/// Main expression dispatcher - extracts from gen_expr() in x86_64.rs (~4.4k lines)
+use crate::ast::{Expr, Type};
+
+/// Main expression dispatcher - extracts from gen_expr() in x86_64.rs
 /// 
-/// Routes expressions to appropriate handlers based on Expr enum variant:
-/// - Literal: Int, Char, Float, String, Vector
+/// Routes expressions to appropriate handlers based on Expr enum variant.
+/// This is the primary entry point that replaces direct calls to gen_expr()
+/// after migration is complete.
+/// 
+/// # Arguments
+/// * `cg` - Codegen context (x86_64::Codegen)
+/// * `e` - Expression to generate code for  
+/// * `dst` - Destination register index (0-7, maps to rax-r7)
+/// 
+/// # Expression Types Handled
+/// - Literals: Int, Char, Float, String, Vector
 /// - Unary: Neg, Not, Deref, AddressOf
-/// - Binary: Add, Sub, Mul, Div, Mod, Lt, Le, Gt, Ge, EqEq, Ne, And, Or
-/// - Logical: AndAnd, OrOr (short-circuit evaluation)
+/// - Binary: Add, Sub, Mul, Div, Mod, comparisons
+/// - Logical: AndAnd, OrOr (short-circuit)
 /// - Cast: Type casting operations
 /// - Call: Function calls
 /// - L-value: Ident, Member, Index, Deref
 /// - Compound: Assign, CompoundLit, Sizeof, Alignof
-/// 
-/// # Arguments
-/// * `cg` - Codegen context
-/// * `e` - Expression to generate code for  
-/// * `dst` - Destination register index
-pub fn gen_expr_dispatcher(cg: &mut crate::codegen::x86_64::Codegen, e: &crate::ast::Expr, dst: u8) {
-    // Placeholder: Full implementation requires extracting ~4,400 lines from x86_64.rs
+pub fn gen_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst: u8) {
+    // Handle special vector lvalue case first
+    if matches!(
+        e,
+        Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
+    ) && matches!(e.ty(), Type::Vector(_, _))
+    {
+        cg.gen_vector_load_into_slot(e, 0);
+        return;
+    }
     
-    use crate::ast::Expr;
+    // Handle special complex lvalue case
+    if matches!(
+        e,
+        Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
+    ) && matches!(e.ty(), Type::Complex(_))
+        && cg.gen_complex_lvalue_rvalue(e)
+    {
+        return;
+    }
     
+    // Dispatch to specific handlers based on expression type
     match e {
-        Expr::Int { .. } | Expr::Char { .. } => {
-            // Literal handling - see literal.rs
-            unimplemented!("extract literal expressions from gen_expr");
+        Expr::Int { v, ty, .. } => {
+            cg.gen_literal_expr(e, dst);
         }
-        Expr::Ident { .. } => {
-            // Identifier/lvalue handling - see lvalue.rs
-            unimplemented!("extract identifier expressions from gen_expr");
+        Expr::Char { v, ty, .. } => {
+            cg.gen_literal_expr(e, dst);
         }
-        Expr::Binop { op, .. } => {
-            // Binary operator handling - see binop.rs
-            unimplemented!("extract binary operators from gen_expr");
+        Expr::Ident { name, ty, .. } => {
+            lvalue::emit_ident(cg, name, ty, dst);
         }
-        Expr::Unary { .. } => {
-            // Unary operator handling - see unary.rs  
-            unimplemented!("extract unary operators from gen_expr");
+        Expr::Binop { op, l, r, .. } => {
+            binop::emit_binop(cg, *op, l, r, dst);
         }
-        Expr::Cast { .. } => {
-            // Cast/expression handling - see cast.rs
-            unimplemented!("extract casts from gen_expr");
+        Expr::Unary { op, e: operand, .. } => {
+            unary::emit_unary(cg, *op, operand.as_ref(), dst);
         }
-        Expr::Call { .. } => {
-            // Function call handling - see call.rs
-            unimplemented!("extract function calls from gen_expr");
+        Expr::Cast { e: operand, type_name, .. } => {
+            cast::emit_cast(cg, operand.as_ref(), type_name, dst);
         }
-        Expr::CompoundLit { .. } => {
-            // Compound literal handling - see init.rs
-            unimplemented!("extract compound literals from gen_expr");
+        Expr::Call { f, args, .. } => {
+            call::emit_call(cg, f, args.as_deref(), dst);
         }
-        Expr::Assign { .. } => {
-            // Assignment handling - see init.rs
-            unimplemented!("extract assignments from gen_expr");
+        Expr::Assign { l, r, .. } => {
+            init::emit_assign(cg, l.as_ref(), r.as_ref(), dst);
         }
-        // Additional cases as needed...
+        Expr::CompoundLit { ty: _, fields } => {
+            init::emit_compound_lit(cg, fields.as_deref());
+        }
+        // Additional expression types as they are extracted...
+        _ => unimplemented!("Expression type not yet migrated: {:?}", std::mem::discriminant(e)),
     }
 }
