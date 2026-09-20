@@ -32,21 +32,28 @@ pub fn gen_literal_expr(cg: &mut crate::codegen::x86_64::Codegen, e: &Expr, dst:
             cg.mov_imm(dst, masked);
         }
         Expr::Float { value, ty } => {
-            // Floating point literal handling - requires conversion to appropriate format
-            unimplemented!("extract float literal conversion from x86_64.rs gen_expr");
-        }
-        Expr::Double { value, ty } => {
-            // Double literal handling - typically stored in XMM registers
-            unimplemented!("extract double literal from x86_64.rs gen_expr");
+            // Floating point literal: store in .rodata, load to XMM register
+            // Implemented by calling gen_float_imm_load helper
+            cg.gen_float_imm_load(*value, ty);
         }
         Expr::String { content, .. } => {
-            // String literal: emit address reference to .rodata section
-            // Will be implemented as: LEA reg, [rip + string_symbol]
-            unimplemented!("extract string literal address calculation from x86_64.rs gen_expr");
+            // String literal: add to .rodata pool, generate RIP-relative LEA
+            let data = content.clone();
+            if !cg.string_pool.contains_key(&data) {
+                let offset = cg.rodata.len() as u64;
+                cg.rodata.extend_from_slice(&data);
+                cg.string_pool.insert(data.clone(), offset);
+            }
+            let at = cg.pos();
+            // LEA dst, [RIP + disp32] (7 bytes)
+            let rex = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
+            cg.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
+            cg.string_refs.push((at, data));
         }
         Expr::Vector { elements, ty } => {
-            // Vector literal: initialize SIMD register from element list
-            unimplemented!("extract vector literal initialization from x86_64.rs gen_expr");
+            // Vector literal initialization - placeholder for now
+            // Will be implemented after SIMD infrastructure is verified
+            unimplemented!("vector literal init - extract from x86_64.rs line ~12800+");
         }
         _ => {
             // Handle any unexpected literal types with diagnostic
