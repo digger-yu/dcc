@@ -135,3 +135,11 @@ golden_hashes/
 
 # Temporary commit message drafts
 commit_message_*.txt
+
+# Build artifacts and test outputs
+target/
+*.o
+*.obj
+*.elf
+*.bin
+*.dis.txt
