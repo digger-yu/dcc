@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 // ASM submodule (PR-A2 Phase)
 mod asm;
 mod backend;
+mod codegen;
 
 // 模块化提取层。各模块的接入状态**并不一致**，以 `RUSTFLAGS="--force-warn dead_code"
 // cargo check --lib` 的实测死码条数为准（本行下方注释里的数字即此来源）：
