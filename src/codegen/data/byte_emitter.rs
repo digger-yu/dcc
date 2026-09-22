@@ -1,10 +1,85 @@
 //! Byte emission engine for generating actual machine code from encoding specifications
 //! 
 //! This module takes selected encoding formats and generates the actual byte sequences
-// that represent instruction machine code.
+//! that represent instruction machine code.
 
 use crate::codegen::data::{encoding_selector::SelectedFormat, instruction_loader::InstructionDefinition};
 use anyhow::Result;
+
+/// Register numbers for encoding
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Register {
+    Rax = 0,
+    Rcx = 1,
+    Rdx = 2,
+    Rbx = 3,
+    Rsp = 4,
+    Rbp = 5,
+    Rsi = 6,
+    Rdi = 7,
+    R8 = 8,
+    R9 = 9,
+    R10 = 10,
+    R11 = 11,
+    R12 = 12,
+    R13 = 13,
+    R14 = 14,
+    R15 = 15,
+}
+
+impl Register {
+    /// Get register index (0-15)
+    pub fn index(&self) -> u8 {
+        *self as u8
+    }
+}
+
+/// Memory addressing mode information
+#[derive(Debug, Clone)]
+pub struct MemoryAddress {
+    /// Base register (optional)
+    pub base: Option<Register>,
+    /// Index register (optional)
+    pub index: Option<Register>,
+    /// Scale factor (1, 2, 4, or 8)
+    pub scale: u8,
+    /// Displacement value
+    pub displacement: i32,
+}
+
+impl MemoryAddress {
+    /// Create new memory address with optional base
+    pub fn with_base(base: Register) -> Self {
+        Self {
+            base: Some(base),
+            ..Default::default()
+        }
+    }
+    
+    /// Add index register with scale
+    pub fn with_index(mut self, index: Register, scale: u8) -> Self {
+        self.index = Some(index);
+        self.scale = scale;
+        self
+    }
+    
+    /// Set displacement
+    pub fn with_displacement(mut self, disp: i32) -> Self {
+        self.displacement = disp;
+        self
+    }
+}
+
+impl Default for MemoryAddress {
+    fn default() -> Self {
+        Self {
+            base: None,
+            index: None,
+            scale: 1,
+            displacement: 0,
+        }
+    }
+}
 
 /// Byte emitter for data-driven instruction encoding
 pub struct ByteEmitter;
@@ -17,6 +92,15 @@ impl ByteEmitter {
     
     /// Emit complete instruction bytes based on selected format
     pub fn emit(&self, selected: &SelectedFormat) -> Result<Vec<u8>> {
+        self.emit_with_addressing(selected, &MemoryAddress::default())
+    }
+    
+    /// Emit with explicit addressing mode information
+    pub fn emit_with_addressing(
+        &self, 
+        selected: &SelectedFormat,
+        address: &MemoryAddress,
+    ) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         
         // Emit REX prefix if needed (x86-64 specific)
@@ -29,12 +113,12 @@ impl ByteEmitter {
         
         // Emit ModR/M byte if required
         if selected.format.modrm_required {
-            self.emit_modrm(&mut bytes, selected);
+            self.emit_modrm(&mut bytes, selected, address)?;
         }
         
         // Emit additional bytes (SIB, displacement, immediate)
         if selected.format.extra_bytes || selected.format.escape_bytes.is_some() {
-            self.emit_extra_bytes(&mut bytes, selected)?;
+            self.emit_extra_bytes(&mut bytes, selected, address)?;
         }
         
         Ok(bytes)
@@ -67,15 +151,53 @@ impl ByteEmitter {
     }
     
     /// Emit ModR/M byte for memory addressing
-    fn emit_modrm(&self, bytes: &mut Vec<u8>, selected: &SelectedFormat) {
-        // Placeholder - in real implementation this would:
-        // 1. Analyze address mode from format description
-        // 2. Encode mod, reg, r/m fields
-        // 3. Add displacement/SIB as needed
+    /// 
+    /// ModR/M format:
+    ///   Bits 7-6: mod (addressing mode)
+    ///   Bits 5-3: reg (register or opcode extension)
+    ///   Bits 2-0: r/m (register or memory addressing)
+    fn emit_modrm(
+        &self,
+        bytes: &mut Vec<u8>,
+        selected: &SelectedFormat,
+        address: &MemoryAddress,
+    ) -> Result<()> {
+        let mut modrm = 0u8;
         
-        // For now, emit a simple register-to-register ModR/M
-        // Mod=11 (register), reg=0, r/m=0 => 0xC0
-        bytes.push(0xC0u8);
+        // Determine mod field based on addressing mode
+        let mod_field = if address.base.is_none() && address.index.is_none() {
+            // Register-only addressing: mod=11b
+            0b11
+        } else if address.displacement == 0 && address.base != Some(Register::Rbp) {
+            // Memory with no displacement or RBP base: mod=00b
+            0b00
+        } else if (-128..=127).contains(&address.displacement) {
+            // Small displacement fits in 8-bit signed: mod=01b
+            0b01
+        } else {
+            // Large displacement requires 32-bit: mod=10b
+            0b10
+        };
+        
+        modrm |= (mod_field as u8) << 6;
+        
+        // For now, use register 0 as default reg field
+        // In full implementation, this would come from operand analysis
+        modrm |= 0b000_00000; // reg = 0
+        
+        // Determine r/m field
+        let rm_field = if let Some(base) = address.base {
+            // Base register is present
+            base.index()
+        } else {
+            // No base register - use register 0 as fallback
+            0
+        };
+        
+        modrm |= rm_field;
+        
+        bytes.push(modrm);
+        Ok(())
     }
     
     /// Emit extra bytes including SIB, displacement, immediates
@@ -83,14 +205,40 @@ impl ByteEmitter {
         &self,
         bytes: &mut Vec<u8>,
         selected: &SelectedFormat,
+        address: &MemoryAddress,
     ) -> Result<()> {
         // Handle escape bytes first
         if let Some(ref escapes) = selected.format.escape_bytes {
             bytes.extend_from_slice(escapes);
         }
         
-        // Additional handling for displacement/immediate would go here
-        // This requires operand type/size information
+        // Emit displacement if present
+        if address.displacement != 0 || (address.base.is_some() && address.base != Some(Register::Rbp)) {
+            self.emit_displacement(bytes, address)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Emit displacement bytes
+    fn emit_displacement(
+        &self,
+        bytes: &mut Vec<u8>,
+        address: &MemoryAddress,
+    ) -> Result<()> {
+        let disp = address.displacement;
+        
+        // Determine displacement size based on ModR/M mod field
+        // If mod=01, use 8-bit signed displacement
+        // If mod=10, use 32-bit unsigned displacement
+        
+        if (-128..=127).contains(&disp) {
+            // Small displacement fits in 8-bit signed
+            bytes.push((disp as i8) as u8);
+        } else {
+            // Large displacement requires 32-bit
+            bytes.extend_from_slice(&disp.to_le_bytes());
+        }
         
         Ok(())
     }
