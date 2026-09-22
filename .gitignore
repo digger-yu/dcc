@@ -126,3 +126,6 @@ gcc_out/
 perf.data.*
 *.dis.txt
 *.disasm
+
+# Report files from backend refactor sessions - do not track
+report/
