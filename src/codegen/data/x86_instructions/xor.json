@@ -1,0 +1,58 @@
+{
+  "$schema": "../instruction_spec_schema.json",
+  "name": "xor",
+  "description": "Logical XOR operation - Bitwise exclusive OR",
+  "arch": "x8664",
+  "aliases": [
+    "XOR"
+  ],
+  "operands": [
+    {
+      "name": "dest",
+      "op_type": "regmem",
+      "direction": "readwrite",
+      "size": "32bit_or_64bit"
+    },
+    {
+      "name": "src",
+      "op_type": "regmemimmediate",
+      "direction": "read",
+      "size": "32bit_or_64bit"
+    }
+  ],
+  "encoding_spec": {
+    "formats": [
+      {
+        "name": "RegMemReg",
+        "description": "Register to register bitwise XOR",
+        "operand_pattern": "r/m r",
+        "opcode": [
+          107
+        ],
+        "modrm_required": true,
+        "rex_prefix": true
+      },
+      {
+        "name": "Immediate",
+        "description": "XOR with immediate value",
+        "operand_pattern": "imm r/m",
+        "opcode": [
+          159,
+          0
+        ],
+        "modrm_required": true,
+        "rex_prefix": true,
+        "extra_bytes": true
+      }
+    ],
+    "default_format": "RegMemReg"
+  },
+  "semantics": {
+    "effect": "dest = dest ^ src",
+    "flags_modified": [
+      "ZF",
+      "SF",
+      "PF"
+    ]
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "../instruction_spec_schema.json",
+  "name": "sub",
+  "description": "Integer subtraction - Subtracts source from destination",
+  "arch": "x8664",
+  "aliases": [
+    "SUB"
+  ],
+  "operands": [
+    {
+      "name": "dest",
+      "op_type": "regmem",
+      "direction": "readwrite",
+      "size": "32bit_or_64bit"
+    },
+    {
+      "name": "src",
+      "op_type": "regmemimmediate",
+      "direction": "read",
+      "size": "32bit_or_64bit"
+    }
+  ],
+  "encoding_spec": {
+    "formats": [
+      {
+        "name": "RegMemReg",
+        "description": "Register to register or memory to register subtraction",
+        "operand_pattern": "r/m r",
+        "opcode": [
+          15
+        ],
+        "modrm_required": true,
+        "rex_prefix": true
+      },
+      {
+        "name": "Immediate",
+        "description": "Subtract immediate value",
+        "operand_pattern": "imm r/m",
+        "opcode": [
+          197,
+          0
+        ],
+        "modrm_required": true,
+        "rex_prefix": true,
+        "extra_bytes": true
+      }
+    ],
+    "default_format": "RegMemReg"
+  },
+  "semantics": {
+    "effect": "dest = dest - src",
+    "flags_modified": [
+      "OF",
+      "SF",
+      "ZF",
+      "AF",
+      "PF",
+      "CF"
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+[package]
+name = "mov"
+version = "1.0.0"
+description = "Move data between registers, memory, and immediates"
+
+arch = "x8664"
+aliases = ["move"]
+
+# Encoding specifications
+[encoding_spec]
+default_format = "RegReg"
+
+[[encoding_spec.formats]]
+name = "RegReg"
+description = "Register to register move"
+operand_pattern = "reg reg"
+opcode = [139]
+modrm_required = true
+
+[[encoding_spec.formats]]
+name = "ImmReg"
+description = "Immediate to register move"
+operand_pattern = "imm reg"
+opcode = [184]
+rex_prefix = true
+extra_bytes = true
+
+# Operands specification
+[[operands]]
+name = "dest"
+op_type = "reg"
+direction = "write"
+description = "Destination register"
+
+[[operands]]
+name = "src"
+op_type = "regmemimmediate"
+direction = "read"
+description = "Source operand"
+
+# Instruction semantics
+class_semantics.effect = "dest = src"
+class_semantics.flags_modified = null
+class_semantics.cpu_modes = ["real", "protected", "long"]
+
+# Example usage
+[[examples]]
+assembly = "mov eax, ebx"
+machine_code_hex = "89 D9"
+description = "Copy EBX to EAX"

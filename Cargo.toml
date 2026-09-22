@@ -7,8 +7,15 @@ description = "DCC: A suckless C compiler. Faster than GCC for the same job."
 license    = "Apache-2.0"
 
 [features]
-# 启用需要 GCC 源码树的集成测试 (libdecnumber 等)
+# GCC source tree integration tests (libdecnumber, etc.)
 gcc_src = []
+
+# ARM/MIPS modular backends
+arm-modular = []      # Enable new modular ARM implementation
+mips-modular = []     # Enable new modular MIPS implementation
+
+# Combined features
+full-modular = ["arm-modular", "mips-modular"]
 
 [profile.release]
 opt-level = 3
@@ -22,10 +29,13 @@ opt-level = 0
 debug     = true
 
 [dependencies]
-# 最小外部依赖: miniz_oxide 用于 DWARF 压缩节 (zlib/deflate)
+# 最小外部依赖：miniz_oxide 用于 DWARF 压缩节 (zlib/deflate)
 miniz_oxide = "0.8"
 # zstd 压缩 debug sections (--compress-debug-sections=zstd)
 zstd = "0.13"
+# TOML support for data-driven instruction specifications
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
 
 [[bin]]
 name = "dcc"
@@ -36,3 +46,10 @@ name = "fixdep"
 path = "src/fixdep.rs"
 
 [workspace]
+default-members = ["."]
+members = [
+    # Empty on purpose - main package doesn't use workspace members
+]
+exclude = [
+    "scripts/codegen-gen",
+]
