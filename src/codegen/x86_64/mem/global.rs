@@ -13,7 +13,7 @@
 /// * `off` - Displacement from R13 base in bytes
 pub fn emit_lea_r13(cg: &mut crate::codegen::x86_64::Codegen, reg: u8, off: i64) {
     let rex_w = 0x48; // REX.W for 64-bit
-    let rex_r = (reg >= 8) as u8 << 2; // REX.R if reg >= 8
+    let rex_r = ((reg >= 8) as u8) << 2; // REX.R if reg >= 8
     let rex_x = 0; // No SIB index used here
     
     //lea [r13 + disp32], reg

@@ -54,6 +54,45 @@ jobs:
       - name: Run cargo tests (unit + integration + error snapshots)
         run: cargo test --release
 
+  # 可重现构建门禁: 同一二进制、同一输入连跑多次, 产物字节必须全等。
+  # 与人工 golden diff 互补: golden 抓不到"顺序置换"(HashMap 迭代序泄漏会产生
+  # k! 种节序/符号序, 而内容本身合法), 本 job 能直接抓。跨版本回归由 drift
+  # 模式在重构 PR 里按需手工跑 (需两个二进制, CI 不上传基线二进制)。
+  reproducibility:
+    name: "Reproducible output (determinism)"
+    needs: build
+    runs-on: ubuntu-latest
+    # 预算: 默认 3 个模式(-c / -S / -O2 -c) × 6 后端 × 全量 fixture × 3 次连跑
+    # ≈ 6k 组合 (本地 ~2 分钟)。加入 -O2 后比旧的 -O0-only 贵 3 倍, 留 15 分余量。
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Prepare dcc
+        run: chmod +x bin/dcc
+
+      - name: Check 6 backends produce byte-identical output on re-run
+        env:
+          DCC: ./bin/dcc
+          # -O0 (-c / -S) 与 -O2 (-c) 必须分档覆盖: 只有 -O2 会走 run_ssa_passes
+          # 的 AST→SSA→AST 往返, 局部变量声明序之类的 HashMap 迭代序泄漏只在那里
+          # 发生 (历史上 98/331 fixture 抖动), 而 -O0 一直是确定的零回归基线。
+          # 只跑 -O0 会漏掉优化器泄漏, 所以这里把 -O2 -c 也常驻门禁。
+          MODES: -c|-S|-O2 -c
+        # --with-link: 额外覆盖链接模式（不带 -c）。它不在默认 MODES 里，因为
+        # 只适用于 x86_64、要真调宿主 cc/ld，全量乘上去会慢一个量级；脚本因此
+        # 用独立小 fixture 集（LINK_SOURCES 默认 6 个，共 12 格，本地实测 <10s）。
+        # 这一档守的是 host-link 把临时 .o 名（曾含 PID）泄进可执行文件的回归；
+        # 同一 job 里它还会打印“STT_FILE 通道命中数”，命中 0 就变红，防止
+        # 这条锁在没人注意时静默退化为“什么都没比但永远绿”。
+        run: ./scripts/check_reproducible_output.sh determinism --runs 3 --with-link
+
   e2e:
     name: "End-to-end compile and run"
     needs: build

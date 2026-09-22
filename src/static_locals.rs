@@ -27,6 +27,10 @@ pub struct StaticLocalInfo {
     pub size: usize,
     /// 所属函数名
     pub owner_func: String,
+    /// 全局源码序序号 (由 `analyze_static_locals` 的 counter 分配, 跨函数唯一递增)。
+    /// 存在理由: `StaticLocalMap` 内部全是 `HashMap`，必须有一个与哈希迭代序无关的
+    /// 全序键才能保证产物可复现 (见 `iter_all`)。
+    pub order: u32,
     /// 是否需要运行时初始化 (由后端注册阶段回填)
     pub needs_runtime_init: bool,
 }
@@ -98,8 +102,20 @@ impl StaticLocalMap {
     }
 
     /// 迭代所有 static local (跨函数).
+    ///
+    /// **必须排序**: `by_function` 是 `HashMap`，`values()` 的迭代序逐进程随机
+    /// (SipHash 密钥每进程重随)，而本函数的输出序直接决定：
+    ///   1. static local 在 `.data` / `.bss` / `.rodata` 内的布局偏移
+    ///      (x86_64 经 `pre_register_static_locals`，其余 arch 经 `ir.rs` 的 globals 降低)
+    ///   2. `.symtab` / `.strtab` 条目序
+    /// —— 不排序则同一输入两次编译产出不同字节，不可复现构建。
+    /// 按 `order`(源码出现序) 排，而不是按名字字典序，是为了与 mangled 名前缀
+    /// `.Lsl<N>` 的语义一致、便于比对与调试。
     pub fn iter_all(&self) -> impl Iterator<Item = &StaticLocalInfo> {
-        self.by_function.values().flat_map(|v| v.iter())
+        let mut all: Vec<&StaticLocalInfo> =
+            self.by_function.values().flat_map(|v| v.iter()).collect();
+        all.sort_by_key(|i| i.order);
+        all.into_iter()
     }
 }
 
@@ -133,6 +149,7 @@ fn collect_from_block(
         match item {
             BlockItem::Decl(Decl::Var(v)) if v.is_static => {
                 let mangled = format!(".Lsl{}.{}.{}", *counter, func_name, v.name.name);
+                let order = *counter;
                 *counter += 1;
                 let sz = v.ty.size().max(1);
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
@@ -146,6 +163,7 @@ fn collect_from_block(
                     alignment: align,
                     size: sz,
                     owner_func: func_name.to_string(),
+                    order,
                     needs_runtime_init: false,
                 };
                 map.by_function

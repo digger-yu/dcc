@@ -136,30 +136,31 @@ impl AsmLocalLabels {
     /// Expand local label references like "1f" (forward), "1b" (backward), "2f", etc.
     fn expand_local_labels(line: &str, label_map: &HashMap<String, usize>) -> String {
         let mut result = line.to_string();
-        
-        // Find all local label references: number followed by f/b prefix
-        let pattern = regex_local_label();
-        if let Some(cap) = pattern.find(line) {
-            let ref_str = cap.as_str();
-            if let (Some(num), Some(direction)) = ref_str.split_at(ref_str.len() - 1).split_once(|c: char| c.is_alphabetic()) {
-                match direction {
-                    "f" => {
-                        // Forward reference: find next matching label
-                        if let Some(&idx) = label_map.get(num) {
-                            result = result.replace(ref_str, &format!("{}:", num));
-                        }
-                    }
-                    "b" => {
-                        // Backward reference: use existing mapping
-                        if let Some(&idx) = label_map.get(num) {
-                            result = result.replace(ref_str, &format!("{}:", num));
-                        }
-                    }
-                    _ => {}
-                }
+
+        // 找局部数字标签引用: 连续数字 + 方向字母 f/b (如 "1f" / "2b")
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if !bytes[i].is_ascii_digit() {
+                i += 1;
+                continue;
             }
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i >= bytes.len() || (bytes[i] != b'f' && bytes[i] != b'b') {
+                continue;
+            }
+            let ref_str = &line[start..i + 1];
+            let num = &line[start..i];
+            // 无论前向 (f) 还是后向 (b), 都已归一化到 label_map 里的唯一内部名
+            if label_map.contains_key(num) {
+                result = result.replace(ref_str, &format!("{}:", num));
+            }
+            i += 1;
         }
-        
+
         result
     }
 }

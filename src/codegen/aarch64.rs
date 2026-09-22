@@ -1,5 +1,8 @@
 // src/codegen/aarch64.rs - AArch64 后端 (M7 完整 IR lowering)
 
+// Backend trait implementation (Phase 3b)
+mod backend;
+
 use crate::ast::{find_field, BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
@@ -37,6 +40,8 @@ pub struct Aarch64Codegen {
     sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
+    /// 帧内保存 lr(x30) 的偏移; -1 = 本函数为叶子, 不保存 (不扰动帧)。
+    lr_off: i32,
     emitted_return: bool,
     source_name: String,
     label_serial: u32,
@@ -128,6 +133,7 @@ impl Aarch64Codegen {
             sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
+            lr_off: -1,
             emitted_return: false,
             source_name: String::new(),
             label_serial: 0,
@@ -268,7 +274,7 @@ impl Aarch64Codegen {
         let prog = module.source();
         self.collect_asm_labels(prog);
         self.build_aggregate_fields(prog);
-        self.emit_globals(module);
+        self.emit_globals(module, prog);
         if self.relocatable {
             self.compile_rel(module, prog);
             self.finalize_branches();
@@ -296,9 +302,9 @@ impl Aarch64Codegen {
         }
     }
 
-    fn emit_globals(&mut self, module: &Module) {
+    fn emit_globals(&mut self, module: &Module, prog: &Program) {
         for g in &module.globals {
-            self.emit_global(g);
+            self.emit_global(g, prog);
         }
         if !self.rodata.is_empty() {
             self.symbols.push(ElfSym {
@@ -315,7 +321,7 @@ impl Aarch64Codegen {
         }
     }
 
-    fn emit_global(&mut self, g: &Global) {
+    fn emit_global(&mut self, g: &Global, prog: &Program) {
         let size = value_type_size(&g.ty).max(1);
         let align = size.max(4) as u64;
         let off = align_rodata(&mut self.rodata, align);
@@ -330,12 +336,18 @@ impl Aarch64Codegen {
             self.tls_globals.insert(g.name.clone(), off);
         }
         if self.relocatable {
+            // 内部链接的文件作用域变量必须是 STB_LOCAL: 函数内 static local
+            // (g.is_static_local) 和顶层 `static int g;` 都不能以可导出符号出现,
+            // 否则跨 TU 同名会误链接/冲突。此前无条件 STB_GLOBAL。判据抄已正确
+            // 处理函数的 func_bind (is_static/is_weak 查 AST)。
+            let is_internal = g.is_static_local || var_is_static(prog, &g.name);
+            let bind = if is_internal { STB_LOCAL } else { STB_GLOBAL };
             self.symbols.push(ElfSym {
                 name: g.name.clone(),
                 section: 2,
                 value: off,
                 size: size as u64,
-                bind: STB_GLOBAL,
+                bind,
                 ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
                 visibility: elf::STV_DEFAULT,
             });
@@ -900,6 +912,20 @@ impl Aarch64Codegen {
             self.canary_slot_off = 0;
         }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
+        // 非叶子函数必须保存 lr(x30): `bl` 会覆写 x30, 否则本函数 `ret`
+        // 返回到错误地址(实测 main->callee 嵌套调用死循环)。叶子函数不需帧存
+        // lr, 保持帧尺寸不变(不扰动已有产物字节)。ftrace/__fentry__/mcount 与
+        // stack-protector 的 __stack_chk_fail 也是调用, 同样需保存 lr。
+        let is_leaf = !func.body.iter().any(stmt_has_call)
+            && ftrace_call_pos.is_none()
+            && !(self._target.stack_protector && self.canary_slot_off > 0);
+        self.lr_off = if is_leaf {
+            -1
+        } else {
+            let off = self.frame_bytes;
+            self.frame_bytes += 16; // 帧顶留 16B 保 sp 16-对齐, x30 存 [sp, lr_off]
+            off
+        };
         if self.frame_bytes > 0 {
             if self._target.stack_clash_protection && self.frame_bytes > 4096 {
                 self.emit_stack_clash_probes(self.frame_bytes as u32);
@@ -910,6 +936,10 @@ impl Aarch64Codegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // 存 lr 必须在帧零初始化之后, 否则 x30 会被清零覆盖。
+        if self.lr_off >= 0 {
+            self.str_xt_sp(30, self.lr_off);
         }
         // Stack protector: store canary value on stack after frame setup
         if self._target.stack_protector && self.canary_slot_off > 0 {
@@ -2138,6 +2168,10 @@ impl Aarch64Codegen {
         }
 
         let mut stack_arg_off = self.frame_bytes;
+        // 目标为通用寄存器 x0 的整型/指针实参必须最后计算: gen_expr 结果落在
+        // w0=x0, 若先算 arg0 再算 arg1, arg1 的 gen_expr 会覆写 x0 而丢失 arg0。
+        // (float/vector 实参落 v 寄存器不冲突; 聚合指针→x0 同理需后置。)
+        let mut deferred_x0: Option<&crate::ir::TypedExpr> = None;
         for (i, arg) in args.iter().enumerate() {
             let reg_idx = sret_reg_idx + i;
             if let Some(hfa) = classify_hfa(&arg.ty, &self.aggregate_fields) {
@@ -2147,6 +2181,11 @@ impl Aarch64Codegen {
                         continue;
                     }
                 }
+            }
+            let to_gp_x0 = reg_idx == 0 && !is_float_ty(&arg.ty) && !is_vector_ty(&arg.ty);
+            if to_gp_x0 {
+                deferred_x0 = Some(arg);
+                continue;
             }
             if is_aggregate(&arg.ty) {
                 if let ExprKind::Local(ref n) = arg.kind {
@@ -2183,6 +2222,23 @@ impl Aarch64Codegen {
                 } else {
                     self.mov_w_reg_w0(reg_idx as u8);
                 }
+            }
+        }
+        // 最后放置 x0 目的地的整型/指针实参。
+        if let Some(arg) = deferred_x0 {
+            if is_aggregate(&arg.ty) {
+                if let ExprKind::Local(ref n) = arg.kind {
+                    if let Some(&off) = self.locals.get(n) {
+                        self.mov_x_reg_sp_off(0, off);
+                    } else {
+                        self.mov_x_reg_imm(0, 0);
+                    }
+                } else {
+                    self.mov_x_reg_imm(0, 0);
+                }
+            } else {
+                // gen_expr 结果天然留在 w0 = x0, 无需再 mov。
+                self.gen_expr(arg);
             }
         }
 
@@ -3896,7 +3952,12 @@ impl Aarch64Codegen {
     }
 
     fn mov_w_reg_w0(&mut self, reg: u8) {
-        let insn = 0x2a0003e0u32 | ((reg as u32 & 0x1f) << 16) | ((reg as u32 & 0x1f) << 5);
+        // MOV Wd, W0 (即 ORR Wd, WZR, W0)。base 0x2a0003e0 已含 Rm=W0(bits16-20=0)
+        // 与 Rn=WZR(bits5-9=11111), 只需把目标寄存器 reg 放进 Rd 位[4:0]。
+        // 旧代码错将 reg 放进 Rm(<<16) 又用 (<<5) 踩写 Rn, 实际发出的是
+        // `MOV W0, Wreg` —— 目标/源颠倒, 导致第 2+ 个实参被丢 (单参因 reg=0
+        // 时恰为 `mov w0,w0` no-op 而掩盖)。改为正确置 Rd=reg。
+        let insn = 0x2a0003e0u32 | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -4290,9 +4351,15 @@ impl Aarch64Codegen {
             // 返回时 sp 为 untagged, 调用方 (MTE 函数) 会通过其 x19 恢复自身 tag,
             // 非 MTE 调用方 (_start / libc) 本就期望 untagged sp。
             self.ldr_xt_sp(19, self.mte_save_off); // ldr x19, [sp, #mte_save_off]
+            if self.lr_off >= 0 {
+                self.ldr_xt_sp(30, self.lr_off); // ldr x30, [sp, #lr_off] 恢复 lr
+            }
             self.emit(&0x9280dfffu32.to_le_bytes()); // and sp, sp, #0x00ffffffffffffff
             self.add_sp_imm(self.frame_bytes as u32);
         } else if self.frame_bytes > 0 {
+            if self.lr_off >= 0 {
+                self.ldr_xt_sp(30, self.lr_off); // ldr x30, [sp, #lr_off] 恢复 lr
+            }
             self.add_sp_imm(self.frame_bytes as u32);
         }
         self.emit(&[0xc0, 0x03, 0x5f, 0xd6]);
@@ -4473,7 +4540,10 @@ impl Aarch64Codegen {
     }
 
     fn patch_bl(&mut self, at: u64, target: u64) {
-        let pc = at + 4;
+        // AArch64 B/BL 的立即数相对分支指令自身地址 (PC == at), 不是 at+4
+        // (那是 ARM32 的 PC+8 流水线偏移)。旧代码误用 at+4 使同 TU 直补丁的
+        // 调用目标总是少 4 字节 (实测 bl 落到 callee 前一条指令)。
+        let pc = at;
         let diff = target as i64 - pc as i64;
         debug_assert!(
             Self::bl_offset_in_range(diff),
@@ -6200,6 +6270,28 @@ fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
         Decl::Func(f) if f.name.name == name => Some(f),
         _ => None,
     })
+}
+
+/// 文件作用域 `static` 变量判定 (与 find_func 对函数做同样的事)。
+/// 只看顶层 Decl::Var; 函数内 static local 由 Global::is_static_local 单独判。
+fn var_is_static(prog: &Program, name: &str) -> bool {
+    prog.decls.iter().any(|d| match d {
+        Decl::Var(v) => v.name.name == name && v.is_static,
+        _ => false,
+    })
+}
+
+/// 递归判定一条 IR 表达式子树里是否含有调用 (Call)。
+fn expr_has_call(e: &crate::ir::TypedExpr) -> bool {
+    if e.kind == crate::ir::ExprKind::Call {
+        return true;
+    }
+    e.children.iter().any(expr_has_call)
+}
+
+/// 递归判定一条 IR 语句子树里是否含有调用。
+fn stmt_has_call(s: &crate::ir::TypedStmt) -> bool {
+    s.expressions.iter().any(expr_has_call) || s.nested.iter().any(stmt_has_call)
 }
 
 fn classify_hfa(

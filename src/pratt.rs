@@ -581,6 +581,7 @@ impl PrattParser {
     /// 中缀/后缀结合力 (左, 右).
     ///
     /// 优先级表 (从低到高):
+    /// ```text
     ///   * Comma:          (1, 2)   左结合
     ///   * Assign (+= 等): (2, 3)   右结合 (lbp=2)
     ///   * Ternary (?:):   (3, 4)   右结合
@@ -597,6 +598,7 @@ impl PrattParser {
     ///   * * / %          (13, 14)  左结合
     ///   * Postfix/call/index/member
     ///                     (14, 15) 左结合 (后缀不递归)
+    /// ```
     fn infix_binding_power(tok: &Tok) -> Option<(u8, u8)> {
         match tok.kind {
             TokKind::Comma => Some((1, 2)),

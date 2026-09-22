@@ -3,9 +3,9 @@
 // Handles return value classification, register allocation, and calling conventions
 
 pub mod classes;
+// call.rs 已由 batch 3 从 mod.rs 逐字搬迁 `emit_sysv_call` 生产实现, 影子存根作废。
 pub mod call;
 pub mod frame;
 
-pub use classes::{AbiClass, abi_classes, classify_field, merge_classes, leaf_abi_class};
-pub use call::emit_sysv_call;
-pub use frame::{emit_sub_rsp, emit_add_rsp, emit_zero_init_frame};
+// Note: Internal helper functions remain private in their modules
+// They are accessed via qualified paths like abi::classes::classify_field

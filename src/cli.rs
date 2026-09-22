@@ -368,6 +368,19 @@ pub enum Arch {
 }
 
 impl Arch {
+    /// 全量枚举: 用于任何需要"遍历所有已知架构"的场景 (能力表、清单一致性测试、
+    /// `--print-supported-targets`)。**新增架构时必须同步本表**，否则
+    /// `codegen::registry::registry_backend_list_is_consistent` 会报错。
+    pub const ALL: [Arch; 7] = [
+        Arch::X86_64,
+        Arch::AArch64,
+        Arch::RiscV64,
+        Arch::RiscV32,
+        Arch::Mips64,
+        Arch::Mips,
+        Arch::Arm,
+    ];
+
     /// 第一性原理：三类语义
     ///   * has_backend == true  : 该 arch 有完整 codegen 后端，emit() 会成功
     ///   * has_backend == false : 仅解析 triple (在 --target / 交叉编译场景

@@ -341,11 +341,12 @@ impl AsmDirectiveExpander {
                     pos = Some(idx);
                     break;
                 }
-                idx = i + (*c as usize);
+                // idx = 下一个字符的字节偏移 (当前 char 的 UTF-8 长度)
+                idx = i + c.len_utf8();
             }
             if let Some(p) = pos {
                 let left = Self::eval_expr_value(&s[..p])?;
-                let right = Self::eval_expr_value(&s[p + op.len()..])?;
+                let right = Self::eval_expr_value(&s[p + op.len_utf8()..])?;
                 return Ok(match *op {
                     '+' => left + right,
                     '-' => left - right,

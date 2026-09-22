@@ -11,6 +11,17 @@ pub enum Endian {
     Big,
 }
 
+/// 目标的过程调用约定 (callee-saved 寄存器集合的名字)。
+///
+/// ⚠ 当前**无任何生产消费者**: `callee_save` 字段的 7 个读取点全部落在本文件
+/// `#[cfg(test)]` 的断言里, 各架构的保存/恢复序列是各自后端硬写死的 (x86_64 用
+/// `callee_saved_pool`, ARM/ARM64/MIPS 各自写自己的序言)。所以这个枚举现在只是一句
+/// 可被测试锁定的“声明”。要真正驱动寄存器分配, 必须先把 MIPS O32/N64 与 ARM AAPCS 的
+/// callee-saved 表接进各自后端, 否则改它不会改变任何产物字节。
+///
+/// 为什么 MIPS 不共用 `AAPCS`: AAPCS 是 **ARM** Architecture Procedure Call Standard。
+/// 之前 MIPS/MIPS64 被标成 AAPCS 是纯粹的标签说谎——两个 MIPS ABI 的 callee-saved
+/// 集合与 ARM 完全不同, 现在各自有一个能说实话的名字 (Arm 仍保留 `AAPCS`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum CalleeSave {
@@ -18,6 +29,10 @@ pub enum CalleeSave {
     Win64,
     AAPCS64,
     AAPCS,
+    /// MIPS O32 (32 位 ABI): $s0-$s7 / $fp / $gp / $sp / $ra 及 $f20-$f31
+    MipsO32,
+    /// MIPS N64 (mips64-linux-gnuabi64, LP64): $s0-$s5 / $fp / $gp / $sp / $ra 及 $f20-$f31
+    MipsN64,
 }
 
 #[derive(Clone)]
@@ -137,8 +152,8 @@ impl Target {
             Arch::AArch64 => (8, 8, 4, 8, Endian::Little, CalleeSave::AAPCS64),
             Arch::RiscV64 => (8, 8, 4, 8, Endian::Little, CalleeSave::SysV),
             Arch::RiscV32 => (4, 4, 4, 8, Endian::Little, CalleeSave::SysV),
-            Arch::Mips64 => (8, 8, 4, 8, Endian::Big, CalleeSave::AAPCS),
-            Arch::Mips => (4, 4, 4, 8, Endian::Big, CalleeSave::AAPCS),
+            Arch::Mips64 => (8, 8, 4, 8, Endian::Big, CalleeSave::MipsN64),
+            Arch::Mips => (4, 4, 4, 8, Endian::Big, CalleeSave::MipsO32),
             Arch::Arm => (4, 4, 4, 8, Endian::Little, CalleeSave::AAPCS),
         };
         // 默认对齐表: 根据架构 ABI 确定各基本类型的自然对齐
@@ -675,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn mips_parse_only_4byte_ptr_big_endian_aapcs() {
+    fn mips_parse_only_4byte_ptr_big_endian_mipso32() {
         // mips 有 triple 解析和 codegen 后端
         let t = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
         assert_eq!(t.arch, Arch::Mips);
@@ -684,18 +699,19 @@ mod tests {
         assert_eq!(t.int_size, 4);
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Big);
-        assert_eq!(t.callee_save, CalleeSave::AAPCS);
+        // 锁的是“不是 ARM 的 AAPCS”这一事实: MIPS O32 自有 callee-saved 集
+        assert_eq!(t.callee_save, CalleeSave::MipsO32);
         assert!(t.arch.has_backend());
     }
 
     #[test]
-    fn mips64_parse_only_8byte_ptr_big_endian_aapcs() {
+    fn mips64_parse_only_8byte_ptr_big_endian_mipsn64() {
         let t = Target::resolve(&trip(Arch::Mips64, Os::Linux, Abi::Gnu));
         assert_eq!(t.arch, Arch::Mips64);
         assert_eq!(t.ptr_size, 8);
         assert_eq!(t.long_size, 8);
         assert_eq!(t.endian, Endian::Big);
-        assert_eq!(t.callee_save, CalleeSave::AAPCS);
+        assert_eq!(t.callee_save, CalleeSave::MipsN64);
         assert!(t.arch.has_backend());
     }
 

@@ -502,6 +502,7 @@ pub fn build_elf_exec_x86_64(
         0,
         16,
         0,
+        false,
     );
     vaddr += text_size;
     file_off += text_size;
@@ -520,6 +521,7 @@ pub fn build_elf_exec_x86_64(
             0,
             8,
             0,
+            false,
         );
         vaddr += rodata_size;
         file_off += rodata_size;
@@ -538,6 +540,7 @@ pub fn build_elf_exec_x86_64(
             0,
             8,
             0,
+            false,
         );
         vaddr += tdata_size;
         // file_off 在每个分支各自更新后已隐式累加；此处避免 dead-store 警告。
@@ -556,6 +559,7 @@ pub fn build_elf_exec_x86_64(
             0,
             8,
             0,
+            false,
         );
         ni += 1;
     }
@@ -572,6 +576,7 @@ pub fn build_elf_exec_x86_64(
             0,
             8,
             0,
+            false,
         );
         // vaddr and file_off updated but not used in subsequent writes
         ni += 1;
@@ -589,6 +594,7 @@ pub fn build_elf_exec_x86_64(
             0,
             8,
             0,
+            false,
         );
         // bss size updated for section header
         ni += 1;
@@ -606,6 +612,7 @@ pub fn build_elf_exec_x86_64(
         n_locals,
         8,
         24,
+        false,
     );
     ni += 1;
     write_section_header(
@@ -620,6 +627,7 @@ pub fn build_elf_exec_x86_64(
         0,
         1,
         0,
+        false,
     );
     ni += 1;
     write_section_header(
@@ -634,6 +642,7 @@ pub fn build_elf_exec_x86_64(
         0,
         1,
         0,
+        false,
     );
 
     // 回填 ELF 头与 Program Header
@@ -812,6 +821,26 @@ fn build_elf_rel_generic(
     comdat_groups: &[ComdatGroup],
     ei_data: u8,
 ) -> Vec<u8> {
+    // 为什么必须在这里做端序判定: 本函数是 x86_64/aarch64/riscv64/mips64 共用的 ET_REL
+    // 生产者, 而 mips64 (target.rs: Arch::Mips64 => Endian::Big) 传入 ELFDATA2MSB。
+    // 此前 ei_data 只被写进 e_ident、正文一律 to_le_bytes(), 等于"文件自称大端、
+    // 正文全是小端": binutils 按大端回读得到 e_type=0x100 / e_machine=0x800 /
+    // e_shoff=5.7e17, 于是 `objdump -h` 直接 "file format not recognized"。
+    // 判据只有一条: 正文必须与文件自己声明的 EI_DATA 一致。
+    // 范式照搬同文件 ELF32 写者 build_elf32_rel_generic (mips32/arm 早已如此)。
+    let is_be = ei_data == ELFDATA2MSB;
+    let ew_u16 = |v: u16| -> [u8; 2] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    let ew_u32 = |v: u32| -> [u8; 4] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    let ew_u64 = |v: u64| -> [u8; 8] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    let ew_i64 = |v: i64| -> [u8; 8] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
     let sec_name_off = |buf: &mut Vec<u8>, name: &str| -> u32 {
@@ -845,39 +874,95 @@ fn build_elf_rel_generic(
         .map(|g| sec_name_off(&mut shstr, &format!(".group.{}", g.signature)))
         .collect();
 
+    // ===== .symtab: 三条 gABI 硬约束 (本轮一次性补齐) =====
+    // (A) 条目尺寸: Elf64_Sym 恒为 24 字节, 与端序无关。
+    // (B) 位域布局: st_info = (STB_* << 4) | STT_*, st_other = STV_*。
+    // (C) 排布: 所有 STB_LOCAL 必须整体排在首个 GLOBAL/WEAK 之前, 且节头
+    //     sh_info = 首个非局部符号的下标 (= 局部符号数, 含下标 0 的空符号)。
+    //
+    // 为什么 (B)(C) 与 (A) 必须一起修: 三者是同一张表的互补判据。只修 (A) 的话,
+    // readelf 会把每个符号都读成 STB_LOCAL (旧代码把 ty 直接写进 st_info, bind 一个
+    // 比特都没放进去), 于是"下标 >= sh_info 的局部符号"必然成立, `local symbol N found
+    // at index >= .symtab's sh_info value` 警告依旧存在; 而只修 (B) 不修 (C) 时,
+    // 含 static 函数的 TU 会把 LOCAL 排在 GLOBAL 之后, 链接器按 sh_info 切分局部/全局
+    // 就会把这些 static 误当成可导出符号 —— 静默的语义错误, 比乱码更难查。
+    //
+    // (C) 的实现照搬同文件 x86_64 写者 build_elf_rel_x86_64 已验证过的做法:
+    // **稳定**排序 + old→new 索引映射 + 重定位 sym_index 随之重映射。稳定是关键:
+    // 当输入本来就满足"局部在前"时排序是恒等变换, 符号下标、.strtab 布局、
+    // .rela.* 全都不变 ⇒ 本轮之前已经正确的产物零漂移。
+    let mut sym_order: Vec<usize> = (0..symbols.len()).collect();
+    sym_order.sort_by_key(|&i| symbols[i].bind); // STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
+    let is_identity_order = sym_order.iter().enumerate().all(|(new_i, &old_i)| new_i == old_i);
+    // 空符号占据下标 0, 故符号 i 的新下标 = 其在 sym_order 中的位置 + 1。
+    let mut sym_index_map = vec![0u32; symbols.len()];
+    for (new_i, &old_i) in sym_order.iter().enumerate() {
+        sym_index_map[old_i] = (new_i + 1) as u32;
+    }
+    let n_locals = symbols.iter().filter(|s| s.bind == STB_LOCAL).count() as u32;
+    let symtab_sh_info = n_locals + 1;
+
     let mut sym_name_off = vec![0u32];
-    for sym in symbols {
+    for &i in &sym_order {
         sym_name_off.push(strtab.len() as u32);
-        strtab.extend_from_slice(sym.name.as_bytes());
+        strtab.extend_from_slice(symbols[i].name.as_bytes());
         strtab.push(0);
     }
 
-    let mut symtab = Vec::new();
-    symtab.extend_from_slice(&0u32.to_le_bytes());
-    symtab.extend_from_slice(&[0u8; 13]);
-    symtab.extend_from_slice(&0u64.to_le_bytes());
-    for (i, sym) in symbols.iter().enumerate() {
-        symtab.extend_from_slice(&sym_name_off[i + 1].to_le_bytes());
-        symtab.push(sym.ty);
-        symtab.push(sym.bind | (sym.visibility << 4));
-        symtab.extend_from_slice(&sym.section.to_le_bytes());
-        symtab.extend_from_slice(&sym.value.to_le_bytes());
-        symtab.extend_from_slice(&sym.size.to_le_bytes());
+    let mut symtab = Vec::with_capacity((symbols.len() + 1) * 24);
+    // Elf64_Sym 固定 24 字节: st_name(4) + st_info(1) + st_other(1) + st_shndx(2)
+    // + st_value(8) + st_size(8)。下标 0 的空符号六段全零 ⇒ 与端序无关, 直接写
+    // 24 个 0 即可。
+    // 历史缺陷: 这里曾按"4 + 填充 + 8"拼, 且填充 MSB 给 12、LSB 给 13, 于是
+    // aarch64/riscv64 的空符号是 **25** 字节, 其后每条符号整体错位一格:
+    // `.symtab` 的 sh_size=0x49=73 不是 24 的倍数, readelf/objdump -t 读出乱码名 +
+    // BAD[...] 节索引, dcc 自研链接器 (src/link/object.rs 按 24 步进) 也跟着读错。
+    // 上一轮为守"非 mips64 零漂移"护栏只修了 MSB 分支并把缺陷记入
+    // docs/backend_feature_matrix.md; 本轮经授权修 LE 分支, 顺手把分叉彻底消除 ——
+    // 全零填充本就不需要端序, 保留 `if is_be` 分叉只会让下一次再错一遍。
+    symtab.extend_from_slice(&[0u8; 24]);
+    for (slot, &i) in sym_order.iter().enumerate() {
+        let sym = &symbols[i];
+        symtab.extend_from_slice(&ew_u32(sym_name_off[slot + 1]));
+        // st_info 的旧写法是 `sym.ty` (丢 bind) 且把 `bind | visibility << 4` 写进
+        // st_other, 两个字段同时错: readelf 因此把所有全局函数显示成 LOCAL, 并给
+        // 出 STV_INTERNAL/HIDDEN 这类凭空的可见性。
+        symtab.push((sym.bind << 4) | (sym.ty & 0x0f));
+        symtab.push(sym.visibility);
+        symtab.extend_from_slice(&ew_u16(sym.section));
+        symtab.extend_from_slice(&ew_u64(sym.value));
+        symtab.extend_from_slice(&ew_u64(sym.size));
     }
 
+    // 符号下标是 .rela.* 里 r_info 的高 32 位, 排序后必须同步重映射,
+    // 否则重定位会指向另一个符号。偏移/加数/类型一律不变 ⇒ 漂移面严格限于
+    // "符号槽位编号"这一种信息, 且仅在 is_identity_order == false 时出现。
+    let remap_sym_index = |idx: u32| -> u32 {
+        if is_identity_order {
+            idx
+        } else {
+            sym_index_map
+                .get(idx as usize)
+                .copied()
+                .unwrap_or(idx)
+        }
+    };
+
+    // Elf64_Rela 的三个字段都是元数据 (链接器按文件声明的端序解析), 必须跟随 ei_data;
+    // 与之相对, text/rodata 里被重定位的**载荷**由各后端自行编码, 不在本函数职责内。
     let mut rela_text = Vec::new();
     for rel in relocations {
-        rela_text.extend_from_slice(&rel.offset.to_le_bytes());
-        let info = ((rel.sym_index as u64) << 32) | (rel.rel_type as u64);
-        rela_text.extend_from_slice(&info.to_le_bytes());
-        rela_text.extend_from_slice(&rel.addend.to_le_bytes());
+        rela_text.extend_from_slice(&ew_u64(rel.offset));
+        let info = ((remap_sym_index(rel.sym_index) as u64) << 32) | (rel.rel_type as u64);
+        rela_text.extend_from_slice(&ew_u64(info));
+        rela_text.extend_from_slice(&ew_i64(rel.addend));
     }
     let mut rela_rodata = Vec::new();
     for rel in rodata_relocations {
-        rela_rodata.extend_from_slice(&rel.offset.to_le_bytes());
-        let info = ((rel.sym_index as u64) << 32) | (rel.rel_type as u64);
-        rela_rodata.extend_from_slice(&info.to_le_bytes());
-        rela_rodata.extend_from_slice(&rel.addend.to_le_bytes());
+        rela_rodata.extend_from_slice(&ew_u64(rel.offset));
+        let info = ((remap_sym_index(rel.sym_index) as u64) << 32) | (rel.rel_type as u64);
+        rela_rodata.extend_from_slice(&ew_u64(info));
+        rela_rodata.extend_from_slice(&ew_i64(rel.addend));
     }
 
     let header_size = 64usize;
@@ -916,10 +1001,11 @@ fn build_elf_rel_generic(
         let off = align_up(cursor, 4);
         let name = comdat_names[i];
         // Build SHT_GROUP data: GRP_COMDAT flag + member section indices
+        // (Elf32_Word 数组, 字节序跟随 EI_DATA 而非宿主序)
         let mut data = Vec::with_capacity(4 + group.member_sec_indices.len() * 4);
-        data.extend_from_slice(&GRP_COMDAT.to_le_bytes());
+        data.extend_from_slice(&ew_u32(GRP_COMDAT));
         for &sec_idx in &group.member_sec_indices {
-            data.extend_from_slice(&sec_idx.to_le_bytes());
+            data.extend_from_slice(&ew_u32(sec_idx));
         }
         cursor = off + data.len();
         comdat_layout.push((name, off as u64, data));
@@ -946,19 +1032,19 @@ fn build_elf_rel_generic(
     out.push(EV_CURRENT);
     out.push(0);
     out.extend_from_slice(&[0u8; 8]);
-    out.extend_from_slice(&ET_REL.to_le_bytes());
-    out.extend_from_slice(&e_machine.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
-    out.extend_from_slice(&(shoff as u64).to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&64u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&64u16.to_le_bytes());
-    out.extend_from_slice(&(n_sections as u16).to_le_bytes());
-    out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes());
+    out.extend_from_slice(&ew_u16(ET_REL));
+    out.extend_from_slice(&ew_u16(e_machine));
+    out.extend_from_slice(&ew_u32(1)); // e_version
+    out.extend_from_slice(&ew_u64(0)); // e_entry (ET_REL 无入口)
+    out.extend_from_slice(&ew_u64(0)); // e_phoff (目标文件无程序头)
+    out.extend_from_slice(&ew_u64(shoff as u64));
+    out.extend_from_slice(&ew_u32(0)); // e_flags
+    out.extend_from_slice(&ew_u16(64)); // e_ehsize
+    out.extend_from_slice(&ew_u16(0)); // e_phentsize
+    out.extend_from_slice(&ew_u16(0)); // e_phnum
+    out.extend_from_slice(&ew_u16(64)); // e_shentsize
+    out.extend_from_slice(&ew_u16(n_sections as u16));
+    out.extend_from_slice(&ew_u16(shstrtab_idx as u16)); // e_shstrndx
 
     pad_to(&mut out, text_off);
     out.extend_from_slice(text);
@@ -993,7 +1079,8 @@ fn build_elf_rel_generic(
     let rodata_idx = if rodata.is_empty() { 0 } else { 2 };
     let _rela_rodata_idx = if rela_rodata.is_empty() { 0 } else { rela_text_idx + 1 };
 
-    write_section_header(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // SHN_NULL 占位节头: 64 字节全零, 端序无从谈起 (但形参仍需显式给)。
+    write_section_header(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, is_be);
     write_section_header(
         &mut out,
         text_name,
@@ -1006,6 +1093,7 @@ fn build_elf_rel_generic(
         0,
         4,
         0,
+        is_be,
     );
     if !rodata.is_empty() {
         write_section_header(
@@ -1020,6 +1108,7 @@ fn build_elf_rel_generic(
             0,
             8,
             0,
+            is_be,
         );
     }
     write_section_header(
@@ -1031,9 +1120,14 @@ fn build_elf_rel_generic(
         symtab_off as u64,
         symtab.len() as u64,
         strtab_idx,
-        1,
+        // sh_info 曾被写死为 1, 等价于宣称"除下标 0 的空符号外没有任何局部符号"。
+        // 只要 TU 里有 static 函数/文件作用域 static 变量, 这个宣称就是假的:
+        // 链接器以 sh_info 为界切分局部/全局, 于是排在 sh_info 之后的真局部符号
+        // 会被当成全局处理。这里改成实算值 (与正文的排序判据同源, 二者不可能背离)。
+        symtab_sh_info,
         8,
         24,
+        is_be,
     );
     write_section_header(
         &mut out,
@@ -1047,6 +1141,7 @@ fn build_elf_rel_generic(
         0,
         1,
         0,
+        is_be,
     );
     write_section_header(
         &mut out,
@@ -1060,6 +1155,7 @@ fn build_elf_rel_generic(
         0,
         1,
         0,
+        is_be,
     );
     write_section_header(
         &mut out,
@@ -1073,6 +1169,7 @@ fn build_elf_rel_generic(
         1,
         8,
         24,
+        is_be,
     );
     if !rela_rodata.is_empty() {
         write_section_header(
@@ -1087,6 +1184,7 @@ fn build_elf_rel_generic(
             rodata_idx as u32,
             8,
             24,
+            is_be,
         );
     }
     for (name, off, sec) in &extra_layout {
@@ -1108,6 +1206,7 @@ fn build_elf_rel_generic(
             0,
             sec.align.max(1),
             0,
+            is_be,
         );
     }
     // Write COMDAT group section headers (SHT_GROUP)
@@ -1124,6 +1223,7 @@ fn build_elf_rel_generic(
             0,
             4,
             0,
+            is_be,
         );
     }
     out
@@ -1457,6 +1557,7 @@ pub fn build_elf_rel_x86_64(
         0,
         text_align.max(1),
         0,
+        false,
     );
 
     // [2] .rodata
@@ -1472,6 +1573,7 @@ pub fn build_elf_rel_x86_64(
         0,
         8,
         0,
+        false,
     );
 
     // [3] .data
@@ -1487,6 +1589,7 @@ pub fn build_elf_rel_x86_64(
         0,
         data_align.max(1),
         0,
+        false,
     );
 
     // [4] .bss
@@ -1502,6 +1605,7 @@ pub fn build_elf_rel_x86_64(
         0,
         bss_align.max(1),
         0,
+        false,
     );
 
     // [5] .tdata
@@ -1517,6 +1621,7 @@ pub fn build_elf_rel_x86_64(
         0,
         tdata_align.max(1),
         0,
+        false,
     );
 
     // [6] .tbss
@@ -1532,6 +1637,7 @@ pub fn build_elf_rel_x86_64(
         0,
         tbss_align.max(1),
         0,
+        false,
     );
 
     // [7..7+N] 自定义节
@@ -1555,6 +1661,7 @@ pub fn build_elf_rel_x86_64(
             0,
             sec.align,
             0,
+            false,
         );
     }
 
@@ -1578,6 +1685,7 @@ pub fn build_elf_rel_x86_64(
             0,
             4,
             0,
+            false,
         );
     }
 
@@ -1596,6 +1704,7 @@ pub fn build_elf_rel_x86_64(
             ers.target_sec_index,
             8,
             24,
+            false,
         );
     }
 
@@ -1623,6 +1732,7 @@ pub fn build_elf_rel_x86_64(
         1,
         8,
         24,
+        false,
     );
 
     // [.rela.data]
@@ -1639,6 +1749,7 @@ pub fn build_elf_rel_x86_64(
             3,
             8,
             24, // sh_info=3 → .data 节索引
+            false,
         );
     }
 
@@ -1655,6 +1766,7 @@ pub fn build_elf_rel_x86_64(
         n_locals,
         8,
         24,
+        false,
     );
 
     // [.strtab]
@@ -1670,6 +1782,7 @@ pub fn build_elf_rel_x86_64(
         0,
         1,
         0,
+        false,
     );
 
     // [.shstrtab]
@@ -1685,6 +1798,7 @@ pub fn build_elf_rel_x86_64(
         0,
         1,
         0,
+        false,
     );
 
     out
@@ -1843,6 +1957,13 @@ fn write_sh_null(out: &mut Vec<u8>) {
     out.extend_from_slice(&[0u8; 64]);
 }
 
+/// 写一条 ELF64 节头表项 (64 字节)。
+///
+/// `is_be` 为何必须由调用方显式传入而不是从 `out` 缓冲嗅探 e_ident:
+/// `build_elf_exec_x86_64` 先用零占位开辟头部、写完节头表后才回填 e_ident,
+/// 嗅探会错拿全零字节当端序声明。写 ELF64 元数据时"文件自己声明的 EI_DATA"
+/// 只有一个合法来源 —— 生产者传入的那个; mips64 就是靠它从"自称大端、正文小端"
+/// 的不可解析状态恢复的 (与 ELF32 侧 write_section_header32 的 is_be 形参对称)。
 fn write_section_header(
     out: &mut Vec<u8>,
     sh_name: u32,
@@ -1855,17 +1976,24 @@ fn write_section_header(
     sh_info: u32,
     sh_addralign: u64,
     sh_entsize: u64,
+    is_be: bool,
 ) {
-    out.extend_from_slice(&sh_name.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_type.to_le_bytes()); // 4
-    out.extend_from_slice(&(sh_flags as u64).to_le_bytes()); // 8 — ELF64 sh_flags is Xword
-    out.extend_from_slice(&sh_addr.to_le_bytes()); // 8
-    out.extend_from_slice(&sh_offset.to_le_bytes()); // 8
-    out.extend_from_slice(&sh_size.to_le_bytes()); // 8
-    out.extend_from_slice(&sh_link.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_info.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_addralign.to_le_bytes()); // 8
-    out.extend_from_slice(&sh_entsize.to_le_bytes()); // 8
+    let w32 = |v: u32| -> [u8; 4] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    let w64 = |v: u64| -> [u8; 8] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    out.extend_from_slice(&w32(sh_name)); // 4
+    out.extend_from_slice(&w32(sh_type)); // 4
+    out.extend_from_slice(&w64(sh_flags as u64)); // 8 — ELF64 sh_flags is Xword
+    out.extend_from_slice(&w64(sh_addr)); // 8
+    out.extend_from_slice(&w64(sh_offset)); // 8
+    out.extend_from_slice(&w64(sh_size)); // 8
+    out.extend_from_slice(&w32(sh_link)); // 4
+    out.extend_from_slice(&w32(sh_info)); // 4
+    out.extend_from_slice(&w64(sh_addralign)); // 8
+    out.extend_from_slice(&w64(sh_entsize)); // 8
                                                       // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
 }
 
@@ -2240,41 +2368,73 @@ fn build_elf32_rel_generic(
         .map(|s| sec_name_off(&mut shstr, &s.name))
         .collect();
 
+    // ===== .symtab: ELF32 与 ELF64 的 gABI 两条硬约束 =====
+    // (C) 排布: 所有 STB_LOCAL 必须整体排在首个 GLOBAL/WEAK 之前, 且节头
+    //     sh_info = 首个非局部符号下标(=局部符号数, 含下标 0 空符号)。上一轮只在
+    //     ELF64 写者补齐, ELF32(arm/mips32)被有意留下。
+    // (F) 字段顺序: Elf32_Sym 与 Elf64_Sym 的字段排布**不同** ——
+    //     ELF32: st_name(4) st_value(4) st_size(4) st_info(1) st_other(1) st_shndx(2);
+    //     ELF64: st_name(4) st_info(1) st_other(1) st_shndx(2) st_value(8) st_size(8)。
+    //     本函数此前按 ELF64 顺序落地, 于是下标 0 全零空符号“碰巧”正确, 真符号却被
+    //     binutils 读成 st_value=st_info<<0|… 的乱码、类型/节索引全错 —— 探针里
+    //     arm/mips32 的 CoreCall / Sanitizer:* 长期假阴性的真因就是这条, 不是排序。
+    // 两条一起修: 只改字段顺序而不补 (C), 含 static 的 TU 仍会把 LOCAL 排在 GLOBAL
+    // 之后被链接器当成可导出; 只改 (C) 不改 (F), binutils 依旧读出错乱符号。
+    // 稳定排序是关键: 输入本就“局部在前”时排序是恒等变换, 符号槽号/.strtab
+    // 布局/.rel.* 全不变 ⇒ 只有真正乱序的产物发生 drift。
+    let mut sym_order: Vec<usize> = (0..symbols.len()).collect();
+    sym_order.sort_by_key(|&i| symbols[i].bind); // STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
+    let is_identity_order = sym_order.iter().enumerate().all(|(new_i, &old_i)| new_i == old_i);
+    // 空符号占下标 0, 故符号 i 的新下标 = 其在 sym_order 中的位置 + 1。
+    let mut sym_index_map = vec![0u32; symbols.len()];
+    for (new_i, &old_i) in sym_order.iter().enumerate() {
+        sym_index_map[old_i] = (new_i + 1) as u32;
+    }
+    let n_locals = symbols.iter().filter(|s| s.bind == STB_LOCAL).count() as u32;
+    let symtab_sh_info = n_locals + 1;
+
     let mut sym_name_off = vec![0u32];
-    for sym in symbols {
+    for &i in &sym_order {
         sym_name_off.push(strtab.len() as u32);
-        strtab.extend_from_slice(sym.name.as_bytes());
+        strtab.extend_from_slice(symbols[i].name.as_bytes());
         strtab.push(0);
     }
 
-    // ELF32 symtab: 16 bytes per entry
-    let mut symtab = Vec::new();
-    symtab.extend_from_slice(&ew_u32(0));     // st_name
-    symtab.push(0); // st_info
-    symtab.push(0); // st_other
-    symtab.extend_from_slice(&ew_u16(0));     // st_shndx
-    symtab.extend_from_slice(&ew_u32(0));     // st_value
-    symtab.extend_from_slice(&ew_u32(0));     // st_size
-    for (i, sym) in symbols.iter().enumerate() {
-        symtab.extend_from_slice(&ew_u32(sym_name_off[i + 1]));
-        symtab.push((sym.bind << 4) | sym.ty);
-        symtab.push(sym.visibility);
-        symtab.extend_from_slice(&ew_u16(sym.section));
-        symtab.extend_from_slice(&ew_u32(sym.value as u32));
-        symtab.extend_from_slice(&ew_u32(sym.size as u32));
+    // ELF32 symtab: 16 bytes per entry。下标 0 空符号全零, 与端序无关。
+    let mut symtab = Vec::with_capacity((symbols.len() + 1) * 16);
+    symtab.extend_from_slice(&[0u8; 16]);
+    for (slot, &i) in sym_order.iter().enumerate() {
+        let sym = &symbols[i];
+        // 字段顺序严格按 Elf32_Sym (见上方 (F) 注释), 不可复用 ELF64 写者的排布。
+        symtab.extend_from_slice(&ew_u32(sym_name_off[slot + 1])); // st_name
+        symtab.extend_from_slice(&ew_u32(sym.value as u32)); // st_value
+        symtab.extend_from_slice(&ew_u32(sym.size as u32)); // st_size
+        symtab.push((sym.bind << 4) | (sym.ty & 0x0f)); // st_info
+        symtab.push(sym.visibility); // st_other
+        symtab.extend_from_slice(&ew_u16(sym.section)); // st_shndx
     }
 
-    // ELF32 Rel: 8 bytes per entry (no addend)
+    // 符号下标是 .rel.* 里 r_info 的高位, 排序后必须同步重映射, 否则重定位会
+    // 指向另一个符号。偏移/类型不变 ⇒ drift 面严格限于"符号槽号"这一种信息。
+    let remap_sym_index = |idx: u32| -> u32 {
+        if is_identity_order {
+            idx
+        } else {
+            sym_index_map.get(idx as usize).copied().unwrap_or(idx)
+        }
+    };
+
+    // ELF32 Rel: 8 bytes per entry (no addend); r_info = (sym<<8)|type
     let mut rel_text = Vec::new();
     for rel in relocations {
         rel_text.extend_from_slice(&ew_u32(rel.offset as u32));
-        let info = (rel.sym_index << 8) | rel.rel_type;
+        let info = (remap_sym_index(rel.sym_index) << 8) | rel.rel_type;
         rel_text.extend_from_slice(&ew_u32(info));
     }
     let mut rel_rodata = Vec::new();
     for rel in rodata_relocations {
         rel_rodata.extend_from_slice(&ew_u32(rel.offset as u32));
-        let info = (rel.sym_index << 8) | rel.rel_type;
+        let info = (remap_sym_index(rel.sym_index) << 8) | rel.rel_type;
         rel_rodata.extend_from_slice(&ew_u32(info));
     }
 
@@ -2413,7 +2573,7 @@ fn build_elf32_rel_generic(
         symtab_off as u32,
         symtab.len() as u32,
         strtab_idx,
-        1,
+        symtab_sh_info,
         4,
         16,
         is_be,

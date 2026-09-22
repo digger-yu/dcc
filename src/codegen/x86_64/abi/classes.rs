@@ -67,7 +67,7 @@ pub fn abi_classes(ty: &crate::ast::Type) -> Vec<AbiClass> {
     
     let num_eightbytes = size.div_ceil(8);
     let mut classes = vec![AbiClass::NoClass; num_eightbytes];
-    Self::classify_field(ty, 0, &mut classes);
+    classify_field(ty, 0, &mut classes);
     
     // Post-merger pass 1: NoClass at tail beyond type size stays NoClass
     // These are alignment fillers from ceil division, not actual data chunks
@@ -90,7 +90,7 @@ pub fn abi_classes(ty: &crate::ast::Type) -> Vec<AbiClass> {
                 // Check if this eightbyte actually contains field data
                 let lo = i * 8;
                 let hi = lo + 8;
-                if Self::has_field_data_in_range(ty, lo, hi) {
+                if has_field_data_in_range(ty, lo, hi) {
                     all_sse_compatible = false;
                     break;
                 }
@@ -156,7 +156,7 @@ fn has_field_data_in_range(ty: &crate::ast::Type, lo: usize, hi: usize) -> bool 
             }
             false
         }
-        crate::ast::Type::Atomic(inner) => Self::has_field_data_in_range(&inner.base, lo, hi),
+        crate::ast::Type::Atomic(inner) => has_field_data_in_range(&inner.base, lo, hi),
         // Scalars/vectors/floats: entire range is data
         _ => true,
     }
@@ -164,7 +164,7 @@ fn has_field_data_in_range(ty: &crate::ast::Type, lo: usize, hi: usize) -> bool 
 
 /// Classify fields into parent's classes array.
 /// Each field classified to temporary array, then merged into parent.
-fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) {
+pub(crate) fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) {
     let size = ty.size();
     if size == 0 {
         return;
@@ -173,7 +173,7 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
     match ty {
         crate::ast::Type::Struct(_, fields, _, false) => {
             for field in fields.iter() {
-                Self::classify_field(&field.ty, base + field.offset, classes);
+                classify_field(&field.ty, base + field.offset, classes);
             }
         }
         crate::ast::Type::Union(_, fields, _, false) => {
@@ -185,22 +185,22 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
                 }
                 let n = f_sz.div_ceil(8).min(classes.len() - base / 8);
                 let mut f_classes = vec![AbiClass::NoClass; n];
-                Self::classify_field(&field.ty, 0, &mut f_classes);
+                classify_field(&field.ty, 0, &mut f_classes);
                 
                 let start = base / 8;
                 for i in 0..n {
                     if start + i < classes.len() {
-                        classes[start + i] = Self::merge_classes(classes[start + i], f_classes[i]);
+                        classes[start + i] = merge_classes(classes[start + i], f_classes[i]);
                     }
                 }
             }
         }
         crate::ast::Type::Array(elem, crate::ast::ArraySize::Const(n)) => {
             for j in 0..*n {
-                Self::classify_field(&elem.base, base + j * elem.size(), classes);
+                classify_field(&elem.base, base + j * elem.size(), classes);
             }
         }
-        crate::ast::Type::Atomic(inner) => Self::classify_field(&inner.base, base, classes),
+        crate::ast::Type::Atomic(inner) => classify_field(&inner.base, base, classes),
         crate::ast::Type::Vector(_, _) => {
             // SIMD vectors: first eightbyte Sse, rest SseUp (vector continuation)
             let start = base / 8;
@@ -212,7 +212,7 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
                     } else {
                         AbiClass::SseUp
                     };
-                    classes[i] = Self::merge_classes(classes[i], cls);
+                    classes[i] = merge_classes(classes[i], cls);
                 }
             }
         }
@@ -223,7 +223,7 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
             let cls = leaf_abi_class(ty);
             for i in start..=end {
                 if i < classes.len() {
-                    classes[i] = Self::merge_classes(classes[i], cls);
+                    classes[i] = merge_classes(classes[i], cls);
                 }
             }
         }
@@ -232,7 +232,7 @@ fn classify_field(ty: &crate::ast::Type, base: usize, classes: &mut [AbiClass]) 
 
 /// SysV ABI class merging table.
 /// Determines final class when two eightbyte classifications overlap.
-fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
+pub(crate) fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
     use AbiClass::*;
     
     if a == b {
@@ -272,7 +272,7 @@ fn merge_classes(a: AbiClass, b: AbiClass) -> AbiClass {
 }
 
 /// Leaf type ABI classification.
-fn leaf_abi_class(ty: &crate::ast::Type) -> AbiClass {
+pub(crate) fn leaf_abi_class(ty: &crate::ast::Type) -> AbiClass {
     match ty {
         crate::ast::Type::Float | crate::ast::Type::Double => AbiClass::Sse,
         crate::ast::Type::LongDouble => AbiClass::Memory,

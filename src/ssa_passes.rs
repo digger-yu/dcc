@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, QualType, Stmt, Type, UnOp};
 use crate::diagnostics::Span;
-use crate::ssa::{Function, Inst, InstKind, Operand, SsaVar, Terminator};
+use crate::ssa::{ordered_block_names, Function, Inst, InstKind, Operand, SsaVar, Terminator};
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
 ///
@@ -356,8 +356,11 @@ pub fn alias_analysis_with_strict(
         // strict-aliasing: 按类型标签分离不兼容的指针
         // 收集每个 SSA 变量的类型
         let mut type_map: HashMap<String, crate::ast::Type> = HashMap::new();
-        for b in func.blocks.values() {
-            for inst in &b.insts {
+        for bb_name in ordered_block_names(func) {
+            let Some(bb) = func.blocks.get(&bb_name) else {
+                continue;
+            };
+            for inst in &bb.insts {
                 if let Some(d) = &inst.dest {
                     type_map.insert(d.name(), d.ty.clone());
                 }
@@ -365,8 +368,15 @@ pub fn alias_analysis_with_strict(
         }
         // 检测类型不兼容的 alias set 并分裂
         // 如果两个变量在同一 alias set 但类型不兼容, 分配不同 set
-        let mut type_class: HashMap<usize, Vec<(String, crate::ast::Type)>> = HashMap::new();
-        for (name, &set_id) in &sets {
+        //
+        // **BTreeMap + 按名排序的成员列表**: 分裂时"第一组保留原 set_id、其余组
+        // 拿 `next_set++`"，所以 `type_class.values()` 的随机序与 `sets` 的随机序
+        // 会直接决定新 set 的编号 → 下游按 set id 遍历的 pass 跑在不同顺序上。
+        let mut type_class: std::collections::BTreeMap<usize, Vec<(String, crate::ast::Type)>> =
+            std::collections::BTreeMap::new();
+        let mut set_entries: Vec<(&String, &usize)> = sets.iter().collect();
+        set_entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, &set_id) in set_entries {
             if let Some(ty) = type_map.get(name) {
                 type_class.entry(set_id).or_default().push((name.clone(), ty.clone()));
             }
@@ -438,19 +448,35 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
     let mut parents: HashMap<usize, usize> = HashMap::new();
     let mut next_id = 0usize;
     // Collect restrict-qualified parameter names (base names, version 0)
-    let restrict_params: std::collections::HashSet<String> = func
+    //
+    // **需要一份有序名单**: 下方按迭代顺序给 restrict 参数分配 alias set id
+    // (`next_id += 1`)。直接用 HashSet 迭代会让同一函数每次编译拿到不同的
+    // id 编号，进而使下游按 id 遍历的 pass 跑在不同顺序上 → 产物不可复现。
+    let mut restrict_names: Vec<String> = func
         .param_quals
         .iter()
         .filter(|(_, quals)| quals.is_restrict())
         .map(|(name, _)| name.clone())
         .collect();
+    restrict_names.sort();
+    restrict_names.dedup();
+    let restrict_params: std::collections::HashSet<String> =
+        restrict_names.iter().cloned().collect();
     // Assign unique alias sets to restrict parameters upfront
-    for name in &restrict_params {
+    for name in &restrict_names {
         let id = next_id;
         next_id += 1;
         sets.insert(format!("{}_0", name), id);
     }
-    for b in func.blocks.values() {
+    //
+    // **必须按 block_order 而不是 `blocks.values()` 遍历**: `blocks` 是 HashMap，
+    // 其随机序会经由循环体内的 `next_id += 1` 泄落到 alias set 编号上，
+    // 并同时决定各 BB 内 union 的先后。`block_order` 是 lowering 期的创建序，也是本仓库
+    // 已有的定序约定 (参见 ssa.rs 里 `for bb_name in &func.block_order`)。
+    for bb_name in ordered_block_names(func) {
+        let Some(b) = func.blocks.get(&bb_name) else {
+            continue;
+        };
         for inst in &b.insts {
             match &inst.kind {
                 InstKind::AddrOf { base } => {
@@ -508,6 +534,11 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
     }
     sets
 }
+
+// 确定性的 BB 遍历序已上调到 `crate::ssa::ordered_block_names`:
+// 先按创建序 `block_order`，再补上未列入者 (按名字排序)。补集是为了保证覆盖
+// 完整: 若某 BB 未进 `block_order` 而被漏掉，会少做一次 union，那就是语义变化
+// 而不只是定序变化了。放在 ssa 侧是因为 rebuild 路径同样需要它。
 
 fn set_of(o: &Operand, sets: &HashMap<String, usize>) -> Option<usize> {
     match o {
@@ -1763,10 +1794,19 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
     let mut consts: HashMap<String, i128> = HashMap::new();
     let mut changed = true;
     let mut iter = 0;
+    // 访问序必须固定: 本 pass 在同一遍里既读 `consts` 又写 `consts`, 而迭代上限是
+    // 16 轮 —— 预算耗尽时拿到的是"部分不动点", 其内容依赖于访问序。直接用
+    // `blocks.values()` (HashMap 随机序) 就会让同一函数在不同进程里折出不同的
+    // 常量集, 进而泄进产物字节。`ordered_block_names` 不改变收敛结果 (真正收敛到
+    // 不动点时与序无关), 只是让"未收敛"情形也保持可复现。
+    let sweep_order = ordered_block_names(func);
     while changed && iter < 16 {
         changed = false;
         iter += 1;
-        for b in func.blocks.values() {
+        for bb_name in &sweep_order {
+            let Some(b) = func.blocks.get(bb_name) else {
+                continue;
+            };
             for inst in &b.insts {
                 let v = match &inst.kind {
                     InstKind::Bin { op, l, r } => {

@@ -2125,6 +2125,28 @@ impl Drop for TmpObjCleanup {
     }
 }
 
+/// host-link 用的临时 .o + 它的私有目录，离开作用域时一并清掉。
+///
+/// 为什么要连带目录一起删：目录名里带 PID（见 `run_with_host_link` 里的说明，
+/// PID 只能待在目录里、不能进 basename），若不清就会每次编译往 /tmp 里
+/// 留一个空目录。用 Drop 而不是散在三个 return 前手工删，是为了让
+/// 「编译失败 / IFUNC 改道 / 正常链接」三条出口都不漏清理。
+struct HostLinkTmpCleanup {
+    obj: PathBuf,
+    dir: PathBuf,
+    /// 目录是否是本次调用创建的（回退到 /tmp 根时不能删别人的目录）
+    dir_owned: bool,
+}
+
+impl Drop for HostLinkTmpCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.obj);
+        if self.dir_owned {
+            let _ = std::fs::remove_dir(&self.dir);
+        }
+    }
+}
+
 /// 将 cli::Arch 映射到 debug::ArchKind
 fn arch_from_target(t: &crate::cli::TargetTriple) -> crate::debug::ArchKind {
     use crate::debug::ArchKind;
@@ -2590,17 +2612,41 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return link_result;
     }
 
+    // 临时 .o 的**文件名**会被宿主 ld 登记成 .symtab 里的 STT_FILE 符号，于是
+    // 拼在名字里的任何易变量都会泄进最终可执行文件。实测确证（修复前）：
+    //   dcc --target x86_64-linux-gnu -O0 stmt_expr.c -o e1
+    //   readelf -sW e1 | awk '$4=="FILE"'
+    //   ...  FILE LOCAL DEFAULT ABS dcc-hostlink-3787882-stmt_expr.c.o   <-- PID
+    //   strings -a e1 | grep hostlink   -> 只有 basename, **不带目录**
+    // 所以本方案把易变量（PID）只放在**目录**部分：
+    //   (a) 产物确定 —— basename 只由输入文件名（稳定量）决定；
+    //   (b) `make -j` 并发不碰撞 —— 每个 dcc 进程一个 PID 私有目录，
+    //       不同进程编译同名源文件（monorepo 里很常见）也不会互踩；
+    //   (c) 不把随机/易变量写进产物 —— 依据上面实测的「ld 只取 basename」。
+    // 备选方案「按 output+input 绝对路径做稳定散列当 basename」被否决：那会让
+    // 产物字节随**构建目录**变化（同一工程换个路径重编就不一致），等于把可复现
+    // 性降级成「同一路径下可复现」，而且散列本身也没比 PID 更稳定。
+    // 另一个备选「让 STT_FILE 固定成输出名」也不选：输出名同样可能是易变的路径。
     let input_name = cfg
         .inputs
         .first()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("input");
-    let tmp_o = std::env::temp_dir().join(format!(
-        "dcc-hostlink-{}-{}.o",
-        std::process::id(),
-        input_name,
-    ));
+    let job_dir = std::env::temp_dir().join(format!("dcc-hostlink-{}", std::process::id()));
+    // 建目录失败（只读的 /tmp、沙箱等）时退回 temp 根目录：此时 basename 依旧
+    // 确定，产物照样可复现，只是失去跨进程的同名隔离——比直接让链接失败好。
+    let dir_created = std::fs::create_dir_all(&job_dir).is_ok();
+    let tmp_o = if dir_created {
+        job_dir.join(format!("dcc-hostlink-{}.o", input_name))
+    } else {
+        std::env::temp_dir().join(format!("dcc-hostlink-{}.o", input_name))
+    };
+    let _tmp_cleanup = HostLinkTmpCleanup {
+        obj: tmp_o.clone(),
+        dir: job_dir,
+        dir_owned: dir_created,
+    };
     if verbose {
         eprintln!(
             "dcc: host-link: {} -> {} -> {}",
@@ -2619,7 +2665,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
     let result = run(cfg);
     if result.is_err() {
-        let _ = fs::remove_file(&tmp_o);
+        // 临时 .o / 目录由 _tmp_cleanup 在离开作用域时回收
         return result;
     }
     // 2) 检测 .o 中是否包含 IFUNC 符号 (target_clones / __attribute__((ifunc)))
@@ -2642,7 +2688,6 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         link_cfg.built_link = true;
         link_cfg.relocatable = false;
         let link_result = run_builtin_linker(&link_cfg);
-        let _ = fs::remove_file(&tmp_o);
         if link_result.is_ok() {
             eprintln!("dcc: {} (via builtin linker, IFUNC)", final_output.display());
         }
@@ -2658,7 +2703,6 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         verbose,
         &sanitizer_flags,
     );
-    let _ = fs::remove_file(&tmp_o);
     if link_result.is_ok() {
         eprintln!("dcc: {} (via host cc)", final_output.display());
     }

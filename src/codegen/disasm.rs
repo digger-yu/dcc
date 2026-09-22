@@ -1721,7 +1721,20 @@ pub fn label_map<'a>(
     for (off, name) in labels {
         m.entry(*off).or_default().push(name);
     }
+    sort_labels_in_place(&mut m);
     m
+}
+
+/// 同一地址上多个别名的排列必须确定。
+///
+/// 上游传入的 `impl IntoIterator` 来自 `Codegen::labels` / `asm_directives_at`
+/// 等 `HashMap` 迭代结果: `BTreeMap` 的 **key(地址) 有序，但每个 key 下的 `Vec`
+/// 完全保留上游的随机迭代序**，导致 `-S` 输出里共用同一 PC 的标签行
+/// (如 `.L4:` / `.L13:`) 逐进程跳动。按名字排序后，同地址别名的输出序固定。
+fn sort_labels_in_place(m: &mut BTreeMap<u64, Vec<&str>>) {
+    for names in m.values_mut() {
+        names.sort_unstable();
+    }
 }
 
 pub fn directive_map<'a>(
@@ -1731,6 +1744,7 @@ pub fn directive_map<'a>(
     for (off, line) in items {
         m.entry(*off).or_default().push(line);
     }
+    sort_labels_in_place(&mut m);
     m
 }
 

@@ -6,6 +6,5 @@ pub mod addr;
 pub mod load_store;
 pub mod global;
 
-pub use addr::{gen_lvalue_addr, gen_expr_decay};
-pub use load_store::{store_rsp_qword, load_rsp_qword};
-pub use global::emit_lea_r13;
+// 不再在这里 `pub use` 重新导出: 已验证的调用方均直接走 `mem::addr::…` /
+// `self.…` 路径，重新导出层无人消费 (属搬桩时留下的空壳外表)。

@@ -33,6 +33,7 @@ pub mod legacy;
 pub mod link_opts;
 pub mod linker_script;
 pub mod lto_bitcode;
+pub mod lto_call_graph_stubs;  // Placeholder for PR-LTO-1 (stub implementation)
 pub mod object;
 pub mod pe;
 pub mod plt_got;

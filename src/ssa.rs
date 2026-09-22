@@ -192,6 +192,69 @@ pub struct Phi {
     pub incoming: Vec<(SsaVar, String)>, // (src var, predecessor BB name)
 }
 
+/// 保序去重的名字集合。
+///
+/// 为什么不用 `HashSet<String>`: `rebuild_block` 会按本集合的**迭代序**为局部
+/// 变量生成 AST 声明, 而后端 (`pre_register_vars`) 又按 AST 声明序分配栈槽。
+/// `std::collections::HashSet` 的迭代序由进程随机哈希种子决定, 于是同一份源码
+/// 每次编译都会得到不同的栈槽偏移 (`lea -72(%r13)` ↔ `lea -80(%r13)`), 这是
+/// `-O2` 产物字节不可复现的根因。本类型保持**首次插入序** (= 源码声明序),
+/// 同时提供 O(1) 的 `contains`。
+pub struct OrderedNameSet {
+    names: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl std::fmt::Debug for OrderedNameSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.names.iter()).finish()
+    }
+}
+
+impl Clone for OrderedNameSet {
+    fn clone(&self) -> Self {
+        Self { names: self.names.clone(), seen: self.seen.clone() }
+    }
+}
+
+impl Default for OrderedNameSet {
+    fn default() -> Self {
+        Self { names: Vec::new(), seen: HashSet::new() }
+    }
+}
+
+impl OrderedNameSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 首次插入返回 true 并保持插入序; 重复插入只返回 false, 不改变顺序。
+    pub fn insert(&mut self, name: String) -> bool {
+        if self.seen.insert(name.clone()) {
+            self.names.push(name);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.seen.contains(name)
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.names.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
@@ -211,7 +274,8 @@ pub struct Function {
     pub is_noreturn: bool,
     pub span: Span,
     /// 原始 AST 中声明的局部变量名 (用于 rebuild_block 避免重复声明)
-    pub original_locals: HashSet<String>,
+    /// 必须是保序集合: 迭代序直接决定重建 AST 的声明序, 进而决定栈槽布局。
+    pub original_locals: OrderedNameSet,
     /// 原始局部变量的类型 (用于 rebuild_block 保留正确的类型信息)
     pub local_types: HashMap<String, Type>,
     /// 原始局部变量的类型限定符 (volatile/const/restrict),
@@ -236,7 +300,7 @@ impl Function {
             is_hot: false,
             is_noreturn: false,
             span,
-            original_locals: HashSet::new(),
+            original_locals: OrderedNameSet::new(),
             local_types: HashMap::new(),
             local_quals: HashMap::new(),
             param_quals: HashMap::new(),
@@ -1795,7 +1859,7 @@ fn lower_lvalue(
 /// 递归收集 block 中所有 Decl::Var 的变量名
 fn collect_local_decls(
     items: &[BlockItem],
-    out: &mut HashSet<String>,
+    out: &mut OrderedNameSet,
     types: &mut HashMap<String, Type>,
     quals: &mut HashMap<String, crate::ast::QualifierFlags>,
 ) {
@@ -1817,7 +1881,7 @@ fn collect_local_decls(
 
 fn collect_local_decls_stmt(
     s: &Stmt,
-    out: &mut HashSet<String>,
+    out: &mut OrderedNameSet,
     types: &mut HashMap<String, Type>,
     quals: &mut HashMap<String, crate::ast::QualifierFlags>,
 ) {
@@ -1860,7 +1924,12 @@ pub fn insert_loop_phis(func: &mut Function) {
     // A back edge is an edge A→B where B dominates A.
     let doms = compute_dominators(func);
     let mut back_edges: Vec<(String, String)> = Vec::new(); // (latch, header)
-    for (bb_name, bb) in &func.blocks {
+    // 必须用 `ordered_block_names` 而非 `&func.blocks`: back_edges 的处理顺序
+    // 决定同一 header 上 phi 的排列序, 而 phi 序会经 rebuild 影响产物字节。
+    for bb_name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&bb_name) else {
+            continue;
+        };
         let successors = match &bb.term {
             Terminator::Jump(t) => vec![t.clone()],
             Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
@@ -1871,7 +1940,7 @@ pub fn insert_loop_phis(func: &mut Function) {
             }
             _ => vec![],
         };
-        let from_doms = match doms.get(bb_name) {
+        let from_doms = match doms.get(&bb_name) {
             Some(d) => d,
             None => continue,
         };
@@ -1921,7 +1990,11 @@ pub fn insert_loop_phis(func: &mut Function) {
         // Insert phi for each variable that is both used at the header
         // and redefined in the loop body
         let mut new_phis: Vec<Phi> = Vec::new();
-        for (base, body_var) in &body_defs {
+        // body_defs 是 HashMap, 直接迭代会把随机序写进 bb.phis; 按名字排序保证可复现。
+        let mut body_def_names: Vec<&String> = body_defs.keys().collect();
+        body_def_names.sort();
+        for base in body_def_names {
+            let body_var = &body_defs[base];
             if let Some(header_var) = header_uses.get(base) {
                 if header_var.name() != body_var.name() {
                     // Different versions: need a phi node
@@ -1960,7 +2033,11 @@ fn insert_label_phis(
         return;
     }
     // 对每个 label BB，检查是否有多个前驱且前驱的变量版本不同
-    for bb_name in label_bbs.values() {
+    // 先把待处理 BB 按名字排序: 不同 label 彼此独立, 但显式定序可防未来改成
+    // 全局副作用型逻辑时重新引入 HashMap 迭代序泄漏。
+    let mut label_bbs_sorted: Vec<&String> = label_bbs.values().collect();
+    label_bbs_sorted.sort();
+    for bb_name in label_bbs_sorted {
         let bb = match func.blocks.get(bb_name) {
             Some(b) => b,
             None => continue,
@@ -1989,7 +2066,12 @@ fn insert_label_phis(
         // 找出在所有前驱中都有定义但版本不同的变量
         let first_vars = &pred_vars[0].1;
         let mut needs_phi: Vec<String> = Vec::new();
-        for (base, var) in first_vars {
+        // first_vars 是 HashMap, 必须先排序再收集, 否则 needs_phi 的序 (→ phi 在
+        // BB 内的排列序) 会随进程随机种子变化。
+        let mut var_names: Vec<&String> = first_vars.keys().collect();
+        var_names.sort();
+        for base in var_names {
+            let var = &first_vars[base];
             let mut all_same = true;
             for (_, other_vars) in &pred_vars[1..] {
                 if let Some(other_var) = other_vars.get(base) {
@@ -2050,12 +2132,17 @@ fn insert_label_phis(
 
 /// Find the body blocks of a natural loop (header, latch).
 /// Loop body = {header} ∪ {blocks that can reach latch without going through header}
+///
+/// 返回值按名字排序: 调用方会用它决定 phi 插入序, 直接 `HashSet::into_iter()`
+/// 会把进程随机哈希序泄到下游。
 fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
     let mut body: HashSet<String> = HashSet::new();
     body.insert(header.to_string());
     if header == latch {
         // Self-loop: only the header itself
-        return body.into_iter().collect();
+        let mut v: Vec<String> = body.into_iter().collect();
+        v.sort();
+        return v;
     }
     // Reverse DFS from latch, not going through header
     let mut stack = vec![latch.to_string()];
@@ -2071,7 +2158,9 @@ fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
             }
         }
     }
-    body.into_iter().collect()
+    let mut v: Vec<String> = body.into_iter().collect();
+    v.sort();
+    v
 }
 
 /// Collect SSA variables used by an instruction, keyed by base name.
@@ -2359,6 +2448,31 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
 // SSA -> AST 重建器
 // ============================================================
 
+/// 返回确定性的 BB 遍历序: 先按 `block_order` (创建序), 再补上 `blocks`
+/// 里未出现在 `block_order` 的 key (按名字排序)。
+///
+/// 为什么需要: `blocks: HashMap<String, BasicBlock>` 的 `values()`/`keys()`
+/// 迭代序由进程随机种子决定。任何“递增编号”或“首个胜出”型逻辑（如 alias set id、
+/// 变量类型/声明序）一旦建立在它之上, 就会泄漏到产物字节里。同时保留
+/// `block_order` 未能覆盖的块, 以免新增块静默丢失。
+pub fn ordered_block_names(func: &Function) -> Vec<String> {
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::with_capacity(func.blocks.len());
+    for n in &func.block_order {
+        if func.blocks.contains_key(n) && emitted.insert(n.clone()) {
+            out.push(n.clone());
+        }
+    }
+    let mut rest: Vec<&String> = func
+        .blocks
+        .keys()
+        .filter(|k| !emitted.contains(k.as_str()))
+        .collect();
+    rest.sort();
+    out.extend(rest.into_iter().cloned());
+    out
+}
+
 /// 把 SSA Function 重建为 AST Block (codegen 仍走 AST 路径)。
 ///
 /// 策略:
@@ -2386,17 +2500,28 @@ pub fn rebuild_block(func: &Function) -> Block {
 
     // 收集所有 SSA 定义中的基础变量名及其类型
     // 用于为不在 original_locals 中但有多次赋值的变量生成声明
+    //
+    // 必须按 `ordered_block_names` (创建序) 而不是 `blocks.values()` (HashMap 随机序)
+    // 遍历: 同一 base 的多个 SSA 版本可能携带不同 `ty`, `or_insert_with` 的
+    // "首个胜出" 规则会因遍历序而选到不同类型; 而且这里得到的名字序会被下面
+    // 直接拼进 `decl_names`, 决定局部变量声明序 → 决定栈槽偏移。
     let mut all_def_types: HashMap<String, Type> = HashMap::new();
-    for bb in func.blocks.values() {
+    let mut all_def_order = OrderedNameSet::new();
+    for bb_name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&bb_name) else {
+            continue;
+        };
         for inst in &bb.insts {
             if let Some(d) = &inst.dest {
-                all_def_types.entry(d.base.clone()).or_insert_with(|| d.ty.clone());
+                if all_def_order.insert(d.base.clone()) {
+                    all_def_types.insert(d.base.clone(), d.ty.clone());
+                }
             }
         }
         for phi in &bb.phis {
-            all_def_types
-                .entry(phi.dest.base.clone())
-                .or_insert_with(|| phi.dest.ty.clone());
+            if all_def_order.insert(phi.dest.base.clone()) {
+                all_def_types.insert(phi.dest.base.clone(), phi.dest.ty.clone());
+            }
         }
     }
 
@@ -2415,7 +2540,8 @@ pub fn rebuild_block(func: &Function) -> Block {
     // 追加: 非 _ 开头、非参数、非 original_locals、非 preserved 的变量
     // 这些是 lower_ir 生成的非临时变量（如 fresh_var 生成的非临时名），
     // 需要声明否则 codegen 会按隐式 int 处理导致类型错误
-    for name in all_def_types.keys() {
+    // 注意: 这里遵循 `all_def_order`(首次定义序) 而非 HashMap 随机序。
+    for name in all_def_order.iter() {
         if phi_dest_names.contains(name) {
             continue;
         }

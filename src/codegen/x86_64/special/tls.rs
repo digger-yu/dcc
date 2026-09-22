@@ -1,58 +1,31 @@
 // src/codegen/x86_64/special/tls.rs
-// Thread-Local Storage (TLS) support for x86_64 backend
-// FS-relative and GS-relative addressing models
+// Thread-Local Storage (TLS) 的 x86_64 codegen 独立 helper。
+//
+// 本文件由 mod.rs 逐字搬迁而来 (batch E)：`emit_tls_fs_setup`（ET_EXEC 下用
+// arch_prctl(ARCH_SET_FS) 把 FS 基址指向 TLS 模板）原样剪切进 `impl Codegen`
+// 块，函数体一字未改，仅把 `fn` 提为 `pub fn`。
+//
+// 说明：mod.rs 中 TLS 的其余逻辑（`pending_tls_rels` 的登记与 resolve() 修补、
+// `--tls-model` 属性 → 重定位类型选择）都内联在 emit_global_addr / resolve /
+// compile_rel 等大函数体内，按"不散落在大函数内部的代码段不要动"的纪律未搬迁。
+// 原影子 `TlsModel` 枚举与 `emit_tls_address_calculation`（生产代码中不存在该
+// 抽象，TLS 模型由 tls_model 字符串 + 重定位类型直接决定，且函数体全是
+// unimplemented!()）按"以生产代码为准"作废删除。
 
-/// TLS access model enum matching GCC/Clang TLS models.
-#[derive(Debug, Clone, Copy)]
-pub enum TlsModel {
-    /// Global-dynamic: First use calls __tls_get_addr()
-    GlobalDynamic,
-    
-    /// Local-dynamic: First use similar to global-dynamic but optimized
-    LocalDynamic,
-    
-    /// Initial-exec: Symbol in local TLS block, no runtime lookup
-    InitialExec,
-    
-    /// Local-exec: Absolute offset known at link time
-    LocalExec,
-}
+use crate::codegen::x86_64::Codegen;
 
-/// Emit TLS address calculation based on access model.
-/// 
-/// Generates different code sequences depending on TLS model:
-/// - LocalExec: LEA rax, [fs + absolute_offset]
-/// - InitialExec: LEA rax, [fs + static_base + offset]
-/// - GlobalDynamic: Call __tls_get_addr() with slot number
-/// 
-/// # Arguments
-/// * `cg` - Codegen context
-/// * `model` - TLS access model to use
-/// * `base_register` - FS or GS base register (typically 4=FS, 5=GS)
-/// * `slot_offset` - Offset within TLS block
-pub fn emit_tls_address_calculation(cg: &mut crate::codegen::x86_64::Codegen, 
-    model: TlsModel, base_register: u8, slot_offset: i64) {
-    
-    let rex_w = 0x48; // REX.W for 64-bit
-    
-    match model {
-        TlsModel::LocalExec => {
-            // LEA rax, [fs + disp32] - absolute offset known at link time
-            cg.emit(&[rex_w, 0x8D, 0x04 | ((base_register & 7) << 3), 0x25]);
-            cg.emit(&(slot_offset as i32).to_le_bytes());
-        }
-        TlsModel::InitialExec => {
-            // Similar but may need additional PC-relative adjustment
-            unimplemented!("InitialExec TLS model requires extraction from x86_64.rs");
-        }
-        TlsModel::GlobalDynamic => {
-            // CALL __tls_get_addr(slot_number)
-            // mov rdi, slot_number; call __tls_get_addr
-            unimplemented!("GlobalDynamic TLS requires runtime lookup extraction");
-        }
-        TlsModel::LocalDynamic => {
-            // Combined dynamic + initial exec sequence
-            unimplemented!("LocalDynamic TLS complexity requires detailed extraction");
-        }
+impl Codegen {
+    /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
+    pub fn emit_tls_fs_setup(&mut self) {
+        // lea rsi, [rip+disp32]  → TLS 模板地址
+        let lea_pos = self.pos() + 3;
+        self.emit(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]);
+        self.pending_tls_rels
+            .push((lea_pos, "__dcc_tls_base".to_string()));
+        // mov rdi, 0x1002 (ARCH_SET_FS)
+        self.emit(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]);
+        // mov rax, 158; syscall
+        self.emit(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]);
+        self.emit(&[0x0F, 0x05]);
     }
 }

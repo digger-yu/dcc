@@ -91,16 +91,15 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
     // Memory: disp(%base,%idx,scale) or (%reg) or symbol(%rip)
     if s.contains('(') {
         let inner = parse_asm_mem(s);
-        return if let (Some(sc), AsmOperand::Mem { disp, base, index, scale }) = (seg, &inner) {
-            AsmOperand::SegMem {
+        return match (seg, inner) {
+            (Some(sc), AsmOperand::Mem { disp, base, index, scale }) => AsmOperand::SegMem {
                 seg: sc,
                 disp,
                 base,
                 index,
                 scale,
-            }
-        } else {
-            inner
+            },
+            (_, other) => other,
         };
     }
     
@@ -203,41 +202,66 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
         // RIP
         "rip" => Some((ASM_BASE_RIP, 64)),
         // XMM/YMM/ZMM vector registers
-        "xmm0".."xmm15" => {
+        // (Rust 不允许字符串范围 pattern, 用 guard + 显式上界表达原语义)
+        name if name.starts_with("xmm") => {
             let idx = n[3..].parse::<u8>().ok()?;
+            if idx > 15 {
+                return None;
+            }
             Some((idx, ASM_REG_XMM))
         }
-        "ymm0".."ymm15" => {
+        name if name.starts_with("ymm") => {
             let idx = n[3..].parse::<u8>().ok()?;
+            if idx > 15 {
+                return None;
+            }
             Some((idx, ASM_REG_YMM))
         }
-        "zmm0".."zmm31" => {
+        name if name.starts_with("zmm") => {
             let idx = n[3..].parse::<u8>().ok()?;
+            if idx > 31 {
+                return None;
+            }
             Some((idx, ASM_REG_ZMM))
         }
         // AMX tile registers
-        "tmm0".."tmm7" => {
+        name if name.starts_with("tmm") => {
             let idx = n[3..].parse::<u8>().ok()?;
+            if idx > 7 {
+                return None;
+            }
             Some((idx, ASM_REG_TMM))
         }
         // AVX-512 mask registers
-        "k0".."k7" => {
+        name if name.starts_with('k') => {
             let idx = n[1..].parse::<u8>().ok()?;
+            if idx > 7 {
+                return None;
+            }
             Some((idx, ASM_REG_K))
         }
         // Control registers
-        "cr0".."cr8" => {
+        name if name.starts_with("cr") => {
             let idx = n[2..].parse::<u8>().ok()?;
+            if idx > 8 {
+                return None;
+            }
             Some((idx, ASM_REG_CR))
         }
         // Debug registers
-        "dr0".."dr7" | "db0".."db7" => {
-            let idx = n[2..3].parse::<u8>().ok()?;
+        name if name.starts_with("dr") || name.starts_with("db") => {
+            let idx = n[2..].parse::<u8>().ok()?;
+            if idx > 7 {
+                return None;
+            }
             Some((idx, ASM_REG_DR))
         }
         // MMX registers
-        "mm0".."mm7" => {
+        name if name.starts_with("mm") => {
             let idx = n[2..].parse::<u8>().ok()?;
+            if idx > 7 {
+                return None;
+            }
             Some((idx, ASM_REG_MMX))
         }
         // x87 FPU stack registers

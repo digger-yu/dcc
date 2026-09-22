@@ -58,6 +58,8 @@ pub struct Riscv64Codegen {
     sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
+    /// 帧内保存 ra(x1)/fp(s0) 的偏移; -1 = 本函数为叶子，不保存 (不扰动帧)。
+    ret_addr_off: i32,
     emitted_return: bool,
     source_name: String,
     label_serial: u32,
@@ -118,6 +120,7 @@ impl Riscv64Codegen {
             sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
+            ret_addr_off: -1,
             emitted_return: false,
             source_name: String::new(),
             label_serial: 0,
@@ -228,7 +231,7 @@ impl Riscv64Codegen {
         let prog = module.source();
         self.collect_asm_labels(prog);
         self.build_aggregate_fields(prog);
-        self.emit_globals(module);
+        self.emit_globals(module, prog);
         if self.relocatable {
             self.compile_rel(module, prog);
             self.finalize_branches();
@@ -289,9 +292,9 @@ impl Riscv64Codegen {
         }
     }
 
-    fn emit_globals(&mut self, module: &Module) {
+    fn emit_globals(&mut self, module: &Module, prog: &Program) {
         for g in &module.globals {
-            self.emit_global(g);
+            self.emit_global(g, prog);
         }
         if !self.rodata.is_empty() {
             self.symbols.push(ElfSym {
@@ -308,7 +311,7 @@ impl Riscv64Codegen {
         }
     }
 
-    fn emit_global(&mut self, g: &Global) {
+    fn emit_global(&mut self, g: &Global, prog: &Program) {
         let size = value_type_size(&g.ty).max(1);
         let align = size.max(4) as u64;
         let off = align_rodata(&mut self.rodata, align);
@@ -323,12 +326,17 @@ impl Riscv64Codegen {
             self.tls_globals.insert(g.name.clone(), off);
         }
         if self.relocatable {
+            // 内部链接的文件作用域变量必须是 STB_LOCAL: 函数内 static local
+            // (g.is_static_local) 和顶层 `static int g;` 都不能以可导出符号出现,
+            // 否则跨 TU 同名会误链接/冲突。此前无条件 STB_GLOBAL。
+            let is_internal = g.is_static_local || var_is_static(prog, &g.name);
+            let bind = if is_internal { STB_LOCAL } else { STB_GLOBAL };
             self.symbols.push(ElfSym {
                 name: g.name.clone(),
                 section: 2,
                 value: off,
                 size: size as u64,
-                bind: STB_GLOBAL,
+                bind,
                 ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
                 visibility: elf::STV_DEFAULT,
             });
@@ -764,6 +772,29 @@ impl Riscv64Codegen {
             self.va_save_base_off = 0;
         }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
+        // 非叶子函数必须保存 ra/x1: jal 覆写 ra，本函数 ret 需要回退地址。叶子函数不需帧存
+        // ra，保持帧尺寸不变 (不扰动已有产物字节)。ftrace/__fentry__/mcount 也是调用，
+        // stack-protector 的 __stack_chk_fail 也是调用，同样需保存 ra。
+        let ftrace_pos: Option<u64>;
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::None) {
+            ftrace_pos = None;
+        } else {
+            // Check call positions later; for now assume non-leaf if ftrace enabled
+            if func.body.iter().any(stmt_has_call) {
+                ftrace_pos = Some(0); // Placeholder to mark non-leaf
+            } else {
+                ftrace_pos = Some(1); // Will be overwritten
+            }
+        }
+        let is_leaf = ftrace_pos.is_none() && !func.body.iter().any(stmt_has_call)
+            && !(self._target.stack_protector && self.canary_slot_off > 0);
+        self.ret_addr_off = if is_leaf {
+            -1
+        } else {
+            let off = self.frame_bytes;
+            self.frame_bytes += 8; // Frame top slot for ra (8 bytes aligned)
+            off
+        };
         if self.frame_bytes > 0 {
             if self._target.stack_clash_protection && self.frame_bytes > 4096 {
                 self.emit_stack_clash_probes(self.frame_bytes as u32);
@@ -774,6 +805,10 @@ impl Riscv64Codegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // 存 ra 必须在帧零初始化之后，否则 ra 会被清零覆盖。
+        if self.ret_addr_off >= 0 {
+            self.emit_sd(1, 2, self.ret_addr_off); // sd x1, ret_addr_off(sp)
         }
         // Stack protector: store canary value on stack after frame setup
         if self._target.stack_protector && self.canary_slot_off > 0 {
@@ -4092,6 +4127,10 @@ impl Riscv64Codegen {
         if self._target.stack_protector && self.canary_slot_off > 0 {
             self.emit_stack_chk_epilogue(self.canary_slot_off);
         }
+        // Restore ra (if frame size >0, saved ra earlier)
+        if self.ret_addr_off >= 0 {
+            self.emit_ld(1, 2, self.ret_addr_off); // ld x1, ret_addr_off(sp)
+        }
         if self.frame_bytes > 0 {
             self.addi_sp(self.frame_bytes);
         }
@@ -5974,6 +6013,27 @@ fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
     })
 }
 
+/// 文件作用域 `static` 变量判定 (与 find_func 对函数做同样的事)。
+fn var_is_static(prog: &Program, name: &str) -> bool {
+    prog.decls.iter().any(|d| match d {
+        Decl::Var(v) => v.name.name == name && v.is_static,
+        _ => false,
+    })
+}
+
+/// 递归判定一条 IR 表达式子树里是否含有调用 (Call)。
+fn expr_has_call(e: &crate::ir::TypedExpr) -> bool {
+    if e.kind == crate::ir::ExprKind::Call {
+        return true;
+    }
+    e.children.iter().any(expr_has_call)
+}
+
+/// 递归判定一条 IR 语句子树里是否含有调用。
+fn stmt_has_call(s: &crate::ir::TypedStmt) -> bool {
+    s.expressions.iter().any(expr_has_call) || s.nested.iter().any(stmt_has_call)
+}
+
 /// RISC-V HFA 分类 (同构浮点聚合)
 /// RV64 约定: 最多 4 个 float/double 字段, 同类型
 fn classify_rv_hfa(
@@ -6652,5 +6712,147 @@ mod tests {
         assert_eq!((insn_nclipu >> 26) & 0x3f, 0b100110, "VNCLIPU funct6");
         assert_eq!((insn_nclipu >> 12) & 0x7, 2, "VNCLIPU funct3=010");
         assert_eq!((insn_nclipu >> 25) & 1, 0, "VNCLIPU vm=0");
+    }
+}
+
+// Backend trait implementation (Phase 3b)
+mod backend {
+    use super::*;
+    use crate::codegen::backend::{Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage};
+    use crate::codegen::features::FeatureSet;
+    use crate::cli::Arch;
+    use crate::diagnostics::Diagnostic;
+
+    impl Backend for Riscv64Codegen {
+        fn arch(&self) -> Arch { Arch::RiscV64 }
+        fn features(&self) -> FeatureSet { FeatureSet::riscv64_cross() }
+        fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
+            self.set_source_name(&input.opts.source_name);
+            self.set_asm_text_mode(input.opts.emit_asm);
+            self.compile(input.module);
+            build_aux_sections(self, input);
+            Ok(CommonImage {
+                code: self.code.clone(), rodata: self.rodata.clone(), data: vec![], bss: 0,
+                tls: TlsImage { offset: 0, size: 0, decl: None },
+                symbols: ObjectSymbols { globals: self.symbols.iter().map(|s| s.name.clone()).collect(), locals: vec![], imports: vec![] },
+                relocs: ObjectRelocs { rellocs: self.relocations.iter().map(|r| format!("{:?}", r)).collect() },
+                extra_sections: self.extra_sections.iter().map(|sec| ExtraSection { name: sec.name.clone(), content: sec.data.clone() }).collect(),
+                diagnostics: self.diagnostics.clone(),
+                func_sizes: self.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            })
+        }
+        fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
+            self.set_source_name(&input.opts.source_name);
+            self.set_asm_text_mode(true);
+            self.compile(input.module);
+            Ok(self.build_asm_output(input.module).into_bytes())
+        }
+        fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
+            Ok(self.build_output())
+        }
+    }
+
+    /// 代码生成完成后组装附加节 (DWARF / .eh_frame / sanitizer / offload)
+    fn build_aux_sections(cg: &mut Riscv64Codegen, input: &CompileInput<'_>) {
+        let opts = input.opts;
+        let module = input.module;
+        use crate::codegen::elf;
+
+        if opts.debug_level > 0 && opts.relocatable {
+            let func_pcs: Vec<(&str, u64, u64)> = module
+                .functions
+                .iter()
+                .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64)))
+                .collect();
+            let dbg_opts = crate::debug::DebugOptions {
+                level: opts.debug_level,
+                dwarf_version: opts.dwarf_version,
+                source_name: opts.source_name.clone(),
+                arch: crate::debug::ArchKind::RiscV64,
+                ..crate::debug::DebugOptions::default()
+            };
+            // 构建 DWARF 行号表条目
+            let line_entries: Vec<crate::debug::LineEntry> = cg
+                .line_entries
+                .iter()
+                .map(|&(pc, line)| crate::debug::LineEntry {
+                    pc,
+                    line,
+                    column: 1,
+                    file_idx: 0,
+                    discriminator: 0,
+                    is_stmt: true,
+                    basic_block: false,
+                })
+                .collect();
+            let cu = crate::codegen::build_dwarf_cu(module, &opts.source_name, &func_pcs, line_entries);
+            let dbg = crate::debug::build_dwarf_full(&cu, &dbg_opts);
+            let extra_secs = crate::debug::dwarf_elf_sections(&dbg);
+            // 不再在这里手工 push `.debug_info`：它与 `extra_secs`（来自
+            // `DebugSections::to_elf_sections`）里的那份逐字节相同，双发只会得到
+            // 两个同名 PROGBITS 节。完整理由见 `aarch64/backend.rs` 里同一处注释。
+            for sec in extra_secs {
+                cg.push_extra_section(sec);
+            }
+            // BTF 已在 build_dwarf_full 中生成
+            if !dbg.btf.is_empty() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".BTF".to_string(),
+                    data: dbg.btf,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 4,
+                    group_name: None,
+                });
+            }
+            if !dbg.btf_ext.is_empty() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".BTF.ext".to_string(),
+                    data: dbg.btf_ext,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 4,
+                    group_name: None,
+                });
+            }
+        }
+
+        if opts.relocatable && input.target.unwind_tables {
+            let frames = cg.func_frames(module);
+            if !frames.is_empty() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".eh_frame".to_string(),
+                    data: crate::debug::build_eh_frame_with_arch(&frames, crate::debug::ArchKind::RiscV64),
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC,
+                    align: 8,
+                    group_name: None,
+                });
+            }
+        }
+
+        if opts.sanitizers.any() {
+            cg.push_extra_section(elf::ElfSection {
+                name: ".dcc.san_info".to_string(),
+                data: crate::sanitizer::sanitizer_metadata(opts.sanitizers),
+                ty: elf::SHT_PROGBITS,
+                flags: 0,
+                align: 1,
+                group_name: None,
+            });
+        }
+
+        if let Some(o) = opts.offload {
+            if !o.is_empty() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".dcc.offload".to_string(),
+                    data: o.to_binary(),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 8,
+                    group_name: None,
+                });
+            }
+        }
     }
 }

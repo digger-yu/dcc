@@ -91,6 +91,20 @@ impl Diagnostic {
             source_line: None,
         }
     }
+    /// 通用构造函数：支持动态严重级别（模块化提取的 emit/abi 代码使用）。
+    ///
+    /// 与 `err`/`warn` 的区别在于严重级别由调用方给定，且 span 可选
+    /// （无位置信息时退化为 `file:"" line:0`，各渲染器会跳过 caret 段）。
+    pub fn new(sev: Severity, msg: &str, span: Option<Span>) -> Self {
+        Self {
+            sev,
+            code: "E0500",
+            msg: msg.to_string(),
+            span: span.unwrap_or_else(|| Span::point("", 0, 0)),
+            hint: None,
+            source_line: None,
+        }
+    }
     /// 返回一个带 [code] 的简短严重性标签
     pub fn sev_tag(&self) -> String {
         let s = match self.sev {
