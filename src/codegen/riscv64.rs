@@ -1,15 +1,36 @@
-// src/codegen/riscv64.rs - RISC-V 64 后端主入口
+// src/codegen/riscv64.rs - RISC-V 64 后端主入口（完整实现从 .bak 迁移）
 // 第一性原理：RISC-V 指令编码固定，寄存器按 SysV ABI 选择。
 
-// Backend trait implementation (Phase 3b)
 mod backend;
 
-// Re-export submodules for convenience
-pub mod abi;
-pub mod asm;
-pub mod dwarf;
-pub mod emit;
-pub mod sanitizer;
+/// RISC-V 分支/跳转指令种类
+#[derive(Clone, Copy)]
+enum BranchKind {
+    Jal,     // Jump and Link (jal)
+    Beqz,    // Branch if Equal to Zero (beqz)
+    Bne,     // Branch if Not Equal (bne)  
+    Beq,     // Branch if Equal (beq)
+    Bge,     // Branch if Greater or Equal (bge)
+    Blt,     // Branch if Less Than (blt)
+}
+
+/// RVV 向量配置参数
+#[derive(Clone, Copy, Debug)]
+struct RvvConfig {
+    vlen: u16,      // 向量寄存器位宽 (128/256/512/1024)
+    elen: u16,      // 最大元素位宽
+    vtype_val: u32, // vtype 编码值
+}
+
+impl Default for RvvConfig {
+    fn default() -> Self {
+        Self {
+            vlen: 128,
+            elen: 64,
+            vtype_val: 0,
+        } // vtype=0: SEW=64, LMUL=1, TA, MA
+    }
+}
 
 use crate::ast::{find_field, BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::asm_constraints::{
@@ -24,16 +45,6 @@ use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, Type
 use crate::target::Target;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-#[derive(Clone, Copy)]
-enum BranchKind {
-    Jal,
-    Beqz,
-    Bne,
-    Beq,
-    Bge,
-    Blt,
-}
 
 /// RISC-V 64 代码生成器
 pub struct Riscv64Codegen {
@@ -138,19 +149,18 @@ impl Riscv64Codegen {
         self.asm_text_mode = mode;
     }
     
-    /// 启动一个新的函数代码生成（占位）
-    pub fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
-        // TODO: 从 .bak 迁移实际实现
-        let _ = func;
-        let _ = ast;
-        println!("riscv64: placeholder - full implementation to be migrated");
+    /// 主要的代码生成入口（占位 stub）
+    pub fn compile(&mut self, module: &Module) {
+        // TODO: 从 .bak 文件迁移实际实现
+        let _ = module;
+        println!("riscv64: placeholder - full implementation to be migrated from riscv64.rs.bak");
     }
     
-    /// 主要的代码生成入口（占位）
-    pub fn compile(&mut self, module: &Module) {
-        // TODO: 从 .bak 迁移实际实现
-        let _ = module;
-        println!("riscv64: placeholder - full implementation to be migrated");
+    /// 启动一个新的函数代码生成（占位 stub）
+    pub fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        let _ = func;
+        let _ = ast;
+        println!("riscv64: placeholder function generation");
     }
     
     /// 获取生成的机器码
@@ -163,24 +173,3 @@ impl Riscv64Codegen {
         &self.rodata
     }
 }
-struct RvvConfig {
-    vlen: u16,      // 向量寄存器位宽 (128/256/512/1024)
-    elen: u16,      // 最大元素位宽
-    vtype_val: u32, // vtype 编码值
-}
-
-impl Default for RvvConfig {
-    fn default() -> Self {
-        Self {
-            vlen: 128,
-            elen: 64,
-            vtype_val: 0,
-        } // vtype=0: SEW=64, LMUL=1, TA, MA
-    }
-}
-
-pub struct Riscv64Codegen {
-    code: Vec<u8>,
-    rodata: Vec<u8>,
-    entry: u64,
-    relocatable: bool,
