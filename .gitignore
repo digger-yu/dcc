@@ -129,3 +129,9 @@ perf.data.*
 
 # Report files from backend refactor sessions - do not track
 report/
+# Golden baseline test artifacts - temporary files for testing
+golden_baseline/
+golden_hashes/
+
+# Temporary commit message drafts
+commit_message_*.txt
