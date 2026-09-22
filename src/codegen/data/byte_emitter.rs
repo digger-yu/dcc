@@ -200,6 +200,49 @@ impl ByteEmitter {
         Ok(())
     }
     
+    /// Emit SIB (Scale-Index-Base) byte for complex memory addressing
+    /// 
+    /// SIB format:
+    ///   Bits 7-6: scale (1, 2, 4, or 8)
+    ///   Bits 5-3: index (register number)
+    ///   Bits 2-0: base (register number)
+    fn emit_sib(
+        &self,
+        bytes: &mut Vec<u8>,
+        address: &MemoryAddress,
+    ) -> Result<()> {
+        let mut sib = 0u8;
+        
+        // Scale field (bits 7-6)
+        let scale_bits = match address.scale {
+            1 => 0b00,
+            2 => 0b01,
+            4 => 0b10,
+            8 => 0b11,
+            _ => return Err(anyhow::anyhow!("Invalid scale factor: {}", address.scale)),
+        };
+        sib |= (scale_bits as u8) << 6;
+        
+        // Index field (bits 5-3)
+        let index_reg = if let Some(index) = address.index {
+            index.index()
+        } else {
+            0b100 // ESP as dummy index when not used
+        };
+        sib |= (index_reg & 0b111) << 3;
+        
+        // Base field (bits 2-0)
+        let base_reg = if let Some(base) = address.base {
+            base.index()
+        } else {
+            0b100 // ESP as dummy base
+        };
+        sib |= base_reg & 0b111;
+        
+        bytes.push(sib);
+        Ok(())
+    }
+    
     /// Emit extra bytes including SIB, displacement, immediates
     fn emit_extra_bytes(
         &self,
@@ -210,6 +253,11 @@ impl ByteEmitter {
         // Handle escape bytes first
         if let Some(ref escapes) = selected.format.escape_bytes {
             bytes.extend_from_slice(escapes);
+        }
+        
+        // Emit SIB byte for complex addressing (base+index)
+        if address.index.is_some() && address.base.is_some() {
+            self.emit_sib(bytes, address)?;
         }
         
         // Emit displacement if present
