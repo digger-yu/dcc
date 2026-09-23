@@ -11,9 +11,11 @@
 // 搬迁它们会波及大量字段可见性，故选取编译最平滑的方案。
 
 use crate::ast::*;
-use crate::codegen::elf;
+use crate::codegen::shared::elf;
+
 use crate::codegen::x86_64::{
     Codegen, FuncEmitChunk, GlobalVar, ParallelEmitCtx, ParallelGlobalSnap,
+
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

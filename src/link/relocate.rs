@@ -22,7 +22,7 @@
 //            THM_MOVW_PREL_NC/THM_MOVT_PREL
 
 use super::layout::{Layout, OutputRela, OutputSection};
-use crate::codegen::elf::{
+use crate::codegen::shared::elf::{
     R_AARCH64_ABS16, R_AARCH64_ABS32, R_AARCH64_ABS64,
     R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_LO21,
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADR_PREL_PG_HI21_NC,
@@ -1747,7 +1747,7 @@ fn write_u32(sec: &mut OutputSection, off: usize, value: u32) -> Result<(), Relo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
+    use crate::codegen::shared::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
     use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
 
     #[allow(clippy::too_many_arguments)]

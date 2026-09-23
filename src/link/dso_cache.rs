@@ -196,7 +196,7 @@ pub fn resolve_library(
 
 /// 解析 .so 文件为 DsoInfo (提取动态符号表).
 pub fn parse_dso_file(path: &Path) -> std::io::Result<DsoInfo> {
-    use crate::codegen::elf;
+    use crate::codegen::shared::elf;
 
     let buf = std::fs::read(path)?;
     if buf.len() < 64 || buf.get(0..4) != Some(&elf::ELFMAG) {
@@ -493,10 +493,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         // 构造最小 ELF
         let mut elf = vec![0u8; 64];
-        elf[0..4].copy_from_slice(&crate::codegen::elf::ELFMAG);
-        elf[4] = crate::codegen::elf::ELFCLASS64;
-        elf[5] = crate::codegen::elf::ELFDATA2LSB;
-        elf[6] = crate::codegen::elf::EV_CURRENT;
+        elf[0..4].copy_from_slice(&crate::codegen::shared::elf::ELFMAG);
+        elf[4] = crate::codegen::shared::elf::ELFCLASS64;
+        elf[5] = crate::codegen::shared::elf::ELFDATA2LSB;
+        elf[6] = crate::codegen::shared::elf::EV_CURRENT;
         let so_path = dir.join("libbar.so");
         std::fs::write(&so_path, &elf).unwrap();
 

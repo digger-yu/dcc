@@ -2703,7 +2703,7 @@ impl LinkerScript {
 
 use super::object::InputBundle;
 use super::resolve::ResolvedSymbol;
-use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
+use crate::codegen::shared::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
 
 /// 链接脚本执行结果
 pub struct ScriptLayoutResult {
@@ -4644,7 +4644,7 @@ mod tests {
         // 测试 *(COMMON) 执行时正确放置 COMMON 符号
         use super::super::object::{FlatSection, InputObject};
         use super::super::resolve::ResolvedSymbol;
-        use crate::codegen::elf::{STB_GLOBAL, STT_OBJECT};
+        use crate::codegen::shared::elf::{STB_GLOBAL, STT_OBJECT};
 
         let bundle = InputBundle {
             objects: vec![InputObject {

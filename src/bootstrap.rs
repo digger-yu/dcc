@@ -58,8 +58,8 @@ pub enum SymbolDiffKind {
 /// 解析 .text / .rodata 段载荷, 返回 HashMap<name, bytes> (None 表示无此段).
 fn read_sections(elf: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
     if elf.len() < 64
-        || elf.get(0..4) != Some(&crate::codegen::elf::ELFMAG)
-        || elf[4] != crate::codegen::elf::ELFCLASS64
+        || elf.get(0..4) != Some(&crate::codegen::shared::elf::ELFMAG)
+        || elf[4] != crate::codegen::shared::elf::ELFCLASS64
     {
         return None;
     }
@@ -403,10 +403,10 @@ fn semantic_diff(left_elf: &[u8], right_elf: &[u8]) -> (Vec<SymbolDiff>, Vec<Str
         }
     }
     // 引用关系 diff
-    let left_refs: BTreeSet<String> = crate::codegen::elf::referenced_symbol_names(left_elf)
+    let left_refs: BTreeSet<String> = crate::codegen::shared::elf::referenced_symbol_names(left_elf)
         .into_iter()
         .collect();
-    let right_refs: BTreeSet<String> = crate::codegen::elf::referenced_symbol_names(right_elf)
+    let right_refs: BTreeSet<String> = crate::codegen::shared::elf::referenced_symbol_names(right_elf)
         .into_iter()
         .collect();
     let mut ref_diffs = Vec::new();
@@ -505,7 +505,7 @@ impl DiffReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf;
+    use crate::codegen::shared::elf;
 
     /// 构造一个最小 ET_REL ELF64 .o, 包含 .text + .data + .symtab + .strtab.
     /// 用于 bootstrap diff 单元测试.

@@ -131,7 +131,7 @@ pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
 
 /// 从单个 ET_REL 目标文件提取 `.llvm.lto` 摘要。
 pub fn extract_from_object(elf: &[u8]) -> Option<LtoUnit> {
-    let data = crate::codegen::elf::read_section_data(elf, ".llvm.lto")?;
+    let data = crate::codegen::shared::elf::read_section_data(elf, ".llvm.lto")?;
     parse_summary(&data)
 }
 
@@ -180,7 +180,7 @@ pub fn dead_local_functions(merged: &LtoUnit) -> Vec<String> {
 /// 根据输入目标文件的重定位表，将引用的符号标记为 referenced。
 pub fn mark_references_from_objects(merged: &mut LtoUnit, objects: &[&[u8]]) {
     for obj in objects {
-        for name in crate::codegen::elf::referenced_symbol_names(obj) {
+        for name in crate::codegen::shared::elf::referenced_symbol_names(obj) {
             if let Some(summary) = merged.functions.get_mut(&name) {
                 summary.referenced = true;
             } else {
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn extract_from_elf_section() {
-        use crate::codegen::elf::{self, ElfSection, SHT_PROGBITS};
+        use crate::codegen::shared::elf::{self, ElfSection, SHT_PROGBITS};
         let unit = build_unit("unit.c", &[("entry", 48, true)]);
         let payload = serialize_summary(&unit);
         let obj = elf::build_elf_rel_x86_64(
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn mark_references_from_rela_marks_cross_tu() {
-        use crate::codegen::elf::{self, ElfRela, ElfSym};
+        use crate::codegen::shared::elf::{self, ElfRela, ElfSym};
         let caller_obj = elf::build_elf_rel_x86_64(
             &[0xe8, 0, 0, 0, 0, 0xc3], // call rel32 + ret
             &[],

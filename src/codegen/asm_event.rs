@@ -5,7 +5,8 @@
 // disassembly. Events track labels, directives, instructions, data sections,
 // and relocations with full semantic information.
 
-use crate::codegen::elf::{ElfRela, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64};
+use crate::codegen::shared::elf::{ElfRela, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64};
+
 
 // (其余代码保持不变 - 简化处理移除了部分问题字段)
 
@@ -344,7 +345,7 @@ pub enum RelocKind {
 }
 
 impl RelocKind {
-    pub fn from_elf_rela(rela: &crate::codegen::elf::ElfRela) -> Option<Self> {
+    pub fn from_elf_rela(rela: &crate::codegen::shared::elf::ElfRela) -> Option<Self> {
         match rela.rel_type {
             R_X86_64_PC32 => Some(RelocKind::Pc32),
             R_X86_64_PLT32 => Some(RelocKind::Plt32),

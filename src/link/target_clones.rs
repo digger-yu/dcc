@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use super::layout::{Layout, OutputRela, OutputSectionKind, OutputSymbol};
-use crate::codegen::elf::{R_X86_64_IRELATIVE, STB_GLOBAL, STT_GNU_IFUNC, STV_DEFAULT};
+use crate::codegen::shared::elf::{R_X86_64_IRELATIVE, STB_GLOBAL, STT_GNU_IFUNC, STV_DEFAULT};
 
 /// 单个 target_clones 函数的所有变体
 #[derive(Debug, Clone)]

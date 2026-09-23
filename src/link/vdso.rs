@@ -77,7 +77,7 @@ pub fn parse_vdso(path: &Path) -> Result<VdsoInfo, VdsoError> {
 
 /// 入口: 直接对内存中的 vDSO 字节做解析 (便于测试).
 pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoError> {
-    use crate::codegen::elf;
+    use crate::codegen::shared::elf;
 
     if buf.len() < 64 {
         return Err(VdsoError::Truncated("< 64 bytes".into()));
@@ -335,7 +335,7 @@ fn detect_vdso_from_proc_maps() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf;
+    use crate::codegen::shared::elf;
 
     /// 构造一个最小 ET_DYN ELF64 (模拟 vDSO 镜像), 包含 .text + .symtab
     /// + .strtab + .shstrtab. 2 个 STT_FUNC 符号: __vdso_clock_gettime

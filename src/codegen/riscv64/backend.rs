@@ -1,14 +1,15 @@
 // src/codegen/riscv64/backend.rs - Backend trait implementation for RISC-V 64 Codegen
 
 use crate::cli::Arch;
-use crate::codegen::backend::{Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage};
-use crate::codegen::features::FeatureSet;
-use crate::codegen::riscv64::Riscv64Codegen;
-use crate::codegen::elf;
+use crate::codegen::shared::backend::{Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage};
+use crate::codegen::shared::features::FeatureSet;
+use crate::codegen::riscv64::registers::*;
+use crate::codegen::riscv64::abi::*;
+use crate::codegen::shared::elf;
 use crate::diagnostics::Diagnostic;
 use std::collections::BTreeMap;
 
-impl Backend for Riscv64Codegen {
+impl Backend for super::riscv64_impl::Riscv64Codegen {
     fn arch(&self) -> Arch {
         Arch::RiscV64
     }

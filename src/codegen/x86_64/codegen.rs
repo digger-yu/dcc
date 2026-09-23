@@ -2,8 +2,8 @@
 // Phase 1b Migration: Extract struct from monolithic mod.rs
 
 use crate::ast::{Designator, Expr, Type};
-use crate::codegen::elf::{ComdatGroup, ElfRela, ElfSection, ExtraRelaSection, ElfSym};
-use crate::codegen::x86_64::{CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout, GlobalVar, PendingCodeRel, PendingJump};
+use crate::codegen::shared::elf;
+use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ExtraRelaSection, ElfSym};
 use crate::diagnostics::Diagnostic;
 use crate::preproc::LineSpan;
 use crate::static_locals::StaticLocalMap;
@@ -22,51 +22,51 @@ pub struct Codegen {
     pub entry: u64,
     pub target: Target,
     pub labels: HashMap<String, u64>,
-    current_asm_line: usize,
-    current_asm_src_line: u32,
+    pub(super) current_asm_line: usize,
+    pub(super) current_asm_src_line: u32,
     pub diagnostics: Vec<Diagnostic>,
     /// 预处理输出行号 → 源文件位置的映射 (诊断定位用)
     pub line_map: Vec<LineSpan>,
-    pending: Vec<PendingJump>,
-    next_label: u32,
-    var_map: HashMap<String, (i64, Type)>,
-    loop_continue: Option<String>,
-    loop_break: Option<String>,
+    pub(super) pending: Vec<PendingJump>,
+    pub(super) next_label: u32,
+    pub(super) var_map: HashMap<String, (i64, Type)>,
+    pub(super) loop_continue: Option<String>,
+    pub(super) loop_break: Option<String>,
     /// break 跳转目标栈：(标签，是否在 switch 内需先弹出 switch 值).
     /// switch 压入 (l_break, true), 循环压入 (le, false); break 语句
     /// 总是跳到栈顶目标 (最近封闭的 switch / 循环).
-    break_targets: Vec<(String, bool)>,
+    pub(super) break_targets: Vec<(String, bool)>,
     // .rodata: 字符串池 + 待修补引用
     pub rodata: Vec<u8>,
-    string_pool: HashMap<Vec<u8>, u64>, // data -> offset in rodata
-    string_refs: Vec<(u64, Vec<u8>)>,   // (code_pos, data)
-    float_refs: Vec<(u64, u64)>,        // (code_pos, rodata_offset) - SSE 浮点字面量引用
-    x87_float_refs: Vec<(u64, u64)>,    // (code_pos, rodata_offset) - x87 fld RIP-relative 引用
+    pub(super) string_pool: HashMap<Vec<u8>, u64>, // data -> offset in rodata
+    pub(super) string_refs: Vec<(u64, Vec<u8>)>,   // (code_pos, data)
+    pub(super) float_refs: Vec<(u64, u64)>,        // (code_pos, rodata_offset) - SSE 浮点字面量引用
+    pub(super) x87_float_refs: Vec<(u64, u64)>,    // (code_pos, rodata_offset) - x87 fld RIP-relative 引用
     /// -fbounds-check ubsan 诊断数据：LEA rdi, [rip+disp32] 的 code_pos 与
     /// OutOfBoundsData 偏移。ET_EXEC: 偏移在 rodata, resolve() 修补 disp32;
     /// ET_REL: 偏移在 .data, compile_rel 生成 PC32 重定位 (.data 节符号)。
-    ubsan_lea_refs: Vec<(u64, u64)>,
+    pub(super) ubsan_lea_refs: Vec<(u64, u64)>,
     /// -fbounds-check ubsan 诊断数据：OutofBoundsData 内绝对指针槽
     /// (data_off, field_off, target_rodata_off), 目标均为 rodata 内
     /// TypeDescriptor / 文件名字符串。ET_EXEC: resolve() 补绝对地址;
     /// ET_REL: 生成 R_X86_64_64 重定位 (.rodata 节符号)。
-    ubsan_ptr_refs: Vec<(u64, u64, u64)>,
+    pub(super) ubsan_ptr_refs: Vec<(u64, u64, u64)>,
     // 全局变量 (通过 lookup_global_info / lookup_global_by_key 受控访问)
-    globals_raw: HashMap<String, GlobalVar>,
+    pub(super) globals_raw: HashMap<String, GlobalVar>,
     // CompoundLit 去重缓存：同类型同内容的 CompoundLit 只物化一次
-    // key = format!("{:?}", Expr) (类型+inits 序列化),
+    // key = format!("{:?}", Expr) (类型 +inits 序列化),
     // value = (anon_name, rodata_offset)
-    compound_lit_cache: HashMap<String, (String, u64)>,
-    frame_size: i64,
-    expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
-    max_expr_depth: u32, // 最大表达式嵌套深度
-    temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
+    pub(super) compound_lit_cache: HashMap<String, (String, u64)>,
+    pub(super) frame_size: i64,
+    pub(super) expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
+    pub(super) max_expr_depth: u32, // 最大表达式嵌套深度
+    pub(super) temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
     /// 已注册固定栈对象占用的 8 字节槽数。
     /// 只记录真实布局用量，不再为大数组创建 __pad_ 占位项。
-    var_map_total_slots: i64,
-    vec_temp_off: i64,  // 向量临时槽区基址 (r13 相对)
-    vla_offsets: HashMap<String, i64>,
-    vla_total_size: i64,
+    pub(super) var_map_total_slots: i64,
+    pub(super) vec_temp_off: i64,  // 向量临时槽区基址 (r13 相对)
+    pub(super) vla_offsets: HashMap<String, i64>,
+    pub(super) vla_total_size: i64,
     /// 局部 variable-sized struct (含 VLA 字段) 的声明时绑定总大小槽:
     /// 类型名 → 槽偏移。类型声明语句执行时求值一次 (C11 6.2.4p7:
     /// VM 类型在声明时绑定维度，后续 sizeof 读槽不重算，20041218-2:
@@ -75,29 +75,30 @@ pub struct Codegen {
     vm_struct_size_slots: HashMap<String, i64>,
     // 当前函数体含 VLA 声明：goto/break/continue 跳转前需恢复动态栈基，
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
-    cur_func_has_vla: bool,
-    bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
+    pub(super) vm_struct_size_slots: HashMap<String, i64>,
+    pub(super) cur_func_has_vla: bool,
+    pub(super) bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
     /// 向量 binop 操作数物化槽号。嵌套向量 binop 时每层结果槽 R 的
     /// 操作数物化到 R+1 (XMM 快速路径 R+1/R+2), 避免内层子表达式
     /// 结果覆盖外层已写入的结果槽 (pr23135: 链式 k0+k1+k3+...
     /// 低层元素被内层重物化覆盖)。非 binop 上下文默认槽 1。
-    vector_op_slot: usize,
+    pub(super) vector_op_slot: usize,
     // 可重定位模式 (.o)
     pub relocatable: bool,
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
     patchable_function_entry: Option<(usize, usize)>,
-    pub symbols: Vec<ElfSym>,
-    pub sym_index: HashMap<String, u32>,
-    pub relocations: Vec<ElfRela>,
-    pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
-    pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转：通用 code relocation
-    pending_func_addr_rels: Vec<(u64, String, bool)>, // (code_offset, func_name, is_lea: true=PC32, false=GOTPCREL)
-    defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
-    error_attr_fns: HashSet<String>,       // __attribute__((error)) 函数名 (调用时发射 ud2)
-    pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
-    pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
-    pub data_section: Vec<u8>,             // .data 节 (已初始化全局变量)
-    pub bss_size: u64,                     // .bss 大小
+    pub(super) symbols: Vec<ElfSym>,
+    pub(super) sym_index: HashMap<String, u32>,
+    pub(super) relocations: Vec<ElfRela>,
+    pub(super) pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
+    pub(super) pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转：通用 code relocation
+    pub(super) pending_func_addr_rels: Vec<(u64, String, bool)>, // (code_offset, func_name, is_lea: true=PC32, false=GOTPCREL)
+    pub(super) defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
+    pub(super) error_attr_fns: HashSet<String>,       // __attribute__((error)) 函数名 (调用时发射 ud2)
+    pub(super) pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
+    pub(super) pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
+    pub(super) data_section: Vec<u8>,             // .data 节 (已初始化全局变量)
+    pub(super) bss_size: u64,                     // .bss 大小
     pub tdata_section: Vec<u8>,            // .tdata (TLS 初始化)
     pub tbss_size: u64,                    // .tbss (TLS 未初始化)
     pub tdata_align: u64,
@@ -207,14 +208,14 @@ pub struct Codegen {
     pub fp_contract: bool,
     /// #pragma STDC CX_LIMITED_RANGE: true 时 complex 除法使用有限范围公式.
     pub cx_limited_range: bool,
-    asm_directives: Vec<String>,
-    asm_directives_at: Vec<(u64, String)>,
-    disasm_calls: HashMap<u64, String>,
-    disasm_data: HashMap<u64, String>,
-    global_asm_exports: HashSet<String>,
-    asm_func_symbols: HashSet<String>,
-    asm_last_text_label: Option<(String, u64)>,
-    func_asm_layout: HashMap<String, FuncAsmLayout>,
+    pub(super) asm_directives: Vec<String>,
+    pub(super) asm_directives_at: Vec<(u64, String)>,
+    pub(super) disasm_calls: HashMap<u64, String>,
+    pub(super) disasm_data: HashMap<u64, String>,
+    pub(super) global_asm_exports: HashSet<String>,
+    pub(super) asm_func_symbols: HashSet<String>,
+    pub(super) asm_last_text_label: Option<(String, u64)>,
+    pub(super) func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
     pub parallel_codegen: bool,
     /// asm 块 DWARF 行号记录：(pc_start, pc_end, src_line)
@@ -226,45 +227,328 @@ pub struct Codegen {
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
     // --- AsmEvent structured logging for -S output ---
     pub asm_events: Vec<crate::codegen::asm_event::AsmEvent>,
-    /// rodata 中被字符串初始化指针占位的变量名列表 (resolve 阶段修补绝对地址)
-    rodata_string_init_globals: Vec<String>,
-    /// rodata 中字符串初始化指针槽的偏移列表 (compile_exec/ET_EXEC 路径的
-    /// InitList 数组/结构体元素; resolve 阶段修补绝对地址)
-    rodata_string_slots: Vec<u64>,
-    /// data 节引用 rodata 字符串的重定位：(data_off, string_rodata_off, custom_sec)
-    pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
-    /// -mrecord-mcount: call site addresses for __mcount_loc section
-    mcount_loc_entries: Vec<u64>,
-    /// GNU asm label 映射：C 名 → asm("label") 覆盖名
-    /// 用于将 ELF 符号名从 C 标识符重映射为用户指定的 asm 标签
-    asm_label_map: HashMap<String, String>,
-    /// TLS 变量访问模型映射：变量名 → tls_model 字符串
-    /// 支持 "local-exec", "initial-exec", "local-dynamic", "global-dynamic"
-    tls_var_models: HashMap<String, String>,
-    /// Function declarations for __alignof__(func) lookup
-    func_alignments: HashMap<String, usize>,
+    pub(super) rodata_string_init_globals: Vec<String>,
+    pub(super) rodata_string_slots: Vec<u64>,
+    pub(super) pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
+    pub(super) mcount_loc_entries: Vec<u64>,
+    pub(super) asm_label_map: HashMap<String, String>,
+    pub(super) tls_var_models: HashMap<String, String>,
+    pub(super) func_alignments: HashMap<String, usize>,
     // ── 寄存器分配器：caller/callee-saved 显式建模 ──
-    /// 被调用者保存寄存器池：rbx(3), r12(12), r14(14), r15(15).
-    /// 这些寄存器在函数内可用作额外暂存，但必须在序言保存/尾声恢复.
-    /// 使用 x86 硬件编码 (非 parse_reg_name 编号).
-    callee_saved_pool: [u8; 4],
-    /// 当前已分配的被调用者保存寄存器 (位掩码，bit i = callee_saved_pool[i])
-    reg_allocated: u8,
-    /// 当前函数是否使用了任何被调用者保存寄存器 (用于 CFI / 序言优化)
-    callee_saved_used: u8,
-    /// 序言/尾声中 callee-saved 保存/恢复指令的补丁点:
-    /// (code 偏移，位掩码 bit). 函数体生成完毕后，若该寄存器未被使用，
-    /// 将对应的 4 字节 mov 改写为 4×0x90 (nop), 避免叶子函数的冗余保存.
-    callee_save_patch_sites: Vec<(u64, u8)>,
+    pub(super) callee_saved_pool: [u8; 4],
+    pub(super) reg_allocated: u8,
+    pub(super) callee_saved_used: u8,
+    pub(super) callee_save_patch_sites: Vec<(u64, u8)>,
     // ── 嵌套函数 trampoline ──
-    /// 嵌套函数 trampoline 栈槽：函数名 → 帧偏移.
-    /// 当嵌套函数地址被取时，在栈上生成 trampoline 代码，
-    /// 设置 r10 = 父帧指针后跳转到实际函数.
-    trampoline_slots: HashMap<String, i64>,
-    /// trampoline 代码大小 (每函数 32 字节)
-    trampoline_total_size: i32,
-    /// 完整 struct/union 定义映射：名称 → 完整类型 (含字段列表).
-    /// 用于解析前向引用导致的不完整类型 (如 `struct S *p` 在 S 定义前声明，
-    /// 后续 `p->field` 需要完整字段列表来计算偏移).
-    complete_struct_types: HashMap<String, Type>,
+    pub(super) trampoline_slots: HashMap<String, i64>,
+    pub(super) trampoline_total_size: i32,
+    pub(super) complete_struct_types: HashMap<String, Type>,
+}
+pub struct GlobalVar {
+    offset: u64,
+    size: usize,
+    ty: Type,
+    init: Option<Vec<u8>>,
+    section: u16,
+    is_tls: bool,
+    in_data_section: bool,
+}
+
+pub struct PendingJump {
+    /// 原始 self.code 中的指令起始偏移。
+    at: u64,
+    target: String,
+    kind: JumpKind,
+    /// disp32/imm32 字段在原始 self.code 中的偏移。
+    disp_offset: u64,
+    /// PC-relative 指令的下一条指令偏移。
+    next_ip: u64,
+    /// push $label: imm32 = absolute address (not PC-relative)
+    is_push_imm: bool,
+}
+
+pub enum JumpKind {
+    Jmp,
+    Je,
+    Jne,
+    Jl,
+    Jle,
+    Jg,
+    Jge,
+    Jb,
+    Ja,
+    Jns,
+    Jo,
+}
+
+pub enum AbiClass {
+    NoClass,
+    Integer,
+    Sse,
+    SseUp,
+    X87,
+    X87Up,
+    ComplexX87,
+    Memory,
+}
+
+pub enum ArgLoc {
+    Gp(u8),
+    Xmm(u8),
+    Stack(usize),
+}
+
+pub struct CustomSecRel {
+    sec_idx: usize,
+    offset: u64,
+    symbol: String,
+    rel_type: u32,
+    addend: i64,
+}
+
+pub struct DeferredPushsectionFixup {
+    sec_idx: usize,
+    data_offset: usize,
+    left_label: String,
+    right_label: String,
+    byte_size: usize, // 1 for .byte, 2 for .short
+}
+
+pub struct FuncAsmLayout {
+    section: String,
+    bytes: Vec<u8>,
+    text_start: u64,
+}
+pub struct PendingCodeRel {
+    offset: u64,
+    symbol: String,
+    rel_type: u32,
+    addend: i64,
+}
+
+pub enum VaListAddress {
+    /// 命名变量 (局部或全局). codegen 内部按 is_global_not_local 分派.
+    Named(String),
+    /// va_list 地址已在寄存器 rcx 中 (来自指针解引用或参数退化).
+    InReg,
+    /// va_list 地址在 [r13 + offset] (来自结构体成员或数组下标).
+    Lvalue(i32),
+}
+
+pub struct ParallelGlobalSnap {
+    offset: u64,
+    size: usize,
+    section: u16,
+    is_tls: bool,
+}
+
+pub struct ParallelEmitCtx {
+    target: Target,
+    relocatable: bool,
+    function_sections: bool,
+    emit_asm_text: bool,
+    debug_level: u8,
+    emit_cfi: bool,
+    source_name: String,
+    line_map: Vec<LineSpan>,
+    globals: HashMap<String, ParallelGlobalSnap>,
+    variadic_funcs: HashMap<String, bool>,
+    old_style_funcs: std::collections::HashSet<String>,
+    nested_funcs: HashMap<String, Vec<(String, i64)>>,
+    nested_func_renames: HashMap<String, HashMap<String, String>>,
+    nested_func_parent: HashMap<String, String>,
+    nested_tramp_offsets: HashMap<String, i64>,
+    nested_chain_offsets: HashMap<String, i64>,
+    nested_func_rename_counter: u32,
+    func_param_types: HashMap<String, Vec<Type>>,
+    defined_funcs: HashSet<String>,
+    error_attr_fns: HashSet<String>,
+    global_reg_bindings: HashMap<String, u8>,
+    rodata: Vec<u8>,
+    string_pool: HashMap<Vec<u8>, u64>,
+    text_align: u64,
+}
+
+pub struct FuncEmitChunk {
+    name: String,
+    code: Vec<u8>,
+    entry_offset: u64,
+    size: u64,
+    labels: HashMap<String, u64>,
+    pending: Vec<PendingJump>,
+    string_refs: Vec<(u64, Vec<u8>)>,
+    float_refs: Vec<(u64, u64)>,
+    x87_float_refs: Vec<(u64, u64)>,
+    pending_func_rels: Vec<(u64, String)>,
+    pending_code_rels: Vec<PendingCodeRel>,
+    pending_func_addr_rels: Vec<(u64, String, bool)>,
+    pending_data_rels: Vec<(u64, String)>,
+    pending_sib_data_rels: Vec<(u64, String)>,
+    label_addr_refs: Vec<(u64, String)>,
+    pending_custom_sec_rels: Vec<CustomSecRel>,
+    pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    extra_sections: Vec<elf::ElfSection>,
+    custom_sec_indices: HashMap<String, usize>,
+    disasm_calls: HashMap<u64, String>,
+    /// rodata 增量：chunk 编译期间新增的 rodata 数据
+    new_rodata: Vec<u8>,
+    /// chunk 开始时的 rodata 大小 (用于计算增量)
+    rodata_base: u64,
+}
+
+impl Codegen {
+    pub fn new(target: Target) -> Self {
+        Self {
+            code: vec![],
+            entry: 0,
+            target,
+            labels: Default::default(),
+            pending: vec![],
+            next_label: 0,
+            var_map: HashMap::new(),
+            loop_continue: None,
+            loop_break: None,
+            break_targets: Vec::new(),
+            rodata: vec![],
+            string_pool: HashMap::new(),
+            string_refs: vec![],
+            float_refs: vec![],
+            x87_float_refs: vec![],
+            ubsan_lea_refs: vec![],
+            ubsan_ptr_refs: vec![],
+            globals_raw: HashMap::new(),
+            compound_lit_cache: HashMap::new(),
+            frame_size: 0,
+            expr_depth: 0,
+            max_expr_depth: 0,
+            temp_slots: 0,
+            var_map_total_slots: 0,
+            vec_temp_off: 0,
+            vla_offsets: HashMap::new(),
+            vla_total_size: 0,
+            vm_struct_size_slots: HashMap::new(),
+            cur_func_has_vla: false,
+            bf_rmw_depth: 0,
+            vector_op_slot: 1,
+            relocatable: false,
+            function_sections: false,
+            patchable_function_entry,
+            symbols: vec![],
+            sym_index: HashMap::new(),
+            relocations: vec![],
+            pending_func_rels: vec![],
+            pending_code_rels: vec![],
+            pending_func_addr_rels: vec![],
+            defined_funcs: HashSet::new(),
+            error_attr_fns: HashSet::new(),
+            pending_data_rels: vec![],
+            pending_sib_data_rels: vec![],
+            data_section: vec![],
+            bss_size: 0,
+            tdata_section: vec![],
+            tbss_size: 0,
+            tdata_align: 8,
+            tbss_align: 8,
+            exec_text_size: 0,
+            pending_tls_rels: vec![],
+            text_align: 16,
+            data_align: 8,
+            bss_align: 8,
+            extra_sections: vec![],
+            custom_sec_indices: HashMap::new(),
+            func_sizes: HashMap::new(),
+            variadic_funcs: HashMap::new(),
+            old_style_funcs: std::collections::HashSet::new(),
+            variadic_named_params: 0,
+            variadic_named_gp: 0,
+            variadic_named_fp: 0,
+            variadic_overflow_offset: 16,
+            variadic_reg_save_offset: 0,
+            current_sret_offset: None,
+            sret_depth: 0,
+            nested_funcs: HashMap::new(),
+            nested_func_renames: HashMap::new(),
+            nested_func_parent: HashMap::new(),
+            nested_tramp_offsets: HashMap::new(),
+            nested_chain_offsets: HashMap::new(),
+            nested_func_rename_counter: 0,
+            current_func_name: String::new(),
+            current_func_ret_ty: Type::Int,
+            static_local_map: crate::static_locals::StaticLocalMap::default(),
+            real_global_names: std::collections::HashSet::new(),
+            func_param_types: HashMap::new(),
+            current_func_is_nested: false,
+            local_labels: std::collections::HashSet::new(),
+            current_returns_nonnull: false,
+            current_is_noreturn: false,
+            current_no_instrument: false,
+            static_chain_offset: 0,
+            upvar_offsets: HashMap::new(),
+            upvar_chain_depth: HashMap::new(),
+            upvar_intermediate_offsets: HashMap::new(),
+            label_addr_refs: vec![],
+            reg_bindings: HashMap::new(),
+            global_reg_bindings: HashMap::new(),
+            pending_data64_rels: vec![],
+            pending_rodata_rels: vec![],
+            pending_label_diff_rels: vec![],
+            data_relocations: vec![],
+            cleanup_vars: vec![],
+            extra_rela_sections: vec![],
+            comdat_groups: vec![],
+            pending_debug_info_relocs: vec![],
+            pushsection_stack: vec![],
+            section_stack: vec![],
+            section_active: false,
+            pending_custom_sec_rels: vec![],
+            pushsection_exec_stack: vec![],
+            pushsection_code_ranges: vec![],
+            deferred_pushsection_fixups: vec![],
+            emit_asm_text: false,
+            debug_level: 0,
+            emit_cfi: false,
+            bounds_check: false,
+            trapv: false,
+            kasan: false,
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+            asm_directives: vec![],
+            asm_directives_at: vec![],
+            disasm_calls: HashMap::new(),
+            disasm_data: HashMap::new(),
+            global_asm_exports: HashSet::new(),
+            asm_func_symbols: HashSet::new(),
+            asm_last_text_label: None,
+            func_asm_layout: HashMap::new(),
+            asm_line_entries: Vec::new(),
+            asm_insn_debug_entries: Vec::new(),
+            // --- AsmEvent structured logging ---
+            asm_events: Vec::new(),
+            current_asm_line: 0,
+            current_asm_src_line: 0,
+            diagnostics: Vec::new(),
+            line_map: Vec::new(),
+            source_name: String::new(),
+            parallel_codegen: false,
+            rodata_string_init_globals: vec![],
+            rodata_string_slots: vec![],
+            pending_data_rodata_rels: vec![],
+            mcount_loc_entries: vec![],
+            asm_label_map: HashMap::new(),
+            tls_var_models: HashMap::new(),
+            // 寄存器分配器初始化
+            callee_saved_pool: [3, 12, 14, 15], // rbx, r12, r14, r15
+            reg_allocated: 0,
+            callee_saved_used: 0,
+            callee_save_patch_sites: vec![],
+            // 嵌套函数 trampoline
+            trampoline_slots: HashMap::new(),
+            trampoline_total_size: 0,
+            // Function Alignment lookup for __alignof__(func)
+            func_alignments: HashMap::new(),
+            // 完整 struct/union 定义映射 (前向引用解析)
+            complete_struct_types: HashMap::new(),
+        }
+    }
 }

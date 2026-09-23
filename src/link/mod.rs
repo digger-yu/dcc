@@ -272,7 +272,7 @@ fn populate_output_comdat_groups(
         }
         // Mark member sections with SHF_GROUP.
         for &out_idx in &member_sec_indices {
-            layout.sections[out_idx as usize].flags |= crate::codegen::elf::SHF_GROUP;
+            layout.sections[out_idx as usize].flags |= crate::codegen::shared::elf::SHF_GROUP;
         }
         layout.comdat_groups.push(layout::OutputComdatGroup {
             signature: grp.signature.clone(),
@@ -475,7 +475,7 @@ pub fn link_from_bundle(
             target_clones::generate_resolver_blob(&cfg.target_clones);
 
         if !resolver_blob.is_empty() {
-            use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS};
+            use crate::codegen::shared::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS};
             use crate::link::layout::{OutputSection, OutputSectionKind};
 
             let ifunc_section_name = ".text.ifunc".to_string();
@@ -595,7 +595,7 @@ pub fn link_from_bundle(
         let dead_section_names: std::collections::HashSet<String> =
             dead_set.iter().map(|name| format!(".text.{}", name)).collect();
         layout.symbols.retain(|sym| {
-            !(sym.ty == crate::codegen::elf::STT_SECTION
+            !(sym.ty == crate::codegen::shared::elf::STT_SECTION
                 && dead_section_names.contains(sym.name.as_str()))
         });
         layout.sections.retain(|sec| {
@@ -807,7 +807,7 @@ fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
 /// _start 调用 main(argc=0, argv=NULL, envp=NULL) 然后 exit(return).
 /// 支持 x86_64, aarch64, riscv64, arm, mips/mips64 架构.
 fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
-    use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
+    use crate::codegen::shared::elf::{STB_GLOBAL, STT_FUNC};
     use crate::link::layout::{OutputSectionKind, OutputSymbol};
     // 如果已存在 _start 或不是可执行文件, 跳过
     // PIE 同样需要入口桩: _start 桩全部由 PC-relative 指令构成, 位置无关。
@@ -1015,7 +1015,7 @@ fn embed_vdso(
     vdso_path: &Path,
     verbose: bool,
 ) -> Result<(), Vec<Diagnostic>> {
-    use crate::codegen::elf::{
+    use crate::codegen::shared::elf::{
         SHF_ALLOC, SHF_EXECINSTR, SHT_NOTE, SHT_PROGBITS, STB_GLOBAL, STT_FUNC,
     };
     use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
@@ -1170,7 +1170,7 @@ fn inject_lto_section_from_bundle(
     bundle: &InputBundle,
     verbose: bool,
 ) {
-    use crate::codegen::elf::SHT_PROGBITS;
+    use crate::codegen::shared::elf::SHT_PROGBITS;
     use crate::link::layout::{OutputSection, OutputSectionKind};
 
     // 0. 收集输入 ELF 中的 LOCAL 函数名 (static 函数)
@@ -1178,8 +1178,8 @@ fn inject_lto_section_from_bundle(
         std::collections::HashSet::new();
     for obj in &bundle.objects {
         for sym in &obj.symbols {
-            if sym.bind == crate::codegen::elf::STB_LOCAL
-                && sym.ty == crate::codegen::elf::STT_FUNC
+            if sym.bind == crate::codegen::shared::elf::STB_LOCAL
+                && sym.ty == crate::codegen::shared::elf::STT_FUNC
             {
                 local_fn_names.insert(sym.name.clone());
             }
@@ -1281,7 +1281,7 @@ fn inject_lto_section_from_bundle(
             dead_set.iter().map(|name| format!(".text.{}", name)).collect();
         // 5c. 剥离 dead 节的 SECTION 符号
         layout.symbols.retain(|sym| {
-            !(sym.ty == crate::codegen::elf::STT_SECTION
+            !(sym.ty == crate::codegen::shared::elf::STT_SECTION
                 && dead_section_names.contains(sym.name.as_str()))
         });
         layout.sections.retain(|sec| {
@@ -1326,7 +1326,7 @@ fn collectfn_refs_in_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfRela, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
+    use crate::codegen::shared::elf::{self, ElfRela, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
 
     fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
         elf::build_elf_rel_x86_64(

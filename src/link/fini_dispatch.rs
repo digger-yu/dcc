@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use super::layout::{Layout, OutputSection, OutputSectionKind};
-use crate::codegen::elf::SHT_FINI_ARRAY;
+use crate::codegen::shared::elf::SHT_FINI_ARRAY;
 
 /// __dso_handle 内容: 通常是 .data 中一个隐藏变量
 /// 简化: 直接指向 .data 节起始地址

@@ -8,11 +8,11 @@
 
 use crate::cli::Arch;
 use crate::codegen::aarch64::Aarch64Codegen;
-use crate::codegen::backend::{
+use crate::codegen::shared::backend::{
     Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
 };
-use crate::codegen::features::FeatureSet;
-use crate::codegen::{build_dwarf_cu, elf};
+use crate::codegen::shared::features::FeatureSet;
+use crate::codegen::{build_dwarf_cu, shared::elf};
 use crate::debug;
 use crate::diagnostics::Diagnostic;
 

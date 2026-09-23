@@ -11,7 +11,7 @@
 
 use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use super::link_opts;
-use crate::codegen::elf::{
+use crate::codegen::shared::elf::{
     ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
     PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_GROUP, SHT_NOBITS, SHT_PROGBITS,
     SHT_STRTAB, SHT_SYMTAB,
@@ -657,31 +657,31 @@ pub fn write_elf_exec_x86_64(layout: &Layout) -> Vec<u8> {
 }
 
 pub fn write_elf_exec_aarch64(layout: &Layout) -> Vec<u8> {
-    write_elf_exec(layout, crate::codegen::elf::EM_AARCH64)
+    write_elf_exec(layout, crate::codegen::shared::elf::EM_AARCH64)
 }
 
 pub fn write_elf_exec_riscv64(layout: &Layout) -> Vec<u8> {
-    write_elf_exec(layout, crate::codegen::elf::EM_RISCV)
+    write_elf_exec(layout, crate::codegen::shared::elf::EM_RISCV)
 }
 
 pub fn write_elf_exec_riscv32(layout: &Layout) -> Vec<u8> {
     // RISC-V 32 与 64 共享同一 e_machine (EM_RISCV).
     // TODO: 应使用 ELFCLASS32 而非 ELFCLASS64, 待完整 32-bit ELF 支持后修正.
-    write_elf_exec(layout, crate::codegen::elf::EM_RISCV)
+    write_elf_exec(layout, crate::codegen::shared::elf::EM_RISCV)
 }
 
 pub fn write_elf_exec_mips64(layout: &Layout) -> Vec<u8> {
-    write_elf_exec(layout, crate::codegen::elf::EM_MIPS)
+    write_elf_exec(layout, crate::codegen::shared::elf::EM_MIPS)
 }
 
 pub fn write_elf_exec_arm(layout: &Layout) -> Vec<u8> {
-    write_elf_exec(layout, crate::codegen::elf::EM_ARM)
+    write_elf_exec(layout, crate::codegen::shared::elf::EM_ARM)
 }
 
 /// 自研 -r 路径: 生成 ET_REL (可重定位) .o 文件
 /// 与 host ld -r 不同, 此路径完全自研: 复制所有节、重写重定位、合并符号表
 pub fn write_elf_relocatable_x86_64(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
+    use crate::codegen::shared::elf::ET_REL;
     // 简化: 复用 write_elf_exec, 改写 e_type
     // 完整 -r 路径需要: 不写 PHDR, 不解析符号, 直接复制节
     let mut out = write_elf_exec(layout, EM_X86_64);
@@ -690,36 +690,36 @@ pub fn write_elf_relocatable_x86_64(layout: &Layout) -> Vec<u8> {
 }
 
 pub fn write_elf_relocatable_aarch64(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
-    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_AARCH64);
+    use crate::codegen::shared::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::shared::elf::EM_AARCH64);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }
 
 pub fn write_elf_relocatable_riscv64(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
-    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_RISCV);
+    use crate::codegen::shared::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::shared::elf::EM_RISCV);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }
 
 pub fn write_elf_relocatable_riscv32(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
-    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_RISCV);
+    use crate::codegen::shared::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::shared::elf::EM_RISCV);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }
 
 pub fn write_elf_relocatable_mips64(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
-    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_MIPS);
+    use crate::codegen::shared::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::shared::elf::EM_MIPS);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }
 
 pub fn write_elf_relocatable_arm(layout: &Layout) -> Vec<u8> {
-    use crate::codegen::elf::ET_REL;
-    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_ARM);
+    use crate::codegen::shared::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::shared::elf::EM_ARM);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }

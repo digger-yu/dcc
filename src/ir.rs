@@ -8,6 +8,9 @@ use crate::const_eval;
 use crate::diagnostics::{Diagnostic, Severity, Span};
 use std::collections::HashMap;
 
+// Re-export ast::Program so it can be accessed as crate::ir::Program
+pub use ast::Program;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueType {
     Void,
@@ -83,9 +86,69 @@ pub struct TypedExpr {
 }
 
 #[derive(Debug, Clone)]
-pub struct TypedStmt {
-    pub expressions: Vec<TypedExpr>,
-    pub nested: Vec<TypedStmt>,
+pub enum TypedStmt {
+    Return {
+        val: Option<TypedExpr>,
+        span: Span,
+    },
+    Expr {
+        e: TypedExpr,
+        span: Span,
+    },
+    If {
+        cond: TypedExpr,
+        then_: Box<TypedStmt>,
+        else_: Option<Box<TypedStmt>>,
+        span: Span,
+    },
+    While {
+        cond: TypedExpr,
+        body: Box<TypedStmt>,
+        span: Span,
+    },
+    Do {
+        body: Box<TypedStmt>,
+        cond: TypedExpr,
+        span: Span,
+    },
+    For {
+        init: Option<Box<TypedStmt>>,
+        cond: Option<TypedExpr>,
+        step: Option<TypedExpr>,
+        body: Box<TypedStmt>,
+        span: Span,
+    },
+    Block {
+        b: Vec<TypedStmt>,
+        span: Span,
+    },
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
+    Label {
+        name: String,
+        stmt: Box<TypedStmt>,
+        span: Span,
+    },
+    Switch {
+        expr: TypedExpr,
+        cases: Vec<TypedCase>,
+        span: Span,
+    },
+    AsmInline {
+        asm_str: String,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedCase {
+    pub val: Option<TypedExpr>,
+    pub range_end: Option<TypedExpr>,
+    pub body: Vec<TypedStmt>,
     pub span: Span,
 }
 
@@ -1013,6 +1076,179 @@ struct Lowering {
     sl_map: crate::static_locals::StaticLocalMap,
     /// 当前正在降低的函数名 (用于 static local 解析)。
     current_func: Option<String>,
+}
+
+// ============================================================================
+// IMPLEMENTATIONS FOR VALUE TYPES
+// ============================================================================
+
+impl ValueType {
+    /// Compute the size in bytes of this type.
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Void => 0,
+            Self::Integer { bits, .. } => (*bits as usize).div_ceil(8),
+            Self::Float { bits } => (*bits as usize).div_ceil(8),
+            Self::Pointer(pointee) => {
+                // On all supported targets, pointers are 8 bytes (64-bit)
+                std::mem::size_of::<usize>()
+            }
+            Self::Array(elem, count) => elem.size().saturating_mul(count.unwrap_or(0)),
+            Self::Aggregate { size, .. } => *size,
+            Self::Function { .. } => std::mem::size_of::<usize>(), // Function pointer
+            Self::Vector(elem, len) => elem.size().saturating_mul(*len),
+            Self::Complex(inner) => inner.size().saturating_mul(2),
+            Self::Imaginary(inner) => inner.size(),
+        }
+    }
+
+    /// Get alignment requirement in bytes.
+    pub fn align(&self) -> usize {
+        match self {
+            Self::Void => 1,
+            Self::Integer { bits, .. } | Self::Float { bits } => {
+                let bytes = (*bits as usize).div_ceil(8);
+                bytes.min(8)
+            }
+            Self::Pointer(_) => 8,
+            Self::Array(elem, _) => elem.align(),
+            Self::Aggregate { align: a, .. } => *a,
+            Self::Function { .. } => 8,
+            Self::Vector(elem, _) => elem.align(),
+            Self::Complex(inner) => inner.align(),
+            Self::Imaginary(inner) => inner.align(),
+        }
+    }
+
+    /// Check if this is a signed integer type.
+    pub fn is_signed(&self) -> bool {
+        matches!(self, Self::Integer { signed: true, .. })
+    }
+
+    /// Check if this is an unsigned integer type.
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, Self::Integer { signed: false, .. })
+    }
+
+    /// Check if this is a floating point type.
+    pub fn is_floating_point(&self) -> bool {
+        matches!(self, Self::Float { .. })
+    }
+
+    /// Check if this is an integer type.
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Self::Integer { .. })
+    }
+
+    /// Check if this is a pointer type.
+    pub fn is_pointer(&self) -> bool {
+        matches!(self, Self::Pointer(..))
+    }
+
+    /// Check if this is an aggregate type.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Aggregate { .. })
+    }
+
+    /// Check if this is a vector type.
+    pub fn is_vector(&self) -> bool {
+        matches!(self, Self::Vector(..))
+    }
+
+    /// Check if this is a complex number type.
+    pub fn is_complex(&self) -> bool {
+        matches!(self, Self::Complex(..))
+    }
+
+    /// Check if this is a void type.
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Void)
+    }
+
+    /// Get the bit width for scalar types.
+    pub fn bit_width(&self) -> Option<u16> {
+        match self {
+            Self::Integer { bits, .. } => Some(*bits),
+            Self::Float { bits } => Some(*bits),
+            Self::Vector(elem, _) => elem.bit_width(),
+            _ => None,
+        }
+    }
+
+    /// Get element type for compound types.
+    pub fn element_type(&self) -> Option<&ValueType> {
+        match self {
+            Self::Pointer(inner) => Some(inner),
+            Self::Array(inner, _) => Some(inner),
+            Self::Vector(inner, _) => Some(inner),
+            Self::Complex(inner) => Some(inner),
+            Self::Imaginary(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// Check if two types are compatible for comparison operations.
+    pub fn compatible_with(&self, other: &ValueType) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+// ============================================================================
+// IMPLEMENTATION FOR TYPED EXPR
+// ============================================================================
+
+impl TypedExpr {
+    /// Get byte representation size.
+    pub fn bytes(&self) -> usize {
+        self.ty.size()
+    }
+
+    /// Check if this expression is a constant.
+    pub fn is_constant(&self) -> bool {
+        matches!(self.kind, ExprKind::Constant)
+    }
+
+    /// Check if this is a literal value.
+    pub fn is_literal(&self) -> bool {
+        self.literal.is_some()
+    }
+
+    /// Get the literal value if this is a literal expression.
+    pub fn literal_value(&self) -> Option<ExprLiteral> {
+        self.literal
+    }
+}
+
+// ============================================================================
+// IMPLEMENTATION FOR EXPR LITERAL
+// ============================================================================
+
+impl ExprLiteral {
+    /// Convert to i128 value.
+    pub fn as_int(&self) -> i128 {
+        match self {
+            Self::Int(v) => *v,
+            Self::Float(f) => *f as i128,
+        }
+    }
+
+    /// Convert to f64 value.
+    pub fn as_float(&self) -> f64 {
+        match self {
+            Self::Int(v) => *v as f64,
+            Self::Float(v) => *v,
+        }
+    }
+
+    /// Check if this is an integer literal.
+    pub fn is_int(&self) -> bool {
+        matches!(self, Self::Int(_))
+    }
+
+    /// Check if this is a float literal.
+    pub fn is_float(&self) -> bool {
+        matches!(self, Self::Float(_))
+    }
 }
 
 impl Lowering {

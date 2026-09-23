@@ -2458,7 +2458,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
                     return None;
                 }
                 link::lto_bitcode::deserialize_module(
-                    &crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
                 )
                 .ok()
             })
@@ -2711,7 +2711,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
 /// 检测 ELF 对象文件是否包含 STT_GNU_IFUNC 类型符号.
 fn elf_has_ifunc_symbols(elf: &[u8]) -> bool {
-    use crate::codegen::elf::{ELFCLASS64, ELFMAG, SHT_SYMTAB};
+    use crate::codegen::shared::elf::{ELFCLASS64, ELFMAG, SHT_SYMTAB};
     if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
         return false;
     }

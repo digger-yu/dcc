@@ -29,11 +29,13 @@ opt-level = 0
 debug     = true
 
 [dependencies]
-# 最小外部依赖：miniz_oxide 用于 DWARF 压缩节 (zlib/deflate)
+# ELF parsing/generation (internal module)
+elf = "0.8"
+# Error handling
+anyhow = "1"
+# Minimal external dependencies for DWARF compression
 miniz_oxide = "0.8"
-# zstd 压缩 debug sections (--compress-debug-sections=zstd)
 zstd = "0.13"
-# TOML support for data-driven instruction specifications
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::object::InputBundle;
 use super::LinkConfig;
-use crate::codegen::elf::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
+use crate::codegen::shared::elf::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
 
 /// COMDAT 组去重。
 ///
@@ -256,7 +256,7 @@ pub fn resolve_with_config(
                 // 多个强定义: 检查是否都是 tentative definition (未初始化, value=0)
                 // C 标准允许跨 TU 的 tentative definition 合并 (取最大 size)
                 // 仅适用于数据对象 (STT_OBJECT / STT_NOTYPE)，不适用于函数
-                use crate::codegen::elf::{STT_NOTYPE, STT_OBJECT};
+                use crate::codegen::shared::elf::{STT_NOTYPE, STT_OBJECT};
                 let all_tentative = cand.strong.iter().all(|&i| {
                     let s = &bundle.symbols[i];
                     s.is_common
@@ -448,7 +448,7 @@ fn is_implicit_undef(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
+    use crate::codegen::shared::elf::{self, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
     use crate::link::object::InputBundle;
 
     fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn tentative_definitions_merge_without_error() {
         // C tentative definition: `int x;` in two TUs should merge, not error
-        use crate::codegen::elf::STT_OBJECT;
+        use crate::codegen::shared::elf::STT_OBJECT;
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test6-tent-a.o");
         let p2 = dir.join("dcc-resolve-test6-tent-b.o");
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn real_duplicate_strong_definitions_still_error() {
         // Two TUs with actual different-offset definitions should still error
-        use crate::codegen::elf::STT_OBJECT;
+        use crate::codegen::shared::elf::STT_OBJECT;
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test7-dup-a.o");
         let p2 = dir.join("dcc-resolve-test7-dup-b.o");
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn common_symbols_resolve_as_strong() {
         // COMMON 符号 (SHN_COMMON) 应作为强定义处理，多个 COMMON 合并取最大 size
-        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test8-common-a.o");
         let p2 = dir.join("dcc-resolve-test8-common-b.o");
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn common_overrides_weak() {
         // COMMON (treated as strong) should override weak definition
-        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test9-common-weak-a.o");
         let p2 = dir.join("dcc-resolve-test9-common-weak-b.o");
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn common_plus_tentative_merge_max_size() {
         // COMMON + tentative (value=0, OBJECT) → merge, take max size
-        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test12-com-tent-a.o");
         let p2 = dir.join("dcc-resolve-test12-com-tent-b.o");
@@ -1009,7 +1009,7 @@ mod tests {
     #[test]
     fn strong_def_overrides_common() {
         // Strong definition (value > 0) should override COMMON
-        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test13-strong-common-a.o");
         let p2 = dir.join("dcc-resolve-test13-strong-common-b.o");

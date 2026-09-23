@@ -13,7 +13,7 @@ use crate::codegen::coff::{
     IMAGE_SCN_CNT_CODE, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_CNT_UNINITIALIZED_DATA,
     IMAGE_SCN_MEM_WRITE,
 };
-use crate::codegen::elf::{
+use crate::codegen::shared::elf::{
     ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFMAG, EM_AARCH64, EM_ARM, EM_MIPS,
     EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_GROUP, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_REL,
     SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
@@ -358,7 +358,7 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
 
 /// Map COFF section characteristics to ELF-like type and flags.
 fn coff_chars_to_elf(chars: u32) -> (u32, u32) {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     let mut flags = 0u32;
     let mut ty = SHT_PROGBITS;
 
@@ -382,7 +382,7 @@ fn coff_chars_to_elf(chars: u32) -> (u32, u32) {
 
 /// Map COFF storage class to ELF bind/type.
 fn coff_storage_to_elf(storage_class: u8, coff_type: u16) -> (u8, u8) {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     let bind = match storage_class {
         2 => STB_GLOBAL, // IMAGE_SYM_CLASS_EXTERNAL
         3 => STB_LOCAL,  // IMAGE_SYM_CLASS_STATIC
@@ -398,7 +398,7 @@ fn coff_storage_to_elf(storage_class: u8, coff_type: u16) -> (u8, u8) {
 
 /// Map COFF AMD64 relocation type to ELF x86_64 relocation type.
 fn coff_reloc_to_elf(coff_type: u16) -> u32 {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     match coff_type {
         0x0001 => R_X86_64_64,       // IMAGE_REL_AMD64_ADDR64
         0x0002 => R_X86_64_32,       // IMAGE_REL_AMD64_ADDR32
@@ -968,7 +968,7 @@ impl InputBundle {
         }
         for (oi, obj) in objects.iter().enumerate() {
             for sym in &obj.symbols {
-                let is_common = sym.section == crate::codegen::elf::SHN_COMMON;
+                let is_common = sym.section == crate::codegen::shared::elf::SHN_COMMON;
                 let section = if sym.section == 0 || is_common {
                     0u32
                 } else {
@@ -1037,7 +1037,7 @@ fn find_section_in_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{
+    use crate::codegen::shared::elf::{
         self, ElfRela, ElfSym, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE,
         STV_DEFAULT,
     };

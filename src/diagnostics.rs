@@ -42,6 +42,15 @@ impl Span {
             len,
         }
     }
+    /// Convenience method for tests/mockups
+    pub fn unknown() -> Self {
+        Self::point("", 0, 0)
+    }
+    /// Deprecated alias for Span::unknown()
+    #[deprecated(note = "Use Span::unknown() instead")]
+    pub fn dummy() -> Self {
+        Self::unknown()
+    }
     pub fn merge(self, other: Span) -> Span {
         debug_assert_eq!(self.file, other.file);
         Span {

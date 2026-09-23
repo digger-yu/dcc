@@ -45,5 +45,6 @@ pub mod semantics;
 pub mod static_locals;
 pub mod symbol;
 pub mod target;
+pub mod timing;
 pub mod tokens;
 pub mod thumb;

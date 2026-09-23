@@ -8,13 +8,13 @@
 //   build_object() : 把 Codegen 内部节镜像序列化为 ELF ET_REL / COFF / ET_EXEC
 
 use crate::cli::Arch;
-use crate::codegen::backend::{
+use crate::codegen::shared::backend::{
     Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
 };
-use crate::codegen::features::FeatureSet;
+use crate::codegen::shared::features::FeatureSet;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::{build_dwarf_cu, debug_abs_reloc_type};
-use crate::codegen::{coff, elf};
+use crate::codegen::{coff, shared::elf};
 use crate::debug;
 use crate::diagnostics::Diagnostic;
 
@@ -286,7 +286,7 @@ fn build_debug_sections(
     target: &crate::target::Target,
     opts: &crate::codegen::EmitOptions<'_>,
 ) {
-    use crate::codegen::elf::ElfRela;
+    use crate::codegen::shared::elf::ElfRela;
 
     // Build func_pcs with actual sizes from codegen
     let func_pcs: Vec<(&str, u64, u64)> = module

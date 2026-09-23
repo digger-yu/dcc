@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dcc-compiler.org/instruction-spec.schema.json",
+  "title": "DCC Instruction Specification Schema",
+  "description": "Schema for validating DCC compiler instruction specifications",
+  "type": "object",
+  "required": ["name", "arch", "encoding_spec"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*$",
+      "description": "Lowercase instruction name (e.g., 'add', 'mov')"
+    },
+    "arch": {
+      "type": "string",
+      "enum": ["x8664", "aarch64", "riscv64"]
+    },
+    "aliases": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "op_type"],
+        "properties": {
+          "name": {"type": "string"},
+          "op_type": {
+            "type": "string",
+            "enum": ["reg", "mem", "regmem", "immediate", "memory", "regmemimmediate", "regimmediate"]
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["read", "write", "readwrite", "none"]
+          }
+        }
+      }
+    },
+    "encoding_spec": {
+      "type": "object",
+      "required": ["formats"],
+      "properties": {
+        "default_format": {"type": "string"},
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "operand_pattern", "opcode"],
+            "properties": {
+              "name": {"type": "string"},
+              "description": {"type": "string"},
+              "operand_pattern": {"type": "string"},
+              "opcode": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255}
+              },
+              "modrm_required": {"type": "boolean"},
+              "rex_prefix": {"type": "boolean"},
+              "extra_bytes": {"type": "boolean"},
+              "escape_bytes": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255}
+              },
+              "addressing_mode": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "semantics": {
+      "type": "object",
+      "properties": {
+        "effect": {"type": "string"},
+        "flags_modified": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "exceptions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "cpu_modes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["assembly", "machine_code_hex"],
+        "properties": {
+          "assembly": {"type": "string"},
+          "machine_code_hex": {"type": "string"},
+          "description": {"type": "string"}
+        }
+      }
+    }
+  }
+}

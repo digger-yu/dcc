@@ -25,7 +25,7 @@
 // DW_INL_*) 严格沿用规范原名, 改写为 ALL_CAPS 会丢失与规范章节对应.
 #![allow(non_upper_case_globals)]
 
-use crate::codegen::elf::{ElfSection, SHF_ALLOC, SHT_PROGBITS};
+use crate::codegen::shared::elf::{ElfSection, SHF_ALLOC, SHT_PROGBITS};
 
 // ============================================================================
 // 公共类型

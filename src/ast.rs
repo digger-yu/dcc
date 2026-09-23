@@ -1201,6 +1201,15 @@ impl Type {
         }
     }
 
+    /// Get the element type of an array type.
+    /// Returns None if the type is not an array.
+    pub fn get_array_element_type(&self) -> Option<&Type> {
+        match self {
+            Type::Array(elem, _) => Some(&elem.base),
+            _ => None,
+        }
+    }
+
     pub fn align(&self) -> usize {
         match self {
             Type::Void => 1,

@@ -32,7 +32,7 @@
 // 真正可观测的产出是 ELF 文件,不是 CLI 参数本身。
 
 use super::layout::{Layout, OutputSection, OutputSectionKind};
-use crate::codegen::elf::{PF_X, SHF_COMPRESSED, SHF_GNU_RETAIN};
+use crate::codegen::shared::elf::{PF_X, SHF_COMPRESSED, SHF_GNU_RETAIN};
 
 /// 链接选项集合 (LinkConfig 之外需独立携带的)
 #[derive(Debug, Clone, Default)]
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(compressed, vec![".debug_info".to_string()]);
         let sec = &layout.sections[0];
         // SHF_COMPRESSED (0x800) 必须设置
-        assert_ne!(sec.flags & crate::codegen::elf::SHF_COMPRESSED, 0);
+        assert_ne!(sec.flags & crate::codegen::shared::elf::SHF_COMPRESSED, 0);
         // 数据前 4 字节 = ELFCOMPRESS_ZSTD (2) little-endian
         assert_eq!(sec.data[0..4], [2, 0, 0, 0]);
         // 数据大小应小于原始大小 (zstd 压 4096 字节全 0)

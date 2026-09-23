@@ -5,7 +5,7 @@
 
 use super::elf_exec::write_elf_internal;
 use super::layout::Layout;
-use crate::codegen::elf::{EM_AARCH64, EM_ARM, EM_MIPS, EM_RISCV, EM_X86_64, ET_DYN};
+use crate::codegen::shared::elf::{EM_AARCH64, EM_ARM, EM_MIPS, EM_RISCV, EM_X86_64, ET_DYN};
 
 pub fn write_elf_pie_x86_64(layout: &Layout) -> Vec<u8> {
     write_elf_pie(layout, EM_X86_64)

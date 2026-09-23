@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use super::layout::{Layout, OutputRela};
-use crate::codegen::elf::R_X86_64_IRELATIVE;
+use crate::codegen::shared::elf::R_X86_64_IRELATIVE;
 
 /// IFUNC 解析表：符号名 -> 解析器地址 (vaddr)
 #[derive(Debug, Default, Clone)]

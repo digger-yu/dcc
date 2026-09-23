@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::codegen::elf::global_symbol_names;
+use crate::codegen::shared::elf::global_symbol_names;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::link::lto_bitcode;
 
@@ -153,7 +153,7 @@ fn link_relocatable_legacy(
         refs.iter()
             .filter_map(|obj| {
                 lto_bitcode::deserialize_module(
-                    &crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
                 )
                 .ok()
             })
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn builtin_r_always_used_regardless_of_lto() {
         // 验证 link_relocatable 始终使用内置路径, 不因 LTO 回退 host ld
-        use crate::codegen::elf;
+        use crate::codegen::shared::elf;
         let dir = std::env::temp_dir();
         let text = &[0xc3u8]; // ret
         let sym1 = elf::ElfSym {
@@ -327,7 +327,7 @@ mod tests {
     /// Test: -r + -T script.lds combination works (kernel module build pattern)
     #[test]
     fn relocatable_with_linker_script() {
-        use crate::codegen::elf;
+        use crate::codegen::shared::elf;
         let dir = std::env::temp_dir();
         let text = &[0xc3u8]; // ret
         let sym1 = elf::ElfSym {

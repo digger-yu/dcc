@@ -3,18 +3,14 @@
 
 pub mod aarch64;
 pub mod arm;
-pub mod asm_constraints;
 pub mod asm_event;
-pub mod backend;
 pub mod coff;
+pub mod data;
 pub mod disasm;
-pub mod elf;
-pub mod features;
-pub mod mini_asm;
 pub mod mips;
-pub mod mips64;
-pub mod registry;
 pub mod riscv64;
+// Note: backend, registry, features, elf, asm_constraints, mini_asm moved to shared/
+pub mod shared;
 pub mod x86_64;
 
 use crate::ast::{Block, BlockItem, Decl, Designator, Expr, InitItem, Program, Stmt, Type};
@@ -23,9 +19,9 @@ use crate::debug;
 use crate::diagnostics::{Diagnostic, Severity, Span};
 use crate::ir::Module;
 use crate::target::Target;
-pub use backend::{Backend, CommonImage, CompileInput, EmitOptions};
-pub use features::FeatureSet;
-pub use registry::backend_for;
+pub use shared::backend::{Backend, CommonImage, CompileInput, EmitOptions};
+pub use shared::features::FeatureSet;
+pub use shared::registry::backend_for;
 
 /// Unified diagnostic policy: fail only on Error severity
 fn has_fatal_diagnostics(diagnostics: &[Diagnostic]) -> bool {

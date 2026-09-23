@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use super::layout::Layout;
-use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS};
+use crate::codegen::shared::elf::{SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS};
 
 // ===== PE constants =====
 
@@ -535,7 +535,7 @@ mod tests {
                     kind: OutputSectionKind::Text,
                     name: ".text".into(),
                     sh_name_off: 0,
-                    ty: crate::codegen::elf::SHT_PROGBITS,
+                    ty: crate::codegen::shared::elf::SHT_PROGBITS,
                     flags: SHF_ALLOC | SHF_EXECINSTR,
                     align: 16,
                     data: vec![0xC3], // ret
@@ -552,7 +552,7 @@ mod tests {
                     kind: OutputSectionKind::Rodata,
                     name: ".rodata".into(),
                     sh_name_off: 0,
-                    ty: crate::codegen::elf::SHT_PROGBITS,
+                    ty: crate::codegen::shared::elf::SHT_PROGBITS,
                     flags: SHF_ALLOC,
                     align: 4,
                     data: b"hello\0".to_vec(),

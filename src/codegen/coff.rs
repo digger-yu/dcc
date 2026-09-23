@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use crate::codegen::elf::{ElfRela, ElfSection, ElfSym, ExtraRelaSection};
+use crate::codegen::shared::elf::{ElfRela, ElfSection, ElfSym, ExtraRelaSection};
 
 // ===== COFF constants =====
 
@@ -50,7 +50,7 @@ const COFF_RELOCATION_SIZE: usize = 10;
 
 /// Convert ELF relocation type to COFF AMD64 relocation type.
 fn elf_rel_to_coff(rel_type: u32) -> u16 {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     match rel_type {
         R_X86_64_64 => IMAGE_REL_AMD64_ADDR64,
         R_X86_64_PC32 => IMAGE_REL_AMD64_REL32,
@@ -62,7 +62,7 @@ fn elf_rel_to_coff(rel_type: u32) -> u16 {
 
 /// Convert ELF section flags to COFF section characteristics.
 fn elf_flags_to_coff(elf_flags: u32, elf_ty: u32) -> u32 {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     let mut chars = 0u32;
     if elf_flags & SHF_EXECINSTR != 0 {
         chars |= IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
@@ -83,7 +83,7 @@ fn elf_flags_to_coff(elf_flags: u32, elf_ty: u32) -> u32 {
 
 /// Map ELF symbol bind/type to COFF storage class.
 fn elf_sym_to_coff_storage(bind: u8, ty: u8) -> u8 {
-    use crate::codegen::elf::*;
+    use crate::codegen::shared::elf::*;
     match ty {
         STT_FUNC => IMAGE_SYM_CLASS_FUNCTION,
         _ => {
@@ -241,7 +241,7 @@ pub fn build_coff_rel_x86_64(
 
     // Extra sections (debug, san_info, offload, etc.)
     for es in extra_sections {
-        use crate::codegen::elf::*;
+        use crate::codegen::shared::elf::*;
         let chars = elf_flags_to_coff(es.flags, es.ty);
         secs.push(CoffSec {
             name: es.name.clone(),
@@ -707,7 +707,7 @@ fn align_up(off: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
+    use crate::codegen::shared::elf::{ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
 
     #[test]
     fn coff_header_machine_is_amd64() {

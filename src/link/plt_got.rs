@@ -12,7 +12,7 @@
 
 use super::layout::{Layout, OutputRela, OutputSectionKind};
 use super::link_opts::LinkOpts;
-use crate::codegen::elf::{
+use crate::codegen::shared::elf::{
     R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, STB_GLOBAL, STT_FUNC, STT_SECTION,
     STV_DEFAULT,
 };

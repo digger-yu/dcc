@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
-use crate::codegen::elf::{
+use crate::codegen::shared::elf::{
     SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
     SHT_NOBITS, SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
     STB_LOCAL, STT_NOTYPE, STT_SECTION,
@@ -256,7 +256,7 @@ impl LayoutBuilder {
                 || sec.name.starts_with(".rela")
                 || sec.name == ".group"
                 || sec.name.starts_with(".group.")
-                || sec.ty == crate::codegen::elf::SHT_GROUP
+                || sec.ty == crate::codegen::shared::elf::SHT_GROUP
             {
                 continue;
             }
@@ -842,7 +842,7 @@ impl LayoutBuilder {
         for (i, sec) in sections.iter_mut().enumerate() {
             if !live.contains(&(i as u32))
                 && sec.size > 0
-                && sec.ty != crate::codegen::elf::SHT_NOBITS
+                && sec.ty != crate::codegen::shared::elf::SHT_NOBITS
             {
                 // 软删除: 把 data 清空, size=0, 标记为不分配
                 // 注意: 实际 "完全删除" 需重新分配 vaddr; 简化处理只清 data
