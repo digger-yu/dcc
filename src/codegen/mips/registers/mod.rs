@@ -314,8 +314,8 @@ impl MipsFpr {
     }
 
     /// Get human-readable register name
-    pub fn name(&self) -> &'static str {
-        format!("${}", self.index()).as_str()
+    pub fn name(&self) -> String {
+        format!("${}", self.index())
     }
 
     /// In O32 ABI with hardfloat, $f12 and $f14 are used for argument passing

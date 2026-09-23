@@ -1,7 +1,7 @@
 // src/codegen/riscv64/emit/mod.rs (Placeholder)
 
-mod stmt;
-mod expr;
+pub mod stmt;
+pub mod expr;
 
 pub use stmt::*;
 pub use expr::*;

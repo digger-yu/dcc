@@ -1,9 +1,9 @@
 // src/codegen/riscv64/emit/expr/lvalue.rs - Left-value addresses emission (RISC-V 64 backend)
 // Priority 4 Task: Extract working implementations from riscv64.rs.bak
 
-use crate::ast::{Field};
-use crate::codegen::riscv64::Riscv64Codegen;
-use crate::ir::TypedExpr;
+use crate::ast::{Field, Type};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
+use crate::ir::{TypedExpr, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
 
@@ -51,18 +51,18 @@ impl Riscv64Codegen {
                 }
             }
             
-            crate::ir::ExprKind::Index(idx_expr) => {
+            crate::ir::ExprKind::Index => {
                 // 数组索引：base + index * element_size
                 if expr.children.len() >= 2 {
                     let base_expr = &expr.children[0];
                     let index_expr = &expr.children[1];
-                    
+
                     self.gen_expr(base_expr); // a0 = base
-                    
+
                     self.gen_expr(index_expr); // a1 = index
-                    
+
                     // 计算元素大小并乘法
-                    let elem_size = value_type_size(&expr.ty).max(1);
+                    let elem_size = expr.ty.size().max(1);
                     if elem_size.is_power_of_two() {
                         // 使用位移优化乘法
                         let shift = elem_size.trailing_zeros() as i32;
@@ -71,7 +71,7 @@ impl Riscv64Codegen {
                         // 普通乘法
                         self.emit_mul(11, 11, 11);
                     }
-                    
+
                     self.emit_add(10, 10, 11); // a0 += index * size
                 } else {
                     self.li_a0(0);
@@ -119,7 +119,7 @@ impl Riscv64Codegen {
                 self.emit_store_sz(value_reg, addr_reg, 0, size.max(1));
             }
             
-            crate::ir::ExprKind::Index(_) => {
+            crate::ir::ExprKind::Index => {
                 // 数组索引
                 let addr_reg = 12;
                 self.gen_lvalue_addr(lvalue);
@@ -167,10 +167,9 @@ impl Riscv64Codegen {
 // ========================================================================
 
 /// 查找聚合类型字段信息
-pub fn find_aggregate_fields<'a>(name: &str) -> Option<std::sync::Arc<Vec<Field>>> {
-    // 这个函数应该查询全局符号表或上下文中的聚合类型定义
-    // 由于在当前文件中无法访问完整上下文，这里返回 None
-    // 实际实现需要通过 Riscv64Codegen 实例来获取
+pub fn find_aggregate_fields(name: &str) -> Option<(std::sync::Arc<Vec<Field>>, bool)> {
+    // TODO: 这个函数应该查询全局符号表或上下文中的聚合类型定义
+    // 当前实现返回 None，需要进一步集成
     None
 }
 

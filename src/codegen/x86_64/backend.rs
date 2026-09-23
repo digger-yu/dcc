@@ -31,7 +31,7 @@ impl Backend for Codegen {
     fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
         apply_emit_options(self, input);
         // Perform the existing code generation (inherent Codegen::compile)
-        self.compile(input.module);
+        self.compile_module(input.module);
         build_aux_sections(self, input);
 
         // Map to CommonImage with explicit field mapping
@@ -75,7 +75,7 @@ impl Backend for Codegen {
         // -S: 与旧 emit() 一致 —— 先设置选项 (含 emit_asm_text), 生成代码,
         // 再输出汇编文本; 不构建 DWARF / ELF。
         apply_emit_options(self, input);
-        self.compile(input.module);
+        self.compile_module(input.module);
         Ok(self.build_asm_output(input.module.source()).into_bytes())
     }
 

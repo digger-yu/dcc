@@ -103,7 +103,9 @@ impl TypePromotionEngine {
     /// Get type class for instruction selection
     pub fn classify_type(ty: &Type) -> TypeClass {
         match ty {
-            Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort
+            Type::Char | Type::SChar | Type::UChar | Type::Char8
+            | Type::Char16 | Type::Char32
+            | Type::Short | Type::UShort
             | Type::Int | Type::UInt | Type::Long | Type::ULong | Type::LongLong
             | Type::ULongLong | Type::Int128 | Type::UInt128 | Type::Bool => {
                 TypeClass::Integer
@@ -192,7 +194,7 @@ impl TypeCoercionEngine {
         let promoted_rhs = self.integral_promotion(rhs);
         
         // Check floating point dominance
-        if promoted_lhs.is_floating_point() || promoted_rhs.is_floating_point() {
+        if matches!(promoted_lhs, Type::Float | Type::Double | Type::LongDouble) || matches!(promoted_rhs, Type::Float | Type::Double | Type::LongDouble) {
             return self.promote_to_higher_float(&promoted_lhs, &promoted_rhs);
         }
         
@@ -228,8 +230,8 @@ impl TypeCoercionEngine {
         use crate::ast::Type;
         
         // Get signedness and rank
-        let lhs_signed = lhs.is_signed();
-        let rhs_signed = rhs.is_signed();
+        let lhs_signed = Self::is_signed(&lhs);
+        let rhs_signed = Self::is_signed(&rhs);
         let lhs_rank = Self::type_rank_integer(lhs);
         let rhs_rank = Self::type_rank_integer(rhs);
         
@@ -281,6 +283,17 @@ impl TypeCoercionEngine {
             _ => true, // Default assumption
         }
     }
+
+    /// Check if an integer type is signed
+    fn is_signed(ty: &Type) -> bool {
+        match ty {
+            Type::Char | Type::SChar | Type::Short | Type::Int
+            | Type::Long | Type::LongLong | Type::Int128 => true,
+            Type::UChar | Type::UShort | Type::UInt | Type::ULong
+            | Type::ULongLong | Type::UInt128 | Type::Bool => false,
+            _ => false,
+        }
+    }
     
     /// Get integer type rank (smaller = lower rank)
     fn type_rank_integer(ty: &Type) -> u8 {
@@ -324,21 +337,28 @@ impl TypeCoercionEngine {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CaseInfo {
-    pub value: crate::ast::Expression,
-    pub body: Vec<crate::ast::Statement>,
+    pub value: crate::ast::Expr,
+    pub body: Vec<crate::ast::Stmt>,
     pub is_default: bool,
 }
 
 impl CaseInfo {
     /// Create a new case with a specific value
-    pub fn new(value: crate::ast::Expression, body: Vec<crate::ast::Statement>) -> Self {
+    pub fn new(value: crate::ast::Expr, body: Vec<crate::ast::Stmt>) -> Self {
         Self { value, body, is_default: false }
     }
     
     /// Create a default case (matches any value)
-    pub fn default_case(body: Vec<crate::ast::Statement>) -> Self {
+    pub fn default_case(body: Vec<crate::ast::Stmt>) -> Self {
         Self {
-            value: crate::ast::Expression::Ident("default".to_string()),
+            value: crate::ast::Expr::Ident {
+                name: crate::ast::Ident {
+                    name: "default".to_string(),
+                    span: crate::diagnostics::Span::unknown(),
+                },
+                span: crate::diagnostics::Span::unknown(),
+                ty: crate::ast::Type::Int,
+            },
             body,
             is_default: true,
         }
@@ -348,6 +368,7 @@ impl CaseInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::QualType;
 
     #[test]
     fn test_integral_promotion() {
@@ -368,7 +389,7 @@ mod tests {
     fn test_type_classification() {
         assert_eq!(TypePromotionEngine::classify_type(&Type::Int), TypeClass::Integer);
         assert_eq!(TypePromotionEngine::classify_type(&Type::Float), TypeClass::FloatingPoint);
-        assert_eq!(TypePromotionEngine::classify_type(&Type::Ptr(Box::new(Type::Int))), TypeClass::Pointer);
+        assert_eq!(TypePromotionEngine::classify_type(&Type::Ptr(Box::new(QualType::new(Type::Int)))), TypeClass::Pointer);
         assert_eq!(TypePromotionEngine::classify_type(&Type::Void), TypeClass::Void);
     }
 

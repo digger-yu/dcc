@@ -23,11 +23,13 @@ use std::collections::{HashMap, HashSet};
 mod asm;
 mod backend;
 mod codegen;
+mod instructions;
 mod abi;
 mod emit;
 mod mem;
 mod parallel;
 mod special;
+mod stubs;
 
 
 // ============================================================================

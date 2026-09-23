@@ -50,8 +50,12 @@ pub use self::abi::*;        // Re-export ABI utilities
 pub use self::emit::*;       // Re-export statement/expression emission
 pub use self::helpers::*;    // Re-export utility functions
 pub use self::special::*;    // Re-export special features (RVV, TLS)
+pub use self::codegen::{Riscv64Codegen, var_is_static};
 
 // Module substructure exports for granular access
 // Note: Only export publicly accessible items
-pub use self::emit::stmt::{self, BlockItem};
-pub use self::helpers::encoding::{self, encode_r_type, decode_i_type};
+pub(crate) use self::emit::stmt;
+pub(crate) use self::helpers::encoding::{self, encode_r_type, decode_i_type};
+
+// 辅助函数导出
+pub use crate::codegen::riscv64::emit::expr::lvalue::{find_aggregate_fields, align_up_u64};

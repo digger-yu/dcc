@@ -72,7 +72,7 @@ impl StackFrame {
         self.total_size = base_size.max(saved_regs_size);
         
         // Set up register save areas at known offsets
-        self.ra_offset = -self.total_size as i64;
+        self.ra_offset = -(self.total_size as i64);
         self.s0_offset = self.ra_offset + 8;
         self.s1_offset = self.ra_offset + 16;
         
@@ -89,7 +89,7 @@ impl StackFrame {
     }
     
     /// Emit function prologue assembly code
-    pub fn emit_prologue<R: Into<u64>>(&self, _regs: &RegistersType, _target: &Target, _out: &mut Vec<R>) {
+    pub fn emit_prologue<R: Into<u64>>(&self, _regs: &Vec<u8>, _target: &Target, _out: &mut Vec<R>) {
         // Prologue: allocate stack and save caller-saved registers
         
         // Save ra

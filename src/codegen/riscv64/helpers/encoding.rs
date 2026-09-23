@@ -67,10 +67,10 @@ pub fn encode_s_type(rs1: u5, rs2: u5, imm_imm12: i12, funct3: u3) -> u32 {
 /// Encoded as: opcode | rs2 << 8 | rs1 << 15 | imm9[8:0] | funct3 << 12 | imm10[7:4] | imm11[3:0]
 #[inline]
 pub fn encode_b_type(rs1: u5, rs2: u5, imm_imm13: i13, funct3: u3) -> u32 {
-    let imm_sign = (imm_imm13 >> 12) & 1; // bit [12]
+    let imm_sign = ((imm_imm13 >> 12) & 1) as u32; // bit [12]
     let imm_11_5 = ((imm_imm13 >> 5) & 0x7F) as u32; // bits [11:5]
     let imm_4_1 = (imm_imm13 & 0x0F) as u32; // bits [4:1]
-    let imm_0 = (imm_imm13 >> 12) as u32; // bit [0], same as sign
+    let imm_0 = ((imm_imm13 >> 12) & 1) as u32; // bit [0], same as sign
     
     (imm_sign << 31) |
     (imm_11_5 << 25) |
@@ -99,7 +99,7 @@ pub fn encode_u_type(opcode: u7, rd: u5, imm_imm20: u20) -> u32 {
 /// Encoded as: opcode | imm11[11:8] | imm10-1[19:10] | imm12-2[20:13] | imm19[1] | rd << 7
 #[inline]
 pub fn encode_j_type(opcode: u7, rd: u5, imm_imm20: i20) -> u32 {
-    let imm_sign = (imm_imm20 >> 19) & 1; // bit [19]
+    let imm_sign = ((imm_imm20 >> 19) & 1) as u32; // bit [19]
     let imm_11 = ((imm_imm20 >> 11) & 0x01) as u32; // bit [11]
     let imm_10_1 = ((imm_imm20 >> 1) & 0x03FF) as u32; // bits [10:1]
     let imm_12 = ((imm_imm20 >> 12) & 0x0FF) as u32; // bit [12]
@@ -159,20 +159,20 @@ pub fn encode_store(op: u7, rs1: u5, rs2: u5, imm_imm12: i12, funct3: u3) -> u32
 
 /// GPR 寄存器编码
 #[inline]
-pub fn reg_gpr(gpr: crate::codegen::riscv64::registers::Gpr) -> u8 {
-    gpr as u8
+pub fn reg_gpr(gpr: u8) -> u8 {
+    gpr
 }
 
 /// FPR 寄存器编码
 #[inline]
-pub fn reg_fpr(fpr: crate::codegen::riscv64::registers::Fpr) -> u8 {
-    fpr as u8
+pub fn reg_fpr(fpr: u8) -> u8 {
+    fpr
 }
 
 /// VPR 寄存器编码 (向量寄存器)
 #[inline]
-pub fn reg_vpr(vpr: crate::codegen::riscv64::registers::Vpr) -> u8 {
-    vpr as u8
+pub fn reg_vpr(vpr: u8) -> u8 {
+    vpr
 }
 
 /// 获取零寄存器编号

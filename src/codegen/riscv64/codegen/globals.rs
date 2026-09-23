@@ -1,5 +1,5 @@
 // src/codegen/riscv64/codegen/globals.rs - Global Variable Handling
-use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
+use crate::ast::{Expr, Type, Block, Decl, FuncDecl};
 // Phase B Day 4 - Extracted from riscv64.rs.bak (2026/9/22)
 //
 // Source locations in riscv64.rs.bak:
@@ -10,6 +10,7 @@ use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
 use std::collections::HashMap;
 use crate::ir::ValueType;
 use crate::codegen::riscv64::var_is_static as riscv64_var_is_static;
+use super::blocks::Expression;
 
 /// Global variable state for RISC-V backend
 pub struct GlobalState {
@@ -58,15 +59,15 @@ impl GlobalState {
     }
 
     /// Emit a single global variable
-    fn emit_single(&mut self, g: &GlobalInfo) {
-        let size = g.ty.size().unwrap_or(1).max(1);
-        
+    fn emit_single(&mut self, g: &crate::ir::Global) {
+        let size = g.ty.size().max(1);
+
         // Align in rodata
         let off = self.align_rodata(size.max(4));
-        
+
         // Record offset
         self.global_rodata.insert(g.name.clone(), off as u64);
-        
+
         // Initialize with bytes if provided
         if let Some(init) = &g.initializer {
             self.write_initializer_bytes(init, size);
@@ -81,7 +82,7 @@ impl GlobalState {
         }
 
         // Create ELF symbol entry
-        self.create_elf_symbol(g, off, size);
+        self.create_elf_symbol(g, off, size, None);
     }
 
     /// Align rodata to specified boundary
@@ -98,22 +99,32 @@ impl GlobalState {
     }
 
     /// Write initializer bytes into rodata
-    fn write_initializer_bytes(&mut self, init: &Expression, size: usize) {
+    fn write_initializer_bytes(&mut self, init: &crate::ir::TypedExpr, size: usize) {
+        use crate::ir::ExprLiteral;
         let start = self.rodata.len();
         self.rodata.resize(start + size, 0);
 
         match &init.literal {
-            Some(LiteralValue::Int(v)) => {
+            Some(ExprLiteral::Int(v)) => {
                 let bytes = (*v as i64).to_le_bytes();
                 self.rodata[start..start + size.min(8)]
                     .copy_from_slice(&bytes[..size.min(8)]);
             }
-            Some(LiteralValue::Float(v)) => {
-                let bits = (*v as f32).to_bits();
-                self.rodata[start..start + 4.min(size)]
-                    .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
-            }
-            _ => {}
+            Some(ExprLiteral::Float(v)) => match init.ty {
+                ValueType::Float { bits: 64 } => {
+                    let bits = *v as f64;
+                    let b = bits.to_le_bytes();
+                    self.rodata[start..start + 8.min(size)]
+                        .copy_from_slice(&b[..8.min(size)]);
+                }
+                _ => {
+                    let bits = *v as f32;
+                    let b = bits.to_bits().to_le_bytes();
+                    self.rodata[start..start + 4.min(size)]
+                        .copy_from_slice(&b[..4.min(size)]);
+                }
+            },
+            None => {}
         }
     }
 
@@ -135,11 +146,11 @@ impl GlobalState {
     }
 
     /// Create ELF symbol for a global variable
-    fn create_elf_symbol(&mut self, g: &GlobalInfo, off: usize, size: usize) {
+    fn create_elf_symbol(&mut self, g: &crate::ir::Global, off: usize, size: usize, _prog: Option<&crate::ast::Program>) {
         use crate::codegen::shared::elf::{STB_GLOBAL, STB_LOCAL, STT_OBJECT, STT_TLS};
 
         // Determine linkage based on static/local modifier
-        let is_internal = g.is_static_local || riscv64_var_is_static(prog, &g.name);
+        let is_internal = g.is_static_local || _prog.map_or(false, |p| riscv64_var_is_static(p, &g.name));
         let bind = if is_internal { STB_LOCAL } else { STB_GLOBAL };
         let ty = if g.is_tls { STT_TLS } else { STT_OBJECT };
 
@@ -161,7 +172,7 @@ impl GlobalState {
         prog.decls.iter()
             .filter_map(|d| {
                 if let crate::ast::Decl::Var(v) = d {
-                    if v.is_tls {
+                    if v.is_thread_local {
                         Some(v.name.name.clone())
                     } else {
                         None
@@ -252,10 +263,10 @@ impl GlobalState {
     pub fn get_type_size(ty: &ValueType) -> Option<usize> {
         match ty {
             ValueType::Void => Some(1), // Minimum unit
-            ValueType::Bool { width } => Some((width / 8).max(1)),
-            ValueType::Int { width, .. } => Some(width / 8),
-            ValueType::Float { is_double } => Some(if *is_double { 8 } else { 4 }),
-            ValueType::Pointer { .. } => Some(8), // 64-bit address space
+            ValueType::Integer { bits, .. } => Some((*bits / 8).max(1) as usize),
+            ValueType::Float { bits } => Some((*bits / 8) as usize),
+            ValueType::Pointer(_) => Some(8), // 64-bit address space
+            _ => None,
         }
     }
 
@@ -307,10 +318,10 @@ mod tests {
     fn test_get_type_size() {
         use GlobalState;
         
-        let size = GlobalState::get_type_size(&ValueType::Int { width: 32, signed: true });
+        let size = GlobalState::get_type_size(&ValueType::Integer { bits: 32, signed: true });
         assert_eq!(size, Some(4));
-        
-        let size = GlobalState::get_type_size(&ValueType::Float { is_double: false });
+
+        let size = GlobalState::get_type_size(&ValueType::Float { bits: 32 });
         assert_eq!(size, Some(4));
     }
 

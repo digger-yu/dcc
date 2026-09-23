@@ -224,6 +224,11 @@ impl RiscvCompileState {
         // Fix up the entry jump address
     }
 
+    /// Generate code for a single function (placeholder)
+    fn gen_function(&mut self, _func: &crate::ir::Function) {
+        // Function emission handled by functions module
+    }
+
     /// Get current code position
     fn pos(&self) -> usize {
         0 // Placeholder - would track actual code buffer position
@@ -249,7 +254,7 @@ impl RiscvCompileState {
     }
 
     /// Resolve GNU-style asm labels
-    fn resolve_asm_label(&self, c_name: &str) -> &str {
+    fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
         // Return asm label override if present, otherwise C name
         self.labels.get(c_name)
             .map(|s| s.as_str())

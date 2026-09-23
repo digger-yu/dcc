@@ -4,7 +4,47 @@
 // 第一性原理：IF/ELSE/WHILE/DO/FOR/SWITCH 的控制流模式在所有 ISA 后端中相同
 // 目标：提取通用控制流生成逻辑，智能选择最佳实现策略
 
-use crate::ast::{Stmt, Block, Expr, Type};
+use crate::ast::{Stmt, Block, Expr, Type, UnOp};
+
+/// Extract the source span of an expression.
+fn expr_span(expr: &Expr) -> crate::diagnostics::Span {
+    match expr {
+        Expr::Int { span, .. }
+        | Expr::Float { span, .. }
+        | Expr::ComplexLit { span, .. }
+        | Expr::Real { span, .. }
+        | Expr::Imag { span, .. }
+        | Expr::String { span, .. }
+        | Expr::Char { span, .. }
+        | Expr::Ident { span, .. }
+        | Expr::Binop { span, .. }
+        | Expr::Unary { span, .. }
+        | Expr::Call { span, .. }
+        | Expr::Assign { span, .. }
+        | Expr::Cond { span, .. }
+        | Expr::Index { span, .. }
+        | Expr::Member { span, .. }
+        | Expr::AddrOf { span, .. }
+        | Expr::Deref { span, .. }
+        | Expr::PostInc { span, .. }
+        | Expr::PostDec { span, .. }
+        | Expr::PreInc { span, .. }
+        | Expr::PreDec { span, .. }
+        | Expr::Comma { span, .. }
+        | Expr::LabelAddr { span, .. }
+        | Expr::CompoundLit { span, .. }
+        | Expr::AsmExpr { span, .. }
+        | Expr::VaArg { span, .. }
+        | Expr::Cast { span, .. }
+        | Expr::InitList { span, .. }
+        | Expr::StmtExpr { span, .. } => span.clone(),
+        Expr::SizeofTy { span, .. }
+        | Expr::SizeofExpr { span, .. }
+        | Expr::AlignofTy { span, .. }
+        | Expr::AlignofExpr { span, .. }
+        | Expr::Offsetof { span, .. } => span.clone(),
+    }
+}
 
 // Helper type for jump kinds - define once centrally
 #[derive(Clone, Copy, PartialEq)]
@@ -48,7 +88,7 @@ pub struct JumpTarget {
 }
 
 /// Branch condition encoding
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchCond {
     /// Simple comparison: EQ, NE, LT, LE, GT, GE
     Comp(crate::ast::BinOp),
@@ -71,7 +111,6 @@ pub enum BranchCond {
 /// 
 /// This trait defines the interface that each ISA backend must implement.
 /// The shared logic calls these methods to generate architecture-specific code.
-#[inline]
 pub trait ControlFlowBackend {
     /// Emit a label definition
     fn emit_label(&self, label: &str);
@@ -206,7 +245,14 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         //         for external goto targets
         if let Ok(cv) = crate::const_eval::eval_full(cond, false) {
             let has_labels_in_then = CF::stmt_contains_label(then_);
-            if cv != 0 {
+            let is_nonzero = match cv {
+                crate::const_eval::ConstValue::Int(i) => i != 0,
+                crate::const_eval::ConstValue::Float(f) => f != 0.0,
+                crate::const_eval::ConstValue::Addr { .. }
+                | crate::const_eval::ConstValue::Str { .. }
+                | crate::const_eval::ConstValue::Bytes { .. } => true,
+            };
+            if is_nonzero {
                 // Condition is true
                 self.lower_stmt(then_);
             } else if has_labels_in_then {
@@ -260,13 +306,13 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
         // Save and restore loop context
         let (sc, sb) = (
-            self.backend.loop_continue.clone(),
-            self.backend.loop_break.clone()
+            self.loop_continue.clone(),
+            self.loop_break.clone()
         );
-        
-        self.backend.loop_continue = Some(ls.clone());
-        self.backend.loop_break = Some(le.clone());
-        self.backend.break_targets.push((le.clone(), false));
+
+        self.loop_continue = Some(ls.clone());
+        self.loop_break = Some(le.clone());
+        self.break_targets.push((le.clone(), false));
 
         // Header label
         self.backend.maybe_align_loop();
@@ -287,9 +333,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         self.backend.label(&le);
 
         // Restore loop context
-        self.backend.loop_continue = sc;
-        self.backend.loop_break = sb;
-        self.backend.break_targets.pop();
+        self.loop_continue = sc;
+        self.loop_break = sb;
+        self.break_targets.pop();
     }
 
     /// Lower do-while loop with context management
@@ -301,13 +347,13 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
         // Save and restore loop context
         let (sc, sb) = (
-            self.backend.loop_continue.clone(),
-            self.backend.loop_break.clone()
+            self.loop_continue.clone(),
+            self.loop_break.clone()
         );
-        
-        self.backend.loop_continue = Some(body_label.clone());
-        self.backend.loop_break = Some(exit_label.clone());
-        self.backend.break_targets.push((exit_label.clone(), false));
+
+        self.loop_continue = Some(body_label.clone());
+        self.loop_break = Some(exit_label.clone());
+        self.break_targets.push((exit_label.clone(), false));
 
         // Do-while: body executes FIRST, then condition checked
         self.backend.emit_label(&body_label);
@@ -328,9 +374,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         self.backend.label(&exit_label);
 
         // Restore loop context
-        self.backend.loop_continue = sc;
-        self.backend.loop_break = sb;
-        self.backend.break_targets.pop();
+        self.loop_continue = sc;
+        self.loop_break = sb;
+        self.break_targets.pop();
     }
 
     /// Lower for loop with full context management
@@ -349,13 +395,13 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
         // Save and restore loop context
         let (sc, sb) = (
-            self.backend.loop_continue.clone(),
-            self.backend.loop_break.clone()
+            self.loop_continue.clone(),
+            self.loop_break.clone()
         );
-        
-        self.backend.loop_continue = Some(lst.clone());  // Continue goes to step
-        self.backend.loop_break = Some(le.clone());
-        self.backend.break_targets.push((le.clone(), false));
+
+        self.loop_continue = Some(lst.clone());  // Continue goes to step
+        self.loop_break = Some(le.clone());
+        self.break_targets.push((le.clone(), false));
         
         self.backend.maybe_align_loop();
 
@@ -391,9 +437,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         self.backend.label(&le);
 
         // Restore loop context
-        self.backend.loop_continue = sc;
-        self.backend.loop_break = sb;
-        self.backend.break_targets.pop();
+        self.loop_continue = sc;
+        self.loop_break = sb;
+        self.break_targets.pop();
     }
 
     /// Lower switch statement with int128 support and GNU range extensions
@@ -408,7 +454,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let l_break = self.backend.new_label_name("switch_break");
         
         // Save break target
-        self.backend.break_targets.push((l_break.clone(), false));
+        self.break_targets.push((l_break.clone(), false));
         
         // Evaluate switch expression
         self.backend.gen_expr(scrutinee, 0);
@@ -430,7 +476,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         }
         
         // Determine signedness for range comparisons
-        let switch_is_signed = self.determine_signedness(scrutinee);
+        let switch_is_signed = Self::determine_signedness(scrutinee);
         
         // Collect case bodies and labels
         let mut case_bodies: Vec<(usize, String)> = Vec::new();
@@ -472,8 +518,8 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                     // Simple equality: case N
                     if switch_is_int128 {
                         // __int128 comparison: compare low and high separately
-                        let case_low: i128 = if let Ok(cv) = crate::const_eval::eval_full(val, false) {
-                            cv.unsigned_to_u128()
+                        let case_low: u128 = if let Ok(cv) = crate::const_eval::eval_full(val, false) {
+                            cv.as_int().unwrap_or(0) as u128
                         } else {
                             0
                         };
@@ -533,7 +579,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         self.backend.label(&l_end);
         
         // Pop break target
-        self.backend.break_targets.pop();
+        self.break_targets.pop();
     }
     
     /// Determine if switch expression is signed
@@ -541,8 +587,25 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         // Helper to determine signedness for range comparisons
         let ty = expr.ty();
         match ty {
-            Type::Int(_) | Type::Long | Type::LongLong => true,
-            Type::Enum(_, _, Some(inner)) => inner.base.is_signed(),
+            Type::Bool
+            | Type::Char
+            | Type::SChar
+            | Type::Short
+            | Type::Int
+            | Type::Long
+            | Type::LongLong
+            | Type::Int128 => true,
+            Type::Enum(_, _, Some(inner)) => matches!(
+                inner.base,
+                Type::Bool
+                    | Type::Char
+                    | Type::SChar
+                    | Type::Short
+                    | Type::Int
+                    | Type::Long
+                    | Type::LongLong
+                    | Type::Int128
+            ),
             _ => false,
         }
     }
@@ -555,9 +618,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let mut has_dense_range = false;
 
         for case in cases {
-            if let Some(val) = case.val {
-                if let Ok(const_val) = crate::const_eval::eval_full(&val, false) {
-                    let val_u64 = const_val.to_u64().unwrap_or(0);
+            if let Some(val) = &case.val {
+                if let Ok(const_val) = crate::const_eval::eval_full(val, false) {
+                    let val_u64 = const_val.as_int().unwrap_or(0) as u64;
                     min_val = min_val.min(val_u64);
                     max_val = max_val.max(val_u64);
                 }
@@ -576,9 +639,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
     /// Lower switch using jump table
     fn lower_switch_with_jump_table(
-        &self,
+        &mut self,
         scrutinee: &Expr,
-        cases: &[crate::ast::Case],
+        _cases: &[crate::ast::Case],
         default_case: Option<&Block>,
     ) {
         let jump_table_label = self.backend.new_label_name("jump_table");
@@ -601,7 +664,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
     /// Lower switch using sequential comparisons
     fn lower_switch_with_branches(
-        &self,
+        &mut self,
         scrutinee: &Expr,
         cases: &[crate::ast::Case],
         default_case: Option<&Block>,
@@ -614,12 +677,13 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
             // Compare with case value
             if let Some(val) = &case.val {
                 self.emit_expr_stmt(scrutinee);
-                
+
                 let eq_expr = Expr::Binop {
-                    op: crate::ast::BinOp::Eq,
+                    op: crate::ast::BinOp::EqEq,
                     l: Box::new(scrutinee.clone()),
-                    r: val.clone(),
-                    loc: scrutinee.location(),
+                    r: Box::new(val.clone()),
+                    span: expr_span(scrutinee),
+                    ty: scrutinee.ty(),
                 };
                 let cond = self.lower_condition(&eq_expr);
                 self.backend.emit_conditional_jump(&cond, &case_label);
@@ -643,7 +707,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         for item in &block.items {
             match item {
                 crate::ast::BlockItem::Stmt(stmt) => self.lower_stmt(stmt),
-                crate::ast::BlockItem::Decl(decl) => {
+                crate::ast::BlockItem::Decl(_decl) => {
                     // Variable declarations - simplified handling
                     eprintln!("TODO: handle variable declaration in block");
                 }
@@ -656,16 +720,29 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         match stmt {
             Stmt::If {
                 cond, then_, else_, ..
-            } => self.lower_if_statement(cond, then_, else_),
+            } => self.lower_if_statement(cond, then_, else_.as_deref()),
             Stmt::While { cond, body, .. } => self.lower_while_loop(cond, body),
             Stmt::Do { cond, body, .. } => self.lower_do_loop(cond, body),
             Stmt::For {
                 init, cond, step, body, ..
-            } => self.lower_for_loop(init.as_ref(), cond.as_ref(), step.as_ref(), body),
-            Stmt::Switch {
-                expr, cases, default,
-                ..
-            } => self.lower_switch_statement(expr, cases, default.as_ref()),
+            } => self.lower_for_loop(
+                init.as_deref(),
+                cond.as_ref(),
+                step.as_ref(),
+                body,
+            ),
+            Stmt::Switch { expr, cases, .. } => {
+                // The default case is represented as the case whose
+                // `val` is None; its body doubles as the default block.
+                let default_case = cases.iter().find_map(|c| {
+                    if c.val.is_none() {
+                        Some(&c.body)
+                    } else {
+                        None
+                    }
+                });
+                self.lower_switch_statement(expr, cases, default_case)
+            }
             Stmt::Block { b, .. } => self.lower_block(b),
             Stmt::Break { .. } => {
                 // TODO: break handling with outer context
@@ -697,7 +774,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                 // Binary operators → branch conditions
                 if matches!(
                     op,
-                    crate::ast::BinOp::Eq
+                    crate::ast::BinOp::EqEq
                         | crate::ast::BinOp::Ne
                         | crate::ast::BinOp::Lt
                         | crate::ast::BinOp::Le
@@ -719,7 +796,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                 }
             }
             Expr::Unary {
-                op: crate::ast::UnaryOp::Not,
+                op: UnOp::Not,
                 e,
                 ..
             } => BranchCond::Not(Box::new(self.lower_condition(e))),
@@ -744,8 +821,8 @@ impl BranchCond {
     /// Flip a comparison operator
     fn flip_comparison(op: crate::ast::BinOp) -> crate::ast::BinOp {
         match op {
-            crate::ast::BinOp::Eq => crate::ast::BinOp::Ne,
-            crate::ast::BinOp::Ne => crate::ast::BinOp::Eq,
+            crate::ast::BinOp::EqEq => crate::ast::BinOp::Ne,
+            crate::ast::BinOp::Ne => crate::ast::BinOp::EqEq,
             crate::ast::BinOp::Lt => crate::ast::BinOp::Ge,
             crate::ast::BinOp::Le => crate::ast::BinOp::Gt,
             crate::ast::BinOp::Gt => crate::ast::BinOp::Le,
@@ -766,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_branch_cond_negation() {
-        let eq = BranchCond::Comp(crate::ast::BinOp::Eq);
+        let eq = BranchCond::Comp(crate::ast::BinOp::EqEq);
         assert_eq!(eq.negate(), BranchCond::Comp(crate::ast::BinOp::Ne));
 
         let lt = BranchCond::Comp(crate::ast::BinOp::Lt);
@@ -784,7 +861,7 @@ mod tests {
         use super::BranchCond;
         
         assert_eq!(
-            BranchCond::flip_comparison(crate::ast::BinOp::Eq),
+            BranchCond::flip_comparison(crate::ast::BinOp::EqEq),
             crate::ast::BinOp::Ne
         );
         assert_eq!(

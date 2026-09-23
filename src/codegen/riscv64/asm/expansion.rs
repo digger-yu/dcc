@@ -29,21 +29,21 @@ impl AddressExpansion {
             let upper = (value >> 16) as u32;
             
             if upper != 0 {
-                emitter.encode_lui(rd, upper);
+                let _ = RiscvEmitter::encode_lui(rd, upper);
                 let lower_val = (value & 0xffff) as i32;
-                
+
                 // Sign-extend if negative
                 if lower_val < 0 {
-                    emitter.encode_i_type(0x13, rd, rd, (lower_val & 0xfff) as u12, 0);
+                    let _ = RiscvEmitter::encode_i_type(0x13, rd, rd, (lower_val & 0xfff) as u12, 0);
                 } else {
-                    emitter.encode_i_type(0x13, rd, rd, (lower_val & 0xfff) as u12, 0);
+                    let _ = RiscvEmitter::encode_i_type(0x13, rd, rd, (lower_val & 0xfff) as u12, 0);
                 }
             }
-            
+
             instructions.push(format!("lui x{}, {}", rd, upper));
         } else {
             // Use rd directly
-            emitter.encode_lui(rd, ((value >> 16) & 0xffff_ffff) as u32);
+            let _ = RiscvEmitter::encode_lui(rd, ((value >> 16) & 0xffff_ffff) as u32);
             instructions.push(format!("lui x{}, {}", rd, (value >> 16)));
         }
 
@@ -111,7 +111,7 @@ impl AddressExpansion {
             } else {
                 // Must construct address through temp
                 let _temp = self.generate_temp_address(base_reg, offset);
-                instructions.extend(_temp.1);
+                instructions.push(_temp.1);
                 instructions.push(format!("add x{}, x{}, x{}", dr, base_reg, _temp.0));
             }
         } else {
@@ -120,7 +120,7 @@ impl AddressExpansion {
                 instructions.push(format!("addi x{}, x{}, {}", base_reg, base_reg, offset));
             } else {
                 let temp = self.generate_temp_address(base_reg, offset);
-                instructions.extend(temp);
+                instructions.push(temp.1);
             }
         }
 
@@ -207,7 +207,10 @@ impl AddressExpansion {
         } else if imm >= 0 && imm <= 0x7fff {
             ImmediateStrategy::AddiSeq
         } else {
-            ImmediateStrategy::LuiAddi { high: (imm >> 16), low: (imm & 0xffff) }
+            ImmediateStrategy::LuiAddi {
+                high: (imm >> 16) as u32,
+                low: (imm & 0xffff) as i16,
+            }
         }
     }
 }

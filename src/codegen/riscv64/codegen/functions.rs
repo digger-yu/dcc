@@ -1,5 +1,5 @@
 // src/codegen/riscv64/codegen/functions.rs - Function Generation Logic
-use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
+use crate::ast::{Expr, Type, Block, Decl, FuncDecl};
 // Phase B Day 4 - Extracted from riscv64.rs.bak (2026/9/22)
 //
 // Source locations in riscv64.rs.bak:
@@ -142,12 +142,16 @@ impl FunctionCodegen {
     pub fn process_body(&mut self, body: &[Statement]) -> Result<(), CompilationError> {
         for stmt in body {
             match stmt {
-                Statement::Block(b) => self.process_block(b)?,
-                Statement::If(e, t, f) => self.process_if(e, t, f)?,
+                Statement::Block(b) => self.process_body(b)?,
+                Statement::If(e, t, f) => self.process_if(e, t, f.as_deref())?,
                 Statement::While(cond, body) => self.process_while(cond, body)?,
-                Statement::For(init, cond, step, body) => self.process_for(init, cond, step, body)?,
+                Statement::For(init, cond, step, body) => {
+                    self.process_for(init.as_deref(), cond, step, body)?
+                }
                 Statement::Switch(expr, cases) => self.process_switch(expr, cases)?,
-                Statement::Return(opt_expr) => self.process_return(opt_expr)?,
+                Statement::Return(opt_expr) => {
+                    self.process_return(opt_expr.as_deref())?
+                }
                 Statement::Assign(lhs, rhs) => self.process_assign(lhs, rhs)?,
                 Statement::Expr(expr) => self.emit_expression(expr),
                 Statement::Label(name) => self.label(&name),
@@ -188,8 +192,8 @@ impl FunctionCodegen {
     /// Evaluate an expression and store result in a register
     pub fn evaluate_expression(&mut self, expr: &Expression) -> RegAllocation {
         match expr {
-            Expression::Binary(op, left, right) => {
-                self.binary_operation(*op, left, right)
+            Expression::Binary(bin_expr) => {
+                self.binary_operation(bin_expr.op, &bin_expr.left, &bin_expr.right)
             }
             Expression::Unary(op, operand) => {
                 self.unary_operation(*op, operand)
@@ -201,7 +205,7 @@ impl FunctionCodegen {
                 self.load_memory(addr)
             }
             Expression::Const(value) => {
-                self.load_immediate(value)
+                self.load_immediate(*value)
             }
             _ => RegAllocation::default(),
         }

@@ -103,7 +103,7 @@ impl Instruction {
     }
 
     /// Format instruction as assembly text
-    pub fn fmt(&self, format: EncodingFormat) -> String {
+    pub fn fmt(&self, format: &EncodingFormat) -> String {
         match format {
             EncodingFormat::Att => self.fmt_att(),
             EncodingFormat::Intel => self.fmt_intel(),
@@ -242,6 +242,12 @@ impl fmt::Display for Operand {
     }
 }
 
+impl fmt::Display for Expression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.fmt())
+    }
+}
+
 impl Expression {
     fn fmt(&self) -> String {
         match self {
@@ -337,7 +343,7 @@ impl AssemblyBuilder {
 
         // Directives
         for dir in &self.directives {
-            text.push_str(&dir.fmt(format));
+            text.push_str(&dir.fmt(&format));
             text.push('\n');
         }
 
@@ -351,7 +357,7 @@ impl AssemblyBuilder {
         // Instructions
         for instr in &self.instructions {
             text.push('\t');
-            text.push_str(&instr.fmt(format));
+            text.push_str(&instr.fmt(&format));
             text.push('\n');
         }
 
@@ -360,7 +366,7 @@ impl AssemblyBuilder {
 }
 
 impl Directive {
-    fn fmt(&self, format: EncodingFormat) -> String {
+    fn fmt(&self, _format: &EncodingFormat) -> String {
         // For now, use generic assembly notation
         match self {
             Directive::Section(name) => format!(".section {}", name),

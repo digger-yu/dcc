@@ -410,11 +410,11 @@ impl Codegen {
         let r_off: i64;
 
         if l_is_vec {
-            self.gen_vector_load_into_slot(l, l_slot);
-            l_off = self.vector_temp_base(l_slot, vec_size);
+            self.gen_vector_load_into_slot(l, l_slot as i64);
+            l_off = self.vector_temp_base(l_slot as i64, vec_size);
         } else {
             self.gen_expr(l, 0);
-            let t_off = self.vector_temp_base(l_slot, 16);
+            let t_off = self.vector_temp_base(l_slot as i64, 16);
             self.emit_store(0, t_off, 8);            // [r13+t_off] = rax (low)
             // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
             self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
@@ -423,11 +423,11 @@ impl Codegen {
         }
 
         if r_is_vec {
-            self.gen_vector_load_into_slot(r, r_slot);
-            r_off = self.vector_temp_base(r_slot, vec_size);
+            self.gen_vector_load_into_slot(r, r_slot as i64);
+            r_off = self.vector_temp_base(r_slot as i64, vec_size);
         } else {
             self.gen_expr(r, 0);
-            let t_off = self.vector_temp_base(r_slot, 16);
+            let t_off = self.vector_temp_base(r_slot as i64, 16);
             self.emit_store(0, t_off, 8);
             self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8);

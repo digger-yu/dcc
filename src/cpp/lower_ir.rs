@@ -317,7 +317,7 @@ impl<'a> IrLowerer<'a> {
         fields: &mut Vec<crate::ast::Field>,
     ) -> Result<(), LowerIrError> {
         // 先处理非虚基类（按声明顺序）
-        for (i, base_layout) in abi.bases.iter().enumerate() {
+        for (_i, base_layout) in abi.bases.iter().enumerate() {
             let base_abi = self.abis.get(&base_layout.base).ok_or_else(|| {
                 LowerIrError::Internal(format!(
                     "ABI for base class {} not found",
@@ -6532,7 +6532,7 @@ mod tests {
         );
         let abi = calc.compute_class(class_id);
         
-        for (i, v) in abi.vptrs.iter().enumerate() {
+        for (_i, _v) in abi.vptrs.iter().enumerate() {
         }
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);

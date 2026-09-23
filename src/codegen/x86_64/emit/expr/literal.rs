@@ -121,41 +121,42 @@ impl Codegen {
                     // dst = base_off
                     self.mov_imm(dst, base_off as i128);
                     // 对每个下标: dst += idx * stride
-                    let mut cur_ty = field_ty;
-                    for idx_expr in indices.iter() {
-                        if let Type::Array(elem, _) = &cur_ty {
-                            // 计算下标值到 rcx
-                            self.gen_expr(idx_expr, 1); // rcx = idx
-                            // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
-                            let idx_ty = idx_expr.ty();
-                            if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
-                                // movslq %ecx, %rcx: 48 63 C9
-                                self.emit(&[0x48, 0x63, 0xC9]);
-                            }
-                            // 计算 stride = sizeof(elem) 并乘到 rcx
-                            if Self::type_has_vla(&elem.base) {
-                                // VLA: 运行时计算 stride 到 r11
-                                self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
-                                // rcx *= r11
-                                self.imul_reg(1, 11);
-                            } else {
-                                // 常量 stride
-                                let stride = elem.size() as u128;
-                                if stride > 1 {
-                                    if stride.is_power_of_two() {
-                                        let shift = (stride.trailing_zeros() as u8).min(31);
-                                        self.emit(&[0x48, 0xC1, 0xE1, shift]); // shl rcx, shift
-                                    } else {
-                                        self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
+                    if let Some(mut cur_ty) = field_ty {
+                        for idx_expr in indices.iter() {
+                            if let Type::Array(elem, _) = &cur_ty {
+                                // 计算下标值到 rcx
+                                self.gen_expr(idx_expr, 1); // rcx = idx
+                                // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
+                                let idx_ty = idx_expr.ty();
+                                if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
+                                    // movslq %ecx, %rcx: 48 63 C9
+                                    self.emit(&[0x48, 0x63, 0xC9]);
+                                }
+                                // 计算 stride = sizeof(elem) 并乘到 rcx
+                                if Self::type_has_vla(&elem.base) {
+                                    // VLA: 运行时计算 stride 到 r11
+                                    self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
+                                    // rcx *= r11
+                                    self.imul_reg(1, 11);
+                                } else {
+                                    // 常量 stride
+                                    let stride = elem.size() as u128;
+                                    if stride > 1 {
+                                        if stride.is_power_of_two() {
+                                            let shift = (stride.trailing_zeros() as u8).min(31);
+                                            self.emit(&[0x48, 0xC1, 0xE1, shift]); // shl rcx, shift
+                                        } else {
+                                            self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
+                                        }
                                     }
                                 }
+                                // dst += rcx
+                                // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
+                                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                                self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
+                                // 下降到元素类型
+                                cur_ty = elem.base.clone();
                             }
-                            // dst += rcx
-                            // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
-                            // 下降到元素类型
-                            cur_ty = elem.base.clone();
                         }
                     }
                 }

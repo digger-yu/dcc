@@ -1,7 +1,7 @@
 //! Expression executor for all ISA backends
 //! Provides common expression evaluation logic across architectures
 
-use crate::ast::{BinOp, UnOp};
+use crate::ast::{BinOp, Type, UnOp};
 use std::fmt;
 
 /// Result type for expression operations
@@ -123,7 +123,7 @@ pub trait ExpressionExecutor: Sized {
     fn emit_call(
         &mut self,
         func: &crate::ast::Expr,
-        args: &[Box<crate::ast::Expr>],
+        args: &[crate::ast::Expr],
         result_reg: u8,
     ) -> ExprResult<()>;
 

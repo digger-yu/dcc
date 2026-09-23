@@ -1,7 +1,7 @@
 // src/codegen/riscv64/emit/stmt.rs - Statement-level emission (RISC-V 64 backend)
 // Priority 4 Task: Extract working implementations from riscv64.rs.bak
 
-use crate::ast::{BlockItem, Case, Decl, Stmt, Type};
+use crate::ast::{BlockItem, Case, Decl, Expr, Stmt, Type};
 use crate::codegen::riscv64::Riscv64Codegen;
 use crate::ir::{TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;

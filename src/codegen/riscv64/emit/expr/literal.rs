@@ -3,7 +3,7 @@
 
 use crate::ast::Type;
 
-use crate::codegen::riscv64::Riscv64Codegen;
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 use crate::ir::{TypedExpr, ValueType};
 
 use crate::target::Target;

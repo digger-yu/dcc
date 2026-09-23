@@ -442,7 +442,7 @@ impl Sema {
 
     /// Find a namespace scope by its name path (e.g., "std" or "std::pmr")
     /// For now, search through all registered scopes
-    fn find_namespace_scope(&self, ns_path: &str) -> Option<ScopeId> {
+    fn find_namespace_scope(&self, _ns_path: &str) -> Option<ScopeId> {
         // TODO: Proper namespace traversal when symbol table integration complete
         // Simple fallback: return None for now since full implementation requires ClassTable access
         // This is acceptable as first-class namespace support is complex
@@ -3284,7 +3284,7 @@ impl Sema {
                 variants,
             } => {
                 // 顶层 enum: 注册枚举值为全局 int 符号
-                let mut next_val: i128 = 0;
+                let _next_val: i128 = 0;
                 for (var_name, init_text) in variants {
                     // 尝试 parse init_text 为 i128, 成功则更新 next_val;
                     // 失败也注册 (scoped enum 成员如 B = A+2 无法 parse)
@@ -3709,7 +3709,7 @@ impl Sema {
                 variants,
             } => {
                 // 类内 enum: 注册枚举常量到类作用域
-                let mut next_val: i128 = 0;
+                let _next_val: i128 = 0;
                 for (var_name, init_text) in variants {
                     if let Some(text) = init_text {
                         let trimmed = text.trim();
@@ -4947,7 +4947,7 @@ impl InstantiationContext {
             if param_name == type_param {
                 // Check if actual type has the requested member
                 return match actual_type {
-                    MangleType::Template { name, args } => {
+                    MangleType::Template { name, args: _args } => {
                         // For std::vector<int>, we might have nested types like 'iterator'
                         // This would be resolved via typedefs/typedef-like mechanisms
                         // For now, return dependent type marker

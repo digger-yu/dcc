@@ -14,6 +14,7 @@ use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, Type
 use crate::target::Target;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::codegen::shared::expressions::ExprResult;
 
 // ============================================================================
 // CORE STRUCTS (moved to appropriate modules in future)
@@ -193,25 +194,28 @@ impl Aarch64Codegen {
     // ARM64 ARITHMETIC INSTRUCTIONS
     // ============================================================================
     
-    pub fn emit_arm64_add(&mut self, dest: u8, src1: u8, src2: u8) {
+    pub fn emit_arm64_add(&self, dest: u8, src1: u8, src2: u8) {
         // ADD <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 ADD instruction
         // Pattern: 0xaa0003e1 (ADD X1, X0, X2)
+        let _ = (dest, src1, src2);
     }
     
-    pub fn emit_arm64_sub(&mut self, dest: u8, src1: u8, src2: u8) {
+    pub fn emit_arm64_sub(&self, dest: u8, src1: u8, src2: u8) {
         // SUB <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 SUB instruction
+        let _ = (dest, src1, src2);
     }
     
-    pub fn emit_arm64_mul(&mut self, dest: u8, src1: u8, src2: u8) -> ExprResult<()> {
+    pub fn emit_arm64_mul(&self, dest: u8, src1: u8, src2: u8) -> ExprResult<()> {
         // MUL <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 MUL instruction
+        let _ = (dest, src1, src2);
         Ok(())
     }
     
     pub fn emit_arm64_div(
-        &mut self,
+        &self,
         dest: u8,
         src1: u8,
         src2: u8,
@@ -219,11 +223,12 @@ impl Aarch64Codegen {
     ) -> ExprResult<()> {
         // SDIV (signed) or UDIV (unsigned)
         // TODO: Encode ARM64 DIV instruction
+        let _ = (dest, src1, src2, signed);
         Ok(())
     }
     
     pub fn emit_arm64_rem(
-        &mut self,
+        &self,
         dest: u8,
         src1: u8,
         src2: u8,
@@ -231,46 +236,51 @@ impl Aarch64Codegen {
     ) -> ExprResult<()> {
         // SREM/UREM via division sequence
         // TODO: Implement remainder via SDIV/UDIV + MUL + SUB
+        let _ = (dest, src1, src2, signed);
         Ok(())
     }
     
-    pub fn emit_arm64_neg(&mut self, dest: u8, src: u8, ty: &ValueType) -> ExprResult<()> {
+    pub fn emit_arm64_neg(&self, dest: u8, src: u8, ty: &Type) -> ExprResult<()> {
         // NEGS for integers, FNEG for floats
-        if ty.is_floating_point() {
-            // TODO: FNEG Vd.{}Vn.{}
+        if ty_is_floating_point(ty) {
+            // TODO: FNEG Vd, Vn
             Err("TODO: FNEG for float negation".into())
         } else {
-            // NEGS Xd, Xn
+            // NEGS Xd, Xn  ==  SUB Xd, XZR, Xn
             self.emit_arm64_sub(dest, 0, src);
             Ok(())
         }
     }
     
-    pub fn emit_arm64_not(&mut self, dest: u8, src: u8) {
+    pub fn emit_arm64_not(&self, dest: u8, src: u8) {
         // EOR Xd, Xn, #-1 (bitwise NOT)
         // TODO: Encode as EOR
+        let _ = (dest, src);
     }
     
     // ============================================================================
     // ARM64 LOGICAL INSTRUCTIONS
     // ============================================================================
     
-    pub fn emit_arm64_and(&mut self, dest: u8, src1: u8, src2: u8) {
+    pub fn emit_arm64_and(&self, dest: u8, src1: u8, src2: u8) {
         // AND <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 AND instruction
+        let _ = (dest, src1, src2);
     }
     
-    pub fn emit_arm64_orr(&mut self, dest: u8, src1: u8, src2: u8) {
+    pub fn emit_arm64_orr(&self, dest: u8, src1: u8, src2: u8) {
         // ORR <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 ORR instruction
+        let _ = (dest, src1, src2);
     }
     
-    pub fn emit_arm64_eor(&mut self, dest: u8, src1: u8, src2: u8) {
+    pub fn emit_arm64_eor(&self, dest: u8, src1: u8, src2: u8) {
         // EOR <Xd>, <Xn>, <Xm>
         // TODO: Encode ARM64 EOR instruction
+        let _ = (dest, src1, src2);
     }
     
-    pub fn orr_clear(&mut self, reg: u8, size: usize) -> ExprResult<()> {
+    pub fn orr_clear(&self, reg: u8, size: usize) -> ExprResult<()> {
         // ORR dest, reg, #0 to clear register
         match size {
             1..=4 => self.emit_arm64_eor(reg, reg, reg),
@@ -284,14 +294,16 @@ impl Aarch64Codegen {
     // ARM64 SHIFT INSTRUCTIONS
     // ============================================================================
     
-    pub fn emit_arm64_lsl(&mut self, dest: u8, src: u8, shift: u8) {
+    pub fn emit_arm64_lsl(&self, dest: u8, src: u8, shift: u8) {
         // LSL <Xd>, <Xn>, #shift
         // TODO: Encode ARM64 LSL immediate
+        let _ = (dest, src, shift);
     }
     
-    pub fn emit_arm64_lsr(&mut self, dest: u8, src: u8, shift: u8) -> ExprResult<()> {
+    pub fn emit_arm64_lsr(&self, dest: u8, src: u8, shift: u8) -> ExprResult<()> {
         // LSR <Xd>, <Xn>, #shift (logical shift right)
         // TODO: Encode ARM64 LSR immediate
+        let _ = (dest, src, shift);
         Ok(())
     }
     
@@ -305,45 +317,52 @@ impl Aarch64Codegen {
     // ARM64 SIGN/ZERO EXTENSION
     // ============================================================================
     
-    pub fn emit_sxtb(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_sxtb(&self, dest: u8, src: u8, dest_bits: usize) {
         // SXTB <Xd>, <Wn> (sign extend byte)
         // TODO: Encode ARM64 SXTB
+        let _ = (dest, src, dest_bits);
     }
     
-    pub fn emit_sxth(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_sxth(&self, dest: u8, src: u8, dest_bits: usize) {
         // SXTH <Xd>, <Wn> (sign extend halfword)
         // TODO: Encode ARM64 SXTH
+        let _ = (dest, src, dest_bits);
     }
     
-    pub fn emit_sxtw(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_sxtw(&self, dest: u8, src: u8, dest_bits: usize) {
         // SXTW <Xd>, <Wn> (sign extend word)
         // TODO: Encode ARM64 SXTW
+        let _ = (dest, src, dest_bits);
     }
     
-    pub fn emit_uxtb(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_uxtb(&self, dest: u8, src: u8, dest_bits: usize) {
         // UXTB <Xd>, <Wn> (zero extend byte)
         // TODO: Encode ARM64 UXTB
+        let _ = (dest, src, dest_bits);
     }
     
-    pub fn emit_uxth(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_uxth(&self, dest: u8, src: u8, dest_bits: usize) {
         // UXTH <Xd>, <Wn> (zero extend halfword)
         // TODO: Encode ARM64 UXTH
+        let _ = (dest, src, dest_bits);
     }
     
-    pub fn emit_uxtw(&mut self, dest: u8, src: u8, dest_bits: usize) {
+    pub fn emit_uxtw(&self, dest: u8, src: u8, dest_bits: usize) {
         // UXTW <Xd>, <Wn> (zero extend word)
         // TODO: Encode ARM64 UXTW
+        let _ = (dest, src, dest_bits);
     }
     
     // ============================================================================
     // ARM64 MOVE INSTRUCTIONS
     // ============================================================================
     
-    pub fn emit_arm64_mov(&mut self, dest: u8, src: u8, size_bytes: usize) -> ExprResult<()> {
+    pub fn emit_arm64_mov(&self, dest: u8, src: u8, size_bytes: usize) -> ExprResult<()> {
         // MOV/MOVZ/MOVK for moving data between GPRs
         // For small sizes, use simple MOV
         // For larger, use MOVZ/MOVK pattern
         self.emit_arm64_orr(dest, src, 0); // Simplified - needs real encoding
+        let _ = size_bytes;
         Ok(())
     }
     
@@ -352,6 +371,7 @@ impl Aarch64Codegen {
         // ARM64 can only load 16-bit immediate in one instruction
         // Need multiple MOVZ/MOVK pairs for 64-bit values
         // TODO: Encode MOVZ/MOVK instructions
+        let _ = (dest, imm, size);
         Ok(())
     }
     
@@ -359,15 +379,17 @@ impl Aarch64Codegen {
     // ARM64 COMPARISON
     // ============================================================================
     
-    pub fn emit_arm64_cmp(&mut self, src1: u8, src2: u8) -> ExprResult<()> {
+    pub fn emit_arm64_cmp(&self, src1: u8, src2: u8) -> ExprResult<()> {
         // CMP <Xn>, <Xm> (subtract and set flags)
         // TODO: Encode ARM64 CMP instruction
+        let _ = (src1, src2);
         Ok(())
     }
     
-    pub fn emit_arm64_setcc(&mut self, dest: u8, cc: crate::codegen::aarch64::expression_impl::arm64::SetCC) -> ExprResult<()> {
+    pub fn emit_arm64_setcc(&self, dest: u8, cc: crate::codegen::aarch64::expression_impl::arm64::SetCC) -> ExprResult<()> {
         // SET<cond> Xd, #0; CSETM Xd, <cond>
         // TODO: Encode ARM64 conditional set
+        let _ = (dest, cc);
         Ok(())
     }
     
@@ -376,7 +398,7 @@ impl Aarch64Codegen {
     // ============================================================================
     
     pub fn load_from_memory_address(
-        &mut self,
+        &self,
         addr_reg: u8,
         dest_reg: u8,
         size: usize,
@@ -386,30 +408,34 @@ impl Aarch64Codegen {
         // LDR Xd, [Xn] for 64-bit
         // LDR Wd, [Xn] for 32-bit
         // TODO: Encode ARM64 LOAD instruction
+        let _ = (addr_reg, dest_reg, size, signed);
         Ok(())
     }
     
-    pub fn store_to_memory_address(&mut self, src_reg: u8, addr_reg: u8, size: usize) -> ExprResult<()> {
+    pub fn store_to_memory_address(&self, src_reg: u8, addr_reg: u8, size: usize) -> ExprResult<()> {
         // STR (store register)
         // STR Xn, [Xd] for 64-bit
         // STR Wn, [Xd] for 32-bit
         // TODO: Encode ARM64 STORE instruction
+        let _ = (src_reg, addr_reg, size);
         Ok(())
     }
     
-    pub fn load_from_address(&mut self, addr_reg: u8, dest_reg: u8, size: usize, signed: bool) {
+    pub fn load_from_address(&self, addr_reg: u8, dest_reg: u8, size: usize, signed: bool) {
         // Load from address
         self.load_from_memory_address(addr_reg, dest_reg, size, signed)
+            .expect("load_from_memory_address failed");
     }
     
     pub fn ldr_with_large_offset(
-        &mut self,
+        &self,
         dest_reg: u8,
         base_reg: u8,
-        offset: i32,
+        offset: i64,
     ) -> ExprResult<()> {
         // LDR with large offset (outside 12-bit range)
         // TODO: May need multiple instructions
+        let _ = (dest_reg, base_reg, offset);
         Ok(())
     }
     
@@ -519,7 +545,7 @@ impl Aarch64Codegen {
     
     /// Convert float to integer (FPTOINT)
     pub fn fcvt_float_to_int(
-        &mut self,
+        &self,
         _src_reg: u8,
         _dest_reg: u8,
         _signed: bool,
@@ -531,11 +557,49 @@ impl Aarch64Codegen {
     
     /// Convert int to float (INTTOFLOAT)
     pub fn fcvt_int_to_float(
-        &mut self,
+        &self,
         _src_reg: u8,
         _dest_reg: u8,
     ) -> ExprResult<()> {
         // TODO: FCVT instruction for int->float conversion
         Ok(())
+    }
+}
+
+// ============================================================================
+// LOCAL AST TYPE CLASSIFIERS
+// The refactored ast::Type has no is_floating_point / is_signed methods;
+// these helpers replicate the classification without touching shared code.
+// ============================================================================
+
+pub(crate) fn ty_is_floating_point(ty: &Type) -> bool {
+    match ty {
+        Type::Float | Type::Double | Type::LongDouble => true,
+        Type::Complex(qt) | Type::Imaginary(qt) => {
+            matches!(qt.base, Type::Float | Type::Double | Type::LongDouble)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn ty_is_signed(ty: &Type) -> bool {
+    match ty {
+        Type::Char => {
+            // Per AAPCS64, plain `char` is unsigned, matching GCC's default.
+            false
+        }
+        Type::SChar
+        | Type::Short
+        | Type::Int
+        | Type::Long
+        | Type::LongLong
+        | Type::Int128
+        | Type::Fract
+        | Type::Accum => true,
+        Type::Enum(_, _, underlying) => match underlying {
+            Some(qt) => ty_is_signed(&qt.base),
+            None => true,
+        },
+        _ => false,
     }
 }

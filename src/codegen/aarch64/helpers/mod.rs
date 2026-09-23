@@ -25,12 +25,12 @@ pub const STACK_ALIGNMENT: usize = 16;
 
 /// Check if register is general purpose
 pub fn is_gpr(reg: u8) -> bool {
-    reg <= NUM_GPRS
+    reg as u32 <= NUM_GPRS
 }
 
 /// Check if register is vector
 pub fn is_vreg(reg: u8) -> bool {
-    reg <= NUM_VREGS
+    reg as u32 <= NUM_VREGS
 }
 
 /// Get register class from register number

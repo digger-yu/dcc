@@ -65,7 +65,7 @@ pub trait InstructionEncoder {
     }
     
     /// Check if instruction supports a particular encoding format
-    fn has_format(&self, format_name: &str) -> bool {
+    fn has_format(&self, _format_name: &str) -> bool {
         false
     }
 }
@@ -90,7 +90,7 @@ impl Default for AssemblyMode {
 }
 
 /// Operand types for instructions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
     Register(u8),
     Memory(Box<MemoryOperand>),
@@ -99,7 +99,7 @@ pub enum Operand {
 }
 
 /// Memory operand structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryOperand {
     pub base_reg: Option<u8>,
     pub index_reg: Option<u8>,

@@ -83,14 +83,14 @@ impl AsmDirectiveEmitter {
             return;
         }
 
-        let target_alignment = 1u32 << align_exp;
+        let target_alignment = (1u32 << align_exp) as usize;
         let current_pos = buf.len();
-        
+
         if current_pos % target_alignment == 0 {
             return;
         }
 
-        let padding_needed = target_alignment - (current_pos % target_alignment) as u32;
+        let padding_needed = target_alignment - (current_pos % target_alignment);
         let nop = [0x13]; // addi x0, x0, 0
         
         for _ in 0..padding_needed {

@@ -414,7 +414,7 @@ impl ConstexprContext<'_> {
                 CppStmt::Block(stmts) => {
                     // Nested block - need isolated scope
                     // Execute within cloned locals to avoid polluting outer scope
-                    let mut block_locals = locals.clone();
+                    let block_locals = locals.clone();
                     let block_result = self.eval_block_statements(stmts.clone(), &block_locals)?;
                     
                     // If inner block returned, propagate up immediately
@@ -432,7 +432,7 @@ impl ConstexprContext<'_> {
                     if let Some(cond_val) = self.eval_cpp_const_safe(cond, &locals) {
                         if cond_val != 0 {
                             // True branch
-                            let mut then_locals = locals.clone();
+                            let then_locals = locals.clone();
                             let then_result = self.eval_vector_stmts(then_body, &then_locals)?;
                             if let Some(ret) = then_result {
                                 return Ok(Some(ret));
@@ -441,7 +441,7 @@ impl ConstexprContext<'_> {
                         } else {
                             // False branch
                             if let Some(else_b) = else_body {
-                                let mut else_locals = locals.clone();
+                                let else_locals = locals.clone();
                                 let else_result = self.eval_vector_stmts(else_b, &else_locals)?;
                                 if let Some(ret) = else_result {
                                     return Ok(Some(ret));
@@ -452,7 +452,7 @@ impl ConstexprContext<'_> {
                     }
                 },
                 
-                CppStmt::For(init, cond, inc, body_stmts) => {
+                CppStmt::For(init, cond, _inc, body_stmts) => {
                     // Simplified counter-based for loop
                     // Support pattern: for(int i=0; i<n; i++) { ... }
                     // Unrolling optimization when bound is constant
@@ -495,7 +495,7 @@ impl ConstexprContext<'_> {
                     // Simplified while loop support
                     // Currently limited to constant-folded expressions
                     
-                    let mut while_locals = locals.clone();
+                    let while_locals = locals.clone();
                     let mut iterations = 0usize;
                     let max_iterations = 100; // Prevent infinite loops
                     
@@ -548,7 +548,7 @@ impl ConstexprContext<'_> {
                         
                         if match_cond {
                             // Execute case body
-                            let mut switch_locals = locals.clone();
+                            let switch_locals = locals.clone();
                             let case_result = self.eval_vector_stmts(case_body, &switch_locals)?;
                             if let Some(ret) = case_result {
                                 return Ok(Some(ret));
@@ -616,7 +616,7 @@ impl ConstexprContext<'_> {
     fn eval_simple_stmt(
         &self,
         stmt: &CppStmt,
-        locals: &HashMap<String, i128>,
+        _locals: &HashMap<String, i128>,
     ) -> ConstEvalResult<()> {
         match stmt {
             CppStmt::Expr(expr) => {

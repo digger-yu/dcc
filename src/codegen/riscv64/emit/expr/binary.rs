@@ -2,7 +2,7 @@
 // Priority 4 Task: Extract working implementations from riscv64.rs.bak
 
 use crate::ast::{BinOp, Expr, Type};
-use crate::codegen::riscv64::Riscv64Codegen;
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 use crate::ir::{TypedExpr, ValueType};
 
 impl Riscv64Codegen {

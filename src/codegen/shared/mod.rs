@@ -21,9 +21,8 @@ pub mod types;            // Type definitions for codegen
 
 // ===== KEY BACKEND TYPE EXPORTS =====
 // Re-export key AST types for cross-backend access
-pub use crate::ast::{Expr, Type, ValueType};
-pub use crate::ast::{BinOp, UnOp, Stmt, Block, Decl, FuncDecl, Program};
-pub use crate::ir::{Module, Function, Global, TypedExpr, TypedStmt};
+pub use crate::ast::{Expr, Type, BinOp, UnOp, Stmt, Block, Decl, FuncDecl, Program};
+pub use crate::ir::{Module, Function, Global, TypedExpr, TypedStmt, ValueType};
 
 // Re-export key traits and results
 pub use control_flow::{ControlFlowBackend, BranchCond, JumpTarget, ControlFlowState};

@@ -394,7 +394,7 @@ fn validate_inline_asm_operands(
     }
 
     // 4. P0-5: 早期约束模式验证 — 拒绝不支持的约束字母
-    let constraint_errors = asm_constraints::validate_asm_constraints(
+    let constraint_errors = shared::asm_constraints::validate_asm_constraints(
         output_constraints,
         input_constraints,
     );
@@ -1216,13 +1216,13 @@ fn build_dwarf_cu(
 fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
     use crate::cli::Arch;
     match arch {
-        Arch::X86_64 => elf::R_X86_64_64,
-        Arch::AArch64 => elf::R_AARCH64_ABS64,
-        Arch::RiscV64 => elf::R_RISCV_64,
-        Arch::RiscV32 => elf::R_RISCV_32,
-        Arch::Mips64 => elf::R_MIPS_64,
-        Arch::Mips => elf::R_MIPS_32,
-        Arch::Arm => elf::R_ARM_ABS32,
+        Arch::X86_64 => shared::elf::R_X86_64_64,
+        Arch::AArch64 => shared::elf::R_AARCH64_ABS64,
+        Arch::RiscV64 => shared::elf::R_RISCV_64,
+        Arch::RiscV32 => shared::elf::R_RISCV_32,
+        Arch::Mips64 => shared::elf::R_MIPS_64,
+        Arch::Mips => shared::elf::R_MIPS_32,
+        Arch::Arm => shared::elf::R_ARM_ABS32,
     }
 }
 

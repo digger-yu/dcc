@@ -44,8 +44,8 @@ pub enum ArgClass {
 #[inline]
 pub fn classify_type(ty: &crate::ir::ValueType) -> ArgClass {
     match ty {
-        crate::ir::ValueType::Int(_) => ArgClass::Gp,
-        crate::ir::ValueType::Float(_) => ArgClass::Fp,
+        crate::ir::ValueType::Integer { .. } => ArgClass::Gp,
+        crate::ir::ValueType::Float { .. } => ArgClass::Fp,
         crate::ir::ValueType::Vector(_, _) => ArgClass::Fp,
         _ => ArgClass::Memory,
     }
@@ -81,7 +81,7 @@ impl CallArgLayout {
     }
     
     /// Assign argument registers according to SysV ABI rules
-    pub fn assign_registers(&mut self, _args: &[crate::codegen::ast::BlockItem]) {
+    pub fn assign_registers(&mut self, _args: &[ast::BlockItem]) {
         // Placeholder - will be implemented when extracting from .bak
     }
 }

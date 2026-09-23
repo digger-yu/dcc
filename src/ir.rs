@@ -85,70 +85,21 @@ pub struct TypedExpr {
     pub quals: QualifierFlags,
 }
 
+/// Typed IR statement.
+///
+/// Statements are represented in a flat, expression-oriented form:
+/// - `expressions` holds all top-level expressions in the statement (e.g.
+///   conditions, return values, the expression in an expression-statement).
+/// - `nested` holds all sub-statements (e.g. then/else branches, loop body).
+///
+/// This structure is intentionally "kind-less" at the IR level — the
+/// semantic shape is recoverable from the expression tree (via
+/// `ExprKind::ControlFlow` etc.) and nesting.  Backends that need a
+/// traditional tagged statement AST can rebuild it during lowering.
 #[derive(Debug, Clone)]
-pub enum TypedStmt {
-    Return {
-        val: Option<TypedExpr>,
-        span: Span,
-    },
-    Expr {
-        e: TypedExpr,
-        span: Span,
-    },
-    If {
-        cond: TypedExpr,
-        then_: Box<TypedStmt>,
-        else_: Option<Box<TypedStmt>>,
-        span: Span,
-    },
-    While {
-        cond: TypedExpr,
-        body: Box<TypedStmt>,
-        span: Span,
-    },
-    Do {
-        body: Box<TypedStmt>,
-        cond: TypedExpr,
-        span: Span,
-    },
-    For {
-        init: Option<Box<TypedStmt>>,
-        cond: Option<TypedExpr>,
-        step: Option<TypedExpr>,
-        body: Box<TypedStmt>,
-        span: Span,
-    },
-    Block {
-        b: Vec<TypedStmt>,
-        span: Span,
-    },
-    Break {
-        span: Span,
-    },
-    Continue {
-        span: Span,
-    },
-    Label {
-        name: String,
-        stmt: Box<TypedStmt>,
-        span: Span,
-    },
-    Switch {
-        expr: TypedExpr,
-        cases: Vec<TypedCase>,
-        span: Span,
-    },
-    AsmInline {
-        asm_str: String,
-        span: Span,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct TypedCase {
-    pub val: Option<TypedExpr>,
-    pub range_end: Option<TypedExpr>,
-    pub body: Vec<TypedStmt>,
+pub struct TypedStmt {
+    pub expressions: Vec<TypedExpr>,
+    pub nested: Vec<TypedStmt>,
     pub span: Span,
 }
 
@@ -804,7 +755,7 @@ fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
     )
 }
 
-fn value_type_size(ty: &ValueType) -> usize {
+pub fn value_type_size(ty: &ValueType) -> usize {
     match ty {
         ValueType::Void => 0,
         ValueType::Integer { bits, .. } | ValueType::Float { bits } => (*bits as usize) / 8,

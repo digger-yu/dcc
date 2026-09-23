@@ -2,8 +2,8 @@
 // Priority 4 Task: Extract working implementations from riscv64.rs.bak
 
 use crate::ast::{Expr, Type, UnOp};
-use crate::codegen::riscv64::Riscv64Codegen;
-use crate::ir::TypedExpr;
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
+use crate::ir::{TypedExpr, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
 
@@ -65,7 +65,7 @@ impl Riscv64Codegen {
                     self.li_a0(0);
                 }
             }
-            crate::ir::ExprKind::Index(idx_expr) => {
+            crate::ir::ExprKind::Index => {
                 // 数组索引：计算元素地址
                 if operand.children.len() >= 2 {
                     let base_expr = &operand.children[0];
@@ -88,7 +88,7 @@ impl Riscv64Codegen {
         }
 
         TypedExpr {
-            kind: crate::ir::ExprKind::Unary(unop),
+            kind: crate::ir::ExprKind::Address,
             ty: crate::ir::ValueType::Pointer(Box::new(operand.ty.clone())),
             literal: None,
             children: vec![operand.clone()],
@@ -126,9 +126,15 @@ impl Riscv64Codegen {
             }
         }
 
+        // 从操作数提取内层类型
+        let inner_ty = match &operand.ty {
+            crate::ir::ValueType::Pointer(t) => t.clone(),
+            _ => crate::ir::ValueType::Int(32),
+        };
+
         TypedExpr {
-            kind: crate::ir::ExprKind::Unary(unop),
-            ty: inner_ty.clone(),
+            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::Deref),
+            ty: inner_ty,
             literal: None,
             children: vec![operand.clone()],
             span: operand.span.clone(),
@@ -158,7 +164,7 @@ impl Riscv64Codegen {
         self.store_to_lvalue(operand, 10);
         
         TypedExpr {
-            kind: crate::ir::ExprKind::Unary(unop),
+            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::PreInc),
             ty: operand.ty.clone(),
             literal: None,
             children: vec![operand.clone()],
@@ -189,7 +195,7 @@ impl Riscv64Codegen {
         self.store_to_lvalue(operand, 10);
         
         TypedExpr {
-            kind: crate::ir::ExprKind::Unary(unop),
+            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::PreDec),
             ty: operand.ty.clone(),
             literal: None,
             children: vec![operand.clone()],

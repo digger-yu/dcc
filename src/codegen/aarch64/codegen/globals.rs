@@ -1,5 +1,4 @@
 // src/codegen/aarch64/codegen/globals.rs - Global Variable Initialization
-use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
 // Phase A Week 2-3 - Extracted from original_monolith.rs::emit_globals() and related
 //
 // This module handles:
@@ -178,7 +177,7 @@ fn init_function_static(
 fn extract_init_bytes(expr: &TypedExpr, expected_size: usize) -> Result<Vec<u8>, CodegenError> {
     // Match on expr.kind to find constant literals
     match &expr.kind {
-        ExprKind::Unary(ast::UnOp::Neg) if expr.literal.is_some() => {
+        ExprKind::Unary(crate::codegen::shared::UnOp::Neg) if expr.literal.is_some() => {
             // Treat negated constants as literals for initialization
             expr.literal.as_ref().map_or_else(
                 || Err(CodegenError::new("Missing literal value".to_string())),
@@ -201,32 +200,27 @@ fn extract_init_bytes(expr: &TypedExpr, expected_size: usize) -> Result<Vec<u8>,
 }
 
 /// Convert expression literal to byte sequence
-fn convert_literal_to_bytes(lit: &crate::ir::ExprLiteral, size: usize) -> Vec<u8> {
-    // Based on literal type and size
+fn convert_literal_to_bytes(lit: &crate::ir::ExprLiteral, size: usize) -> Result<Vec<u8>, CodegenError> {
+    let mut buf = vec![0u8; size];
     match lit {
         crate::ir::ExprLiteral::Int(val) => {
-            // Handle both int and char (char is stored as i128)
-            let bytes = if *val < 0 {
-                // Negative values or large unsigned - two's complement
-                (*val as u64).to_le_bytes()
-            } else {
-                (*val as u64).to_le_bytes()
-            };
-            bytes[..size.min(8)]
-                .iter()
-                .cloned()
-                .collect()
+            let raw = val.to_le_bytes();
+            let n = size.min(raw.len());
+            buf[..n].copy_from_slice(&raw[..n]);
         }
         crate::ir::ExprLiteral::Float(f) => {
-            // Float conversion - use f64 representation
-            let float_bytes = f.to_le_bytes();
-            float_bytes[..size.min(8)]
-                .iter()
-                .cloned()
-                .collect()
+            if size <= 4 {
+                let raw = (*f as f32).to_bits().to_le_bytes();
+                let n = size.min(raw.len());
+                buf[..n].copy_from_slice(&raw[..n]);
+            } else {
+                let raw = f.to_bits().to_le_bytes();
+                let n = size.min(raw.len());
+                buf[..n].copy_from_slice(&raw[..n]);
+            }
         }
-        _ => vec![0u8; size],
     }
+    Ok(buf)
 }
 
 /// Align buffer to boundary and return offset
@@ -254,14 +248,11 @@ fn write_bytes_to_rodata(ctx: &mut CodegenContext, data: &[u8]) {
 
 /// Check if variable has file-level static qualifier
 fn var_is_static(prog: &Program, name: &str) -> bool {
-    // Search through declarations looking for static qualifier
-    prog.decls.iter().any(|decl| {
-        matches!(
-            decl,
-            crate::ast::Decl::Func(crate::ast::FuncDecl {
-                name: crate::ast::Ident { name },
-                ..
-            }) if name == name /* simplified check */)
+    // Search through declarations looking for the matching identifier.
+    prog.decls.iter().any(|decl| match decl {
+        crate::ast::Decl::Func(fd) => fd.name.name == name,
+        crate::ast::Decl::Var(vd) => vd.name.name == name,
+        _ => false,
     })
 }
 
@@ -282,7 +273,7 @@ fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Integer { bits, .. } | ValueType::Float { bits } => (*bits as usize).div_ceil(8),
         ValueType::Pointer(_) => 8,  // AArch64 pointers are 64-bit
         ValueType::Vector(elem, len) => elem.size().saturating_mul(*len),
-        ValueType::Function { ret, .. } => ret.size(),  // Function type = return type
+        ValueType::Function { .. } => 8,  // Function pointer
         ValueType::Array(elem, count) => elem.size().saturating_mul(count.unwrap_or(0)),
         ValueType::Aggregate { size, .. } => *size,
         _ => ty.size(),

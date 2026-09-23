@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use crate::ast::{UnOp, Stmt as AstStmt};
+use super::functions::ValueKind;
 
 /// Control flow graph structure
 pub struct CFG {
@@ -71,9 +72,9 @@ impl CFG {
                 Statement::If(cond, then, otherwise) => {
                     instrs.extend(self.expr_to_instrs(cond));
                     instrs.push(Instruction::Branch(
-                        *cond as u8, // Condition type
-                        then.is_empty().then(|| LabelRef::Fallthrough).flatten(),
-                        otherwise.as_ref().map(|_| LabelRef::NewTemp).flatten(),
+                        0u8, // Condition type placeholder
+                        then.is_empty().then(|| LabelRef::Fallthrough),
+                        otherwise.as_ref().map(|_| LabelRef::NewTemp),
                     ));
                     for stmt in then {
                         instrs.extend(self.stmt_to_instrs(stmt));
@@ -396,7 +397,7 @@ impl LoopContext {
 
     /// Get outermost loop info
     pub fn outermost_loop(&self) -> Option<(&String, &String)> {
-        self.loops.front()
+        self.loops.front().map(|(a, b)| (a, b))
     }
 }
 

@@ -440,14 +440,14 @@ impl super::super::super::Codegen {
     }
 
     /// 浮点增量/减量：暂不实现 - 走 gen_float_inc_dec 路径
-    fn gen_float_inc_dec(&mut self, lv: &Expr, _dst: u8, is_pre: bool, is_inc: bool, ty: &Type) {
+    fn gen_float_inc_dec(&mut self, _lv: &Expr, _dst: u8, _is_pre: bool, _is_inc: bool, _ty: &Type) {
         // Delegate to existing implementation in mod.rs
         // TODO: Move full implementation here when deleting from mod.rs
         unimplemented!("gen_float_inc_dec moved to increment.rs pending deletion phase");
     }
     
     /// 长双精度增量/减量：x87 FPU 路径 - 占位符
-    fn gen_long_double_inc_dec(&mut self, lv: &Expr, _dst: u8, is_pre: bool, is_inc: bool) {
+    fn gen_long_double_inc_dec(&mut self, _lv: &Expr, _dst: u8, _is_pre: bool, _is_inc: bool) {
         unimplemented!("long double inc/dec not yet implemented");
     }
 }

@@ -228,7 +228,7 @@ impl TemplateRegistry {
         let mut resolved = Vec::new();
         let mut arg_idx = 0;
         
-        for (param_idx, is_pack) in td.is_variadic_param.iter().enumerate() {
+        for (_param_idx, is_pack) in td.is_variadic_param.iter().enumerate() {
             if *is_pack {
                 // This parameter is a pack
                 // Collect all remaining args into a VariadicPack
@@ -1681,7 +1681,7 @@ mod g14_tests {
                     if let CppDecl::Typedef { target, .. } = member {
                         // The target should still be TplMember pattern (text substitution doesn't fully resolve)
                         match target {
-                            MangleType::TplMember { name, member, .. } => {
+                            MangleType::TplMember { name: _name, member, .. } => {
                                 // Name stays as template param name (_Iterator), but type args would be substituted
                                 // For this test, we just verify it's still a TplMember after instantiation
                                 assert_eq!(member, "difference_type");

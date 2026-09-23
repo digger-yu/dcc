@@ -19,7 +19,7 @@ pub struct CodegenError {
     /// Error message describing what went wrong
     pub message: String,
     /// Optional source span information for better error reporting
-    pub span: Option<crate::ast::Span>,
+    pub span: Option<crate::diagnostics::Span>,
 }
 
 impl CodegenError {
@@ -32,7 +32,7 @@ impl CodegenError {
     }
 
     /// Create a new error with source location information
-    pub fn with_span(message: impl Into<String>, span: crate::ast::Span) -> Self {
+    pub fn with_span(message: impl Into<String>, span: crate::diagnostics::Span) -> Self {
         Self {
             message: message.into(),
             span: Some(span),
@@ -43,8 +43,8 @@ impl CodegenError {
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "CodeGen Error: {}", self.message)?;
-        if let Some(span) = self.span {
-            write!(f, " at line {}", span.start)?;
+        if let Some(span) = &self.span {
+            write!(f, " at line {}", span.line)?;
         }
         Ok(())
     }
@@ -81,6 +81,8 @@ pub struct CodegenContext {
     pub rodata_relocations: Vec<ElfRela>,
     /// Global variable offsets in read-only data section
     pub global_rodata: HashMap<String, u64>,
+    /// Thread-local global variable offsets
+    pub tls_globals: HashMap<String, u64>,
     /// Function size map (name -> size in bytes)
     pub func_sizes: HashMap<String, u64>,
 }
@@ -108,6 +110,7 @@ impl CodegenContext {
             relocations: Vec::new(),
             rodata_relocations: Vec::new(),
             global_rodata: HashMap::new(),
+            tls_globals: HashMap::new(),
             func_sizes: HashMap::new(),
         }
     }
@@ -337,8 +340,9 @@ impl CodegenContext {
         self.global_rodata.insert(g.name.clone(), off);
         
         if let Some(init) = &g.initializer {
-            // Write initializer bytes directly
-            self.write_bytes(init.bytes(), size);
+            // Serialize the constant initializer into its storage bytes.
+            let data = serialize_init_bytes(init, size);
+            self.write_bytes(&data, size);
         } else {
             // Zero-initialize
             self.rodata_buffer.resize(self.rodata_buffer.len() + size, 0);
@@ -372,6 +376,35 @@ impl CodegenContext {
         
         todo!("Implement build_object_file calling ELF builder")
     }
+}
+
+/// Utility: serialize a constant global initializer into its storage bytes.
+///
+/// Only scalar literal constants are emitted directly; aggregate or
+/// non-constant initializers remain zero-filled pending full lowering.
+fn serialize_init_bytes(init: &TypedExpr, size: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; size];
+    if let Some(lit) = &init.literal {
+        match lit {
+            crate::ir::ExprLiteral::Int(v) => {
+                let raw = v.to_le_bytes();
+                let n = size.min(raw.len());
+                buf[..n].copy_from_slice(&raw[..n]);
+            }
+            crate::ir::ExprLiteral::Float(f) => {
+                if size <= 4 {
+                    let raw = (*f as f32).to_bits().to_le_bytes();
+                    let n = size.min(raw.len());
+                    buf[..n].copy_from_slice(&raw[..n]);
+                } else {
+                    let raw = f.to_bits().to_le_bytes();
+                    let n = size.min(raw.len());
+                    buf[..n].copy_from_slice(&raw[..n]);
+                }
+            }
+        }
+    }
+    buf
 }
 
 /// Utility: get size of a type in bytes

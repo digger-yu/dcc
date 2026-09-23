@@ -4,16 +4,16 @@
 // First Principle: RISC-V implements same ExpressionExecutor trait as x86_64/AArch64
 // Enables shared expression evaluation across all ISAs
 
-use crate::ast::{BinOp, UnOp};
+use crate::ast::{BinOp, Type, UnOp};
 use crate::codegen::shared::expression_executor::{ExpressionExecutor, ExprResult};
 
 /// RISC-V 64-specific ExpressionExecutor implementation
 pub struct RiscV64ExpressionBackend<'a> {
-    pub cg: &'a mut super::Codegen,
+    pub cg: &'a mut crate::codegen::riscv64::codegen::Riscv64Codegen,
 }
 
 impl<'a> RiscV64ExpressionBackend<'a> {
-    pub fn new(cg: &'a mut super::Codegen) -> Self {
+    pub fn new(cg: &'a mut crate::codegen::riscv64::codegen::Riscv64Codegen) -> Self {
         Self { cg }
     }
 }
@@ -35,64 +35,84 @@ impl<'a> ExpressionExecutor for RiscV64ExpressionBackend<'a> {
         
         match op {
             // Integer arithmetic (RV64I base instruction set)
-            Add => self.cg.emit_rv_add(dest_reg, lhs_reg, rhs_reg),
-            Sub => self.cg.emit_rv_sub(dest_reg, lhs_reg, rhs_reg),
+            Add => self.cg.emit_add(dest_reg, lhs_reg, rhs_reg),
+            Sub => self.cg.emit_sub(dest_reg, lhs_reg, rhs_reg),
             
             Mul => {
                 // MUL instruction (RV64I)
-                self.cg.emit_rv_mul(dest_reg, lhs_reg, rhs_reg)?;
+                self.cg.emit_mul(dest_reg, lhs_reg, rhs_reg);
             }
             
             Div => {
                 // SDIV (signed) or DIVU (unsigned)
                 let signed = result_ty.is_signed();
-                self.cg.emit_rv_div(dest_reg, lhs_reg, rhs_reg, signed)?;
+                if signed {
+                    self.cg.emit_div(dest_reg, lhs_reg, rhs_reg);
+                } else {
+                    self.cg.emit_divu(dest_reg, lhs_reg, rhs_reg);
+                }
             }
             
             Rem => {
                 // REM (signed) or REMU (unsigned)
                 let signed = result_ty.is_signed();
-                self.cg.emit_rv_rem(dest_reg, lhs_reg, rhs_reg, signed)?;
+                if signed {
+                    self.cg.emit_rem(dest_reg, lhs_reg, rhs_reg);
+                } else {
+                    self.cg.emit_remu(dest_reg, lhs_reg, rhs_reg);
+                }
             }
             
             // Bitwise operations
-            And => self.cg.emit_rv_and(dest_reg, lhs_reg, rhs_reg),
-            Or => self.cg.emit_rv_or(dest_reg, lhs_reg, rhs_reg),
-            Xor => self.cg.emit_rv_xor(dest_reg, lhs_reg, rhs_reg),
+            And => self.cg.emit_and(dest_reg, lhs_reg, rhs_reg),
+            Or => self.cg.emit_or(dest_reg, lhs_reg, rhs_reg),
+            Xor => self.cg.emit_xor(dest_reg, lhs_reg, rhs_reg),
             
             // Shift operations
             Shl => {
                 // SLL (shift logical left)
-                self.cg.emit_rv_sll(dest_reg, lhs_reg, rhs_reg)?;
+                self.cg.emit_sll(dest_reg, lhs_reg, rhs_reg);
             }
             Shr => {
                 // SRL (shift logical right) / SRA (arithmatic right)
                 let signed = result_ty.is_signed();
                 if signed {
-                    self.cg.emit_rv_sra(dest_reg, lhs_reg, rhs_reg)?;
+                    self.cg.emit_sra(dest_reg, lhs_reg, rhs_reg);
                 } else {
-                    self.cg.emit_rv_srl(dest_reg, lhs_reg, rhs_reg)?;
+                    self.cg.emit_srl(dest_reg, lhs_reg, rhs_reg);
                 }
             }
             
             // Comparison operations (returns 0 or 1)
             Eq => {
-                self.cg.emit_rv_seq(dest_reg, lhs_reg, rhs_reg);
+                // Implement equality comparison using slt logic like binary.rs
+                self.cg.emit_slt(12, lhs_reg, rhs_reg); // t1 = (lhs < rhs)
+                self.cg.emit_slt(13, rhs_reg, lhs_reg); // t2 = (rhs < lhs)
+                self.cg.emit_or(dest_reg, 12, 13); // dest = t1 | t2 → 0 if equal, else 1
+                self.cg.xori(dest_reg, dest_reg, 1); // dest = !dest → 1 if equal, else 0
             }
             Ne => {
-                self.cg.emit_rv_nez(dest_reg, lhs_reg, rhs_reg)?;
+                // Inequality is inverse of equality
+                self.cg.emit_slt(12, lhs_reg, rhs_reg); // t1 = (lhs < rhs)
+                self.cg.emit_slt(13, rhs_reg, lhs_reg); // t2 = (rhs < lhs)
+                self.cg.emit_or(dest_reg, 12, 13); // dest = t1 | t2 → 1 if not equal, else 0
             }
             Lt => {
-                self.cg.emit_rv_slts(dest_reg, lhs_reg, rhs_reg)?;
+                self.cg.emit_slt(dest_reg, lhs_reg, rhs_reg);
             }
             Le => {
-                self.cg.emit_rv_sle(dest_reg, lhs_reg, rhs_reg)?;
+                // a <= b → !(a > b) → which is equivalent to (b >= a)
+                self.cg.emit_slt(12, rhs_reg, lhs_reg); // t1 = (rhs < lhs) → 1 if rhs < lhs (so lhs > rhs)
+                self.cg.xori(dest_reg, 12, 1); // dest = t1 ^1 → 1 if rhs >= lhs → a <= b
             }
             Gt => {
-                self.cg.emit_rv_sgts(dest_reg, lhs_reg, rhs_reg)?;
+                // a > b → equivalent to (b < a)
+                self.cg.emit_slt(dest_reg, rhs_reg, lhs_reg);
             }
             Ge => {
-                self.cg.emit_rv_sge(dest_reg, lhs_reg, rhs_reg)?;
+                // a >= b → equivalent to !(a < b)
+                self.cg.emit_slt(dest_reg, lhs_reg, rhs_reg); // t1 = (lhs < rhs) → 1 when a < b
+                self.cg.xori(dest_reg, dest_reg, 1); // dest = !t1 → 1 when a >= b
             }
             
             // Logical operators need short-circuit
@@ -117,25 +137,27 @@ impl<'a> ExpressionExecutor for RiscV64ExpressionBackend<'a> {
         
         match op {
             Neg => {
-                // NEG or SUB zero
-                self.cg.emit_rv_neg(dest_reg, src_reg, result_ty)?;
+                // NEG: subtract from zero
+                self.cg.emit_sub(dest_reg, 0, src_reg);
             }
             Not => {
-                // NOR (bitwise NOT = nor with zero)
-                self.cg.emit_rv_not(dest_reg, src_reg)?;
+                // Bitwise NOT: use bitwise_not method
+                self.cg.emit_bitwise_not(dest_reg, src_reg);
             }
             Plus => {
-                // No-op for unary plus
+                // No-op for unary plus, just move if needed
                 if src_reg != dest_reg {
-                    self.cg.emit_rv_mov(dest_reg, src_reg, result_ty.size() as usize)?;
+                    self.cg.emit_mv(dest_reg, src_reg, result_ty.size() as usize);
                 }
             }
             AddrOf => {
                 Err("Address-of requires lvalue handling".into())
             }
             Deref => {
-                // LW/DW (load word/doubleword) from address
-                self.cg.load_from_address(src_reg, dest_reg, result_ty.size() as usize, result_ty.is_signed());
+                // Load from address: use emit_load_sz as per unary.rs
+                let size = result_ty.size() as usize;
+                self.cg.emit_load_sz(dest_reg, src_reg, 0, size);
+                Ok(())
             }
         }
         

@@ -9,7 +9,7 @@ use crate::codegen::shared::elf;
 use crate::diagnostics::Diagnostic;
 use std::collections::BTreeMap;
 
-impl Backend for super::riscv64_impl::Riscv64Codegen {
+impl Backend for crate::codegen::riscv64::Riscv64Codegen {
     fn arch(&self) -> Arch {
         Arch::RiscV64
     }

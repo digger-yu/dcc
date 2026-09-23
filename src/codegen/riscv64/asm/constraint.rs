@@ -31,8 +31,9 @@ impl Default for ConstraintType {
 }
 
 /// Read/write direction for constraints
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ConstraintRW {
+    #[default]
     Write,       // "=r" - write-only
     ReadWrite,   // "+r" or "r" - read/write
     Read,        // No explicit prefix - effectively read for output positions
@@ -82,7 +83,7 @@ impl ConstraintParser {
                 modifier = '&';
                 start_idx += 1;
                 if chars.len() > 1 {
-                    return Self::parse_simple(&chars[start_idx..].iter().collect::<String>(), rw);
+                    return Self::parse_simple(chars[start_idx..].iter().collect::<String>(), rw);
                 }
             } else {
                 return Self::parse_simple(c.to_string(), rw);
@@ -202,15 +203,15 @@ pub fn resolve_asm_operands(
     
     // Process output operands
     for (i, constraint_str) in output_constraints.iter().enumerate() {
-        if let Ok(constraint) = ConstraintParser::parse(constraint_str) {
+        if let Some(constraint) = ConstraintParser::parse(constraint_str) {
             let reg_name = get_register_for_constraint(constraint, i);
             results.push(reg_name);
         }
     }
-    
-    // Process input operands  
+
+    // Process input operands
     for (i, constraint_str) in input_constraints.iter().enumerate() {
-        if let Ok(constraint) = ConstraintParser::parse(constraint_str) {
+        if let Some(constraint) = ConstraintParser::parse(constraint_str) {
             let reg_name = get_register_for_constraint(constraint, i);
             results.push(reg_name);
         }

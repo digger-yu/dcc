@@ -167,7 +167,9 @@ impl Codegen {
                     // 必须走慢路径 (emit_ident_base_addr) 从栈帧访问。
                     let is_static_local = self.static_local_map
                         .is_static_local(&self.current_func_name, &arr_name.name);
-                    let resolved_key = self.resolve_global_key(&arr_name.name).to_string();
+                    let resolved_key = self
+                        .resolve_global_key(&arr_name.name)
+                        .unwrap_or_else(|| arr_name.name.clone());
                     let is_global_array = !is_static_local
                         && self
                             .globals_raw
@@ -330,7 +332,7 @@ impl Codegen {
                 // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
                 //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
                 let expr_ty = expr.ty();
-                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                let target_ty = self.resolve_complete_struct_ty(&Self::member_target_ty(&expr_ty, *is_arrow));
                 let field_info = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| {

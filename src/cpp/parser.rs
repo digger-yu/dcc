@@ -1679,8 +1679,8 @@ impl<'a> CppParser<'a> {
             ));
         }
         
-        let saved_lex = self.lex.clone();
-        let saved_peek = self.peek.clone();
+        let _saved_lex = self.lex.clone();
+        let _saved_peek = self.peek.clone();
         
         self.bump(); // consume <
         
@@ -6477,7 +6477,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
         };
         let spec = self.skip_specifiers();
         // M30.5: trailing return type 一般不在 friend 声明中使用，初始化为 None
-        let mut trailing_ret_type: Option<MangleType> = None;
+        let trailing_ret_type: Option<MangleType> = None;
         // 函数体 或 ;
         if matches!(
             &self.peek,
@@ -10713,7 +10713,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
     fn parse_structured_binding(
         &mut self,
         ty: &MangleType,
-        is_static: bool,
+        _is_static: bool,
         is_volatile: bool,
     ) -> Result<CppStmt, CppParseError> {
         self.bump(); // consume '['
@@ -11680,16 +11680,16 @@ fn collect_from_stmt(
             }
         }
         CppStmt::For { init, cond, step, body } => {
-            if let Some(i) = init {
-                // i is Box<CppStmt>, recursively collect from this single statement
+            if let Some(_i) = init {
+                // _i is Box<CppStmt>, recursively collect from this single statement
                 // This is typically a variable declaration or empty
                 // For now, skip collecting (it's usually simple)
             }
             if let Some(c) = cond {
                 classify_expr(&c, params, dependent, non_dependent);
             }
-            if let Some(s) = step {
-                // s is Box<CppStmt>, similarly just skip for now
+            if let Some(_s) = step {
+                // _s is Box<CppStmt>, similarly just skip for now
             }
             for stmt in &body.stmts {
                 collect_from_stmt(stmt, params, dependent, non_dependent);

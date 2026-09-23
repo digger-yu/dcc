@@ -9736,7 +9736,7 @@ impl Lower {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
             // G13: Full specialization - emit as weak symbol
-            CppDecl::FullSpec { primary_name, specific_args, body } => {
+            CppDecl::FullSpec { _primary_name, _specific_args, _body } => {
                 // Skip full spec in legacy mode for now - native will handle properly
                 // TODO: Implement proper lowering for FullSpec when needed
             }
@@ -10495,7 +10495,7 @@ impl Lower {
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
             }
-            CppStmt::StructuredBinding { names, ty, init: _, is_volatile: _ } => {
+            CppStmt::StructuredBinding { names, _ty, init: _, is_volatile: _ } => {
                 // M30.4: 结构化绑定降级 - 暂时输出注释警告
                 self.out.push_str("// structured binding not yet fully implemented: ");
                 self.out.push_str(&format!("{:?}\n", names));
@@ -10965,9 +10965,9 @@ impl Lower {
                     // M26.1: 用户定义的自由函数调用 -> mangled 名，与定义一致
                     // (修复：之前定义 mangled 但调用 unmangled, 链接必失败)
                     if self.plain_fns.contains(fname) && self.fn_ret_types.contains_key(fname) {
-                        let ret_ty = &self.fn_ret_types[fname];
+                        let _ret_ty = &self.fn_ret_types[fname];
                         // Use empty params for standard Itanium mangling (return type encoded implicitly)
-                        let n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
+                        let _n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
                         let m = crate::cpp::mangle::mangle_global_function(fname, &[]);
                         self.out.push_str(&m);
                         self.out.push('(');

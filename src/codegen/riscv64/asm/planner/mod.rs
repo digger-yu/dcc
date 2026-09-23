@@ -41,6 +41,7 @@ impl AsmPlanner {
         self.labels.insert(name.to_string(), LabelInfo {
             name: name.to_string(),
             is_global,
+            definition_line: None,
         });
 
         if is_global {

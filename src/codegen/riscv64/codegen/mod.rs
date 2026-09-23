@@ -1,5 +1,5 @@
 // src/codegen/riscv64/codegen/mod.rs - Core Code Generation Module
-use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
+use crate::ast::{Expr, Type, Block, Decl, FuncDecl};
 // Phase B Day 3-5 - Complete implementation extracted from riscv64.rs.bak (2026/9/22)
 //
 // Source locations in riscv64.rs.bak:
@@ -16,6 +16,7 @@ use crate::ast::{Expr, Type, Statement, Block, Decl, FuncDecl};
 // └── blocks.rs     - Control flow/block processing     ✅
 
 mod compile;
+mod codegen;
 mod functions;
 mod globals;
 mod blocks;
@@ -24,3 +25,7 @@ pub use compile::*;
 pub use functions::*;
 pub use globals::*;
 pub use blocks::*;
+pub use codegen::{Riscv64Codegen, var_is_static};
+
+// Type aliases for compatibility
+pub type LabelsMap = std::collections::HashMap<String, String>;

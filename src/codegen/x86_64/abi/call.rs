@@ -724,7 +724,9 @@ impl Codegen {
                 self.load_static_chain_for_call(*hops, offs);
             }
             // Resolve GNU asm label (e.g., __asm__("real_name")) for call sites
-            let resolved_name = self.resolve_asm_label(&effective_name).to_string();
+            let resolved_name = self
+                .resolve_asm_label(&effective_name)
+                .unwrap_or_else(|| effective_name.clone());
             self.call_label(&resolved_name);
         } else {
             self.load_rsp_qword(11, callee_scratch.unwrap());

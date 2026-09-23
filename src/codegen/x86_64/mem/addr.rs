@@ -78,7 +78,7 @@ impl Codegen {
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
-                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                let target_ty = self.resolve_complete_struct_ty(&Self::member_target_ty(&expr_ty, *is_arrow));
                 let field_off = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
@@ -285,7 +285,7 @@ impl Codegen {
                     }
                     // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                     let expr_ty = expr.ty();
-                    let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                    let target_ty = self.resolve_complete_struct_ty(&Self::member_target_ty(&expr_ty, *is_arrow));
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -410,7 +410,7 @@ impl Codegen {
                 // &&label: 加载标签地址到 dst (GNU 扩展)
                 // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
                 // 前缀标签名以避免与函数符号名冲突
-                let label_name = Self::c_label_to_asm(&label.name);
+                let label_name = Codegen::c_label_to_asm(&label.name);
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 let modrm = 0x05 | ((dst & 7) << 3);
                 self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);

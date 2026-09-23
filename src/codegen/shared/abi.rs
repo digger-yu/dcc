@@ -118,23 +118,31 @@ impl ABILoweringEngine {
         params.iter().map(|ty| self.param_info_for_type(ty)).collect()
     }
 
+    /// Build the default [`ParamInfo`] for a single parameter type.
+    fn param_info_for_type(&self, ty: &Type) -> ParamInfo {
+        ParamInfo {
+            ty: ty.clone(),
+            ..Default::default()
+        }
+    }
+
     /// Get register allocation for function parameters
     pub fn alloc_params_registers(&self, params: &[Type]) -> Vec<Option<String>> {
-        let mut result = Vec::new();
-        
+        let mut result: Vec<Option<String>> = Vec::new();
+
         match &self.cconv {
             CallingConvention::SystemVAMD64 => {
                 // First 6 integer/pointer args in RDI, RSI, RDX, RCX, R8, R9
                 let gp_regs = ["RDI", "RSI", "RDX", "RCX", "R8", "R9"];
                 // First 8 floating-point args in XMM0-XMM7
                 let fp_regs = ["XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7"];
-                
+
                 for (idx, ty) in params.iter().enumerate() {
                     if idx < gp_regs.len() {
-                        if ty.is_float() {
-                            result.push(fp_regs[idx].into());
+                        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                            result.push(Some(fp_regs[idx].to_string()));
                         } else {
-                            result.push(gp_regs[idx].into());
+                            result.push(Some(gp_regs[idx].to_string()));
                         }
                     } else {
                         result.push(None); // Stack
@@ -183,10 +191,10 @@ impl ABILoweringEngine {
     pub fn callee_saved_registers(&self) -> Vec<String> {
         match &self.cconv {
             CallingConvention::SystemVAMD64 => {
-                vec!["RBX", "RBP", "R12", "R13", "R14", "R15"].to_vec()
+                vec!["RBX".to_string(), "RBP".to_string(), "R12".to_string(), "R13".to_string(), "R14".to_string(), "R15".to_string()]
             }
             CallingConvention::MicrosoftX64 => {
-                vec!["RBX", "RBP", "R12", "R13", "R14", "R15"].to_vec()
+                vec!["RBX".to_string(), "RBP".to_string(), "R12".to_string(), "R13".to_string(), "R14".to_string(), "R15".to_string()]
             }
             CallingConvention::SystemVAarch64 => {
                 vec!["X19".to_string(), "X20".to_string(), "X21".to_string(), 
@@ -281,7 +289,11 @@ mod tests {
     fn test_system_v_amd64_param_passing() {
         let engine = ABILoweringEngine::new(CallingConvention::SystemVAMD64);
         
-        let params = vec![Type::Int, Type::Double, Type::Ptr(Box::new(Type::Int))];
+        let params = vec![
+            Type::Int,
+            Type::Double,
+            Type::Ptr(Box::new(crate::ast::QualType::new(Type::Int))),
+        ];
         let regs = engine.alloc_params_registers(&params);
         
         assert_eq!(regs[0], Some("RDI".to_string()));

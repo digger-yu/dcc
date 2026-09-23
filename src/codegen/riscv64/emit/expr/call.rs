@@ -2,7 +2,7 @@
 // Priority 4 Task: Extract working implementations from riscv64.rs.bak
 
 use crate::ast::{Expr};
-use crate::codegen::riscv64::Riscv64Codegen;
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 use crate::ir::{TypedExpr, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ impl Riscv64Codegen {
                 let v = args.first()
                     .and_then(|a| crate::const_eval::eval(a).ok())
                     .map_or(0, |v| if v != 0 { 1i128 } else { 0i128 });
-                self.li_a0(crate::codegen::riscv64::trunc_i32(v) as i32);
+                self.li_a0(v as i32);
                 
                 return TypedExpr {
                     kind: crate::ir::ExprKind::Call,
@@ -161,7 +161,7 @@ impl Riscv64Codegen {
     // ============================================================
 
     /// 根据 SysV ABI 将值移动到参数寄存器
-    fn mv_a_reg(&mut self, reg_idx: u8) {
+    pub(crate) fn mv_a_reg(&mut self, reg_idx: u8) {
         // a0-a7 are x10-x17
         if reg_idx < 8 {
             let target_reg = 10 + reg_idx;
@@ -525,7 +525,7 @@ impl Riscv64Codegen {
     }
 
     /// 加载变量到寄存器 (for inline asm)
-    fn asm_load_var_to_reg(&mut self, name: &str, reg_idx: u8) {
+    pub(crate) fn asm_load_var_to_reg(&mut self, name: &str, reg_idx: u8) {
         if let Some(&off) = self.locals.get(name) {
             self.load_a0(off);
             self.emit_mv(reg_idx as u8, 10);
@@ -536,7 +536,7 @@ impl Riscv64Codegen {
     }
 
     /// 从寄存器写回变量 (for inline asm)
-    fn asm_store_reg_to_var(&mut self, name: &str, reg_idx: u8) {
+    pub(crate) fn asm_store_reg_to_var(&mut self, name: &str, reg_idx: u8) {
         if let Some(&off) = self.locals.get(name) {
             self.emit_store_sz(reg_idx as u8, 2, off, 8);
         }

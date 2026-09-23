@@ -2,7 +2,7 @@
 // Assembly template instantiation engine for inline assembly
 // Extracted from src/codegen/x86_64/mod.rs (Turns 36-37)
 
-use crate::ast::{Expr};
+use crate::ast::{Expr, Type};
 
 // Forward declaration of Member type
 #[derive(Clone)]

@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use super::registers::{MipsFpr, MipsGpr, MAX_FPINREG_ARG_COUNT, MAX_INREG_ARG_COUNT};
+use super::registers::{MipsFpr, MipsGpr, MAX_INREG_ARG_COUNT};
 
 /// O32 ABI: Stack alignment requirement (8-byte)
 pub const STACK_ALIGNMENT_O32: usize = 8;
@@ -152,10 +152,8 @@ impl MipsAbi {
             _ => {
                 // Aggregates passed via memory pointer
                 // Pointer goes in $a0
-                if let Some(gpr) = MipsGpr::A0 {
-                    info.stack_offset = Some(-4); // Hidden parameter on stack
-                    info.reg = Some(MipsArgReg::Gpr(*gpr));
-                }
+                info.stack_offset = Some(-4); // Hidden parameter on stack
+                info.reg = Some(MipsArgReg::Gpr(MipsGpr::A0));
             }
         }
 
@@ -195,7 +193,7 @@ impl MipsAbi {
         if size <= 4 {
             ReturnInfo {
                 via_reg: true,
-                reg: MipsArgReg::Gpr(MipsGpr::V0),
+                reg: Some(MipsArgReg::Gpr(MipsGpr::V0)),
                 size: size as i32,
                 kind: ReturnKind::SimpleInt,
             }
@@ -204,7 +202,7 @@ impl MipsAbi {
         else if size == 8 && ty_kind != "double" {
             ReturnInfo {
                 via_reg: true,
-                reg: MipsArgReg::Gpr(MipsGpr::V0),
+                reg: Some(MipsArgReg::Gpr(MipsGpr::V0)),
                 size: 8,
                 kind: ReturnKind::Int64TwoRegs,
             }
@@ -213,7 +211,7 @@ impl MipsAbi {
         else if ty_kind == "double" {
             ReturnInfo {
                 via_reg: true,
-                reg: MipsArgReg::Fpr(MipsFpr::F0),
+                reg: Some(MipsArgReg::Fpr(MipsFpr::F0)),
                 size: 8,
                 kind: ReturnKind::Double,
             }
@@ -276,13 +274,13 @@ impl MipsAbi {
         let mut instructions = Vec::new();
 
         // Save RA (return address) in $ra
-        instructions.push("sw $ra, 0($sp)");
+        instructions.push("sw $ra, 0($sp)".to_string());
 
         // Save saved registers ($s0-$s5)
         if !save_regs.is_empty() {
             for (i, reg) in save_regs.iter().enumerate() {
-                let offset = -(4 * (i + 1)) as i32;
-                instructions.push(format!("sw ${}, {}($sp)", reg.name(), offset.abs()));
+                let offset = (4 * (i + 1)) as i32;
+                instructions.push(format!("sw ${}, {}($sp)", reg.name(), offset));
             }
         }
 
@@ -295,7 +293,7 @@ impl MipsAbi {
 
         // Set up frame pointer (optional, but common)
         if needs_fp {
-            instructions.push("move $fp, $sp");
+            instructions.push("move $fp, $sp".to_string());
         }
 
         instructions
@@ -311,26 +309,28 @@ impl MipsAbi {
 
         // Restore stack pointer
         if frame_size > 0 {
-            instructions.push(&format!("addi $sp, $sp, {}", frame_size));
+            instructions.push(format!("addi $sp, $sp, {}", frame_size));
         }
 
         // Restore saved registers
         if !save_regs.is_empty() {
             for (i, reg) in save_regs.iter().enumerate().rev() {
-                let offset = -(4 * (i + 1)) as i32;
-                instructions.push(format!("lw ${}, {}($sp)", reg.name(), offset.abs()));
+                let offset = (4 * (i + 1)) as i32;
+                instructions.push(format!("lw ${}, {}($sp)", reg.name(), offset));
             }
         }
 
         // Restore return address and return
-        instructions.push("lw $ra, 0($sp)");
+        instructions.push("lw $ra, 0($sp)".to_string());
         
         if needs_fp {
-            instructions.push("move $sp, $fp");
+            instructions.push("move $sp, $fp".to_string());
         }
         
         instructions.push("jr $ra".to_string());
         instructions.push("nop".to_string()); // Delay slot fill
+
+        instructions
     }
 
     /// Generate delay slot filler instruction

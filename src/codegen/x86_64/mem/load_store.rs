@@ -178,9 +178,9 @@ pub fn pop_reg(cg: &mut Codegen, reg: u8) {
 /// # Arguments
 /// * `cg` - Codegen context
 /// * `alignment` - Desired alignment (e.g., 16, 32)
-pub fn align_stack(cg: &mut Codegen, alignment: usize) {
+pub fn align_stack(_cg: &mut Codegen, alignment: usize) {
     // Mask RSP to alignment boundary
-    let mask = (!(alignment - 1) as i64);
+    let mask = !(alignment - 1) as i64;
     // This requires dynamic calculation based on current RSP
     // Simplified version: just ensure 16-byte alignment typically done in prologue
     let _ = mask; // Placeholder - full implementation in context of prologue
