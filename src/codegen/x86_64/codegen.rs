@@ -412,6 +412,9 @@ pub struct FuncEmitChunk {
 
 impl Codegen {
     pub fn new(target: Target) -> Self {
+        // 自 monolith 恢复: -fpatchable-function-entry 的 (N,M) 来自 target 描述,
+        // 迁移期间此处丢失导致函数符号 value 不再跳过 patchable 前缀。
+        let patchable_function_entry = target.patchable_function_entry;
         Self {
             code: vec![],
             entry: 0,
@@ -446,7 +449,7 @@ impl Codegen {
             vector_op_slot: 1,
             relocatable: false,
             function_sections: false,
-            patchable_function_entry: None,
+            patchable_function_entry,
             symbols: vec![],
             sym_index: HashMap::new(),
             relocations: vec![],
@@ -636,6 +639,11 @@ impl Codegen {
             .collect();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
+                // 扫描函数体对被标记 error/warning/deprecated 函数的调用
+                // (自 monolith 3604 恢复: 迁移期间此行丢失, diag_fns 闲置)
+                if let Some(body) = &f.body {
+                    Self::check_attr_diagnostics(&body.items, &diag_fns, &f.name.name);
+                }
                 // 记录 __attribute__((error)) 函数名，调用时发射 ud2
                 if f.error_msg.is_some() {
                     self.error_attr_fns.insert(f.name.name.clone());
@@ -739,11 +747,7 @@ impl Codegen {
                         self.tdata_section.push(0);
                     }
                     let offset = self.tdata_section.len() as u64;
-                    let init_data = if let Some(e) = &v.init {
-                        self.eval_global_init(e)
-                    } else {
-                        None
-                    };
+                    let init_data = Self::eval_global_init(self, v, sz, false);
                     if let Some(ref data) = init_data {
                         self.tdata_section.extend_from_slice(data);
                         for _ in data.len()..sz {
@@ -811,11 +815,7 @@ impl Codegen {
                         continue;
                     }
                 }
-                let init_data = if let Some(e) = &v.init {
-                    self.eval_global_init(e)
-                } else {
-                    None
-                };
+                let init_data = Self::eval_global_init(self, v, sz, true);
                 if let Some(ref data) = init_data {
                     self.rodata.extend_from_slice(data);
                     for _ in data.len()..sz {
@@ -1089,7 +1089,7 @@ impl Codegen {
                                 if let Some(init_data) = self.gen_global_init_list(
                                     &v.ty,
                                     inits,
-                                    Some((base, Some(sec_idx as u64))),
+                                    Some((base, Some(sec_idx))),
                                     false,
                                 ) {
                                     self.extra_sections[sec_idx]
@@ -1211,8 +1211,8 @@ impl Codegen {
                         match init {
                             Expr::String { data, .. } => {
                                 // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
-                                // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
-                                // 重定位指向字符串 (链接时写入 rodata 基址 + 偏移)。
+                                // 指针槽通过 pending_data_rodata_rels 生成
+                                // R_X86_64_64 重定位 (符号 = .rodata, addend = str_off)。
                                 if matches!(&v.ty, Type::Ptr(_)) {
                                     let data = data.clone();
                                     if !self.string_pool.contains_key(&data) {
@@ -1221,28 +1221,34 @@ impl Codegen {
                                         self.string_pool.insert(data.clone(), o);
                                     }
                                     let str_off = *self.string_pool.get(&data).unwrap();
-                                    let ref_off = self.data_section.len() as u64;
-                                    self.data_section.resize(ref_off as usize + 8, 0);
-                                    self.pending_data_rodata_rels.push((ref_off, str_off, None));
+                                    let cur = self.extra_sections[sec_idx].data.len();
+                                    self.extra_sections[sec_idx].data.resize(cur + 8, 0);
+                                    self.pending_data_rodata_rels.push((
+                                        cur as u64,
+                                        str_off,
+                                        Some(sec_idx),
+                                    ));
                                 } else {
-                                    self.data_section.extend_from_slice(data);
+                                    self.extra_sections[sec_idx].data.extend_from_slice(data);
                                     for _ in data.len()..sz {
-                                        self.data_section.push(0);
+                                        self.extra_sections[sec_idx].data.push(0);
                                     }
                                 }
                                 has_init = true;
                             },
                             Expr::InitList { inits, .. } => {
-                                let base = self.data_section.len() as u64;
+                                let base = self.extra_sections[sec_idx].data.len() as u64;
                                 if let Some(init_data) = self.gen_global_init_list(
                                     &v.ty,
                                     inits,
-                                    Some((base, None)),
+                                    Some((base, Some(sec_idx))),
                                     false,
                                 ) {
-                                    self.data_section.extend_from_slice(&init_data);
+                                    self.extra_sections[sec_idx]
+                                        .data
+                                        .extend_from_slice(&init_data);
                                     for _ in init_data.len()..sz {
-                                        self.data_section.push(0);
+                                        self.extra_sections[sec_idx].data.push(0);
                                     }
                                     has_init = true;
                                 }
@@ -1253,23 +1259,30 @@ impl Codegen {
                                 if let Some((base_name, byte_off)) =
                                     global::eval_global_lvalue_offset(e, &self.globals_raw)
                                 {
-                                    let ref_off = self.data_section.len() as u64;
+                                    let ref_off = self.extra_sections[sec_idx].data.len() as u64;
                                     let width = if sz <= 4 { 4 } else { 8 };
-                                    self.data_section
+                                    self.extra_sections[sec_idx]
+                                        .data
                                         .resize(ref_off as usize + sz.max(width), 0);
                                     let rel_type = if width == 4 {
                                         crate::codegen::shared::elf::R_X86_64_32
                                     } else {
                                         crate::codegen::shared::elf::R_X86_64_64
                                     };
-                                    self.pending_data64_rels
-                                        .push((ref_off, base_name, None, rel_type, byte_off));
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        base_name,
+                                        Some(sec_idx),
+                                        rel_type,
+                                        byte_off,
+                                    ));
                                     has_init = true;
                                 } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
                                     // Fallback for function pointers and other symbols not in globals
-                                    let ref_off = self.data_section.len() as u64;
+                                    let ref_off = self.extra_sections[sec_idx].data.len() as u64;
                                     let width = if sz <= 4 { 4 } else { 8 };
-                                    self.data_section
+                                    self.extra_sections[sec_idx]
+                                        .data
                                         .resize(ref_off as usize + sz.max(width), 0);
                                     let rel_type = if width == 4 {
                                         crate::codegen::shared::elf::R_X86_64_32
@@ -1279,7 +1292,7 @@ impl Codegen {
                                     self.pending_data64_rels.push((
                                         ref_off,
                                         ref_name.name.clone(),
-                                        None,
+                                        Some(sec_idx),
                                         rel_type,
                                         0,
                                     ));
@@ -1288,17 +1301,23 @@ impl Codegen {
                                     global::materialize_compound_literal(self, e, false)
                                 {
                                     // &(struct A){42,43} — C99 合法的文件地址常量
-                                    let ref_off = self.data_section.len() as u64;
+                                    let ref_off = self.extra_sections[sec_idx].data.len() as u64;
                                     let width = if sz <= 4 { 4 } else { 8 };
-                                    self.data_section
+                                    self.extra_sections[sec_idx]
+                                        .data
                                         .resize(ref_off as usize + sz.max(width), 0);
                                     let rel_type = if width == 4 {
                                         crate::codegen::shared::elf::R_X86_64_32
                                     } else {
                                         crate::codegen::shared::elf::R_X86_64_64
                                     };
-                                    self.pending_data64_rels
-                                        .push((ref_off, anon_name, None, rel_type, 0));
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        anon_name,
+                                        Some(sec_idx),
+                                        rel_type,
+                                        0,
+                                    ));
                                     has_init = true;
                                 } else {
                                     // No compound literal match
@@ -1311,7 +1330,7 @@ impl Codegen {
                                 if let Some(bytes) =
                                     global::global_init_bytes(init, sz, is_float, &v.ty)
                                 {
-                                    self.data_section.extend_from_slice(&bytes);
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
                                     has_init = true;
                                 }
                             },
@@ -1319,7 +1338,7 @@ impl Codegen {
                     }
                     if !has_init {
                         for _ in 0..sz {
-                            self.data_section.push(0);
+                            self.extra_sections[sec_idx].data.push(0);
                         }
                     }
                     self.globals_raw.insert(
@@ -1526,8 +1545,16 @@ impl Codegen {
                 ..
             } = decl
             {
-                // self.emit_global_asm(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, clobbers);
-                // TODO: Implement emit_global_asm for Asm decl
+                self.emit_global_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                );
             }
         }
 
@@ -1704,118 +1731,27 @@ impl Codegen {
         // 依赖 pending_code_rels 中的外部符号, 所以必须先于 Phase 2。
         self.patch_local_jumps(&move_ranges);
 
-        // Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
-        // 先收集到临时 vec, 然后排序构建最终 symtab
-        let mut local_syms: Vec<ElfSym> = vec![];
-        let mut global_syms: Vec<ElfSym> = vec![];
-
-        // 全局变量符号（extern 声明 + 同 TU 定义会重复出现在 prog.decls）
-        let mut emitted_var_syms: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let var_defined: HashSet<String> = prog
-            .decls
-            .iter()
-            .filter_map(|d| match d {
-                Decl::Var(v) if !v.is_extern || v.init.is_some() => Some(v.name.name.clone()),
-                _ => None,
-            })
-            .collect();
-        let var_has_definition = |name: &str| -> bool { var_defined.contains(name) };
-        for decl in &prog.decls {
-            if let Decl::Var(v) = decl {
-                if v.register_name.is_some() {
-                    continue;
-                }
-                // __attribute__((alias)): 变量别名由 alias 路径处理
-                if v.alias_name.is_some() {
-                    continue;
-                }
-                // Skip variables with empty names
-                if v.name.name.is_empty() {
-                    continue;
-                }
-                // 超大数组 (>1GB) 未分配存储，跳过符号发射
-                if v.ty.size() > (1 << 30) {
-                    continue;
-                }
-                if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
-                    continue;
-                }
-                if !emitted_var_syms.insert(v.name.name.clone()) {
-                    continue;
-                }
-                let g = self.globals_raw[&v.name.name].clone();
-                let (section, bind) = if v.is_extern
-                    && v.init.is_none()
-                    && g.section == crate::codegen::shared::elf::SHN_UNDEF
-                {
-                    (
-                        crate::codegen::shared::elf::SHN_UNDEF,
-                        if v.is_weak {
-                            crate::codegen::shared::elf::STB_WEAK
-                        } else {
-                            crate::codegen::shared::elf::STB_GLOBAL
-                        },
-                    )
-                } else {
-                    (
-                        g.section,
-                        if v.is_weak {
-                            crate::codegen::shared::elf::STB_WEAK
-                        } else if v.is_static {
-                            crate::codegen::shared::elf::STB_LOCAL
-                        } else {
-                            crate::codegen::shared::elf::STB_GLOBAL
-                        },
-                    )
-                };
-                let sym = ElfSym {
-                    name: self.resolve_asm_label(&v.name.name).to_string(),
-                    section,
-                    value: g.offset,
-                    size: g.size as u64,
-                    bind,
-                    ty: if g.is_tls {
-                        crate::codegen::shared::elf::STT_TLS
-                    } else {
-                        crate::codegen::shared::elf::STT_OBJECT
-                    },
-                    visibility: Self::parse_visibility(&v.visibility),
-                };
-                if v.is_static {
-                    local_syms.push(sym);
-                } else {
-                    global_syms.push(sym);
-                }
-            }
-        }
-        self.collect_exec_symbols(prog);
-    }
-
-    pub fn gen_global_init_list(
-        &mut self,
-        _ty: &Type,
-        _inits: &[crate::ast::InitItem],
-        _base: Option<(u64, Option<u64>)>,
-        _use_rodata: bool,
-    ) -> Option<Vec<u8>> {
-        unimplemented!("gen_global_init_list implementation");
-    }
-
-    pub fn eval_global_init(&mut self, _e: &crate::ast::Expr) -> Option<Vec<u8>> {
-        unimplemented!("eval_global_init implementation");
+        // Phase 2: 收集所有符号 (STN_UNDEF → LOCAL → GLOBAL)。
+        // 自 monolith 恢复的完整 ET_REL symtab 构建 (elf/rel_symbols.rs)：
+        // 含 asm 函数符号、alias/target_clones 变体、嵌套函数、__mcount_loc、
+        // pushsection 标签符号、section 符号与 implicit UND。迁移期间曾被
+        // 降级为复用 exec 路径的 collect_exec_symbols (仅剩死代码变量循环)。
+        self.collect_rel_symbols(prog, &custom_func_offsets);
+        // Phase 3 (自 monolith 恢复): 符号表定稿后发射 ET_REL 重定位、
+        // init/fini_array 节与自定义节重定位搬迁。
+        self.emit_rel_relocations(prog, &custom_func_ranges);
     }
 
     /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等
     /// 统一走 const_eval 的 ConstValue::Addr (符号 + 字节偏移)。
-    fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
+    pub(crate) fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
         match const_eval::eval_full(init, false) {
             Ok(const_eval::ConstValue::Addr { name, offset }) => Some((name, offset as i64)),
             _ => None,
         }
     }
 
-    fn compute_func_size_fallback(&self, _name: &str, func_start: u64) -> u64 {
+    pub(crate) fn compute_func_size_fallback(&self, _name: &str, func_start: u64) -> u64 {
         // 收集所有函数起始位置，找到当前函数之后的下一个函数
         let mut all_starts: Vec<u64> = self.labels.values().copied().collect();
         all_starts.sort();
@@ -1836,7 +1772,7 @@ impl Codegen {
         func_start.saturating_sub(prefix_len)
     }
 
-    fn pad_custom_section_to(&mut self, sec_idx: usize, len: usize) {
+    pub(crate) fn pad_custom_section_to(&mut self, sec_idx: usize, len: usize) {
         let section = &mut self.extra_sections[sec_idx];
         let fill = if section.flags & crate::codegen::shared::elf::SHF_EXECINSTR != 0 {
             0x90

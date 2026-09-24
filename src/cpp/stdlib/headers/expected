@@ -1,8 +1,50 @@
 // <expected> - C++23 特性 stub (simplified)
 // 仅用于编译通过，不实现完整语义
+//
+// 提供两组降级形式:
+//   - expected_int / expected_str: M18 期按常用 T/E 组合手写的具名类
+//     (tests/fixtures/cpp/expected.cpp 依赖这两个名字 + 静态 error() 工厂);
+//   - expected_int_int: 对应 std::expected<int, int> 的实例化名形式
+//     (tests/fixtures/cpp/cpp23_features.cpp 依赖它 + make_unexpected).
 
 namespace std {
-    // Minimal expected<T,E> for compilation
+    /* 简化 expected: 模板参数通过 ctor 重载特化. 提供两种 alias:
+         expected_int      - 存 int / int
+         expected_str      - 存 const char* / int
+    */
+    class expected_int {
+    public:
+        expected_int() : has_v_(0), v_(0), e_(0) {}
+        expected_int(int v) : has_v_(1), v_(v), e_(0) {}
+        static expected_int error(int err) {
+            expected_int r; r.has_v_ = 0; r.e_ = err; return r;
+        }
+        int has_value() const { return has_v_; }
+        int value() const     { return v_; }
+        int error() const     { return e_; }
+    private:
+        int has_v_;
+        int v_;
+        int e_;
+    };
+
+    /* expected<const char*, int>: 字符串/错误码, 不持有 str */
+    class expected_str {
+    public:
+        expected_str() : has_v_(0), v_(0), e_(0) {}
+        expected_str(const char* v) : has_v_(1), v_(v), e_(0) {}
+        static expected_str error(int err) {
+            expected_str r; r.has_v_ = 0; r.e_ = err; return r;
+        }
+        int has_value() const     { return has_v_; }
+        const char* value() const { return v_; }
+        int error() const         { return e_; }
+    private:
+        int has_v_;
+        const char* v_;
+        int e_;
+    };
+
     struct expected_int_int {
         int val_;
         int has_val_;

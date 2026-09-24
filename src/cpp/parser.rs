@@ -10118,6 +10118,15 @@ impl<'a> CppParser<'a> {
         if is_static {
             i += 1;
         }
+        // C++20: `constexpr` / `constinit` / `consteval` 是声明说明符而非类型的一部分,
+        // 与全局路径 parse_decl 的处理保持一致 (降级时剥离), 否则局部
+        // `constexpr int x = 1;` 会被误判为非声明语句.
+        while matches!(
+            self.peek_token_at(i),
+            Some(CppTok::Kw(CppKw::Constexpr | CppKw::Constinit | CppKw::Consteval, _))
+        ) {
+            i += 1;
+        }
         // 跳过 const/volatile 限定符
         while self.is_qualifier_at(i) {
             i += 1;
@@ -10442,6 +10451,10 @@ impl<'a> CppParser<'a> {
         // M10+: 检测 static 关键字
         let is_static = self.at(CppKw::Static);
         if is_static {
+            self.bump();
+        }
+        // C++20: constexpr/constinit/consteval 声明说明符 - 同 parse_decl 剥离
+        while self.at(CppKw::Constexpr) || self.at(CppKw::Constinit) || self.at(CppKw::Consteval) {
             self.bump();
         }
         // M30.2: 先跳过 const/volatile 前缀，否则 `const bidi::context &x`

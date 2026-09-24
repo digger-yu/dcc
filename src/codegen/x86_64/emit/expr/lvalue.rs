@@ -154,9 +154,7 @@ impl Codegen {
             let is_static_local = self
                 .static_local_map
                 .is_static_local(&self.current_func_name, &arr_name.name);
-            let resolved_key = self
-                .resolve_global_key(&arr_name.name)
-                .unwrap_or_else(|| arr_name.name.clone());
+            let resolved_key = self.resolve_global_key(&arr_name.name).to_string();
             let is_global_array = !is_static_local
                 && self
                     .globals_raw

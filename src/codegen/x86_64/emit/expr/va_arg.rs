@@ -5,6 +5,7 @@
 // 新方法, 缩进层级与 gen_expr 内层 match 完全一致, 语义 diff 为 0。
 
 use crate::ast::*;
+use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::{Codegen, VaListAddress};
 
 impl Codegen {

@@ -1,20 +1,36 @@
-// <chrono> - Empty classes only (no fields) for DCC compatibility
-// Using extern "C" struct pattern to avoid DCC class limitations
+// <chrono> - dcc++ C++ 标准库
+// 只提供其它标准库头 (如 <thread> 的 this_thread::sleep_for) 依赖的最小
+// 类型与访问器, 不含真实时钟语义.
 
 namespace std {
-    // Use typedef struct instead of class to avoid field access issues
-    typedef struct {
-    } duration;
-    
-    typedef struct {
-    } time_point;
-    
-    typedef struct {
-    } system_clock;
-    
-    typedef struct {
-    } steady_clock;
-    
-    typedef struct {
-    } high_resolution_clock;
+    // duration: 以纳秒为单位存储的时间间隔
+    struct duration {
+        long long ns_;
+
+        duration() : ns_(0) {}
+        duration(long long n) : ns_(n) {}
+
+        long long count_nanos() const { return ns_; }
+    };
+
+    struct time_point {
+        duration d_;
+
+        time_point() : d_() {}
+        time_point(duration d) : d_(d) {}
+
+        duration time_since_epoch() const { return d_; }
+    };
+
+    struct system_clock {
+        static duration now() { return duration(0); }
+    };
+
+    struct steady_clock {
+        static duration now() { return duration(0); }
+    };
+
+    struct high_resolution_clock {
+        static duration now() { return duration(0); }
+    };
 }

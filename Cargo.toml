@@ -3,16 +3,16 @@ name    = "dcc"
 version = "0.1.0"
 edition = "2021"
 authors = ["digger-yu@outlook.com"]
-description = "DCC: A suckless C compiler. Faster than GCC for the same job."
+description = "DCC: Digger C compiler. A suckless C compiler."
 license    = "Apache-2.0"
 
 [features]
 # GCC source tree integration tests (libdecnumber, etc.)
 gcc_src = []
 
-# 后端 family 特性 (默认全部关闭; 主线只编 x86_64 + shared)
-# - `arm`: 启用 32 位 ARM + 64 位 AArch64 后端
-# - `mips`: 启用 32/64 位 MIPS + RISC-V 64 后端 (RISC 家族打包)
+# 历史遗留的空 feature 别名: aarch64/arm/mips/mips64/riscv64 后端现在**无条件**
+# 参与构建(见 src/codegen/mod.rs), 这些名字仅为兼容旧脚本/CI 调用而保留, 不再
+# 控制任何代码路径。新代码请使用运行期 FeatureSet 能力查询, 不要再加 gate。
 default = []
 arm = []
 mips = []

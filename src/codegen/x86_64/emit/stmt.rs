@@ -4,6 +4,7 @@
 // 语义 diff 为 0。
 
 use crate::ast::*;
+use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::{AbiClass, Codegen, JumpKind};
 
 use crate::const_eval;

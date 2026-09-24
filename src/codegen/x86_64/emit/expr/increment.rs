@@ -6,6 +6,7 @@
 
 use crate::ast::find_field;
 use crate::ast::*;
+use crate::codegen::shared::elf as shared_elf;
 
 use crate::diagnostics::Span;
 

@@ -8,29 +8,18 @@ use crate::codegen::x86_64;
 use crate::diagnostics::Diagnostic;
 use crate::target::Target;
 
-#[cfg(feature = "mips")]
 use crate::codegen::mips;
-#[cfg(feature = "mips")]
 use crate::codegen::mips::mips64;
-#[cfg(feature = "mips")]
 use crate::codegen::riscv64;
-/// 后端 family 通过 cargo feature gate; 默认构建仅含 x86_64.
-/// 见 Cargo.toml `arm` / `mips` / `all-backends`.
-#[cfg(feature = "arm")]
 use crate::codegen::{aarch64, arm};
 
 /// Backend implementation wrapper for type erasure
 pub enum AnyBackend {
     X86_64(x86_64::Codegen),
-    #[cfg(feature = "arm")]
     AArch64(aarch64::Aarch64Codegen),
-    #[cfg(feature = "arm")]
     Arm(arm::ArmCodegen),
-    #[cfg(feature = "mips")]
     Mips(mips::MipsCodegen),
-    #[cfg(feature = "mips")]
     Mips64(mips64::Mips64Codegen),
-    #[cfg(feature = "mips")]
     RiscV64(riscv64::Riscv64Codegen),
 }
 
@@ -38,15 +27,10 @@ impl Backend for AnyBackend {
     fn arch(&self) -> Arch {
         match self {
             AnyBackend::X86_64(_) => Arch::X86_64,
-            #[cfg(feature = "arm")]
             AnyBackend::AArch64(_) => Arch::AArch64,
-            #[cfg(feature = "arm")]
             AnyBackend::Arm(_) => Arch::Arm,
-            #[cfg(feature = "mips")]
             AnyBackend::Mips(_) => Arch::Mips,
-            #[cfg(feature = "mips")]
             AnyBackend::Mips64(_) => Arch::Mips64,
-            #[cfg(feature = "mips")]
             AnyBackend::RiscV64(_) => Arch::RiscV64,
         }
     }
@@ -56,15 +40,10 @@ impl Backend for AnyBackend {
         // 包装层不得再抄一份.
         match self {
             AnyBackend::X86_64(cg) => cg.features(),
-            #[cfg(feature = "arm")]
             AnyBackend::AArch64(cg) => cg.features(),
-            #[cfg(feature = "arm")]
             AnyBackend::Arm(cg) => cg.features(),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips(cg) => cg.features(),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips64(cg) => cg.features(),
-            #[cfg(feature = "mips")]
             AnyBackend::RiscV64(cg) => cg.features(),
         }
     }
@@ -74,15 +53,10 @@ impl Backend for AnyBackend {
         // 方法调用语法会优先选中 inherent 版本而导致类型不匹配, 必须显式走 trait.
         match self {
             AnyBackend::X86_64(cg) => <x86_64::Codegen as Backend>::compile(cg, input),
-            #[cfg(feature = "arm")]
             AnyBackend::AArch64(cg) => <aarch64::Aarch64Codegen as Backend>::compile(cg, input),
-            #[cfg(feature = "arm")]
             AnyBackend::Arm(cg) => <arm::ArmCodegen as Backend>::compile(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips(cg) => <mips::MipsCodegen as Backend>::compile(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips64(cg) => <mips64::Mips64Codegen as Backend>::compile(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::RiscV64(cg) => <riscv64::Riscv64Codegen as Backend>::compile(cg, input),
         }
     }
@@ -90,15 +64,10 @@ impl Backend for AnyBackend {
     fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
         match self {
             AnyBackend::X86_64(cg) => <x86_64::Codegen as Backend>::render_asm(cg, input),
-            #[cfg(feature = "arm")]
             AnyBackend::AArch64(cg) => <aarch64::Aarch64Codegen as Backend>::render_asm(cg, input),
-            #[cfg(feature = "arm")]
             AnyBackend::Arm(cg) => <arm::ArmCodegen as Backend>::render_asm(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips(cg) => <mips::MipsCodegen as Backend>::render_asm(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips64(cg) => <mips64::Mips64Codegen as Backend>::render_asm(cg, input),
-            #[cfg(feature = "mips")]
             AnyBackend::RiscV64(cg) => <riscv64::Riscv64Codegen as Backend>::render_asm(cg, input),
         }
     }
@@ -106,15 +75,10 @@ impl Backend for AnyBackend {
     fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
         match self {
             AnyBackend::X86_64(cg) => <x86_64::Codegen as Backend>::build_object(cg),
-            #[cfg(feature = "arm")]
             AnyBackend::AArch64(cg) => <aarch64::Aarch64Codegen as Backend>::build_object(cg),
-            #[cfg(feature = "arm")]
             AnyBackend::Arm(cg) => <arm::ArmCodegen as Backend>::build_object(cg),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips(cg) => <mips::MipsCodegen as Backend>::build_object(cg),
-            #[cfg(feature = "mips")]
             AnyBackend::Mips64(cg) => <mips64::Mips64Codegen as Backend>::build_object(cg),
-            #[cfg(feature = "mips")]
             AnyBackend::RiscV64(cg) => <riscv64::Riscv64Codegen as Backend>::build_object(cg),
         }
     }
@@ -143,25 +107,20 @@ pub fn backend_for(
 ) -> Option<Box<dyn Backend + 'static>> {
     match arch {
         Arch::X86_64 => Some(Box::new(AnyBackend::X86_64(x86_64::Codegen::new(target.clone())))),
-        #[cfg(feature = "arm")]
         Arch::AArch64 => Some(Box::new(AnyBackend::AArch64(aarch64::Aarch64Codegen::new(
             target.clone(),
             relocatable,
         )))),
-        #[cfg(feature = "arm")]
         Arch::Arm => {
             Some(Box::new(AnyBackend::Arm(arm::ArmCodegen::new(target.clone(), relocatable))))
         },
-        #[cfg(feature = "mips")]
         Arch::Mips => {
             Some(Box::new(AnyBackend::Mips(mips::MipsCodegen::new(target.clone(), relocatable))))
         },
-        #[cfg(feature = "mips")]
         Arch::Mips64 => Some(Box::new(AnyBackend::Mips64(mips64::Mips64Codegen::new(
             target.clone(),
             relocatable,
         )))),
-        #[cfg(feature = "mips")]
         Arch::RiscV64 => Some(Box::new(AnyBackend::RiscV64(riscv64::Riscv64Codegen::new(
             target.clone(),
             relocatable,
@@ -170,12 +129,7 @@ pub fn backend_for(
         // Disabled backends:
         Arch::RiscV32 => None, // See emit E0399 "Not Yet Implemented"
 
-        // 关闭的后端 family (feature 未开启): 返回 None 让调用方报 E0399.
-        #[cfg(not(feature = "arm"))]
-        Arch::AArch64 | Arch::Arm => None,
-        #[cfg(not(feature = "mips"))]
-        Arch::Mips | Arch::Mips64 | Arch::RiscV64 => None,
-        // Future platforms can be added here
+                               // Future platforms can be added here
     }
 }
 
@@ -192,7 +146,7 @@ pub fn backend_for(
 ///
 /// ```
 /// use dcc::cli::Arch;
-/// use dcc::codegen::registry::has_backend;
+/// use dcc::codegen::shared::registry::has_backend;
 ///
 /// assert!(has_backend(Arch::X86_64));
 /// assert!(!has_backend(Arch::RiscV32));

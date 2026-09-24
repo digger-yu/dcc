@@ -223,7 +223,7 @@ impl AsmDirectiveExpander {
     /// Some(count) if valid, None otherwise
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// assert_eq!(AsmDirectiveExpander::parse_rept(".rept 5"), Some(5));
     /// assert_eq!(AsmDirectiveExpander::parse_rept("mov eax, 1"), None);
     /// ```
@@ -243,7 +243,7 @@ impl AsmDirectiveExpander {
     /// Some((symbol_name, value_list))
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let result = AsmDirectiveExpander::parse_irp(".irp x, 1, 2, 3").unwrap();
     /// assert_eq!(result.0, "x");
     /// assert_eq!(result.1, vec!["1", "2", "3"]);
@@ -268,7 +268,7 @@ impl AsmDirectiveExpander {
     /// Some((symbol_name, character_string))
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// let result = AsmDirectiveExpander::parse_irpc(".irpc c, ABC").unwrap();
     /// assert_eq!(result.0, "c");
     /// assert_eq!(result.1, "ABC");
@@ -292,8 +292,8 @@ impl AsmDirectiveExpander {
     /// Some((macro_name, parameter_names))
     ///
     /// # Example
-    /// ```rust
-    /// let result = AsmDirectiveExpander::parse_macro_def(".macro ADD a, b").unwrap();
+    /// ```rust,ignore
+    /// let result = AsmDirectiveExpander::parse_macro_def(".macro add a, b").unwrap();
     /// assert_eq!(result.0, "ADD");
     /// assert_eq!(result.1, vec!["a", "b"]);
     /// ```

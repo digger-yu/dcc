@@ -884,7 +884,10 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
     }
 }
 
-/// 过滤掉模板声明（Template / PartialSpec / Concept 等），只保留普通声明
+/// 过滤掉模板声明（Template / PartialSpec / Concept 等），只保留普通声明.
+/// 需递归进入 namespace / export 块: 否则 `namespace std { template<class M>
+/// class lock_guard {...} }` 里的未实例化模板类体会交给 Sema, 其模板参数
+/// 类型 (如 `M`) 无法解析.
 fn filter_template_decls(decls: &[CppDecl]) -> Vec<CppDecl> {
     decls
         .iter()
@@ -894,7 +897,14 @@ fn filter_template_decls(decls: &[CppDecl]) -> Vec<CppDecl> {
                 CppDecl::Template { .. } | CppDecl::PartialSpec { .. } | CppDecl::Concept { .. }
             )
         })
-        .cloned()
+        .map(|d| match d {
+            CppDecl::Namespace { name, body } => CppDecl::Namespace {
+                name: name.clone(),
+                body: filter_template_decls(body),
+            },
+            CppDecl::ExportBlock(inner) => CppDecl::ExportBlock(filter_template_decls(inner)),
+            other => other.clone(),
+        })
         .collect()
 }
 

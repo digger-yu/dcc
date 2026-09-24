@@ -30,7 +30,6 @@ mod instructions;
 mod mem;
 mod parallel;
 mod special;
-mod stubs;
 
 // ============================================================================
 // Core Public Exports (from extracted modules)

@@ -5,4 +5,6 @@
 pub mod expr;
 pub mod func_setup;
 pub mod functions;
+pub mod nested;
 pub mod stmt;
+pub mod vla;

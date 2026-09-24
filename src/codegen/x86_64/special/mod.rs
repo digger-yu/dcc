@@ -4,6 +4,7 @@
 //
 // 各子模块自 batch B 起为真实生产路径（mod.rs 逐字搬迁，非影子实现）。
 
+pub mod builtins;
 pub mod int128;
 // batch C/D/E 已全部接线投产：x87 / sanitizer / tls 子模块均为 mod.rs 逐字搬迁的
 // 生产实现（非影子），`#[allow(unused_imports)]` 仅为兼容后续逐模块引用。

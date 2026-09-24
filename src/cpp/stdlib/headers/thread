@@ -4,6 +4,8 @@
 // 成员函数需要用 C 兼容 thunk 适配 (dcc++ 不会自动生成, 用户自己
 // 写一个 free function 取 this).
 
+#include <chrono>
+
 extern "C" {
     struct dccpp_thread;
     /* M18.0: dcc++ 不支持裸函数指针类型在 param list 内 (`void* (*fn)(void*)`),

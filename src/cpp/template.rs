@@ -850,12 +850,44 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
         CppExpr::PtrMemberStar(o, s) => {
             CppExpr::PtrMemberStar(Box::new(substitute_expr(o, params, args)), s.clone())
         },
-        CppExpr::Call(f, as_) => CppExpr::Call(
-            Box::new(substitute_expr(f, params, args)),
-            as_.iter()
-                .map(|a| substitute_expr(a, params, args))
-                .collect(),
-        ),
+        CppExpr::Call(f, as_) => {
+            // 模板参数名在表达式语境中作为类型使用时 (如 `T()`、`new T`),
+            // 替换为实际类型名或零值初始化.
+            if let CppExpr::Ident(name) = f.as_ref() {
+                if let Some(idx) = params.iter().position(|p| p == name) {
+                    if let Some(a) = args.get(idx) {
+                        match a {
+                            MangleType::Class(n) => {
+                                return CppExpr::Call(
+                                    Box::new(CppExpr::Ident(n.clone())),
+                                    as_.iter()
+                                        .map(|x| substitute_expr(x, params, args))
+                                        .collect(),
+                                );
+                            },
+                            // 非类类型的函数式类型转换: `T()` 值初始化为 0;
+                            // `T(x)` 是 functional cast, 必须保留实参值 (Cast 到 T),
+                            // 不能把实参丢弃成 0。
+                            _ => {
+                                return match as_.as_slice() {
+                                    [] => CppExpr::IntLit(0),
+                                    _ => CppExpr::Cast(
+                                        a.clone(),
+                                        Box::new(substitute_expr(&as_[0], params, args)),
+                                    ),
+                                };
+                            },
+                        }
+                    }
+                }
+            }
+            CppExpr::Call(
+                Box::new(substitute_expr(f, params, args)),
+                as_.iter()
+                    .map(|a| substitute_expr(a, params, args))
+                    .collect(),
+            )
+        },
         CppExpr::New(ty, as_) => CppExpr::New(
             match substitute_type(&MangleType::Class(ty.clone()), params, args) {
                 MangleType::Class(n) => n,
@@ -935,7 +967,19 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
             body: substitute_body(&lam.body, params, args),
             closure_name: lam.closure_name.clone(),
         }),
-        // Ident / 字面量 / 模板名等无需替换
+        // 模板**类型**参数在值语境中以类型名使用时 (如 `new T` 的类型段、
+        // 类型位置引用) 替换为实际类名。标量/非类型模板参数是值, 不得替换
+        // (否则会把 `template<int N>` 里的 `N` 等静默归零); `T(实参)` 形式的
+        // 函数式类型转换由上面的 Call 分支单独处理, 此处不介入。
+        CppExpr::Ident(name) => {
+            if let Some(idx) = params.iter().position(|p| p == name) {
+                if let Some(MangleType::Class(n)) = args.get(idx) {
+                    return CppExpr::Ident(n.clone());
+                }
+            }
+            e.clone()
+        },
+        // 字面量 / 模板名等无需替换
         other => other.clone(),
     }
 }
@@ -1253,6 +1297,39 @@ mod tests {
             name: name.to_string(),
             args: args.to_vec(),
         }
+    }
+
+    #[test]
+    fn substitute_functional_cast_preserves_value() {
+        // `T(9)` with T=int → functional cast, 必须保留实参值 (Cast(Int, 9)), 不能归零.
+        let e = CppExpr::Call(Box::new(CppExpr::Ident("T".to_string())), vec![CppExpr::IntLit(9)]);
+        match substitute_expr(&e, &["T".to_string()], &[MangleType::Int]) {
+            CppExpr::Cast(MangleType::Int, inner) => {
+                assert!(matches!(*inner, CppExpr::IntLit(9)));
+            },
+            other => panic!("expected Cast(Int, 9), got {:?}", other),
+        }
+        // `T()` 空实参 → 值初始化 0.
+        let e0 = CppExpr::Call(Box::new(CppExpr::Ident("T".to_string())), vec![]);
+        assert!(matches!(
+            substitute_expr(&e0, &["T".to_string()], &[MangleType::Int]),
+            CppExpr::IntLit(0)
+        ));
+    }
+
+    #[test]
+    fn substitute_non_class_param_not_zeroed() {
+        // 裸 Ident 参数名在绑定为非类类型 (如非类型模板参数) 时不得被替换成 0.
+        let e = CppExpr::Ident("N".to_string());
+        let r = substitute_expr(&e, &["N".to_string()], &[MangleType::Int]);
+        assert!(matches!(&r, CppExpr::Ident(name) if name == "N"), "非类参数名被误替换: {:?}", r);
+        // 绑定为类类型时, 裸 Ident 替换为实际类名.
+        let rc = substitute_expr(
+            &CppExpr::Ident("T".to_string()),
+            &["T".to_string()],
+            &[MangleType::Class("Foo".to_string())],
+        );
+        assert!(matches!(&rc, CppExpr::Ident(name) if name == "Foo"));
     }
 
     #[test]

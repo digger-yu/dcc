@@ -367,6 +367,11 @@ pub struct Sema {
     current_class: Option<ClassId>,
     /// 静态局部变量命名计数器（生成唯一 linkage name）
     static_local_counter: usize,
+    /// 当前函数内由 `T(args...)` 匿名临时量登记的栈上槽位符号
+    /// (在 build_function 结束时统一发射为函数体最前面的 Decl 语句)
+    func_temps: Vec<SymbolId>,
+    /// 临时量命名计数器 (整个 TU 内保证名字唯一)
+    temp_counter: usize,
 }
 
 impl Sema {
@@ -385,6 +390,8 @@ impl Sema {
             hir: HirTranslationUnit::new(),
             current_class: None,
             static_local_counter: 0,
+            func_temps: Vec::new(),
+            temp_counter: 0,
         };
 
         // 注册 C++ runtime symbols（如 dccpp_dur_free, __dcc_eh_throw 等）
@@ -913,6 +920,73 @@ impl Sema {
         id
     }
 
+    /// 将不带限定的名字解析为类符号 (用于 `T(args...)` 函数式构造与模板类型 id).
+    /// 先走作用域链; 未命中时回退到全符号表扫描 —— stub 头里定义在
+    /// `namespace std` 内的类不在当前函数的作用域链上.
+    /// 回退时只取已完整注册的类 (拥有自己的 class scope):
+    /// 第一遍 register_classes_deep 只为前向声明建符号, 不 push scope,
+    /// 按名字会优先命中那个空壳.
+    fn resolve_class_symbol(&self, name: &str) -> Option<SymbolId> {
+        if let Some(sym) = self
+            .lookup_unqualified(name)
+            .into_iter()
+            .find(|&s| matches!(self.get_symbol(s).map(|sym| sym.kind), Some(CxxSymbolKind::Class)))
+        {
+            return Some(sym);
+        }
+        let candidates: Vec<SymbolId> = self
+            .symbols
+            .iter()
+            .filter(|s| s.name == name && matches!(s.kind, CxxSymbolKind::Class))
+            .map(|s| s.id)
+            .collect();
+        candidates
+            .iter()
+            .find(|&&id| self.class_scope(ClassId::from(id)).is_some())
+            .or_else(|| candidates.first())
+            .copied()
+    }
+
+    /// 构造类临时对象 `T(args...)`:
+    /// 为函数级临时量槽调用构造器, 并以逗号表达式将
+    /// 临时量本身作为结果值 (与 `T t(args); t` 的局部构造形式同构).
+    fn build_class_temporary(
+        &mut self,
+        class_sym: SymbolId,
+        args: &[CppExpr],
+    ) -> Result<HirExprId, String> {
+        let class_ty = CxxType::Class(ClassId::from(class_sym));
+        let tmp_name = format!("__dcc_tmp{}", self.temp_counter);
+        self.temp_counter += 1;
+        let tmp =
+            self.add_symbol(tmp_name, CxxSymbolKind::Variable, class_ty.clone(), Access::Private);
+        self.func_temps.push(tmp);
+        let mut hir_args = Vec::new();
+        for a in args {
+            hir_args.push(self.build_expr(a)?);
+        }
+        let object = self.add_expr(HirExprKind::Local(tmp), class_ty.clone());
+        let place = self
+            .add_expr(HirExprKind::AddressOf(object), CxxType::Pointer(Box::new(class_ty.clone())));
+        let construct = self.add_expr(
+            HirExprKind::Construct {
+                class: ClassId::from(class_sym),
+                place,
+                args: hir_args,
+                variant: crate::cpp::hir::CtorVariant::Complete,
+            },
+            CxxType::Void,
+        );
+        let value = self.add_expr(HirExprKind::Local(tmp), class_ty.clone());
+        Ok(self.add_expr(
+            HirExprKind::Comma {
+                lhs: construct,
+                rhs: value,
+            },
+            class_ty,
+        ))
+    }
+
     // --- MangleType -> CxxType ---
 
     fn convert_type(&mut self, mt: &MangleType) -> Result<CxxType, String> {
@@ -978,6 +1052,27 @@ impl Sema {
                 let inner = self.convert_type(t)?;
                 Ok(CxxType::Array(Box::new(inner), Some(*n)))
             },
+            MangleType::Template { name, args } => {
+                // 模板类型 id: native 流水线 Step 0 已将已知类模板实例化并替换成
+                // MangleType::Class. 仍为 Template 的是 stub 头里手写的实例结构体
+                // (如 <expected> 为 std::expected<int,int> 提供 expected_int_int),
+                // 按实例化名 / 去前缀名依次回查类符号.
+                let inst = crate::cpp::template::instantiated_class_name(name, args);
+                let bare = {
+                    let mut s = name.replace("::", "_");
+                    for a in crate::cpp::template::merge_expanded_args(args) {
+                        s.push('_');
+                        s.push_str(&crate::cpp::template::type_key(&a));
+                    }
+                    s
+                };
+                for cand in [inst.as_str(), bare.as_str(), name.as_str()] {
+                    if let Some(sym) = self.resolve_class_symbol(cand) {
+                        return Ok(CxxType::Class(ClassId::from(sym)));
+                    }
+                }
+                Err(format!("unknown class type: {}", inst))
+            },
             MangleType::Class(name) => {
                 // 从当前作用域向上查找类名
                 let syms = self.lookup_unqualified(name);
@@ -1029,6 +1124,11 @@ impl Sema {
                         return Ok(CxxType::Pointer(Box::new(CxxType::Void)));
                     },
                     _ => {},
+                }
+                // parser 将 `std::X` 类型名降为短名 X, 因此定义在 namespace 内的类
+                // 不在当前作用域链上: 回退到全符号表查找已完整注册的类.
+                if let Some(sym) = self.resolve_class_symbol(name) {
+                    return Ok(CxxType::Class(ClassId::from(sym)));
                 }
                 Err(format!("unknown class type: {}", name))
             },
@@ -1625,6 +1725,12 @@ impl Sema {
                 self.build_expr(&deref_expr)
             },
             CppExpr::Call(callee, args) => {
+                // 函数式构造 `T(args...)`: callee 解析为类名时走临时量构造路径
+                if let CppExpr::Ident(name) = callee.as_ref() {
+                    if let Some(class_sym) = self.resolve_class_symbol(name) {
+                        return self.build_class_temporary(class_sym, args);
+                    }
+                }
                 let callee_id = self.build_expr(callee)?;
                 let callee_ty = self.hir.exprs[callee_id.0].ty.clone();
                 let mut hir_args = Vec::new();
@@ -2758,13 +2864,26 @@ impl Sema {
         }
 
         // 构建函数体
+        // 函数体内新登记的临时量槽需先声明再进入原语句 (构造仍在各使用点)
+        let saved_temps = std::mem::replace(&mut self.func_temps, Vec::new());
         let body_id = if !body.is_decl {
             let body_stmts = self.build_body(body)?;
-            self.add_body(body_stmts)
+            let temps = std::mem::replace(&mut self.func_temps, Vec::new());
+            let mut stmts = Vec::with_capacity(temps.len() + body_stmts.len());
+            for sym in temps {
+                stmts.push(self.add_stmt(HirStmtKind::Decl {
+                    symbol: sym,
+                    init: None,
+                }));
+            }
+            stmts.extend(body_stmts);
+            self.add_body(stmts)
         } else {
             // 纯声明，空 body
             self.add_body(Vec::new())
         };
+        // 嵌套函数 (lambda 等) 的临时量登记在外层函数上, 恢复外层列表
+        self.func_temps = saved_temps;
 
         self.pop_scope();
 
@@ -2982,7 +3101,17 @@ impl Sema {
 
         for (field_name, field_sym) in &fields_in_order {
             if let Some(init_expr) = init_map.get(field_name).cloned() {
-                let args = self.build_init_args(init_expr)?;
+                // 类成员: 展开构造器参数列表 (build_init_args)
+                // 标量成员: 整个表达式作为单一值 (即使它形式上是 Call 表达式)
+                let is_class_member = self
+                    .get_symbol(*field_sym)
+                    .map(|s| matches!(s.ty, CxxType::Class(_)))
+                    .unwrap_or(false);
+                let args = if is_class_member {
+                    self.build_init_args(init_expr)?
+                } else {
+                    vec![self.build_expr(&init_expr)?]
+                };
                 result.push(self.add_stmt(HirStmtKind::CtorInitMember {
                     member: *field_sym,
                     args,
@@ -3164,7 +3293,18 @@ impl Sema {
 
                 // 处理成员
                 let members: Vec<CppDecl> = class_decl.members.clone();
+                // 类内成员函数体按“类已完整”的 C++ 语义编译, 因此先预注册
+                // 全部数据成员 (仍按声明顺序 → 字段布局不变), 否则定义在字段
+                // 之前的 `int get() const { return v_; }` 会找不到 `v_`.
                 for member in &members {
+                    if matches!(member, CppDecl::MemberVar { .. }) {
+                        self.build_class_member(member, class_id)?;
+                    }
+                }
+                for member in &members {
+                    if matches!(member, CppDecl::MemberVar { .. }) {
+                        continue;
+                    }
                     self.build_class_member(member, class_id)?;
                 }
 
@@ -3288,6 +3428,34 @@ impl Sema {
                 }
                 Ok(())
             },
+            CppDecl::RawExternC(text) => {
+                // `extern "C" { ... }` 在降级阶段保留为原文, 但 native 路径需要其中
+                // 的声明 (如 <thread> 的 `struct dccpp_thread;` 前向声明与函数原型),
+                // 因此剥去外壳重新解析, 逐条走同一构建流程.
+                // 解析失败时保持原行为 (整块忽略), 不因语法缺口阻断整份编译.
+                let inner = Self::extern_c_block_inner(text);
+                if inner.trim().is_empty() {
+                    return Ok(());
+                }
+                let mut sub = crate::cpp::parser::CppParser::new(inner.as_bytes(), "<extern-c>");
+                let decls = match sub.parse_top_level() {
+                    Ok(decls) => decls,
+                    Err(e) => {
+                        // 保持降级: 不阻断整份编译, 但不静默吞掉——否则块内的
+                        // 前向声明/函数原型丢失会在后续处以难以定位的
+                        // "unknown class/identifier" 再次冒出.
+                        eprintln!(
+                            "dcc: warning: failed to re-parse extern \"C\" block, skipped: {:?}",
+                            e
+                        );
+                        return Ok(());
+                    },
+                };
+                for d in &decls {
+                    self.build_decl(d)?;
+                }
+                Ok(())
+            },
             CppDecl::Template { decl, .. } | CppDecl::PartialSpec { decl, .. } => {
                 // 模板声明通常已在 native.rs 被过滤, 此处递归处理内部声明
                 self.build_decl(decl)
@@ -3296,7 +3464,6 @@ impl Sema {
             | CppDecl::Module { .. }
             | CppDecl::Import { .. }
             | CppDecl::PrivateFragment
-            | CppDecl::RawExternC(_)
             | CppDecl::Using { .. }
             | CppDecl::UsingEnum { .. }
             | CppDecl::InheritingCtor { .. }
@@ -3310,6 +3477,18 @@ impl Sema {
                 Err(format!("unsupported opaque declaration: {}", text))
             },
             CppDecl::Typedef { target, name } => {
+                // parser 把 `struct X;` / `class X;` 前置声明编码为
+                // Typedef { target: Class(X), name: X } (legacy 路径不输出),
+                // 但 native 路径需要 X 作为类符号存在: 这里注册为前向声明类.
+                if let MangleType::Class(tname) = target {
+                    if tname == name && self.lookup_unqualified(name).is_empty() {
+                        let (_class_id, _class_scope) =
+                            self.register_class(name.clone(), Access::Public, &[]);
+                        // register_class push 了 class scope, 前向声明无成员需 pop
+                        self.pop_scope();
+                        return Ok(());
+                    }
+                }
                 // typedef/using 别名: 注册 TypeAlias 符号, 方便 convert_type 展开
                 let target_ty = self.convert_type(target)?;
                 self.add_symbol(name.clone(), CxxSymbolKind::TypeAlias, target_ty, Access::Public);
@@ -3859,6 +4038,19 @@ impl Sema {
                 _ => {},
             }
         }
+    }
+
+    /// 剥去 `extern "C" { ... }` (或 `extern "C++"`) 块的外壳, 返回花括号内的声明文本.
+    fn extern_c_block_inner(text: &str) -> &str {
+        let start = match text.find('{') {
+            Some(i) => i + 1,
+            None => return "",
+        };
+        let end = match text.rfind('}') {
+            Some(i) if i > start => i,
+            _ => return "",
+        };
+        &text[start..end]
     }
 
     /// 将 parser 的 AST 声明列表转换为 HIR。

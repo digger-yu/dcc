@@ -1,0 +1,406 @@
+//! abi/tyclass.rs —— 自历史完整实现（git 28a9063 单文件 Codegen）按职责簇恢复的模块。
+//! 仅移动/可见性调整，不改语义（backend_refactor_plan §3.1 原则 1）。
+#![allow(clippy::all)]
+#![allow(unused_imports)]
+use crate::ast::*;
+use crate::codegen::shared::elf as shared_elf;
+use crate::codegen::shared::elf::*;
+use crate::codegen::shared::*;
+use crate::codegen::x86_64::asm::*;
+use crate::codegen::x86_64::Codegen;
+use crate::codegen::x86_64::*;
+use crate::const_eval::{self, ConstValue};
+use crate::debug::*;
+use crate::diagnostics::{Diagnostic, Severity, Span};
+use crate::ir::{self, *};
+use crate::semantics::{self, *};
+use crate::target::Target;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+impl Codegen {
+    pub(crate) fn abi_classes(ty: &Type) -> Vec<AbiClass> {
+        let size = ty.size();
+        if size == 0 {
+            return Vec::new();
+        }
+        // SysV AMD64 ABI: 超过 64 字节的聚合类型无法放入寄存器集
+        // (6 GP + 8 XMM 共 64 字节), 直接强制 Memory 类.
+        // long double (x86 80-bit) 也强制 Memory.
+        // Complex: any complex type is returned via memory regardless of size.
+        if size > 64 || matches!(ty, Type::LongDouble) || matches!(ty, Type::Complex(_)) {
+            return vec![AbiClass::Memory];
+        }
+        let num_eightbytes = size.div_ceil(8);
+        let mut classes = vec![AbiClass::NoClass; num_eightbytes];
+        Self::classify_field(ty, 0, &mut classes);
+        // Post-merger pass 1: 结构体**尾部之外**的 NoClass (即超过类型真实
+        // 大小、仅因 num_eightbytes 向上取整产生的槽) 保持 NoClass, 不参与
+        // 寄存器传递 (SysV ABI: 尾部填充不占 eightbyte)。这里无需转换。
+        // 注意: 历史实现把所有 NoClass 统一改成 Memory, 再在 pass 2 里升级为
+        // SseUp, 导致 16B 对齐但只含 8B double 的 aligned_d 被误判成
+        // [Sse, SseUp], 多出一个本不存在的高 8 字节。
+        // 仅当该 eightbyte 确实落在类型大小范围内才补 Memory (正常不会出现,
+        // 因为 struct 内的洞由字段重叠分类覆盖)。
+        for (i, c) in classes.iter_mut().enumerate() {
+            if *c == AbiClass::NoClass && i * 8 < size {
+                *c = AbiClass::Memory;
+            }
+        }
+        // Post-merger pass 2: SSE 规则
+        // 若首个 eightbyte 为 SSE, 检查其余**有数据的** eightbyte:
+        //   - SSE/SSEUP → 保留
+        //   - 含非 SSE/SSEUP 数据 → 全部转 MEMORY
+        // 结构体尾部填充 (NoClass, i*8 >= size) 不参与判断, 也不升级为 SSEUP。
+        if num_eightbytes > 1 && classes[0] == AbiClass::Sse {
+            let mut all_sse_compatible = true;
+            for (i, class) in classes.iter().enumerate().skip(1) {
+                if i * 8 >= size {
+                    // 尾部填充: 忽略
+                    continue;
+                }
+                if *class != AbiClass::Sse && *class != AbiClass::SseUp {
+                    // 检查该 eightbyte 是否有字段数据
+                    let lo = i * 8;
+                    let hi = lo + 8;
+                    if Self::has_field_data_in_range(ty, lo, hi) {
+                        all_sse_compatible = false;
+                        break;
+                    }
+                }
+            }
+            if all_sse_compatible {
+                // 不做任何 NoClass→SseUp 转换: 真正的向量延续已由
+                // classify_field 的 Type::Vector 分支标为 SseUp; 尾部填充
+                // 必须保持 NoClass。
+            } else {
+                for c in classes.iter_mut() {
+                    *c = AbiClass::Memory;
+                }
+            }
+        }
+        // 归一化: 全 Memory 时压缩为单元素, 保证 needs_memory_return 判断正确
+        if classes.len() > 1 && classes.iter().all(|c| *c == AbiClass::Memory) {
+            classes.truncate(1);
+        }
+        // 丢弃尾部 NoClass: 那只是 num_eightbytes 向上取整产生的对齐填充,
+        // 不构成实际传递的 eightbyte (如 16B 对齐的 8B double → 仅一个 Sse)。
+        while classes.last() == Some(&AbiClass::NoClass) {
+            classes.pop();
+        }
+        classes
+    }
+    pub(crate) fn compute_offset(ty: &Type, member: &str) -> usize {
+        let fields = match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
+            _ => return 0,
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut offset = 0usize;
+        let mut current_fields = fields.as_ref();
+        for (i, part) in parts.iter().enumerate() {
+            let (name, bracket_part) = if part.contains('[') {
+                let pos = part.find('[').unwrap();
+                (&part[..pos], &part[pos..])
+            } else {
+                (*part, "")
+            };
+            // 使用 find_field 支持匿名 struct/union 成员穿透查找
+            if let Some((field, inner_off)) = find_field(current_fields, name) {
+                offset += field.offset + inner_off;
+                // 处理常量数组下标: "b[2][3]" → 加 2*stride1 + 3*stride2
+                if !bracket_part.is_empty() {
+                    let mut cur_ty = field.ty.clone();
+                    for idx_str in bracket_part.split(['[', ']']) {
+                        if idx_str.is_empty() {
+                            continue;
+                        }
+                        if let Ok(idx_val) = idx_str.parse::<usize>() {
+                            // stride = 当前数组元素类型的大小
+                            let stride = match &cur_ty {
+                                Type::Array(elem, _) => elem.size(),
+                                _ => break,
+                            };
+                            offset += idx_val * stride;
+                            // 下降到元素类型
+                            match &cur_ty {
+                                Type::Array(elem, _) => cur_ty = elem.base.clone(),
+                                _ => break,
+                            };
+                        } else {
+                            break; // 非常量下标 "?", 由运行时计算
+                        }
+                    }
+                }
+                if i < parts.len() - 1 {
+                    if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
+                        current_fields = sub.as_ref();
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        offset
+    }
+    pub(crate) fn expr_bitfield_width(e: &Expr) -> Option<u32> {
+        if let Expr::Member {
+            expr: inner, field, ..
+        } = e
+        {
+            let inner_ty = inner.ty();
+            // 指针解引用: 取所指类型 (兼容数组隐式衰减)
+            let struct_ty: &Type = match &inner_ty {
+                Type::Ptr(p) => &p.base,
+                Type::Array(elem, _) => &elem.base,
+                other => other,
+            };
+            match struct_ty {
+                Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                    find_field(fields, &field.name).and_then(|(f, _)| f.bit_width)
+                },
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+    pub(crate) fn find_offsetof_field_type(ty: &Type, member: &str) -> Type {
+        let fields = match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
+            _ => return Type::Int,
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut current_fields = fields.as_ref();
+        let mut result_ty = Type::Int;
+        for part in &parts {
+            let name = if part.contains('[') {
+                &part[..part.find('[').unwrap()]
+            } else {
+                part
+            };
+            if let Some((field, _)) = find_field(current_fields, name) {
+                result_ty = field.ty.clone();
+                if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
+                    current_fields = sub.as_ref();
+                }
+            }
+        }
+        result_ty
+    }
+    pub(crate) fn fits_disp32(off: i64) -> bool {
+        (i32::MIN as i64..=i32::MAX as i64).contains(&off)
+    }
+    pub(crate) fn fits_disp8(off: i64) -> bool {
+        (-128..=127).contains(&off)
+    }
+    pub(crate) fn gen_sret_return(&mut self, e: &Expr, ret_ty: &Type) {
+        let sz = ret_ty.size();
+        let sret_off = self
+            .current_sret_offset
+            .expect("sret return without saved sret pointer");
+        // 浮点标量返回 (long double 为 Memory 类): 结果写入 sret 缓冲区.
+        // long double 内部以 double 表示: 槽布局 = [double 位模式, 0].
+        // 写回格式按声明返回类型判定, 表达式类型可能不同 (隐式转换).
+        let declared_ret = self.current_func_ret_ty.clone();
+        if matches!(declared_ret, Type::Float | Type::Double | Type::LongDouble) {
+            let expr_ty = e.ty();
+            if Self::is_integer_type(&expr_ty) {
+                // 整数表达式 → rax → xmm0 (cvtsi2sd)
+                self.gen_expr(e, 0);
+                self.emit_scalar_to_xmm0_if_needed(e, &declared_ret);
+            } else {
+                // 浮点表达式 → xmm0; float 需提升到 double
+                self.gen_expr(e, 0);
+                if matches!(expr_ty, Type::Float) && !matches!(declared_ret, Type::Float) {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd
+                }
+            }
+            self.load_stack(7, sret_off); // rdi = sret 指针
+            if matches!(declared_ret, Type::Float) {
+                self.emit(&[0xF3, 0x0F, 0x11, 0x07]); // movss [rdi], xmm0
+            } else if matches!(declared_ret, Type::LongDouble) {
+                // long double: 低 8 字节 double + 高 8 字节零
+                self.emit(&[0x66, 0x0F, 0xD6, 0x07]); // movq [rdi], xmm0
+                self.emit(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0]); // mov qword [rdi+8], 0
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x11, 0x07]); // movsd [rdi], xmm0
+            }
+            return;
+        }
+        // 1. 源地址 → rsi (reg 6)
+        let mut got_src = false;
+        if matches!(e, Expr::Call { .. }) {
+            // sret/寄存器返回调用: gen_expr 后 rax = &内部 sret 槽
+            self.gen_expr(e, 0);
+            self.mov(6, 0);
+            got_src = true;
+        } else if self.gen_lvalue_addr(e, 6) {
+            // Ident / Member / Index / Deref / Cast: rsi = 源地址
+            got_src = true;
+        }
+        if !got_src {
+            // 兜底: 求值后按 rax 指向物化结果 (与既有聚合赋值语义一致)
+            self.gen_expr(e, 0);
+            self.mov(6, 0);
+        }
+        // 2. 目标地址 → rdi (reg 7)
+        self.load_stack(7, sret_off);
+        // 3. rep movsq + rep movsb 拷贝
+        let qwords = sz / 8;
+        let remainder = sz % 8;
+        if qwords > 0 {
+            self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, imm32 (qwords)
+            self.emit(&(qwords as u32).to_le_bytes());
+            self.emit(&[0xF3, 0x48, 0xA5]); // rep movsq
+        }
+        if remainder > 0 {
+            self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, imm32 (remainder)
+            self.emit(&(remainder as u32).to_le_bytes());
+            self.emit(&[0xF3, 0xA4]); // rep movsb
+        }
+    }
+    pub(crate) fn gp_reg_name(idx: usize) -> &'static str {
+        match idx {
+            0 => "rax",
+            1 => "rcx",
+            2 => "rdx",
+            3 => "rbx",
+            4 => "rsp",
+            5 => "rbp",
+            6 => "rsi",
+            7 => "rdi",
+            8 => "r8",
+            9 => "r9",
+            10 => "r10",
+            11 => "r11",
+            12 => "r12",
+            13 => "r13",
+            14 => "r14",
+            15 => "r15",
+            _ => "rax",
+        }
+    }
+    pub(crate) fn is_integer_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Bool
+                | Type::Char
+                | Type::SChar
+                | Type::UChar
+                | Type::Short
+                | Type::UShort
+                | Type::Int
+                | Type::UInt
+                | Type::Long
+                | Type::ULong
+                | Type::LongLong
+                | Type::ULongLong
+                | Type::Int128
+                | Type::UInt128
+        )
+    }
+    pub(crate) fn is_int_narrow(src: &Type, dst: &Type) -> bool {
+        Self::is_integer_type(src) && Self::is_integer_type(dst) && dst.size() < src.size()
+    }
+    pub(crate) fn is_signed_int(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+        )
+    }
+    pub(crate) fn is_sseup_128_aggregate(ty: &Type) -> bool {
+        ty.size() == 16 && {
+            let c = Self::abi_classes(ty);
+            c.len() == 2 && c[0] == AbiClass::Sse && c[1] == AbiClass::SseUp
+        }
+    }
+    pub(crate) fn mask_imm_to_type(v: i128, ty: &Type) -> i128 {
+        let (bits, signed) = match ty {
+            // 有符号小类型 (< 32 位): 截断 + 符号扩展
+            Type::Char | Type::SChar => (8, true),
+            Type::Short => (16, true),
+            // 无符号小类型: 截断 + 零扩展
+            Type::Bool | Type::UChar => (8, false),
+            Type::UShort => (16, false),
+            // UInt: 截断到 32 位, 零扩展到 64 位.
+            // 例如 -1U (i128 = -1) → 截断到 0xFFFFFFFF → 零扩展到 0x00000000FFFFFFFF.
+            Type::UInt => (32, false),
+            // Int: 64 位寄存器已正确表示, 无需截断.
+            // 正值: 0x00000000XXXXXXXX, 负值: 0xFFFFFFFFXXXXXXXX.
+            Type::Int => return v,
+            // Long/LongLong/Int128: 64 位寄存器已正确表示, 无需截断
+            Type::Long
+            | Type::ULong
+            | Type::LongLong
+            | Type::ULongLong
+            | Type::Int128
+            | Type::UInt128 => return v,
+            _ => return v,
+        };
+        let mask = (1i128 << bits) - 1;
+        let truncated = v & mask;
+        if signed && (truncated & (1i128 << (bits - 1))) != 0 {
+            // 符号位为 1: 符号扩展 (高位全 1)
+            truncated | !mask
+        } else {
+            truncated
+        }
+    }
+    pub(crate) fn member_target_ty(expr_ty: Type, is_arrow: bool) -> Type {
+        if !is_arrow {
+            return expr_ty;
+        }
+        match &expr_ty {
+            Type::Ptr(p) => p.base.clone(),
+            Type::Array(elem, _) => elem.base.clone(),
+            _ => expr_ty,
+        }
+    }
+    pub(crate) fn needs_memory_return(ty: &Type) -> bool {
+        let classes = Self::abi_classes(ty);
+        // 分类强制 Memory/X87 → 必须 sret
+        if classes.iter().any(|c| {
+            matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
+        }) {
+            return true;
+        }
+        // 超过 2 个 eightbyte 无法放入 rax+rdx → sret
+        classes.len() > 2
+    }
+    pub(crate) fn ptr_seg_prefix(ty: &Type) -> Option<u8> {
+        if let Type::Ptr(qt) = ty {
+            qt.addr_space.prefix_byte()
+        } else {
+            None
+        }
+    }
+    pub(crate) fn rex(w: bool, r: u8, x: u8, b: u8) -> u8 {
+        let mut v = 0x40u8;
+        if w {
+            v |= 0x08;
+        }
+        if r >= 8 {
+            v |= 0x04;
+        }
+        if x >= 8 {
+            v |= 0x02;
+        }
+        if b >= 8 {
+            v |= 0x01;
+        }
+        v
+    }
+    pub(crate) fn seg_meta(seg: u8) -> (u8, u8) {
+        match seg {
+            0 => (0, 0x26), // ES
+            1 => (1, 0x2E), // CS
+            2 => (2, 0x36), // SS
+            3 => (3, 0x3E), // DS
+            4 => (4, 0x64), // FS
+            5 => (5, 0x65), // GS
+            _ => (0, 0x3E),
+        }
+    }
+}

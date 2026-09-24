@@ -7,7 +7,7 @@ use crate::codegen::x86_64::Codegen;
 pub type AttrDiagFn<'a> = (&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>);
 
 impl Codegen {
-    fn check_attr_diagnostics<'a>(
+    pub(crate) fn check_attr_diagnostics<'a>(
         items: &[crate::ast::BlockItem],
         diag_fns: &[AttrDiagFn<'a>],
         _caller: &str,

@@ -723,6 +723,32 @@ impl ConstexprContext<'_> {
 // Legacy API (保持向后兼容)
 // ============================================================================
 
+/// sizeof(T) 的编译期折叠: 内建类型 / 指针 / 定长数组按 LP64 数据模型计算.
+/// 类 / 模板 / auto 等需要 ABI 布局信息的类型返回 None (交由语义阶段处理).
+///
+/// **降级范围**: 此处 `long`/指针 硬为 8 字节, `long double` 为 16 字节,
+/// 仅对 x86_64 / aarch64 / riscv64 等 LP64 目标正确。若需在 arm32 /
+/// mips32 等 ILP32/LP32 目标上折叠 sizeof, 需把 `Target` 的 ptr_size/long_size
+/// 透传进来 (本函数与 `eval_cpp_const` 目前无 target 上下文).
+/// 与 legacy 路径 `Lower::ty_size` 采用同一假设。
+fn sizeof_mangle_type(ty: &crate::cpp::mangle::MangleType) -> Option<i128> {
+    use crate::cpp::mangle::MangleType;
+    match ty {
+        MangleType::Bool | MangleType::Char | MangleType::Schar | MangleType::Uchar => Some(1),
+        MangleType::Short | MangleType::Ushort => Some(2),
+        MangleType::Int | MangleType::Uint | MangleType::Float => Some(4),
+        MangleType::Long
+        | MangleType::Ulong
+        | MangleType::LongLong
+        | MangleType::UlongLong
+        | MangleType::Double => Some(8),
+        MangleType::LongDouble => Some(16),
+        MangleType::Pointer(_) | MangleType::Reference(_) => Some(8),
+        MangleType::Array(elem, n) => sizeof_mangle_type(elem).map(|s| s * *n as i128),
+        _ => None,
+    }
+}
+
 /// 求值 CppExpr 到 i128. 失败返回 None.
 ///
 /// **注意**: 保留以维持向后兼容性。Phase 3 新功能在 eval_cpp_const_full()中实现。
@@ -814,7 +840,11 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
             }
             None
         },
-        CppExpr::Sizeof(_) => None, // TODO: 完整实现 via TypeInfoRepository
+        CppExpr::Sizeof(arg) => match arg {
+            SizeofArg::Type(t) => sizeof_mangle_type(t),
+            // sizeof 表达式形式需要表达式类型信息 (locals 只存常量值)
+            SizeofArg::Expr(_) => None,
+        },
         CppExpr::Noexcept(_) => Some(1),
         CppExpr::Ternary { cond, then, els } => {
             let c = eval_cpp_const(cond, locals)?;

@@ -1,9 +1,11 @@
 // src/codegen/x86_64/elf/init_list.rs
 // Global initialization list generation for static variables.
 
-use crate::ast::{Expr, InitItem, Type};
-use crate::codegen::x86_64::Codegen;
+use crate::ast::{find_field, ArraySize, Designator, Expr, InitItem, Type};
 use crate::codegen::shared::elf::R_X86_64_PC32;
+use crate::codegen::x86_64::emit::expr::aggregate::resolve_designator;
+use crate::codegen::x86_64::{Codegen, GlobalVar};
+use crate::const_eval;
 
 impl Codegen {
     pub fn gen_global_init_list(
@@ -32,10 +34,8 @@ impl Codegen {
                         if l < f {
                             continue;
                         }
-                        let is_float_elem = matches!(
-                            &elem_ty.base,
-                            Type::Float | Type::Double | Type::LongDouble
-                        );
+                        let is_float_elem =
+                            matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                         let mut k = f;
                         while k <= l {
                             while data.len() < k * elem_size {
@@ -56,10 +56,22 @@ impl Codegen {
                                 if let Expr::String { data, .. } = value {
                                     self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                                 } else {
-                                    self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                                    self.eval_const_expr(
+                                        value,
+                                        elem_rel,
+                                        elem_size,
+                                        is_float_elem,
+                                        rodata_slots,
+                                    )
                                 }
                             } else {
-                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                                self.eval_const_expr(
+                                    value,
+                                    elem_rel,
+                                    elem_size,
+                                    is_float_elem,
+                                    rodata_slots,
+                                )
                             };
                             data.extend_from_slice(&elem_data);
                             k += 1;
@@ -77,10 +89,10 @@ impl Codegen {
                                         data.push(0);
                                     }
                                     value
-                                }
+                                },
                                 None => continue,
                             }
-                        }
+                        },
                     };
                     if let Expr::InitList {
                         inits: nested,
@@ -105,10 +117,8 @@ impl Codegen {
                             data.extend_from_slice(&elem_data);
                         }
                     } else {
-                        let is_float_elem = matches!(
-                            &elem_ty.base,
-                            Type::Float | Type::Double | Type::LongDouble
-                        );
+                        let is_float_elem =
+                            matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
                         // 复数元素收到复数常量表达式: 按目标分量编码
                         // (eval_const_expr 通用路径对复数只取虚部)
@@ -124,10 +134,22 @@ impl Codegen {
                             if let Expr::String { data, .. } = value {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
-                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                                self.eval_const_expr(
+                                    value,
+                                    elem_rel,
+                                    elem_size,
+                                    is_float_elem,
+                                    rodata_slots,
+                                )
                             }
                         } else {
-                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                            self.eval_const_expr(
+                                value,
+                                elem_rel,
+                                elem_size,
+                                is_float_elem,
+                                rodata_slots,
+                            )
                         };
                         data.extend_from_slice(&elem_data);
                     }
@@ -135,7 +157,7 @@ impl Codegen {
                         data.push(0);
                     }
                 }
-            }
+            },
             Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                 let total_size = ty.size();
                 data.resize(total_size, 0);
@@ -160,29 +182,40 @@ impl Codegen {
                             } else {
                                 break; // 多余初始值, 忽略
                             }
-                        }
+                        },
                         InitItem::Designated { designator, value } => {
                             match resolve_designator(ty, designator) {
                                 Some((o, s, ft)) => {
                                     // Look up bitfield info for designated field
                                     let bf_info = if let Designator::Field(ref name) = designator {
-                                        if let Type::Struct(_, fs, _, _) | Type::Union(_, fs, _, false) = ty {
-                                            find_field(fs.as_ref(), &name.name).and_then(|(f, extra)| {
-                                                f.bit_width.map(|bw| (f.bit_offset + (extra as u32) * 8, bw))
-                                            })
-                                        } else { None }
-                                    } else { None };
+                                        if let Type::Struct(_, fs, _, _)
+                                        | Type::Union(_, fs, _, false) = ty
+                                        {
+                                            find_field(fs.as_ref(), &name.name).and_then(
+                                                |(f, extra)| {
+                                                    f.bit_width.map(|bw| {
+                                                        (f.bit_offset + (extra as u32) * 8, bw)
+                                                    })
+                                                },
+                                            )
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
                                     (o, s, value, Some(ft), bf_info)
-                                }
-                                None => { init_idx += 1; continue; },
+                                },
+                                None => {
+                                    init_idx += 1;
+                                    continue;
+                                },
                             }
-                        }
+                        },
                     };
                     let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
-                    let is_float_field = matches!(
-                        &field_ty,
-                        Some(Type::Float | Type::Double | Type::LongDouble)
-                    );
+                    let is_float_field =
+                        matches!(&field_ty, Some(Type::Float | Type::Double | Type::LongDouble));
                     // 本字段消费的 init item 数 (默认 1)
                     let consumed;
                     // 嵌套初始化列表 ({ { [0 ... N] = v } }): 递归生成字段数据,
@@ -206,7 +239,7 @@ impl Codegen {
                             };
                             self.gen_global_init_list(&nty, nested, field_rel, rodata_slots)
                                 .unwrap_or_else(|| vec![0; sz])
-                        }
+                        },
                         _ => {
                             // 聚合字段 (数组/struct) 收到标量值: 收集后续标量 init items
                             // 填充聚合元素 (C 允许无括号扁平初始化, 如
@@ -216,7 +249,12 @@ impl Codegen {
                             // 字段 (C 标准 6.7.9p14: "abc" 等价于 {'a','b','c','\0'})
                             let is_aggregate = matches!(
                                 &field_ty,
-                                Some(Type::Array(..) | Type::Struct(..) | Type::Union(..) | Type::Vector(..))
+                                Some(
+                                    Type::Array(..)
+                                        | Type::Struct(..)
+                                        | Type::Union(..)
+                                        | Type::Vector(..)
+                                )
                             );
                             if is_aggregate
                                 && matches!(item, InitItem::Expr(_))
@@ -229,7 +267,7 @@ impl Codegen {
                                 let remaining = match &field_ty {
                                     Some(Type::Array(elem_ty, ArraySize::Const(n))) => {
                                         elem_ty.size() * n - elem_ty.size()
-                                    }
+                                    },
                                     _ => field_ty.as_ref().map_or(0, |t| t.size() - sz),
                                 };
                                 // 对于数组: 每个标量占 elem_size 字节
@@ -265,7 +303,7 @@ impl Codegen {
                                 let complex_data = match &field_ty {
                                     Some(Type::Complex(ci)) => {
                                         Self::complex_init_bytes(value, &ci.base)
-                                    }
+                                    },
                                     _ => None,
                                 };
                                 if let Some(b) = complex_data {
@@ -274,13 +312,25 @@ impl Codegen {
                                     if let Expr::String { data, .. } = value {
                                         self.emit_string_ptr_slot(field_rel, data, rodata_slots)
                                     } else {
-                                        self.eval_const_expr(value, field_rel, sz, is_float_field, rodata_slots)
+                                        self.eval_const_expr(
+                                            value,
+                                            field_rel,
+                                            sz,
+                                            is_float_field,
+                                            rodata_slots,
+                                        )
                                     }
                                 } else {
-                                    self.eval_const_expr(value, field_rel, sz, is_float_field, rodata_slots)
+                                    self.eval_const_expr(
+                                        value,
+                                        field_rel,
+                                        sz,
+                                        is_float_field,
+                                        rodata_slots,
+                                    )
                                 }
                             }
-                        }
+                        },
                     };
                     init_idx += consumed;
                     // 位域字段: 将值打包到正确的位位置
@@ -318,7 +368,7 @@ impl Codegen {
                         data[off + j] = b;
                     }
                 }
-            }
+            },
             Type::Vector(elem_ty, n) => {
                 let elem_size = elem_ty.size();
                 data.resize(elem_size * n, 0);
@@ -330,10 +380,8 @@ impl Codegen {
                         InitItem::Expr(e) => e,
                         _ => continue,
                     };
-                    let is_float_elem = matches!(
-                        &elem_ty.base,
-                        Type::Float | Type::Double | Type::LongDouble
-                    );
+                    let is_float_elem =
+                        matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
                     // 复数元素收到复数常量表达式: 按目标分量编码
                     // (eval_const_expr 通用路径对复数只取虚部)
@@ -348,10 +396,22 @@ impl Codegen {
                         if let Expr::String { data, .. } = value {
                             self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                         } else {
-                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                            self.eval_const_expr(
+                                value,
+                                elem_rel,
+                                elem_size,
+                                is_float_elem,
+                                rodata_slots,
+                            )
                         }
                     } else {
-                        self.eval_const_expr(value, elem_rel, elem_size, is_float_elem, rodata_slots)
+                        self.eval_const_expr(
+                            value,
+                            elem_rel,
+                            elem_size,
+                            is_float_elem,
+                            rodata_slots,
+                        )
                     };
                     let off = i * elem_size;
                     for (j, &b) in elem_data.iter().enumerate() {
@@ -360,18 +420,19 @@ impl Codegen {
                         }
                     }
                 }
-            }
+            },
             Type::Complex(ref inner) => {
                 // 复数类型初始化: 分别处理实部和虚部
                 let inner_size = inner.size();
                 let total_size = inner_size * 2;
                 data.resize(total_size, 0);
-                let is_float_inner = matches!(inner.base, Type::Float | Type::Double | Type::LongDouble);
-                
+                let is_float_inner =
+                    matches!(inner.base, Type::Float | Type::Double | Type::LongDouble);
+
                 // 收集实部和虚部的初始化表达式
                 let mut real_expr = None;
                 let mut imag_expr = None;
-                
+
                 for (i, item) in inits.iter().enumerate() {
                     if let InitItem::Expr(e) = item {
                         if i == 0 {
@@ -382,7 +443,7 @@ impl Codegen {
                         }
                     }
                 }
-                
+
                 // 单个复数常量表达式 ({1+2i} / {2i}): 拆解实虚部按目标
                 // 分量编码。不能当实部标量求值 (eval_full 对复数只返回
                 // 虚部, 会把整个复数当实部写入)
@@ -401,25 +462,32 @@ impl Codegen {
 
                 // 处理实部
                 if let Some(real_e) = real_expr {
-                    let real_data = self.eval_const_expr(real_e, rel, inner_size, is_float_inner, rodata_slots);
+                    let real_data =
+                        self.eval_const_expr(real_e, rel, inner_size, is_float_inner, rodata_slots);
                     for (j, &b) in real_data.iter().enumerate() {
                         if j < inner_size {
                             data[j] = b;
                         }
                     }
                 }
-                
+
                 // 处理虚部
                 if let Some(imag_e) = imag_expr {
                     let imag_rel = rel.map(|(base, sec)| (base + inner_size as u64, sec));
-                    let imag_data = self.eval_const_expr(imag_e, imag_rel, inner_size, is_float_inner, rodata_slots);
+                    let imag_data = self.eval_const_expr(
+                        imag_e,
+                        imag_rel,
+                        inner_size,
+                        is_float_inner,
+                        rodata_slots,
+                    );
                     for (j, &b) in imag_data.iter().enumerate() {
                         if inner_size + j < total_size {
                             data[inner_size + j] = b;
                         }
                     }
                 }
-            }
+            },
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
@@ -430,7 +498,7 @@ impl Codegen {
                     }
                     data = self.eval_const_expr(e, rel, ty.size(), is_float_ty, rodata_slots);
                 }
-            }
+            },
         }
         if data.is_empty() {
             None
@@ -441,11 +509,10 @@ impl Codegen {
 
     pub fn eval_global_init(
         &mut self,
-        var: &crate::ast::GlobalVar,
+        v: &crate::ast::VarDecl,
+        sz: usize,
+        use_rodata: bool,
     ) -> Option<Vec<u8>> {
-        let v = var;
-        let sz = v.ty.size();
-        let use_rodata = v.section == 1; // section 1 is .rodata
         let init = v.init.as_ref()?;
         // 静态地址常量统一拦截 (含 cast 包裹与指针算术基址):
         // globals 中的符号按 data 偏移直算虚地址。
@@ -467,7 +534,7 @@ impl Codegen {
                 } else {
                     Some(data.clone())
                 }
-            }
+            },
             Expr::InitList { inits, .. } => {
                 let base = if use_rodata {
                     self.rodata.len()
@@ -475,7 +542,7 @@ impl Codegen {
                     self.tdata_section.len()
                 } as u64;
                 self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata)
-            }
+            },
             Expr::AddrOf { e, .. } => {
                 // 1. 首先尝试命名全局变量 + 偏移 (如 &a[3], &s.field)
                 if let Some((base_name, byte_off)) =
@@ -490,9 +557,7 @@ impl Codegen {
                 }
                 // 2. Compound literal 取地址: 发射为匿名静态对象
                 // (&(struct B){...} 是合法的 C99 文件地址常量)
-                if let Some((anon_name, vaddr)) =
-                    self.materialize_compound_literal(e, use_rodata)
-                {
+                if let Some((anon_name, vaddr)) = self.materialize_compound_literal(e, use_rodata) {
                     // 记录匿名对象到 globals_raw (供后续嵌套 AddrOf 查找)
                     let sz = e.ty().size().max(1);
                     let rodata_offset = vaddr - self.entry;
@@ -504,13 +569,14 @@ impl Codegen {
                             ty: e.ty().clone(),
                             init: None,
                             section: 1,
-                            is_tls: false, in_data_section: false,
+                            is_tls: false,
+                            in_data_section: false,
                         },
                     );
                     return Some(vaddr.to_le_bytes().to_vec());
                 }
                 None
-            }
+            },
             // 整数/浮点常量: 统一走 eval_full, 浮点目标转位模式
             _ => Self::global_init_bytes(init, sz, is_float, &v.ty),
         }

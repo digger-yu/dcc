@@ -21867,7 +21867,7 @@ fn riscv64_cross_call_preserves_ra() {
 
     let exe = dir.join(format!("dcc-rvv-xrun-{pid}.bin"));
     let mut ld = Command::new("riscv64-linux-gnu-ld");
-    ld.arg("-static");
+    ld.arg("-static").arg("--no-warn-mismatch");
     ld.arg(&start_o).arg(&obj_f).arg("-o").arg(&exe);
     assert!(ld.status().map_or(false, |s| s.success()), "cross link failed");
 

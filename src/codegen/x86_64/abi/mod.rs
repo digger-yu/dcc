@@ -3,6 +3,7 @@
 // Handles return value classification, register allocation, and calling conventions
 
 pub mod classes;
+pub mod tyclass;
 // call.rs 已由 batch 3 从 mod.rs 逐字搬迁 `emit_sysv_call` 生产实现, 影子存根作废。
 pub mod call;
 pub mod frame;

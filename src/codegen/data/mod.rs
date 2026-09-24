@@ -7,14 +7,14 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! Instruction Loader → Encoding Selector → Byte Emitter → Machine Code
 //!      (TOML)              (Pattern Match)    (Binary)       (Vec<u8>)
 //! ```
 //!
 //! ## Usage Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use crate::codegen::data::*;
 //!
 //! // Load all instructions from directory

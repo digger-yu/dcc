@@ -9,15 +9,11 @@ pub mod disasm;
 pub mod shared;
 pub mod x86_64;
 
-// 后端 family 通过 cargo feature gate, 避免主线构建被未完成实现拖住.
-// 见 Cargo.toml: `arm` (arm + aarch64), `mips` (mips + mips64 + riscv64).
-#[cfg(feature = "arm")]
+// 全部后端 family 无条件参与构建: aarch64/arm (AAPCS 家族) 与 mips/mips64/riscv64
+// (RISC 家族) 都是受支持的一等后端, 不再用 cargo feature gate 隐藏能力缺口.
 pub mod aarch64;
-#[cfg(feature = "arm")]
 pub mod arm;
-#[cfg(feature = "mips")]
 pub mod mips;
-#[cfg(feature = "mips")]
 pub mod riscv64;
 
 use crate::ast::{Block, BlockItem, Decl, Designator, Expr, InitItem, Program, Stmt, Type};

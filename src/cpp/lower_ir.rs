@@ -970,8 +970,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             } => self.lower_init_list(elems, &expr_ty),
 
             HirExprKind::SizeOf(cxx_ty) => {
-                // TODO(Stage 4): Add proper support
-                Err(LowerIrError::Unsupported(format!("SizeOf({:?}) not implemented", cxx_ty)))
+                // sizeof(T): 降级为 ast::Type 后取字节大小, 作为编译期常量
+                let lowered = self.lowerer.lower_type(cxx_ty)?;
+                Ok(Operand::Int(type_size(&lowered) as i128))
             },
 
             _ => Err(LowerIrError::Unsupported(format!(
@@ -4886,6 +4887,7 @@ fn expr_kind_name(kind: &HirExprKind) -> &'static str {
         HirExprKind::New { .. } => "New",
         HirExprKind::Delete { .. } => "Delete",
         HirExprKind::SizeOf(_) => "SizeOf",
+        HirExprKind::MethodRef { .. } => "MethodRef",
         HirExprKind::Comma { .. } => "Comma",
         HirExprKind::InitList { .. } => "InitList",
         _ => "Other",
@@ -5273,10 +5275,13 @@ mod tests {
 
         let mut hir = sema.into_hir();
 
-        // 构造一个不支持的表达式 (SizeOf)
+        // 构造一个不支持的表达式 (MethodRef: 成员方法引用尚未降级)
         let expr = HirExpr {
             id: HirExprId(0),
-            kind: HirExprKind::SizeOf(CxxType::Void),
+            kind: HirExprKind::MethodRef {
+                object: HirExprId(0),
+                method: fn_sym,
+            },
             ty: CxxType::Integer {
                 bits: 64,
                 signed: false,
@@ -5284,7 +5289,7 @@ mod tests {
         };
         hir.exprs.push(expr);
 
-        // 语句: return sizeof(void)
+        // 语句: 求值该不支持表达式
         let stmt = HirStmt {
             id: HirStmtId(0),
             kind: HirStmtKind::Expr(HirExprId(0)),
@@ -5308,11 +5313,11 @@ mod tests {
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         let result = lowerer.lower();
-        // SizeOf 目前不支持，应该返回 Unsupported
+        // MethodRef 目前不支持，应该返回 Unsupported
         assert!(result.is_err());
         match result.unwrap_err() {
             LowerIrError::Unsupported(msg) => {
-                assert!(msg.contains("SizeOf"));
+                assert!(msg.contains("MethodRef"));
             },
             _ => panic!("expected Unsupported error"),
         }
