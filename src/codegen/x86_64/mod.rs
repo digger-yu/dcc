@@ -29,6 +29,7 @@ mod emit;
 mod mem;
 mod parallel;
 mod special;
+mod elf;
 mod stubs;
 
 

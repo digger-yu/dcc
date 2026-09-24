@@ -1,14 +1,19 @@
 // src/codegen/x86_64/codegen.rs - x86_64 Codegen 结构体定义
 // Phase 1b Migration: Extract struct from monolithic mod.rs
 
-use crate::ast::{Designator, Expr, Type};
+use crate::ast::{Decl, Designator, Expr, Field, Program, Type};
 use crate::codegen::shared::elf;
 use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ExtraRelaSection, ElfSym};
+use crate::codegen::x86_64::mem::global;
 use crate::diagnostics::Diagnostic;
 use crate::preproc::LineSpan;
 use crate::static_locals::StaticLocalMap;
 use crate::target::Target;
+use crate::const_eval;
+use crate::codegen::x86_64::FuncDecl;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use crate::codegen::x86_64::elf::attr_diag::AttrDiagFn;
 
 /// x86_64 代码生成器主结构体
 /// 
@@ -243,6 +248,7 @@ pub struct Codegen {
     pub trampoline_total_size: i32,
     pub complete_struct_types: HashMap<String, Type>,
 }
+#[derive(Clone)]
 pub struct GlobalVar {
     pub offset: u64,
     pub size: usize,
@@ -557,6 +563,1281 @@ impl Codegen {
             func_alignments: HashMap::new(),
             // 完整 struct/union 定义映射 (前向引用解析)
             complete_struct_types: HashMap::new(),
+    }
+}
+
+    pub fn compile_module(&mut self, module: &crate::ir::Module) {
+        let prog = module.source();
+        self.fenv_access = prog.fenv_access;
+        self.fp_contract = prog.fp_contract;
+        self.cx_limited_range = prog.cx_limited_range;
+        // 构建完整 struct/union 定义映射 (用于解析前向引用导致的不完整类型)
+        self.complete_struct_types.clear();
+        for decl in &prog.decls {
+            match decl {
+                Decl::StructDef(sd) if !sd.fields.is_empty() => {
+                    let fields: Arc<Vec<Field>> = Arc::new(sd.fields.clone());
+                    let align = Type::aggregate_align_from_offsets(&sd.fields);
+                    self.complete_struct_types.insert(
+                        sd.name.name.clone(),
+                        Type::Struct(sd.name.name.clone(), fields, align, false),
+                    );
+                }
+                Decl::UnionDef(sd) if !sd.fields.is_empty() => {
+                    let fields: Arc<Vec<Field>> = Arc::new(sd.fields.clone());
+                    let align = Type::aggregate_align_from_offsets(&sd.fields);
+                    self.complete_struct_types.insert(
+                        sd.name.name.clone(),
+                        Type::Union(sd.name.name.clone(), fields, align, false),
+                    );
+                }
+                Decl::Typedef { ty, .. } => {
+                    // typedef struct S { ... } S; 形式: 提取内层 struct/union
+                    if let Type::Struct(name, fields, align, _) = ty {
+                        if !fields.is_empty() {
+                            self.complete_struct_types.insert(
+                                name.clone(),
+                                Type::Struct(name.clone(), fields.clone(), *align, false),
+                            );
+                        }
+                    } else if let Type::Union(name, fields, align, _) = ty {
+                        if !fields.is_empty() {
+                            self.complete_struct_types.insert(
+                                name.clone(),
+                                Type::Union(name.clone(), fields.clone(), *align, false),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
+        // 如果函数体中调用了这些函数，发射诊断信息
+        let diag_fns: Vec<AttrDiagFn> = prog
+            .decls
+            .iter()
+            .filter_map(|d| {
+                if let Decl::Func(f) = d {
+                    if f.error_msg.is_some()
+                        || f.warning_msg.is_some()
+                        || f.deprecated_msg.is_some()
+                    {
+                        return Some((
+                            f.name.name.as_str(),
+                            f.error_msg.as_deref(),
+                            f.warning_msg.as_deref(),
+                            f.deprecated_msg.as_deref(),
+                        ));
+                    }
+                }
+                None
+            })
+            .collect();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                // 记录 __attribute__((error)) 函数名，调用时发射 ud2
+                if f.error_msg.is_some() {
+                    self.error_attr_fns.insert(f.name.name.clone());
+                }
+            }
+        }
+        // 预扫描：收集函数对齐信息 for __alignof__(func)
+        self.func_alignments.clear();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                self.func_alignments.insert(
+                    f.name.name.clone(),
+                    f.alignment.unwrap_or(8).max(1),
+                );
+            }
+        }
+        // 预扫描: 记录哪些函数是可变参数的
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                Self::register_func_sig(f, &mut self.func_param_types);
+                if f.is_variadic {
+                    self.variadic_funcs.insert(f.name.name.clone(), true);
+                }
+                if f.is_old_style {
+                    self.old_style_funcs.insert(f.name.name.clone());
+                }
+                if let Some(body) = &f.body {
+                    let mut nested = Vec::new();
+                    Self::collect_nested_funcs(&body.items, &mut nested);
+                    for nf in nested {
+                        Self::register_func_sig(&nf, &mut self.func_param_types);
+                        self.nested_funcs
+                            .insert(nf.name.name.clone(), nf.upvars.clone());
+                        if nf.is_old_style {
+                            self.old_style_funcs.insert(nf.name.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // 预扫描: 收集 GNU asm label 映射 (C 名 → asm("label"))
+        // 同时收集 TLS 变量访问模型
+        for decl in &prog.decls {
+            match decl {
+                Decl::Func(f) => {
+                    if let Some(ref label) = f.asm_label {
+                        self.asm_label_map.insert(f.name.name.clone(), label.clone());
+                    }
+                }
+                Decl::Var(v) => {
+                    if let Some(ref label) = v.asm_label {
+                        self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                    }
+                    if v.is_thread_local {
+                        if let Some(ref model) = v.tls_model {
+                            self.tls_var_models.insert(v.name.name.clone(), model.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.relocatable {
+            self.compile_rel(prog);
+        } else {
+            self.compile_exec(prog);
+        }
+    }
+
+    /// ET_EXEC 模式: 生成可直接执行的 ELF
+    fn compile_exec(&mut self, prog: &Program) {
+        self.entry = 0x400000 + 64 + 56;
+        // 收集本 TU 中有函数体的函数名
+        self.defined_funcs.clear();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    self.defined_funcs.insert(f.name.name.clone());
+                }
+            }
+        }
+        // 收集全局变量 → rodata / .tdata(TLS)
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                if v.is_extern {
+                    continue;
+                }
+                let sz_raw = v.ty.size().max(1);
+                // 超大数组 (>1GB) 可能导致内存分配失败，视为外部声明不分配存储
+                if sz_raw > (1 << 30) {
+                    continue;
+                }
+                let sz = sz_raw;
+                let align = v.alignment.unwrap_or(v.ty.align()).max(1);
+                if v.is_thread_local {
+                    self.tdata_align = self.tdata_align.max(align as u64);
+                    // ET_EXEC: 所有 TLS 数据（含 .tbss）都在单一 TLS 模板中
+                    let off = (self.tdata_section.len() + align - 1) & !(align - 1);
+                    while self.tdata_section.len() < off {
+                        self.tdata_section.push(0);
+                    }
+                    let offset = self.tdata_section.len() as u64;
+                    let init_data = if let Some(e) = &v.init { self.eval_global_init(e) } else { None };
+                    if let Some(ref data) = init_data {
+                        self.tdata_section.extend_from_slice(data);
+                        for _ in data.len()..sz {
+                            self.tdata_section.push(0);
+                        }
+                    } else {
+                        for _ in 0..sz {
+                            self.tdata_section.push(0);
+                        }
+                    }
+                    let sec = if v.init.is_some() { 5u16 } else { 6u16 };
+                    if v.init.is_none() {
+                        self.tbss_size = self.tbss_size.max(offset + sz as u64);
+                    }
+                    self.globals_raw.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: init_data,
+                            section: sec,
+                            is_tls: true, in_data_section: false,
+                        },
+                    );
+                    continue;
+                }
+                let off = (self.rodata.len() + align - 1) & !(align - 1);
+                while self.rodata.len() < off {
+                    self.rodata.push(0);
+                }
+                let offset = self.rodata.len() as u64;
+                // 字符串字面量初始化指针 (char *s = "hello"): 字符串进 rodata 池,
+                // 指针槽写入字符串 rodata 偏移 (占位), resolve 阶段修补为绝对地址。
+                if matches!(&v.ty, Type::Ptr(_)) {
+                    if let Some(Expr::String { data, .. }) = &v.init {
+                        // 1. 预留 8 字节指针槽 (offset 处)
+                        self.rodata.extend_from_slice(&[0u8; 8]);
+                        // 2. 字符串追加到 rodata 末尾 (池化去重)
+                        let data = data.clone();
+                        if !self.string_pool.contains_key(&data) {
+                            let o = self.rodata.len() as u64;
+                            self.rodata.extend_from_slice(&data);
+                            self.string_pool.insert(data.clone(), o);
+                        }
+                        let str_off = *self.string_pool.get(&data).unwrap();
+                        // 3. 指针槽写入字符串 rodata 偏移 (resolve 修补)
+                        let slot = offset as usize;
+                        self.rodata[slot..slot + 8].copy_from_slice(&str_off.to_le_bytes());
+                        // 4. 记录待修补变量
+                        self.rodata_string_init_globals.push(v.name.name.clone());
+                        self.globals_raw.insert(
+                            v.name.name.clone(),
+                            GlobalVar {
+                                offset,
+                                size: sz,
+                                ty: v.ty.clone(),
+                                init: None,
+                                section: 1,
+                                is_tls: false, in_data_section: false,
+                            },
+                        );
+                        continue;
+                    }
+                }
+                let init_data = if let Some(e) = &v.init { self.eval_global_init(e) } else { None };
+                if let Some(ref data) = init_data {
+                    self.rodata.extend_from_slice(data);
+                    for _ in data.len()..sz {
+                        self.rodata.push(0);
+                    }
+                } else {
+                    for _ in 0..sz {
+                        self.rodata.push(0);
+                    }
+                }
+                self.globals_raw.insert(
+                    v.name.name.clone(),
+                    GlobalVar {
+                        offset,
+                        size: sz,
+                        ty: v.ty.clone(),
+                        init: init_data,
+                        section: 1,
+                        is_tls: false, in_data_section: false,
+                    },
+                );
+                // KASAN 全局变量红区: 追加 32 字节零填充
+                if self.kasan {
+                    for _ in 0..32 {
+                        self.rodata.push(0);
+                    }
+                }
+            }
+        }
+        let _rodata_size = self.rodata.len();
+        let _main = prog
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Func(f) if f.name.name == "main" => Some(f),
+                _ => None,
+            })
+            .expect("no main()");
+        // 收集 constructor/destructor 函数 (按 priority 排序)
+        let mut ctors: Vec<(u16, String)> = prog
+            .decls
+            .iter()
+            .filter_map(|d| {
+                if let Decl::Func(f) = d {
+                    if f.is_constructor && f.body.is_some() {
+                        Some((f.ctor_priority.unwrap_or(65535), f.name.name.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut dtors: Vec<(u16, String)> = prog
+            .decls
+            .iter()
+            .filter_map(|d| {
+                if let Decl::Func(f) = d {
+                    if f.is_destructor && f.body.is_some() {
+                        Some((f.dtor_priority.unwrap_or(65535), f.name.name.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ctors.sort_by_key(|(p, _)| *p);
+        dtors.sort_by_key(|(p, _)| *p);
+        self.label("_start");
+        self.emit(&[0x49, 0x89, 0xe4]); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
+        self.emit(&[0x55]); // push rbp
+        self.emit(&[0x48, 0x89, 0xe5]); // mov rbp, rsp
+                                        // 调用 constructor 函数
+        for (_p, ctor) in &ctors {
+            self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax (no variadic args)
+            self.call_label(ctor);
+        }
+        self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax
+        self.call_label("main");
+        // 保存 main 返回值
+        self.emit(&[0x41, 0x89, 0xc5]); // mov r13d, eax
+                                        // 调用 destructor 函数
+        for (_p, dtor) in &dtors {
+            self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax
+            self.call_label(dtor);
+        }
+        self.emit(&[0x4c, 0x89, 0xe4]); // mov rsp, r12 (恢复原始 rsp)
+        self.emit(&[0x44, 0x89, 0xef]); // mov edi, r13d (main 返回值)
+        self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00]); // mov eax, 0x3c
+        self.emit(&[0x0f, 0x05]); // syscall
+        self.emit(&[0xeb, 0xfe]); // jmp self
+        // 静态局部变量分析 pass + 预注册到 data/bss
+        self.static_local_map = crate::static_locals::analyze_static_locals(prog);
+        self.pre_register_static_locals();
+        self.emit_functions(prog);
+        // 修补 data_section 里的 label 地址差值
+        // (`&&A - &&B` 在静态初始化式中出现, 编译期 label 未知,
+        // 函数编译完后 self.labels 已填充, 用 offset 差值回填).
+        self.patch_label_diff_rels();
+        // 对齐 code 到 8 字节 (ELF 的 .rodata 也按 8 对齐)
+        while !self.code.len().is_multiple_of(8) {
+            self.code.push(0);
+        }
+        self.exec_text_size = self.code.len() as u64;
+        let rodata_start = self.entry + self.exec_text_size;
+        self.code.extend_from_slice(&self.rodata);
+        self.code.extend_from_slice(&self.tdata_section);
+        // Static 局部变量: 注册到 data_section, 需追加到可执行文件
+        // 对齐 data_section 到 8 字节边界
+        while !self.data_section.len().is_multiple_of(8) {
+            self.data_section.push(0);
+        }
+        let data_start = self.entry + self.exec_text_size + self.rodata.len() as u64 + self.tdata_section.len() as u64;
+        self.code.extend_from_slice(&self.data_section);
+        // BSS: 仅记录大小, 不写入文件内容
+        self.code.extend_from_slice(&vec![0u8; self.bss_size as usize]);
+        self.collect_exec_symbols(prog);
+        self.resolve(rodata_start, data_start);
+    }
+
+    fn compile_rel(&mut self, prog: &Program) {
+        // 收集本 TU 中有函数体的函数名 (用于 emit_func_addr 区分内部/外部)
+        self.defined_funcs.clear();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    self.defined_funcs.insert(f.name.name.clone());
+                }
+            }
+        }
+        // Phase 1: 生成代码, 收集数据
+        // 收集全局变量 → .data / .bss (或自定义 section)
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                if let Some(ref reg_name) = v.register_name {
+                    if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
+                        self.global_reg_bindings
+                            .insert(v.name.name.clone(), reg_idx);
+                    }
+                    continue;
+                }
+                let sz_raw = v.ty.size().max(1);
+                // 超大数组 (>1GB) 可能导致内存分配失败，视为外部声明不分配存储
+                if sz_raw > (1 << 30) {
+                    continue;
+                }
+                let sz = sz_raw;
+                let align = v.alignment.unwrap_or(v.ty.align()).max(1);
+                if v.is_extern && v.init.is_none() {
+                    self.globals_raw.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset: 0,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: None,
+                            section: crate::codegen::shared::elf::SHN_UNDEF,
+                            is_tls: false, in_data_section: false,
+                        },
+                    );
+                    continue;
+                }
+                if v.is_thread_local {
+                    let initialized = v.init.is_some();
+                    if initialized {
+                        self.tdata_align = self.tdata_align.max(align as u64);
+                    } else {
+                        self.tbss_align = self.tbss_align.max(align as u64);
+                    }
+                    let offset = if initialized {
+                        let off = (self.tdata_section.len() + align - 1) & !(align - 1);
+                        while self.tdata_section.len() < off {
+                            self.tdata_section.push(0);
+                        }
+                        self.tdata_section.len() as u64
+                    } else {
+                        let off = self.tbss_size.div_ceil(align as u64) * align as u64;
+                        self.tbss_size = off + sz as u64;
+                        off
+                    };
+                    if let Some(init) = &v.init {
+                        // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;),
+                        // 避免 eval 截断为 int
+                        let is_float =
+                            matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if let Some(bytes) =
+                            global::global_init_bytes(init, sz, is_float, &v.ty)
+                            {
+                            self.tdata_section.extend_from_slice(&bytes);
+                        }
+                    }
+                    self.globals_raw.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: None,
+                            section: if initialized { 5 } else { 6 },
+                            is_tls: true, in_data_section: false,
+                        },
+                    );
+                    continue;
+                }
+                // attribute((used)): 路由到独立节并标记 SHF_GNU_RETAIN
+                if v.is_used_attr && !v.is_thread_local {
+                    let sec_name = if v.init.is_some() {
+                        format!(".data.{}", v.name.name)
+                    } else {
+                        format!(".bss.{}", v.name.name)
+                    };
+                    let is_writable = true;
+                    let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
+                    // 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
+                    self.extra_sections[sec_idx].flags |= crate::codegen::shared::elf::SHF_GNU_RETAIN;
+                    self.extra_sections[sec_idx].align =
+                        self.extra_sections[sec_idx].align.max(align as u64);
+                    if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
+                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_NOBITS;
+                    } else if v.init.is_some() {
+                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_PROGBITS;
+                    }
+                    let sec = &mut self.extra_sections[sec_idx];
+                    let off = (sec.data.len() + align - 1) & !(align - 1);
+                    while sec.data.len() < off {
+                        sec.data.push(0);
+                    }
+                    let offset = sec.data.len() as u64;
+                    let mut has_init = false;
+                    if let Some(init) = &v.init {
+                        match init {
+                            Expr::String { data, .. } => {
+                                // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
+                                // 指针槽通过 pending_data_rodata_rels 生成
+                                // R_X86_64_64 重定位 (符号 = .rodata, addend = str_off)。
+                                if matches!(&v.ty, Type::Ptr(_)) {
+                                    let data = data.clone();
+                                    if !self.string_pool.contains_key(&data) {
+                                        let o = self.rodata.len() as u64;
+                                        self.rodata.extend_from_slice(&data);
+                                        self.string_pool.insert(data.clone(), o);
+                                    }
+                                    let str_off = *self.string_pool.get(&data).unwrap();
+                                    let cur = self.extra_sections[sec_idx].data.len();
+                                    self.extra_sections[sec_idx].data.resize(cur + 8, 0);
+                                    self.pending_data_rodata_rels.push((
+                                        cur as u64,
+                                        str_off,
+                                        Some(sec_idx),
+                                    ));
+                                    has_init = true;
+                                } else {
+                                    self.extra_sections[sec_idx].data.extend_from_slice(data);
+                                    for _ in data.len()..sz {
+                                        self.extra_sections[sec_idx].data.push(0);
+                                    }
+                                    has_init = true;
+                                }
+                            }
+                            Expr::InitList { inits, .. } => {
+                                let base = self.extra_sections[sec_idx].data.len() as u64;
+                                if let Some(init_data) = self.gen_global_init_list(
+                                    &v.ty,
+                                    inits,
+                                    Some((base, Some(sec_idx as u64))),
+                                    false,
+                                ) {
+                                    self.extra_sections[sec_idx]
+                                        .data
+                                        .extend_from_slice(&init_data);
+                                    for _ in init_data.len()..sz {
+                                        self.extra_sections[sec_idx].data.push(0);
+                                    }
+                                    has_init = true;
+                                }
+                            }
+                            Expr::AddrOf { e, .. } => {
+                                // P1-6: 自定义 section 中的符号引用
+                                if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
+                                    let ref_off = self.extra_sections[sec_idx].data.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.extra_sections[sec_idx]
+                                        .data
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type =
+                                        if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        ref_name.name.clone(),
+                                        Some(sec_idx),
+                                        rel_type,
+                                        0,
+                                    ));
+                                    has_init = true;
+                                } else if let Expr::Index {
+                                    arr,
+                                    idx,
+                                    ty: elem_ty,
+                                    ..
+                                } = e.as_ref()
+                                {
+                                    if let (Expr::Ident { name: ref_name, .. }, Ok(i)) =
+                                        (arr.as_ref(), const_eval::eval(idx))
+                                    {
+                                        let ref_off =
+                                            self.extra_sections[sec_idx].data.len() as u64;
+                                        let width = if sz <= 4 { 4 } else { 8 };
+                                        self.extra_sections[sec_idx]
+                                            .data
+                                            .resize(ref_off as usize + sz.max(width), 0);
+                                        let rel_type =
+                                            if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                        let addend = (i as i64) * elem_ty.size().max(1) as i64;
+                                        self.pending_data64_rels.push((
+                                            ref_off,
+                                            ref_name.name.clone(),
+                                            Some(sec_idx),
+                                            rel_type,
+                                            addend,
+                                        ));
+                                        has_init = true;
+                                    }
+                                }
+                            }
+                            _ => {
+                                // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                                let is_float =
+                                    matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                if let Some(bytes) = global::global_init_bytes(
+                                    init,
+                                    sz,
+                                    is_float,
+                                    &v.ty,
+                                ) {
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                    has_init = true;
+                                }
+                            }
+                        }
+                    }
+                    if !has_init {
+                        for _ in 0..sz {
+                            self.extra_sections[sec_idx].data.push(0);
+                        }
+                    }
+                    self.globals_raw.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: None,
+                            section: (sec_idx + 7) as u16,
+                            is_tls: false, in_data_section: false,
+                        },
+                    );
+                    continue;
+                }
+                // 自定义 section 变量: 路由到 extra_sections
+                if v.section.is_some() {
+                    let sec_name = v.section.as_ref().unwrap().clone();
+                    let is_writable = !matches!(&v.init, Some(Expr::String { .. }));
+                    let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
+                    self.extra_sections[sec_idx].align =
+                        self.extra_sections[sec_idx].align.max(align as u64);
+                    if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
+                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_NOBITS;
+                    } else if v.init.is_some() {
+                        // 同名节一旦包含显式初始化数据就必须占文件空间。
+                        self.extra_sections[sec_idx].ty = crate::codegen::shared::elf::SHT_PROGBITS;
+                    }
+                    let sec = &mut self.extra_sections[sec_idx];
+                    let off = (sec.data.len() + align - 1) & !(align - 1);
+                    while sec.data.len() < off {
+                        sec.data.push(0);
+                    }
+                    let offset = sec.data.len() as u64;
+                    let mut has_init = false;
+                    if let Some(init) = &v.init {
+                        match init {
+                            Expr::String { data, .. } => {
+                                // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
+                                // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
+                                // 重定位指向字符串 (链接时写入 rodata 基址 + 偏移)。
+                                if matches!(&v.ty, Type::Ptr(_)) {
+                                    let data = data.clone();
+                                    if !self.string_pool.contains_key(&data) {
+                                        let o = self.rodata.len() as u64;
+                                        self.rodata.extend_from_slice(&data);
+                                        self.string_pool.insert(data.clone(), o);
+                                    }
+                                    let str_off = *self.string_pool.get(&data).unwrap();
+                                    let ref_off = self.data_section.len() as u64;
+                                    self.data_section.resize(ref_off as usize + 8, 0);
+                                    self.pending_data_rodata_rels.push((ref_off, str_off, None));
+                                } else {
+                                    self.data_section.extend_from_slice(data);
+                                    for _ in data.len()..sz {
+                                        self.data_section.push(0);
+                                    }
+                                }
+                                has_init = true;
+                            }
+                            Expr::InitList { inits, .. } => {
+                                let base = self.data_section.len() as u64;
+                                if let Some(init_data) =
+                                    self.gen_global_init_list(&v.ty, inits, Some((base, None)), false)
+                                {
+                                    self.data_section.extend_from_slice(&init_data);
+                                    for _ in init_data.len()..sz {
+                                        self.data_section.push(0);
+                                    }
+                                    has_init = true;
+                                }
+                            }
+                            Expr::AddrOf { e, .. } => {
+                                // P1-6: .data 节中的符号引用
+                                // Handle &ident, &a[i], &a[i][j], &s.field, etc.
+                                if let Some((base_name, byte_off)) =
+                                    global::eval_global_lvalue_offset(e, &self.globals_raw)
+                                {
+                                    let ref_off = self.data_section.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.data_section
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        base_name,
+                                        None,
+                                        rel_type,
+                                        byte_off,
+                                    ));
+                                    has_init = true;
+                                } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
+                                    // Fallback for function pointers and other symbols not in globals
+                                    let ref_off = self.data_section.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.data_section
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    self.pending_data64_rels.push((
+                                        ref_off,
+                                        ref_name.name.clone(),
+                                        None,
+                                        rel_type,
+                                        0,
+                                    ));
+                                    has_init = true;
+                                } else if let Some((anon_name, _off)) =
+                                    global::materialize_compound_literal(self, e, false)
+                                {
+                                    // &(struct A){42,43} — C99 合法的文件地址常量
+                                    let ref_off = self.data_section.len() as u64;
+                                    let width = if sz <= 4 { 4 } else { 8 };
+                                    self.data_section
+                                        .resize(ref_off as usize + sz.max(width), 0);
+                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    self.pending_data64_rels.push((
+                                        ref_off, anon_name, None, rel_type, 0,
+                                    ));
+                                    has_init = true;
+                                } else {
+                                    // No compound literal match
+                                }
+                            }
+                            _ => {
+                                // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                                let is_float =
+                                    matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                if let Some(bytes) = global::global_init_bytes(
+                                    init,
+                                    sz,
+                                    is_float,
+                                    &v.ty,
+                                ) {
+                                    self.data_section.extend_from_slice(&bytes);
+                                    has_init = true;
+                                }
+                            }
+                        }
+                    }
+                    if !has_init {
+                        for _ in 0..sz {
+                            self.data_section.push(0);
+                        }
+                    }
+                    self.globals_raw.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: None,
+                            section: (sec_idx + 7) as u16,
+                            is_tls: false, in_data_section: false,
+                        },
+                    );
+                    continue;
+                }
+                let initialized = v.init.is_some();
+                if initialized {
+                    self.data_align = self.data_align.max(align as u64);
+                } else {
+                    self.bss_align = self.bss_align.max(align as u64);
+                }
+                let offset = if initialized {
+                    let off = (self.data_section.len() + align - 1) & !(align - 1);
+                    while self.data_section.len() < off {
+                        self.data_section.push(0);
+                    }
+                    self.data_section.len() as u64
+                } else {
+                    self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
+                    self.bss_size
+                };
+                // 静态地址常量优先: &x / (T*)&x / &((arr+i)->f) / arr + n
+                // 统一由 const_eval 折叠为 (符号, 字节偏移) 重定位,
+                // 覆盖旧 AddrOf/Cast 分支无法表达的形式
+                let static_addr_handled = if let Some(init) = &v.init {
+                    if let Some((base_name, byte_off)) = Self::static_addr_parts(init) {
+                        let ref_off = self.data_section.len() as u64;
+                        let width = if sz <= 4 { 4 } else { 8 };
+                        self.data_section
+                            .resize(ref_off as usize + sz.max(width), 0);
+                        let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                        self.pending_data64_rels.push((
+                            ref_off, base_name, None, rel_type, byte_off,
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let has_init = if static_addr_handled {
+                    true
+                } else if let Some(init) = &v.init {
+                    match init {
+                        Expr::String { data, .. } => {
+                            // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
+                            // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
+                            // 重定位指向字符串 (链接时写入 rodata 基址 + 偏移)。
+                            if matches!(&v.ty, Type::Ptr(_)) {
+                                let data = data.clone();
+                                if !self.string_pool.contains_key(&data) {
+                                    let o = self.rodata.len() as u64;
+                                    self.rodata.extend_from_slice(&data);
+                                    self.string_pool.insert(data.clone(), o);
+                                }
+                                let str_off = *self.string_pool.get(&data).unwrap();
+                                let ref_off = self.data_section.len() as u64;
+                                self.data_section.resize(ref_off as usize + 8, 0);
+                                self.pending_data_rodata_rels.push((ref_off, str_off, None));
+                            } else {
+                                self.data_section.extend_from_slice(data);
+                                for _ in data.len()..sz {
+                                    self.data_section.push(0);
+                                }
+                            }
+                            true
+                        }
+                        Expr::InitList { inits, .. } => {
+                            let base = self.data_section.len() as u64;
+                            if let Some(init_data) =
+                                self.gen_global_init_list(&v.ty, inits, Some((base, None)), false)
+                            {
+                                self.data_section.extend_from_slice(&init_data);
+                                for _ in init_data.len()..sz {
+                                    self.data_section.push(0);
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Expr::AddrOf { e, .. } => {
+                            // P1-6: .data 节中的符号引用
+                            // Handle &ident, &a[i], &a[i][j], &s.field, etc.
+                            if let Some((base_name, byte_off)) =
+                                global::eval_global_lvalue_offset(e, &self.globals_raw)
+                            {
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                self.pending_data64_rels.push((
+                                    ref_off,
+                                    base_name,
+                                    None,
+                                    rel_type,
+                                    byte_off,
+                                ));
+                                true
+                            } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
+                                // Fallback for function pointers and other symbols not in globals
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                self.pending_data64_rels.push((
+                                    ref_off,
+                                    ref_name.name.clone(),
+                                    None,
+                                    rel_type,
+                                    0,
+                                ));
+                                true
+                            } else if let Some((anon_name, _off)) =
+                                global::materialize_compound_literal(self, e, false)
+                            {
+                                // &(struct A){42,43} — C99 合法的文件地址常量
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                self.pending_data64_rels.push((
+                                    ref_off, anon_name, None, rel_type, 0,
+                                ));
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => {
+                            // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                            let is_float =
+                                matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                            if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
+                                self.data_section.extend_from_slice(&bytes);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                } else {
+                    false
+                };
+                if !has_init {
+                    if initialized {
+                        self.data_section.resize(self.data_section.len() + sz, 0);
+                    } else {
+                        self.bss_size += sz as u64;
+                    }
+                }
+                self.globals_raw.insert(
+                    v.name.name.clone(),
+                    GlobalVar {
+                        offset,
+                        size: sz,
+                        ty: v.ty.clone(),
+                        init: None,
+                        section: if initialized { 3 } else { 4 },
+                        is_tls: false, in_data_section: false,
+                    },
+                );
+            }
+        }
+
+        // 文件级 asm 先发射到 .text
+        for decl in &prog.decls {
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                ..
+            } = decl
+            {
+                // self.emit_global_asm(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, clobbers);
+                // TODO: Implement emit_global_asm for Asm decl
+            }
+        }
+
+        // 静态局部变量分析 pass + 预注册到 data/bss
+        self.static_local_map = crate::static_locals::analyze_static_locals(prog);
+        self.pre_register_static_locals();
+        // 生成函数代码 (无 _start)
+        self.emit_functions(prog);
+        // 修补 data_section 里的 label 地址差值 (同 compile_exec 路径)
+        self.patch_label_diff_rels();
+
+        // 填充反汇编符号表 (全局变量 RIP-relative 引用)
+        for (p, name) in &self.pending_data_rels {
+            self.disasm_data.insert(*p, name.clone());
+        }
+        for (p, name) in &self.pending_sib_data_rels {
+            self.disasm_data.insert(*p, name.clone());
+        }
+
+        // 后处理: 将自定义 section 函数的代码从 .text 提取到 extra_sections
+        // 记录函数在自定义 section 内的偏移 (用于符号表)
+        let mut custom_func_offsets: HashMap<String, (u16, u64)> = HashMap::new(); // func_name → (section_idx+5, symbol_offset)
+        let mut custom_func_ranges: Vec<(u64, u64, usize, u64, u64)> = vec![]; // func_start, emitted_start, emitted_size, sec_idx, sec_off
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_none() {
+                    continue;
+                }
+                let effective_section = f.section.clone().or_else(|| {
+                    if f.is_cold {
+                        Some(".text.unlikely".to_string())
+                    } else if f.is_hot {
+                        Some(".text.hot".to_string())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(sec_name) = effective_section.as_ref() {
+                    if sec_name.is_empty() {
+                        continue;
+                    }
+                    if let Some(&func_start) = self.labels.get(&f.name.name) {
+                        let func_size =
+                            self.func_sizes
+                                .get(&f.name.name)
+                                .copied()
+                                .unwrap_or_else(|| {
+                                    self.compute_func_size_fallback(&f.name.name, func_start)
+                                });
+                        if func_size == 0 {
+                            continue;
+                        }
+                        let emitted_start = self.function_emitted_start(func_start);
+                        let emitted_size = func_size + (func_start - emitted_start);
+                        let sec_idx = self.ensure_custom_section(sec_name, true, false);
+                        let func_align = f.alignment.unwrap_or(16).max(1);
+                        self.extra_sections[sec_idx].align =
+                            self.extra_sections[sec_idx].align.max(func_align as u64);
+                        let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
+                            & !(func_align - 1);
+                        self.pad_custom_section_to(sec_idx, aligned);
+                        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                        // 从 .text 拷贝代码到自定义节，包含 patchable entry 前缀。
+                        let code_slice = self.code
+                            [emitted_start as usize..(emitted_start + emitted_size) as usize]
+                            .to_vec();
+                        self.extra_sections[sec_idx]
+                            .data
+                            .extend_from_slice(&code_slice);
+                        // 暂时保留 .text 原代码；resolve() 修补本地跳转后会重新复制。
+                        custom_func_ranges.push((
+                            func_start,
+                            emitted_start,
+                            emitted_size as usize,
+                            sec_idx as u64,
+                            sec_off,
+                        ));
+                        custom_func_offsets.insert(
+                            f.name.name.clone(),
+                            ((sec_idx + 7) as u16, sec_off + (func_start - emitted_start)),
+                        );
+                    }
+                }
+            }
+        }
+
+        // -ffunction-sections：将普通函数拆到 .text.<name>，供链接期 --gc-sections 剔除
+        if self.function_sections {
+            let mut per_func: Vec<FuncDecl> = vec![];
+            for decl in &prog.decls {
+                if let Decl::Func(f) = decl {
+                    if f.body.is_some() && f.section.is_none() && !f.is_cold {
+                        per_func.push(f.clone());
+                    }
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_funcs(&body.items, &mut per_func);
+                    }
+                }
+            }
+            for f in &per_func {
+                if custom_func_offsets.contains_key(&f.name.name) {
+                    continue;
+                }
+                if f.section.is_some() || f.is_cold {
+                    continue;
+                }
+                if let Some(&func_start) = self.labels.get(&f.name.name) {
+                    let func_size =
+                        self.func_sizes
+                            .get(&f.name.name)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                self.compute_func_size_fallback(&f.name.name, func_start)
+                            });
+                    if func_size == 0 {
+                        continue;
+                    }
+                    let emitted_start = self.function_emitted_start(func_start);
+                    let emitted_size = func_size + (func_start - emitted_start);
+                    let sec_name = format!(".text.{}", f.name.name);
+                    let sec_idx = self.ensure_custom_section(&sec_name, true, false);
+                    // attribute((used)): 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
+                    if f.is_used_attr {
+                        self.extra_sections[sec_idx].flags |= crate::codegen::shared::elf::SHF_GNU_RETAIN;
+                    }
+                    let func_align = f.alignment.unwrap_or(16).max(1);
+                    self.extra_sections[sec_idx].align =
+                        self.extra_sections[sec_idx].align.max(func_align as u64);
+                    let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
+                        & !(func_align - 1);
+                    self.pad_custom_section_to(sec_idx, aligned);
+                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                    let code_slice = self.code
+                        [emitted_start as usize..(emitted_start + emitted_size) as usize]
+                        .to_vec();
+                    self.extra_sections[sec_idx]
+                        .data
+                        .extend_from_slice(&code_slice);
+                    custom_func_ranges.push((
+                        func_start,
+                        emitted_start,
+                        emitted_size as usize,
+                        sec_idx as u64,
+                        sec_off,
+                    ));
+                    custom_func_offsets.insert(
+                        f.name.name.clone(),
+                        ((sec_idx + 7) as u16, sec_off + (func_start - emitted_start)),
+                    );
+                }
+            }
+        }
+
+        // 处理字符串引用 → 确保所有字符串在 rodata 中
+        let string_data_list: Vec<Vec<u8>> =
+            self.string_refs.iter().map(|(_, d)| d.clone()).collect();
+        for data in &string_data_list {
+            if !self.string_pool.contains_key(data) {
+                let off = self.rodata.len() as u64;
+                self.rodata.extend_from_slice(data);
+                self.string_pool.insert(data.clone(), off);
+            }
+        }
+
+        let move_ranges: Vec<(u64, u64, usize, u64)> = custom_func_ranges
+            .iter()
+            .map(|(fs, s, e, i, _)| (*fs, *s, *e, *i))
+            .chain(self.pushsection_code_ranges.iter().copied())
+            .collect();
+
+        // 所有标签已发射完成后, 先修补本地跳转, 并把最终仍未解析
+        // 的 asm 符号跳转转换为 pending code relocation。符号表收集
+        // 依赖 pending_code_rels 中的外部符号, 所以必须先于 Phase 2。
+        self.patch_local_jumps(&move_ranges);
+
+        // Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
+        // 先收集到临时 vec, 然后排序构建最终 symtab
+        let mut local_syms: Vec<ElfSym> = vec![];
+        let mut global_syms: Vec<ElfSym> = vec![];
+
+        // 全局变量符号（extern 声明 + 同 TU 定义会重复出现在 prog.decls）
+        let mut emitted_var_syms: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let var_defined: HashSet<String> = prog
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Var(v) if !v.is_extern || v.init.is_some() => Some(v.name.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let var_has_definition = |name: &str| -> bool { var_defined.contains(name) };
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                if v.register_name.is_some() {
+                    continue;
+                }
+                // __attribute__((alias)): 变量别名由 alias 路径处理
+                if v.alias_name.is_some() {
+                    continue;
+                }
+                // Skip variables with empty names
+                if v.name.name.is_empty() {
+                    continue;
+                }
+                // 超大数组 (>1GB) 未分配存储，跳过符号发射
+                if v.ty.size() > (1 << 30) {
+                    continue;
+                }
+                if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
+                    continue;
+                }
+                if !emitted_var_syms.insert(v.name.name.clone()) {
+                    continue;
+                }
+                let g = self.globals_raw[&v.name.name].clone();
+                let (section, bind) = if v.is_extern && v.init.is_none() && g.section == crate::codegen::shared::elf::SHN_UNDEF {
+                    (crate::codegen::shared::elf::SHN_UNDEF, if v.is_weak { crate::codegen::shared::elf::STB_WEAK } else { crate::codegen::shared::elf::STB_GLOBAL })
+                } else {
+                    (
+                        g.section,
+                        if v.is_weak {
+                            crate::codegen::shared::elf::STB_WEAK
+                        } else if v.is_static {
+                            crate::codegen::shared::elf::STB_LOCAL
+                        } else {
+                            crate::codegen::shared::elf::STB_GLOBAL
+                        },
+                    )
+                };
+                let sym = ElfSym {
+                    name: self.resolve_asm_label(&v.name.name).to_string(),
+                    section,
+                    value: g.offset,
+                    size: g.size as u64,
+                    bind,
+                    ty: if g.is_tls { crate::codegen::shared::elf::STT_TLS } else { crate::codegen::shared::elf::STT_OBJECT },
+                    visibility: Self::parse_visibility(&v.visibility),
+                };
+                if v.is_static {
+                    local_syms.push(sym);
+                } else {
+                    global_syms.push(sym);
+                }
+            }
+        }
+        self.collect_exec_symbols(prog);
+    }
+
+    pub fn gen_global_init_list(&mut self, _ty: &Type, _inits: &[crate::ast::InitItem], _base: Option<(u64, Option<u64>)>, _use_rodata: bool) -> Option<Vec<u8>> {
+        unimplemented!("gen_global_init_list implementation");
+    }
+
+    pub fn eval_global_init(&mut self, _e: &crate::ast::Expr) -> Option<Vec<u8>> {
+        unimplemented!("eval_global_init implementation");
+    }
+
+    /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等
+    /// 统一走 const_eval 的 ConstValue::Addr (符号 + 字节偏移)。
+    fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
+        match const_eval::eval_full(init, false) {
+            Ok(const_eval::ConstValue::Addr { name, offset }) => {
+                Some((name, offset as i64))
+            }
+            _ => None,
+        }
+    }
+
+    fn compute_func_size_fallback(&self, _name: &str, func_start: u64) -> u64 {
+        // 收集所有函数起始位置，找到当前函数之后的下一个函数
+        let mut all_starts: Vec<u64> = self.labels.values().copied().collect();
+        all_starts.sort();
+        // 找到 func_start 之后的下一个起始位置
+        let next_start = all_starts
+            .iter()
+            .find(|&&s| s > func_start)
+            .copied()
+            .unwrap_or(self.code.len() as u64);
+        next_start.saturating_sub(func_start)
+    }
+
+    fn function_emitted_start(&self, func_start: u64) -> u64 {
+        let prefix_len = self
+            .patchable_function_entry
+            .map(|(n, m)| m.min(n) as u64)
+            .unwrap_or(0);
+        func_start.saturating_sub(prefix_len)
+    }
+
+    fn pad_custom_section_to(&mut self, sec_idx: usize, len: usize) {
+        let section = &mut self.extra_sections[sec_idx];
+        let fill = if section.flags & crate::codegen::shared::elf::SHF_EXECINSTR != 0 {
+            0x90
+        } else {
+            0
+        };
+        section.data.resize(len, fill);
+    }
+
+    fn final_text_loc(pos: u64, move_ranges: &[(u64, u64, usize, u64)]) -> (u16, u64) {
+        move_ranges
+            .iter()
+            .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+            .map(|(start, _size, sec_idx, sec_off)| {
+                ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
+            })
+            .unwrap_or((1u16, pos))
+    }
+
+    fn patch_local_jumps(&mut self, move_ranges: &[(u64, u64, usize, u64)]) {
+        let pending = std::mem::take(&mut self.pending);
+        for p in pending {
+            let Some(&dst) = self.labels.get(&p.target) else {
+                if self.relocatable && !p.is_push_imm {
+                    let rel_off = p.disp_offset;
+                    self.pending_code_rels.push(PendingCodeRel {
+                        offset: rel_off,
+                        symbol: p.target,
+                        rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
+                        addend: -4,
+                    });
+                    continue;
+                }
+                self.pending.push(p);
+                continue;
+            };
+            let off = p.disp_offset as usize;
+            if p.is_push_imm {
+                // push $label: imm32 = absolute address (lower 32 bits)
+                self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
+            } else {
+                let (src_sec, src_at) = Self::final_text_loc(p.at, move_ranges);
+                let src_next = src_at + (p.next_ip - p.at);
+                let (dst_sec, dst_pos) = Self::final_text_loc(dst, move_ranges);
+                let rel_off = p.disp_offset as usize;
+                if src_sec == dst_sec {
+                    let rel = (dst_pos as i64) - (src_next as i64);
+                    self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                } else if self.relocatable {
+                    self.pending_code_rels.push(PendingCodeRel {
+                        offset: p.disp_offset,
+                        symbol: p.target,
+                        rel_type: crate::codegen::shared::elf::R_X86_64_PC32,
+                        addend: -4,
+                    });
+                } else {
+                    let rel = (dst as i64) - (p.next_ip as i64);
+                    self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                }
+            }
         }
     }
 }

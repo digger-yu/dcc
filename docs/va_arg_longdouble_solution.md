@@ -1,241 +1,146 @@
 # va_arg 与 long double 问题彻底解决方案
 
+> 版本：**v2**（2026-09-24 按当前代码现状重写；v1 的代码定位与实施序已过时）
+> 状态：方案稿 — 尚未按 v2 开工。
+> v1 摸底基线：9.5，单体 `src/codegen/x86_64.rs`。
+> v2 摸底：2026-09-24，`src/codegen/x86_64/` 目录化后端 + feature-gated 多架构。
+
 ## 问题背景
-9.5 发现当前 va_arg 实现在复杂场景下存在问题，以及 long double 不满足完整 SysV ABI 语义，本次方案旨在彻底解决：
+
+v1 列出的 5 个问题仍然是本方案的目标：
 
 1. 混合整数/浮点结构体的 va_arg 读取不完整
 2. va_arg 聚合参数的入口路径不一致
-3. va_copy 目前没有看到真正的状态复制实现（已修复，仅做验证）
-4. va_list 传参的数组退化语义仍然脆弱
-5. long double 实际实现不是完整 SysV 语义
+3. va_copy 真正的状态复制（v1 判断已修复，仅需验证）
+4. va_list 传参的数组退化语义脆弱
+5. long double 不满足完整 SysV ABI 语义
 
-## 总体设计原则
-- 严格遵循 SysV ABI 规范（AMD64 版本）
-- 统一所有后端的 va_list 语义模型
-- 保持现有 API 兼容，不破坏已有功能
-- 完整覆盖所有测试场景，增强集成测试
+**但代码基线已经发生根本变化**，v1 中所有 `x86_64.rs#Lxxxxx` 的行号定位全部失效，且其中部分工作已经完成、部分实现在重构中丢失。下文先给现状审计，再给修订后的实施步骤。
 
 ---
 
-## 问题 1 & 2：混合整数/浮点结构体读取与聚合参数入口路径问题
+## 1. 现状审计（2026-09-24）
 
-### 当前问题分析
+### 1.1 后端架构变化
 
-当前在 `gen_va_arg_struct` ([x86_64.rs](file:///root/dcc/src/codegen/x86_64.rs#L23960-L24028)) 中，处理聚合参数（结构体/联合体）时：
-1. 仅 `Integer` 和 `Sse`/`SseUp` 会在寄存器保存区路径被处理，其他 ABI 分类会被跳过
-2. 混合类型结构体若部分字段落在寄存器保存区，部分被跳过 → 读取不完整
-3. 入口对齐仅处理 overflow 路径，寄存器保存区路径未对齐 → 地址错误
+- 单体 `src/codegen/x86_64.rs` 已不存在，拆分为 [x86_64/](file:///root/dcc/src/codegen/x86_64) 目录模块（`abi/`、`emit/`、`mem/`、`asm/`、`special/` 等）。
+- 该目录化迁移**尚未完成**：[stubs.rs](file:///root/dcc/src/codegen/x86_64/stubs.rs) 仍有约 100 个 `unimplemented!()` 占位，文件头自述"迁移完成后本文件将被删除"。
+- 其他后端改为 cargo feature gate：`arm` / `mips`，默认 `default = []` 即**只构建 x86_64**（见 [Cargo.toml](file:///root/dcc/Cargo.toml#L16-L20)）。
 
-### 解决方案
+### 1.2 实测：x86_64 后端当前不可用
 
-#### 步骤 1：完善 ABI 分类遍历，所有类型都处理
-在 `gen_va_arg_struct` 寄存器保存区路径，遍历所有 eightbyte 分类：
+`compile_module` 本身就是桩（[stubs.rs#L19-L21](file:///root/dcc/src/codegen/x86_64/stubs.rs#L19-L21)），因此：
 
-| ABI 分类 | 处理方式 |
-|---------|---------|
-| `Integer` | 从 gp_offset + rax*8 读取 8 字节到 r9，写入目标地址对应偏移 |
-| `Sse`/`SseUp` | 从 fp_offset + rdx*16 读取 8 字节（double）或 4 字节（float）到 xmm0，movq 写入目标地址 |
-| `X87`/`X87Up`/`ComplexX87`/`Memory` | 此类分类存在时整体已经走 overflow 路径，不会到寄存器路径，所以这里不可能出现，断言即可 |
+- 编译任意 C 文件（含 `int main(){return 42;}`）都在 codegen 阶段 panic。
+- `cargo test --test integration`：**193 passed / 624 failed**；profile 16 failed；perf 4 failed。
+- va_arg 相关 19 个测试全部失败。
 
-修改代码位置：[x86_64.rs L23996-L24028](file:///root/dcc/src/codegen/x86_64.rs#L23996-L24028)，在循环中增加对所有分类的处理，而非跳过。
+结论：**va/long double 的剩余工作无法在"后端可用"的前提下增量进行，必须先恢复 x86_64 后端的基本 codegen 能力。** 这是 v2 与 v1 最大的前提差异。
 
-#### 步骤 2：寄存器保存区路径入口对齐
-SysV ABI §3.5.7 要求聚合参数在寄存器保存区也需要对齐到其对齐要求。
-当前仅 overflow 路径做了对齐，需要在寄存器路径也增加对齐判断：
+### 1.3 五个问题的逐项状态
 
-```rust
-// 在进入寄存器路径前，和 overflow 路径一样做对齐检查
-if align > 8 {
-    // gp_offset 要对齐到 align
-    let align_mask = !(align - 1);
-    rax = (rax + align - 1) & align_mask;
-    // 如果 gp 调整后溢出，需要跳转到 overflow
-    if rax > 48 - 8 * n_gp {
-        jmp overflow;
-    }
-    // 同理 fp_offset 也需要对齐
-    if n_fp > 0 {
-        rdx = (rdx + align - 1) & align_mask;
-        if rdx > 176 - 16 * n_fp {
-            jmp overflow;
-        }
-    }
-}
-```
+| # | 问题 | 状态 | 证据 |
+|---|------|------|------|
+| 1/2 | 聚合 va_arg 混合类读取、入口对齐 | **丢失，需重做** | `gen_va_arg_struct` / `gen_va_arg_ptr_struct` / `gen_va_arg` / `gen_va_arg_ptr` 全是 `unimplemented!()` 桩（[stubs.rs#L450-L463](file:///root/dcc/src/codegen/x86_64/stubs.rs#L450-L463)）；`resolve_va_list_addr` 桩返回假值（[stubs.rs#L446-L448](file:///root/dcc/src/codegen/x86_64/stubs.rs#L446-L448)）。调用点在 [va_arg.rs](file:///root/dcc/src/codegen/x86_64/emit/expr/va_arg.rs) |
+| 3 | va_copy 状态复制 | **丢失，需重做** | 新 x86_64 模块中没有任何 `__builtin_va_start/__builtin_va_copy/__builtin_va_end` 的特殊处理（全模块 grep 无命中），会按普通外部函数调用处理。仅 feature-gated 的 aarch64/riscv64 有 va_copy 实现（[aarch64 call.rs#L30](file:///root/dcc/src/codegen/aarch64/emit/expr/call.rs#L30)、[riscv64 call.rs#L28](file:///root/dcc/src/codegen/riscv64/emit/expr/call.rs#L28)） |
+| 4 | va_list 数组退化 | **已完成，无需前端改动** | parser 将 `__builtin_va_list` 直接构造为 4 字段（gp_offset/fp_offset/overflow_arg_area/reg_save_area）结构体的**单元素数组**（[parser.rs#L6075-L6129](file:///root/dcc/src/parser.rs#L6075-L6129)），传参经通用数组→指针退化规则处理；caller 侧也有统一的 array decay（[call.rs#L45-L53](file:///root/dcc/src/codegen/x86_64/abi/call.rs#L45-L53)） |
+| 5a | LongDouble 大小/对齐 | **已完成** | `size() = 16`、`align() = 16`（[ast.rs#L1164](file:///root/dcc/src/ast.rs#L1164)、[ast.rs#L1235](file:///root/dcc/src/ast.rs#L1235)），结构体布局与 eightbyte 计数自动正确 |
+| 5b | x87 指令发射 | **已迁移存在** | [x87_floating_point.rs](file:///root/dcc/src/codegen/x86_64/special/x87_floating_point.rs) 已含 `fld tbyte`（DB /5）、`fstp tbyte`（DB /7）、f64→80-bit 转换、x87 比较与运算全套 |
+| 5c | 80-bit 常量表示 | **未做** | 常量仍统一存 f64（[const_eval.rs#L30](file:///root/dcc/src/const_eval.rs#L30)）。当前路径下 `1.0L` 经 f64 再由 `f64_to_x87_80` 转回，能保证"f64 可表示值"不丢精度，但无法表达真正超出 f64 的 80-bit 字面量 |
+| 5d | va_arg long double 读取 | **丢失（随 1/2 一起）** | 读取函数即 5a 表中的桩；x87 发射件已具备，补桩时直接调用 `fld tbyte` + 推进 16 字节即可 |
 
-#### 步骤 3：统一溢出检查顺序
-当前先 gp 溢出检查，再 fp，调整顺序为对齐后再溢出检查，保证对齐后溢出判断正确。
+### 1.4 测试 fixture 现状
 
-#### 步骤 4：所有后端同步对齐逻辑
-对于 aarch64/riscv64/arm/mips，需要检查是否对齐逻辑缺失，同步对齐实现。
+v1 计划新增的 5 个 fixture **已全部存在**（命名有差异），且都已在 [integration.rs](file:///root/dcc/tests/integration.rs#L10764-L10837) 注册：
+
+| v1 计划名 | 实际文件 |
+|----------|---------|
+| `struct_mixed_ints_float.c` | [struct_mixed.c](file:///root/dcc/tests/fixtures/c/va_arg/struct_mixed.c) |
+| `struct_mixed_ld.c` + `long_double_constant.c` | [long_double.c](file:///root/dcc/tests/fixtures/c/va_arg/long_double.c) |
+| `va_list_param_passing.c` | [va_list_param.c](file:///root/dcc/tests/fixtures/c/va_arg/va_list_param.c) |
+| `nested_struct_va_copy.c` | [va_copy_advanced.c](file:///root/dcc/tests/fixtures/c/va_arg/va_copy_advanced.c) |
+| （补充） | [aggregate_va_arg.c](file:///root/dcc/tests/fixtures/c/va_arg/aggregate_va_arg.c)、[vla_struct.c](file:///root/dcc/tests/fixtures/c/va_arg/vla_struct.c)、[va_copy.c](file:///root/dcc/tests/fixtures/c/va_arg/va_copy.c) |
+
+因此 v2 **不需要新增 fixture**，目标是让已有测试转绿；仅当 80-bit 字面量精度（5c）开工时，再补充对应用例。
 
 ---
 
-## 问题 3：va_copy 状态复制（验证结论：已修复，仅需补充文档/测试）
+## 2. v1 设计中仍然有效的部分
 
-当前 x86_64 实现已经正确：
-- 完整复制 va_list 的全部字段（gp_offset, fp_offset, reg_save_area, overflow_arg_area）
-- 正确处理地址规则：区分 dest/src 是 va_list[1] 还是 va_list*
-- 使用 rep movsb 复制整个结构
+以下技术结论与 v1 一致，重做时直接遵循：
 
-仅需：
-1. 同步所有后端到 x86_64 的实现方式
-2. 现有集成测试已覆盖 [va_copy.c](file:///root/dcc/tests/fixtures/c/va_arg/va_copy.c)、[va_copy_advanced.c](file:///root/dcc/tests/fixtures/c/va_arg/va_copy_advanced.c)，不需要新增测试
+### 2.1 聚合 va_arg（问题 1/2）
 
----
+- 寄存器保存区路径遍历**所有** eightbyte 分类：`Integer` 从 gp 区读 8 字节；`Sse` 从 fp 区按 16 字节槽读；`SseUp` 复用同一 xmm 高 8 字节；`X87/X87Up/ComplexX87/Memory` 不可能出现在寄存器路径（存在即整体 overflow），断言即可。
+- 寄存器保存区路径与 overflow 路径一样，按聚合 `align`（含 >8 的情形）做入口对齐，对齐后再做溢出判断；溢出则整体走 overflow。
+- 与 caller 侧 [call.rs](file:///root/dcc/src/codegen/x86_64/abi/call.rs#L64-L84) 的 force_mem 对齐规则保持一致（`align.max(8)`）。
 
-## 问题 4：va_list 传参数组退化语义
+### 2.2 va_start / va_copy / va_end（问题 3）
 
-### 当前问题分析
-- C 语言规定 `typedef va_list[1];` 声明 va_list，当作为函数参数传递时会退化成为指针
-- 当前仅 x86_64 在 `__builtin_va_copy` 中正确处理数组退化和地址计算
-- 其他后端处理简化，前端语法解析在复杂场景（结构体嵌套 va_list、多层指针、取地址）可能不正确
-- 参数传递时数组退化到指针的规则没有统一全链路实现
+- `va_start(ap, last)`：ap 为 va_list 数组，取 `&ap[0]` 初始化四字段（gp_offset=0、fp_offset=48*8、reg_save_area 指向序言保存区、overflow_arg_area 指向栈上首个溢出参数）。
+- `va_copy(dest, src)`：区分指针（已退化形参）与数组（局部声明）寻址，复制整个 24 字节 va_list，不共享内部状态。
+- `va_end`：无操作（nop）。
 
-### 解决方案
+### 2.3 long double（问题 5）
 
-#### 前端：统一处理 va_list 参数退化
-在 parser 参数声明阶段 ([parser.rs](file:///root/dcc/src/parser.rs)):
-
-当参数类型为数组，且元素类型是 `__builtin_va_list`（即 `va_list` 形参），自动退化到 `__builtin_va_list *` 类型，和普通数组参数一致。
-
-保证所有场景下，va_list 形参都是指针类型，和 C 语言语义一致。
-
-#### codegen：统一所有后端 va_start/va_copy 地址规则
-所有后端需要遵循同一个地址规则：
-
-- `va_start(ap, last_named_arg)`: ap 是 va_list 数组 → 取 ap[0] 的地址初始化
-- `va_copy(dest, src)`:
-  - 如果 dest/src 是指针类型（已退化），直接取值
-  - 如果是数组类型（局部变量声明），取元素地址
-  - 复制整个 va_list 结构从 src 地址到 dest 地址
-
-所有后端对齐 x86_64 的实现逻辑，保证一致性。
-
-#### 测试：补充复杂退化场景
-新增集成测试：
-- 函数参数传递 va_list 到子函数
-- 结构体嵌套 va_list 成员，做 va_copy
-- 传递 &ap 到子函数，子函数内部使用
+- 参数/返回走 x87（st0），内存中 16 字节槽、低 10 字节为 80-bit 值。
+- va_arg：`fldt (%r9)` 加载，`r9 += 16`。
+- 5c 的完整 80-bit 常量表示（独立 FloatBits/F80）维持 v1 的"可选增量"定位：当前 f64 + `f64_to_x87_80` 已覆盖现有 fixture，不阻塞主目标。
 
 ---
 
-## 问题 5：long double 完整 SysV ABI 实现
+## 3. 修订后的实施步骤（v2）
 
-### 当前问题分析
+> 与 v1 的差异：新增"阶段 0 恢复后端"，删除"新增 fixture"，多后端同步改为 feature gate 下的独立工作。
 
-| 层级 | 问题 |
-|-----|------|
-| **前端语法/常量解析** | long double 常量被解析为 f64，丢失精度 |
-| **AST/类型系统** | Type::LongDouble 大小仍然是 8 字节，实际 SysV AMD64 要求 16 字节对齐 16 字节 |
-| **语义分析** | 无大问题，大小正确后布局自然正确 |
-| **ABI 参数分类** | 分类正确为 X87，但是大小错误会影响 eightbyte 计数错误 |
-| **IR lowering** | 无大问题，只要类型大小对齐对了，IR 不变 |
-| **函数序言（prologue）** | 变参函数保存 xmm 寄存器到 reg_save_area，XMM 保存是 16 字节每个，和 long double 无关 |
-| **va_arg codegen** | 当前按 8 字节读取，需要改为 16 字节对齐读取 |
-| **函数调用 codegen** | 压栈需要对齐到 16 字节 |
+### 阶段 0：恢复 x86_64 后端基本可用（前置，独立于 va）
 
-### 解决方案，分步骤重构：
+1. 补全 `compile_module`：IR → 函数遍历、序言/结语、gen_stmt 主循环。
+2. 补全 `gen_expr` 总分发及 [stubs.rs](file:///root/dcc/src/codegen/x86_64/stubs.rs) 中使普通 C 程序可编译所必需的桩。
+3. 验收：`int main(){return 42;}` 可编译运行；integration 失败数从 624 显著下降（目标为仅剩与 va/特定未迁移特性相关的用例）。
 
-#### 步骤 1：修正 Type::LongDouble 大小和对齐
-修改 [ast.rs](file:///root/dcc/src/ast.rs):
+注：此阶段是目录化迁移的收尾，范围以"消除 panic、恢复主路径"为限，不借机重构。
 
-```rust
-// 修改 long double 大小：
-Type::LongDouble => 16, // 原来是 8
-// 对齐：
-align_of(Type::LongDouble) => 16, // 原来是 8
-```
+### 阶段 1：恢复 va_arg 标量与聚合 codegen（问题 1/2/5d）
 
-影响：
-- 结构体布局自动修正，含 long double 的结构体大小/偏移自动正确
-- ABI 分类 eightbyte 分割自动正确
+1. 实现 `resolve_va_list_addr`（Named / InReg / Lvalue 三态，对应 [helpers.rs](file:///root/dcc/src/codegen/x86_64/helpers.rs#L80-L81) 既有枚举）。
+2. 实现 `gen_va_arg` / `gen_va_arg_ptr`：标量三路径（gp 区 / fp 区 / overflow），含单 chunk 溢出。
+3. 实现 `gen_va_arg_struct` / `gen_va_arg_ptr_struct`：按 §2.1 遍历全分类 + 双路径对齐；long double 分类走 `fld tbyte`、推进 16 字节。
+4. 验收：`struct_mixed`、`aggregate_va_arg`、`vla_struct`、`long_double`、`double_precision` 等用例转绿。
 
-#### 步骤 2：重构常量解析，支持 80-bit 扩展精度
-修改 [const_eval.rs](file:///root/dcc/src/const_eval.rs):
+### 阶段 2：恢复 va_start / va_copy / va_end（问题 3）
 
-当前所有浮点常量统一存为 f64，需要改为存储原始字节和格式：
-1. 新增枚举 `FloatBits` 区分：
-   - `F32(u32)` 32-bit float
-   - `F64(u64)` 64-bit double
-   - `F80(u64[2])` 80-bit x87 long double
-   - `F128(u64[2])` 128-bit IEEE quad
+1. 在 call/builtin 分发中拦截三个 `__builtin_va_*`，按 §2.2 实现，不再当外部调用。
+2. 变参函数序言：按 ABI 保存 GP/XMM 到 reg_save_area，并正确初始化 overflow_arg_area。
+3. 验收：`va_copy`、`va_copy_advanced`、`va_list_param`、`va_list_as_function_param` 等全部转绿。
 
-2. 解析阶段：
-   - 对于 `f` 后缀 → f32
-   - 无后缀 → f64
-   - `l` 后缀 → 解析为 80-bit x87 扩展精度，存为 10 字节（对齐 16 字节后高 6 字节补零）
+### 阶段 3：全量回归与（可选）80-bit 常量
 
-3. 常量运算：
-   - 运算时将 F80 转换为 f64 计算（保持兼容性，用户不做运算不丢失精度）
-   - 只有常量传递 → 保留原始 80-bit 比特
+1. 运行 `cargo test`、外部 gcc-dg/torture 套件与内核冒烟，确认无回归后删除已落地桩。
+2. 可选：按 v1 原案引入 F80 常量表示与字面量精度测试，此时再新增 fixture。
 
-4. 代码生成时：
-   - va_arg 读取 long double 从内存加载 16 字节，低 10 字节是有效 x87 值
+### 多后端同步（非默认构建，独立排期）
 
-#### 步骤 3：修正 x86_64 va_arg long double codegen
-当前实现 ([x86_64.rs L24330-L24359](file:///root/dcc/src/codegen/x86_64.rs#L24330-L24359)):
-- 按 8 字节读取，加载为 double → 需要修改：
-
-SysV ABI 要求：
-- long double 对齐 16 字节
-- 占用 16 字节，低 10 字节是 x87 80-bit 值
-- va_arg 读取时对齐后，fldt 加载到 x87 栈（st0）
-
-修改：
-```nasm
-; 原来: movsd (%r9), %xmm0  ; 读 8 字节到 xmm0
-; 改为: fldt (%r9)         ; 读 10 字节 80-bit 到 x87 栈 st0
-; 然后：add r9, 16  ; 总是推进 16 字节，符合对齐要求
-```
-
-dcc 内部约定：long double 参数返回在 st0，和 SysV ABI 一致。
-
-#### 步骤 4：修正 ABI 参数分类
-当前分类正确，但因为大小改变，eightbyte 计数会自动修正，不需要额外修改。
-
-测试增加：含多个 long double 的结构体 va_arg，验证偏移正确。
-
-#### 步骤 5：所有后端同步 long double 修改
-对于其他非 x86_64 后端，根据目标平台 ABI 修正：
-- aarch64: long double 也是 128 位，16 字节对齐
-- riscv64: 同 aarch64
-- arm/mips: 根据平台 ABI 修正大小对齐
+aarch64/riscv64 已有 va_start/va_copy 与 `gen_va_arg_struct` 实现（feature gate 后），需在 `--features arm,mips` 下核对：
+- 与 x86_64 统一 va_list 寻址/退化语义；
+- long double 按各平台 ABI（aarch64/riscv64 为 16 字节）核对；
+- arm/mips 的 va_arg 目前仍是空实现（[arm functions.rs#L333](file:///root/dcc/src/codegen/arm/codegen/functions.rs#L333)、[mips baseline_mips.rs#L764](file:///root/dcc/src/codegen/mips/baseline_mips.rs#L764)），不在本方案主线内。
 
 ---
 
-## 集成测试补充
+## 4. 风险与兼容性
 
-需要新增/更新测试用例到 `tests/fixtures/c/va_arg/`:
-
-| 测试文件 | 测试内容 |
-|---------|---------|
-| `struct_mixed_ints_float.c` | 混合多个 int + float 结构体 va_arg |
-| `struct_mixed_ld.c` | 含 long double + 整数混合结构体 va_arg |
-| `va_list_param_passing.c` | va_list 作为参数传递给子函数，验证退化 |
-| `nested_struct_va_copy.c` | 结构体嵌套 va_list，验证 va_copy 正确 |
-| `long_double_constant.c` | long double 常量传递和精度验证 |
+- 最大风险来自阶段 0 的迁移收尾，而非 va 逻辑本身：应以"恢复既有行为"为目标，逐桩对照目录化前语义，避免在补桩时引入新规则。
+- 不改变用户 API；long double 布局在 5a 已为 16/16，阶段 1/2 不再改动布局。
+- 每个阶段独立可测、可单独提交；阶段 1/2 必须在阶段 0 之后串行。
+- 多后端差异被 feature gate 隔离，不阻塞 x86_64 主线验收。
 
 ---
 
-## 实施步骤（TODO）
+## 5. v1 → v2 变更摘要
 
-1. 修复问题 1/2：完善聚合 va_arg 混合类读取和入口对齐 x86_64
-2. 同步所有后端聚合读取和对齐逻辑
-3. 统一所有后端 va_copy 实现到 x86_64 标准
-4. 修复前端 va_list 参数退化规则
-5. 修正 Type::LongDouble 大小对齐
-6. 重构常量求值支持 80-bit 长双精度
-7. 修正 x86_64 va_arg long double codegen
-8. 同步所有后端 long double 修改
-9. 新增集成测试覆盖所有场景
-10. 运行全部测试，验证无回归
-
----
-
-## 风险和兼容性
-
-- 不改变现有 API，所有用户代码不需要修改
-- long double 改变后，含 long double 的结构体内存布局会变化，但这是修复错误，原来布局不符合 SysV ABI
-- 常量精度改变后，链接和运行时行为不变，仅精度提升
-- 对变参性能影响可忽略，复杂场景才会触发多分类遍历
+1. 基线从单体文件改为目录化未完成迁移：新增阶段 0（恢复后端）为硬前置。
+2. 问题 1/2/3 的 x86_64 实现状态从"待修补/已修复"改为"**重构中丢失，需重做**"。
+3. 问题 4（数组退化）与 5a（大小对齐）、5b（x87 发射件）标记为**已完成**，移出实施清单。
+4. v1 计划的 5 个新 fixture 已全部存在，**不再新增**；仅可选 80-bit 常量阶段补例。
+5. "同步所有后端"改为 feature gate（`arm`/`mips`）下的独立排期，默认只验收 x86_64。

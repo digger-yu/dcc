@@ -2,7 +2,7 @@
 name    = "dcc"
 version = "0.1.0"
 edition = "2021"
-authors = ["DCC Contributors"]
+authors = ["digger-yu@outlook.com"]
 description = "DCC: A suckless C compiler. Faster than GCC for the same job."
 license    = "Apache-2.0"
 

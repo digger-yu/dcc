@@ -23,13 +23,13 @@ impl Codegen {
                 {
                     let slot = self.alloc_sret_slot(arg_ty.size());
                     let va_addr = self.resolve_va_list_addr(ap);
-                    if let VaListAddress::Named(_) = va_addr {
+                    if let VaListAddress::Named(ref name) = va_addr {
                         self.emit_lea_r13(7, slot); // rdi = 临时槽
-                        self.gen_va_arg_struct(va_addr, arg_ty, 7);
+                        self.gen_va_arg_struct(name, arg_ty);
                     } else {
                         // Reg/Lvalue: rcx 已有 va_list 指针, 用指针版 struct 读取
                         self.emit_lea_r13(7, slot); // rdi = 临时槽
-                        self.gen_va_arg_ptr_struct(arg_ty, 7);
+                        self.gen_va_arg_ptr_struct(arg_ty);
                     }
                     self.emit_lea_r13(0, slot); // rax = 槽地址
                     return;
@@ -37,8 +37,8 @@ impl Codegen {
                 // 统一分发: 构造 VaListAddress 后按变体分派
                 let va_addr = self.resolve_va_list_addr(ap);
                 match va_addr {
-                    VaListAddress::Named(_) => {
-                        self.gen_va_arg(va_addr, arg_ty, dst);
+                    VaListAddress::Named(name) => {
+                        self.gen_va_arg(&name, arg_ty, dst);
                     }
                     VaListAddress::InReg | VaListAddress::Lvalue(_) => {
                         // rcx 已有 va_list 指针地址

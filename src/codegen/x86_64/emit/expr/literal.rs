@@ -121,8 +121,8 @@ impl Codegen {
                     // dst = base_off
                     self.mov_imm(dst, base_off as i128);
                     // 对每个下标: dst += idx * stride
-                    if let Some(mut cur_ty) = field_ty {
-                        for idx_expr in indices.iter() {
+                    let mut cur_ty = field_ty;
+                    for idx_expr in indices.iter() {
                             if let Type::Array(elem, _) = &cur_ty {
                                 // 计算下标值到 rcx
                                 self.gen_expr(idx_expr, 1); // rcx = idx
@@ -158,7 +158,6 @@ impl Codegen {
                                 cur_ty = elem.base.clone();
                             }
                         }
-                    }
                 }
             }
             _ => {}

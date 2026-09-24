@@ -778,8 +778,8 @@ impl Codegen {
 
     /// Resolve GNU asm label: if the symbol carries an `__asm__("name")`
     /// alias, return the alias name; otherwise None.
-    pub fn resolve_asm_label(&self, name: &str) -> Option<String> {
-        self.asm_label_map.get(name).cloned()
+    pub fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
+        self.asm_label_map.get(c_name).map(|s| s.as_str()).unwrap_or(c_name)
     }
 
     /// RSP (current stack pointer value - stored as field or computed)

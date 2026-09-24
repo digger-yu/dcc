@@ -78,7 +78,7 @@ impl Codegen {
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
-                let target_ty = self.resolve_complete_struct_ty(&Self::member_target_ty(&expr_ty, *is_arrow));
+                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                 let field_off = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
@@ -285,7 +285,7 @@ impl Codegen {
                     }
                     // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                     let expr_ty = expr.ty();
-                    let target_ty = self.resolve_complete_struct_ty(&Self::member_target_ty(&expr_ty, *is_arrow));
+                    let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {

@@ -7,6 +7,7 @@
 
 pub mod lvalue;
 pub mod binary;
+pub mod dispatch;
 
 pub mod cast;
 pub mod call;

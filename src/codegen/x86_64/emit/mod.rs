@@ -3,4 +3,6 @@
 // Extracted from gen_expr() and gen_stmt() functions in x86_64.rs
 
 pub mod expr;
+pub mod func_setup;
+pub mod functions;
 pub mod stmt;

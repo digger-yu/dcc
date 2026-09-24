@@ -843,4 +843,108 @@ impl Codegen {
             _ => {}
         }
     }
+
+    pub fn gen_block_items(&mut self, items: &[BlockItem]) {
+        for it in items {
+            match it {
+                BlockItem::Stmt(s) => self.gen_stmt(s),
+                BlockItem::Decl(Decl::Var(v)) => {
+                    // extern 声明不分配栈槽, 仅作为全局符号引用标记
+                    if v.is_extern && v.init.is_none() {
+                        continue;
+                    }
+                    // static 局部变量已在全局数据段分配,
+                    // 跳过栈分配 (与函数顶层遍历 L6970 一致)
+                    if v.is_static
+                        && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name)
+                        && !self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                    {
+                        continue;
+                    }
+                    if let Some(ref reg_name) = v.register_name {
+                        if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
+                            self.reg_bindings.insert(v.name.name.clone(), reg_idx);
+                        }
+                    }
+                    // P2-9: cleanup 属性变量注册
+                    if let Some(ref fn_name) = v.cleanup_fn {
+                        self.cleanup_vars
+                            .push((v.name.name.clone(), fn_name.clone()));
+                    }
+                    // 定义+声明一体的 struct/union 类型: 变量声明点即类型
+                    // 声明点, 触发 VM 槽绑定/静态清除 (parser 不产生独立
+                    // StructDef BlockItem)
+                    if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+                        self.gen_vm_type_bind(&v.ty);
+                    }
+                    // static local 需要运行时初始化: 发射初始化代码到全局地址
+                    if v.is_static
+                        && self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                    {
+                        if let Some(init) = &v.init {
+                            self.gen_expr(init, 0);
+                            self.emit_global_store(0, &v.name.name);
+                        }
+                        continue;
+                    }
+                    self.register_var(&v.name.name, &v.ty);
+                    if Self::type_has_vla(&v.ty) {
+                        self.gen_vla_alloc(v);
+                    } else if let Some(init) = &v.init {
+                        if let Expr::InitList { inits, .. } = init {
+                            self.gen_init_list(&v.name.name, &v.ty, inits);
+                        } else {
+                            let is_agg = matches!(
+                                &v.ty,
+                                Type::Struct(_, _, _, _)
+                                    | Type::Union(_, _, _, _)
+                                    | Type::Array(_, ArraySize::Const(_))
+                                    | Type::Atomic(_)
+                            ) && v.ty.size() > 8;
+                            if matches!(&v.ty, Type::Vector(_, _)) || is_agg {
+                                let dst_ty = v.ty.clone();
+                                let dst_name = v.name.name.clone();
+                                self.gen_aggregate_assign(&dst_name, &dst_ty, init);
+                            } else if let Type::Complex(inner) = &v.ty {
+                                self.gen_complex_init(&v.name.name, &inner.base, init);
+                            } else if let Type::Imaginary(ref inner) = &v.ty {
+                                self.gen_imaginary_init(&v.name.name, &inner.base, init);
+                            } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble)
+                            {
+                                // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
+                                self.gen_expr(init, 0);
+                                // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                                self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                self.gen_float_store(&v.name.name, &v.ty);
+                            } else {
+                                self.gen_expr(init, 0);
+                                // Implicit float→int conversion
+                                let init_ty = init.ty();
+                                if matches!(
+                                    &init_ty,
+                                    Type::Float | Type::Double | Type::LongDouble
+                                ) && Self::is_integer_type(&v.ty) {
+                                    self.emit_implicit_float_to_int(
+                                        0, &init_ty, &v.ty,
+                                    );
+                                }
+                                self.mov_to_stack(0, &v.name.name);
+                            }
+                        }
+                    }
+                }
+                // 局部 struct/union 定义声明: 含 VLA 字段时在声明点
+                // 求值总大小存入绑定槽 (C11 6.2.4p7), 供 sizeof(类型)
+                // 读槽 (20041218-2: 声明后 n++ 不影响 sizeof)。
+                // 静态类型 (重)声明则清除残留绑定。
+                BlockItem::Decl(Decl::StructDef(sd)) => {
+                    self.gen_vm_struct_bind(sd, false);
+                }
+                BlockItem::Decl(Decl::UnionDef(sd)) => {
+                    self.gen_vm_struct_bind(sd, true);
+                }
+                _ => {}
+            }
+        }
+    }
 }

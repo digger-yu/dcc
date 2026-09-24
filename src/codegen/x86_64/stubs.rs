@@ -7,26 +7,15 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::ast::{BinOp, Expr, Type, UnOp, Designator, Field};
+use crate::ast::{find_field, BinOp, Expr, Type, UnOp, Designator, Field};
 use crate::codegen::x86_64::Codegen;
 use crate::debug::FuncFrame;
 use std::sync::Arc;
 
 impl Codegen {
-    // ================================================================
-    // 主编译入口
-    // ================================================================
-    pub fn compile_module(&mut self, _module: &crate::ir::Module) {
-        unimplemented!("compile_module stub")
-    }
+
 
     // ================================================================
-    // 表达式主分派（110 处调用）
-    // ================================================================
-    pub fn gen_expr(&mut self, e: &Expr, dst: u8) {
-        unimplemented!("gen_expr stub")
-    }
-
     // ================================================================
     // 类型判断相关关联函数
     // ================================================================
@@ -46,8 +35,15 @@ impl Codegen {
         None
     }
 
-    pub fn member_target_ty(_ty: &Type, _is_arrow: bool) -> Type {
-        Type::Int
+    pub fn member_target_ty(expr_ty: Type, is_arrow: bool) -> Type {
+        if !is_arrow {
+            return expr_ty;
+        }
+        match &expr_ty {
+            Type::Ptr(p) => p.base.clone(),
+            Type::Array(elem, _) => elem.base.clone(),
+            _ => expr_ty,
+        }
     }
 
     pub fn needs_memory_return(ty: &Type) -> bool {
@@ -155,16 +151,25 @@ impl Codegen {
     // ================================================================
     // 结构体/聚合相关
     // ================================================================
-    pub fn resolve_complete_struct_ty(&mut self, ty: &Type) -> Type {
-        ty.clone()
+    pub fn resolve_complete_struct_ty(&self, ty: Type) -> Type {
+        match &ty {
+            Type::Struct(name, fields, _, _) if fields.is_empty() => {
+                if let Some(complete_ty) = self.complete_struct_types.get(name) {
+                    return complete_ty.clone();
+                }
+            }
+            Type::Union(name, fields, _, _) if fields.is_empty() => {
+                if let Some(complete_ty) = self.complete_struct_types.get(name) {
+                    return complete_ty.clone();
+                }
+            }
+            _ => {}
+        }
+        ty
     }
 
     pub fn gen_sizeof_runtime(&mut self, ty: &Type, dst: u8) {
         unimplemented!("gen_sizeof_runtime stub")
-    }
-
-    pub fn gen_block_items(&mut self, items: &[crate::ast::BlockItem]) {
-        unimplemented!("gen_block_items stub")
     }
 
     pub fn gen_agg_elem_store(&mut self, _r: &Expr, _elem_ty: &Type, _es: i32, _dst: u8) {
@@ -179,9 +184,7 @@ impl Codegen {
         unimplemented!("gen_init_list_at stub")
     }
 
-    pub fn gen_global_init_list(&mut self, _ty: &Type, _inits: &[crate::ast::InitItem], _base: Option<(u64, Option<u64>)>, _use_rodata: bool) -> Option<Vec<u8>> {
-        unimplemented!("gen_global_init_list stub")
-    }
+
 
     pub fn gen_same_size_bitcast(&mut self, _e: &Expr, _ty: &Type, _dst: u8) -> bool {
         false
@@ -342,7 +345,60 @@ impl Codegen {
     }
 
     pub fn build_asm_output(&mut self, prog: &crate::ast::Program) -> String {
-        String::new()
+        let mut out = String::new();
+        let name = if self.source_name == "input.c" {
+            "input.c".to_string()
+        } else {
+            self.source_name.clone()
+        };
+        out.push_str(&format!("\t.file \"{name}\"\n"));
+        
+        if !self.rodata.is_empty() {
+            out.push_str("\t.section .rodata,\"a\",@progbits\n");
+            // Emit rodata entries from string pool
+            for (bytes, offset) in &self.string_pool {
+                let name = format!(".rodata.str{}", offset);
+                out.push_str(&format!("\t.globl {}\n", name));
+                out.push_str(&format!("\t.type {}, @object\n", name));
+                out.push_str(&format!("{}:\n", name));
+                // Emit the bytes
+                for chunk in bytes.chunks(16) {
+                    out.push_str("\t.byte ");
+                    for (i, &b) in chunk.iter().enumerate() {
+                        if i > 0 { out.push_str(", "); }
+                        out.push_str(&format!("{:#04x}", b));
+                    }
+                    out.push_str("\n");
+                }
+                out.push_str(&format!("\t.size {}, {}\n", name, bytes.len()));
+            }
+        }
+        
+        out.push_str("\t.text\n");
+        // Emit functions from program declarations
+        for decl in &prog.decls {
+            if let crate::ast::Decl::Func(func) = decl {
+                let is_weak = func.is_weak;
+                
+                let name_str = &func.name.name;
+                if is_weak {
+                    out.push_str(&format!("\t.weak {}\n", name_str));
+                } else {
+                    out.push_str(&format!("\t.globl {}\n", name_str));
+                }
+                
+                out.push_str(&format!("\t.type {}, @function\n", name_str));
+                
+                // Emit function entry
+                out.push_str(&format!("{}:\n", name_str));
+                
+                // x86_64 return instruction
+                out.push_str("\tret\n");
+                out.push_str(&format!("\t.size {}, .-{}\n", name_str, name_str));
+            }
+        }
+        
+        out
     }
 
     pub fn func_frames(&mut self, module: &crate::ir::Module) -> Vec<FuncFrame> {
@@ -414,9 +470,28 @@ impl Codegen {
         unimplemented!("expr_warn stub")
     }
 
-    pub fn find_offsetof_field_type(ty: &Type, field: &str) -> Option<Type> {
-        let _ = (ty, field);
-        None
+    pub fn find_offsetof_field_type(ty: &Type, member: &str) -> Type {
+        let fields = match ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
+            _ => return Type::Int,
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut current_fields = fields.as_ref();
+        let mut result_ty = Type::Int;
+        for part in &parts {
+            let name = if part.contains('[') {
+                &part[..part.find('[').unwrap()]
+            } else {
+                part
+            };
+            if let Some((field, _)) = find_field(current_fields, name) {
+                result_ty = field.ty.clone();
+                if let Type::Struct(_, sub, _, _) | Type::Union(_, sub, _, false) = &field.ty {
+                    current_fields = sub.as_ref();
+                }
+            }
+        }
+        result_ty
     }
 
     pub fn stmt_ends_with_return(stmt: &crate::ast::Stmt) -> bool {
@@ -447,7 +522,7 @@ impl Codegen {
         crate::codegen::x86_64::VaListAddress::Named(String::new())
     }
 
-    pub fn gen_va_arg(&mut self, addr: crate::codegen::x86_64::VaListAddress, ty: &Type, dst: u8) {
+    pub fn gen_va_arg(&mut self, ap_name: &str, ty: &Type, dst: u8) {
         unimplemented!("gen_va_arg stub")
     }
 
@@ -455,11 +530,11 @@ impl Codegen {
         unimplemented!("gen_va_arg_ptr stub")
     }
 
-    pub fn gen_va_arg_struct(&mut self, addr: crate::codegen::x86_64::VaListAddress, ty: &Type, dst: u8) {
+    pub fn gen_va_arg_struct(&mut self, ap_name: &str, ty: &Type) {
         unimplemented!("gen_va_arg_struct stub")
     }
 
-    pub fn gen_va_arg_ptr_struct(&mut self, ty: &Type, dst: u8) {
+    pub fn gen_va_arg_ptr_struct(&mut self, ty: &Type) {
         unimplemented!("gen_va_arg_ptr_struct stub")
     }
 
@@ -497,14 +572,6 @@ impl Codegen {
 
     pub fn ensure_custom_section(&mut self, name: &str, _exec: bool, _writable: bool) -> usize {
         0
-    }
-
-    pub fn compile_func(&mut self, func: &crate::ast::FuncDecl, _prog: &crate::ast::Program) {
-        unimplemented!("compile_func stub")
-    }
-
-    pub fn emit_func_epilogue(&mut self) {
-        unimplemented!("emit_func_epilogue stub")
     }
 
     pub fn asm_warn(&mut self, msg: &str) {
@@ -594,5 +661,68 @@ impl crate::semantics::ObjectResolver for Codegen {
 
     fn is_local_name(&self, name: &str) -> bool {
         self.var_map.contains_key(name)
+    }
+}
+
+impl Codegen {
+    // ================================================================
+    // Feature-gated function setup helpers (migrated later per feature)
+    // ================================================================
+    pub fn compile_naked_func(
+        &mut self,
+        _f: &crate::ast::FuncDecl,
+        _prog: &crate::ast::Program,
+        _func_start: u64,
+    ) {
+        unimplemented!("compile_naked_func stub")
+    }
+
+    pub fn emit_mcount_loc_entry(&mut self, _call_pc: u64, _func_name: &str) {
+        unimplemented!("emit_mcount_loc_entry stub")
+    }
+
+    pub fn jmp_external(&mut self, _name: &str) {
+        unimplemented!("jmp_external stub")
+    }
+
+    pub fn gen_trampoline(&mut self, _nested_name: &str) -> i64 {
+        unimplemented!("gen_trampoline stub")
+    }
+
+    pub fn emit_mprotect_for_stack(&mut self) {
+        unimplemented!("emit_mprotect_for_stack stub")
+    }
+
+    pub fn emit_trampoline_to_stack(&mut self) {
+        unimplemented!("emit_trampoline_to_stack stub")
+    }
+
+    pub fn emit_instrument_func_enter(&mut self) {
+        unimplemented!("emit_instrument_func_enter stub")
+    }
+
+    pub fn gen_init_list(
+        &mut self,
+        _var_name: &str,
+        _ty: &Type,
+        _inits: &[crate::ast::InitItem],
+    ) {
+        unimplemented!("gen_init_list stub")
+    }
+
+    pub fn gen_complex_init(&mut self, _name: &str, _inner: &Type, _init: &Expr) {
+        unimplemented!("gen_complex_init stub")
+    }
+
+    pub fn gen_complex_part(&mut self, _e: &Expr, _is_real: bool, _ty: &Type, _dst: u8) {
+        unimplemented!("gen_complex_part stub")
+    }
+
+    pub fn gen_complex_lvalue_rvalue(&mut self, _e: &Expr) -> bool {
+        unimplemented!("gen_complex_lvalue_rvalue stub")
+    }
+
+    pub fn gen_imaginary_init(&mut self, _name: &str, _inner: &Type, _init: &Expr) {
+        unimplemented!("gen_imaginary_init stub")
     }
 }
