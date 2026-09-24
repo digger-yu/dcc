@@ -783,12 +783,12 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                 ) {
                     BranchCond::Comp(*op)
                 } else if *op == crate::ast::BinOp::AndAnd {
-                    let l_cond = self.lower_condition(l);
-                    let r_cond = self.lower_condition(r);
+                    let _l_cond = self.lower_condition(l);
+                    let _r_cond = self.lower_condition(r);
                     BranchCond::And(0, 0) // TODO: proper indices
                 } else if *op == crate::ast::BinOp::OrOr {
-                    let l_cond = self.lower_condition(l);
-                    let r_cond = self.lower_condition(r);
+                    let _l_cond = self.lower_condition(l);
+                    let _r_cond = self.lower_condition(r);
                     BranchCond::Or(0, 0) // TODO: proper indices
                 } else {
                     // Non-boolean binary ops → implicit true/false

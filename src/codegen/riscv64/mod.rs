@@ -1,61 +1,31 @@
-// src/codegen/riscv64.rs - RISC-V 64 后端模块化
-// Phase B Day 1-5 - Complete modularization from riscv64.rs.bak (2026/9/22)
+// src/codegen/riscv64/mod.rs - RISC-V 64 backend (modular).
 //
-/// # Module Structure
-/// Modular extraction from original riscv64.rs.bak:
+// Mechanically split from the original monolithic implementation. The
+// split is a pure move: every method body is unchanged; only visibility
+// and import paths were adjusted.
 //
-/// ## Completed ✅
-/// - `registers/`      - Register constants and utilities
-/// - `asm/`            - Inline assembly handling
-/// - `codegen/`        - Core code generation logic (~1659 lines)
-/// - `abi/`            - SysV ABI calling convention implementation
-/// - `emit/stmt`       - Statement-level emission (~448 lines) NEW
-/// - `emit/expr/*`     - Expression handling: binary/binary/unary/call/lvalue/literal
-/// - `helpers/encoding`- Encoding utilities (~424 lines) NEW
-/// - `special/tls`     - TLS support (~269 lines) NEW
-//
-// ├── registers/  - Register constants and utilities ✅
-// ├── asm/        - Inline assembly handling ✅
-// ├── abi/        - Calling convention ✅
-// ├── codegen/    - Core code generation logic ✅
-// ├── emit/
-// │   ├── stmt.rs         - Statement emission (~448 lines) NEW
-// │   └── expr/
-// │       ├── binary.rs   - Binary operations (~400 lines) NEW
-// │       ├── unary.rs    - Unary operators (~442 lines) NEW
-// │       ├── call.rs     - Function calls (~544 lines) NEW
-// │       ├── lvalue.rs   - L-value addresses (~259 lines) NEW
-// │       └── literal.rs  - Literal values (~211 lines) NEW
-// ├── helpers/
-// │   └── encoding.rs   - Encoding utilities (~424 lines) NEW
-// └── special/
-//     └── tls.rs        - TLS support (~269 lines) NEW
+// Layout:
+//   backend.rs            - Backend trait implementation / entry wiring
+//   codegen/              - state struct, constructor, compile pipeline,
+//                           function generation, output builders and the
+//                           shared free helper functions
+//   emit/block.rs         - statement / block-item emission
+//   emit/expr/*           - expression-level emission (lvalue, call,
+//                           unary, binary, literal, bitfield)
+//   expression_impl*.rs   - gen_expr family (scalar/float/vector/complex/
+//                           from-ast)
+//   special/*             - atomics, TLS, inline asm, float conversions,
+//                           compressed insns, RVV, CSR
 
-// ============================================================================
-// Module Declarations (incrementally extracted from monolith)
-// ============================================================================
 mod backend;
-mod registers;   // Day 1-2 - Register utilities
-mod asm;         // Day 2-3 - Inline assembly module
-mod codegen;     // Week 2 - Core code generation module
-mod abi;         // SysV ABI calling convention
-mod emit;        // Statement/expression emission (NEW)
-mod helpers;     // Utility functions (NEW)
-mod special;     // Special features: RVV vector extension, TLS (NEW)
-mod expression_impl;  // Phase C - Expression executor backend
+mod codegen;
+mod emit;
+mod expression_impl;
+mod expression_impl2;
+mod expression_impl3;
+mod special;
 
+#[cfg(test)]
+mod tests_split;
 
-pub use self::registers::*;  // Re-export register utilities
-pub use self::abi::*;        // Re-export ABI utilities
-pub use self::emit::*;       // Re-export statement/expression emission
-pub use self::helpers::*;    // Re-export utility functions
-pub use self::special::*;    // Re-export special features (RVV, TLS)
-pub use self::codegen::{Riscv64Codegen, var_is_static};
-
-// Module substructure exports for granular access
-// Note: Only export publicly accessible items
-pub(crate) use self::emit::stmt;
-pub(crate) use self::helpers::encoding::{self, encode_r_type, decode_i_type};
-
-// 辅助函数导出
-pub use crate::codegen::riscv64::emit::expr::lvalue::{find_aggregate_fields, align_up_u64};
+pub(crate) use codegen::Riscv64Codegen;

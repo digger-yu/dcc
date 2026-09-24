@@ -1,421 +1,593 @@
-// src/codegen/aarch64/expression_impl.rs
-// Phase C: Data-Driven Code Generation Architecture - AArch64 Expression Backend
-//
-// First Principle: AArch64 implements same ExpressionExecutor trait as x86_64
-// This enables shared expression evaluation logic across all ISAs
+// AArch64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::ast::{find_field, BinOp, UnOp};
+use crate::codegen::aarch64::codegen::{
+    is_aggregate, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size,
+    Aarch64Codegen,
+};
+use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
-use crate::ast::{BinOp, UnOp, Type};
-use crate::codegen::aarch64::aarch64::{ty_is_floating_point, ty_is_signed, Aarch64Codegen};
-use crate::codegen::shared::expression_executor::{ExpressionExecutor, ExprResult};
-use crate::ir::ValueType;
-
-/// AArch64-specific ExpressionExecutor implementation
-pub struct AArch64ExpressionBackend<'a> {
-    pub cg: &'a mut Aarch64Codegen,
-}
-
-impl<'a> AArch64ExpressionBackend<'a> {
-    pub fn new(cg: &'a mut Aarch64Codegen) -> Self {
-        Self { cg }
-    }
-}
-
-impl<'a> ExpressionExecutor for AArch64ExpressionBackend<'a> {
-    // ========== ARM64 BINARY OPERATIONS =========
-
-    fn emit_binary_op(
-        &self,
-        op: &BinOp,
-        result_ty: &Type,
-        lhs_reg: u8,
-        rhs_reg: u8,
-        dest_reg: u8,
-    ) -> ExprResult<()> {
-        use crate::ast::BinOp::*;
-
-        let _is_float = ty_is_floating_point(result_ty);
-
-        match op {
-            // Integer arithmetic (GPRs)
-            Add => self.cg.emit_arm64_add(dest_reg, lhs_reg, rhs_reg),
-            Sub => self.cg.emit_arm64_sub(dest_reg, lhs_reg, rhs_reg),
-
-            Mul => {
-                // MUL for 32-bit, MULH for 64-bit multiply high if needed
-                self.cg.emit_arm64_mul(dest_reg, lhs_reg, rhs_reg)?;
-            }
-
-            Div => {
-                // SDIV for signed, UDIV for unsigned
-                let signed = ty_is_signed(result_ty);
-                self.cg.emit_arm64_div(dest_reg, lhs_reg, rhs_reg, signed)?;
-            }
-
-            Rem => {
-                // SREM/UREM via division sequence
-                let signed = ty_is_signed(result_ty);
-                self.cg.emit_arm64_rem(dest_reg, lhs_reg, rhs_reg, signed)?;
-            }
-
-            // Bitwise operations
-            And => self.cg.emit_arm64_and(dest_reg, lhs_reg, rhs_reg),
-            Or => self.cg.emit_arm64_orr(dest_reg, lhs_reg, rhs_reg),
-            Xor => self.cg.emit_arm64_eor(dest_reg, lhs_reg, rhs_reg),
-
-            // Shift operations
-            Shl => self.cg.emit_arm64_lsl(dest_reg, lhs_reg, rhs_reg),
-            Shr => {
-                // LSR for logical shift right (zero-fill)
-                self.cg.emit_arm64_lsr(dest_reg, lhs_reg, rhs_reg)?;
-            }
-
-            // Comparison operations (returns boolean in GPR)
-            Eq => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::EQ)?;
-            }
-            Ne => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::NE)?;
-            }
-            Lt => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::LT)?;
-            }
-            Le => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::LE)?;
-            }
-            Gt => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::GT)?;
-            }
-            Ge => {
-                self.cg.emit_arm64_cmp(lhs_reg, rhs_reg)?;
-                self.cg.emit_arm64_setcc(dest_reg, arm64::SetCC::GE)?;
-            }
-
-            // Logical operators need short-circuit evaluation
-            AndAnd | OrOr => {
-                return Err("Logical operators require label-based evaluation".into())
-            }
+impl Aarch64Codegen {
+    pub(crate) fn gen_expr(&mut self, expr: &TypedExpr) -> bool {
+        if is_vector_ty(&expr.ty) {
+            return self.gen_vector_expr(expr);
         }
-
-        Ok(())
-    }
-
-    // ========== ARM64 UNARY OPERATIONS =========
-
-    fn emit_unary_op(
-        &self,
-        op: &UnOp,
-        src_reg: u8,
-        dest_reg: u8,
-        result_ty: &Type,
-    ) -> ExprResult<()> {
-        use crate::ast::UnOp::*;
-        
-        match op {
-            Neg => {
-                // NEGS for integer negation
-                // For floats, FNEG instruction
-                self.cg.emit_arm64_neg(dest_reg, src_reg, result_ty)?;
-            }
-            Not => {
-                // EOR to all ones (bitwise NOT)
-                self.cg.emit_arm64_not(dest_reg, src_reg);
-            }
-            Plus => {
-                // Unary plus is no-op
-                if src_reg != dest_reg {
-                    self.cg.emit_arm64_mov(dest_reg, src_reg, result_ty.size() as usize)?;
+        // Handle Assign before float/complex dispatch to avoid
+        // infinite recursion (Assign node ty may be float/aggregate).
+        if let ExprKind::Assign = &expr.kind {
+            if expr.children.len() >= 2
+                && !is_float_ty(&expr.children[1].ty)
+                && !is_complex_ty(&expr.children[1].ty)
+                && !is_vector_ty(&expr.children[1].ty)
+            {
+                // Check for bitfield write before normal assignment
+                let lhs = &expr.children[0];
+                if let ExprKind::Member(ref field_name) = lhs.kind {
+                    if !lhs.children.is_empty() {
+                        let child = &lhs.children[0];
+                        let sn = match &child.ty {
+                            ValueType::Aggregate { name, .. } => Some(name.clone()),
+                            ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
+                                if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let bf = sn.as_ref().and_then(|n| {
+                            self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                                find_field(fields, field_name).and_then(|(f, extra)| {
+                                    f.bit_width.map(|bw| {
+                                        (f.offset + extra, bw, f.bit_offset, f.ty.clone())
+                                    })
+                                })
+                            })
+                        });
+                        if let Some((f_off, bw, b_off, cty)) = bf {
+                            if bw < (cty.size() * 8) as u32 {
+                                self.gen_bitfield_store_aarch64(
+                                    &lhs.children[0],
+                                    &expr.children[1],
+                                    f_off,
+                                    bw,
+                                    b_off,
+                                    &cty,
+                                );
+                                return true;
+                            }
+                        }
+                    }
                 }
-            }
-            AddrOf => {
-                return Err("Address-of requires lvalue handling".into());
-            }
-            Deref => {
-                // Load from pointer
-                self.cg.load_from_address(src_reg, dest_reg, result_ty.size() as usize, ty_is_signed(result_ty));
+                // Normal (non-bitfield) assignment
+                // Evaluate rhs -> x0
+                self.gen_expr(&expr.children[1]);
+                // Save rhs value to stack temp (safe across recursive calls)
+                let save_off = self.alloc_local("<asgn>", 8);
+                self.emit_str_x(0, 31, save_off as u32, 8);
+                let lhs = &expr.children[0];
+                match &lhs.kind {
+                    ExprKind::Local(ref name) => {
+                        // Reload rhs value
+                        self.emit_ldr_x(0, 31, save_off as u32, 8);
+                        if let Some(&off) = self.locals.get(name) {
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            match sz {
+                                1 => {
+                                    self.emit_str_x(0, 31, 0, 1); /* placeholder */
+                                    self.store_x_at_sp(off, 0, 1);
+                                }
+                                2 => {
+                                    self.emit_str_x(0, 31, 0, 1);
+                                    self.store_x_at_sp(off, 0, 2);
+                                }
+                                4 => self.store_w0(off),
+                                _ => {
+                                    // 8 bytes or aggregate
+                                    self.emit_str_x(0, 31, off as u32, 8);
+                                    if sz > 8 {
+                                        // Aggregate: save src addr, copy word-by-word
+                                        self.emit_ldr_x(14, 31, save_off as u32, 8);
+                                        self.mov_x0_sp_off(off); // x0 = dst addr
+                                        self.aggregate_store_loop(14, 0, 8, sz);
+                                    }
+                                }
+                            }
+                        } else if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_w0(name); // x0 = global addr
+                            self.emit_ldr_x(14, 31, save_off as u32, 8); // x14 = rhs
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(14, 0, 0, sz);
+                        }
+                    }
+                    _ => {
+                        self.gen_lvalue_addr(lhs); // x0 = addr
+                        self.emit_mov_x_reg(12, 0); // x12 = addr
+                        self.emit_ldr_x(14, 31, save_off as u32, 8); // x14 = rhs
+                        let sz = value_type_size(&expr.ty).max(1);
+                        if sz <= 8 {
+                            self.emit_store_sz(14, 12, 0, sz);
+                        } else {
+                            self.aggregate_store_loop(14, 12, 0, sz);
+                        }
+                    }
+                }
+                // Result of assignment is the rhs value
+                self.emit_ldr_x(0, 31, save_off as u32, 8);
+                return true;
             }
         }
-        
-        Ok(())
-    }
-
-    // ========== TYPE CONVERSIONS =========
-
-    fn convert_float_to_int(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        signed: bool,
-        dest_bits: usize,
-    ) -> ExprResult<()> {
-        // FCVT from float to integer (floating-point to GPR)
-        self.cg.fcvt_float_to_int(src_reg, dest_reg, signed, dest_bits)?;
-        Ok(())
-    }
-
-    fn convert_int_to_float(&self, src_reg: u8, dest_reg: u8) -> ExprResult<()> {
-        // FCVT from integer to float (GPR to floating-point)
-        self.cg.fcvt_int_to_float(src_reg, dest_reg)?;
-        Ok(())
-    }
-
-    fn sign_extend(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        bits_from: usize,
-        bits_to: usize,
-    ) -> ExprResult<()> {
-        // ARM64: SXTB/SXTH/SXTW for sign extension
-        match bits_from {
-            8 => {
-                self.cg.emit_sxtb(dest_reg, src_reg, bits_to);
-                Ok(())
+        // expr.ty 自身是 float/vector 时走 gen_float_expr.
+        // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
+        // gen_float_expr 形成死循环). 例如 (int)sum(double) 这个 Cast
+        // children[0]=Double 但 expr.ty=Integer, 应走 gen_expr 主路径,
+        // 内层 Call(Double) 再递归调 gen_expr -> gen_float_expr.
+        if is_float_ty(&expr.ty) {
+            return self.gen_float_expr(expr);
+        }
+        // Complex type: dispatch to gen_complex_expr
+        // Complex values are stored as pairs (real, imag) in consecutive
+        // stack slots or register pairs (v0, v1).
+        if is_complex_ty(&expr.ty) {
+            return self.gen_complex_expr(expr);
+        }
+        match &expr.kind {
+            ExprKind::Constant => {
+                if let Some(ExprLiteral::Int(v)) = expr.literal {
+                    self.mov_w0_imm(trunc_i32(v));
+                    return true;
+                }
+                if let Some(ExprLiteral::Float(v)) = expr.literal {
+                    self.load_float_s0(v as f32);
+                    return true;
+                }
+                self.mov_w0_imm(0);
             }
-            16 => {
-                self.cg.emit_sxth(dest_reg, src_reg, bits_to);
-                Ok(())
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.load_w0(off);
+                    // 整数提升: char/short → int
+                    self.gen_int_promote_ir(&expr.ty);
+                    return true;
+                }
+                if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_w0(name);
+                    return true;
+                }
+                self.mov_w0_imm(0);
             }
-            32 => {
-                self.cg.emit_sxtw(dest_reg, src_reg, bits_to);
-                Ok(())
+            ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                // Float comparison: children are float, result is integer
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && matches!(
+                        op,
+                        BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    )
+                {
+                    // Evaluate left float -> s0
+                    self.gen_float_expr(&expr.children[0]);
+                    self.mov_s1_s0(); // save left to s1
+                                      // Evaluate right float -> s0
+                    self.gen_float_expr(&expr.children[1]);
+                    // Now s0 = right, s1 = left
+                    // fcmp s1, s0 and set w0 from condition
+                    self.fcmp_s0_s1();
+                    self.fset_w0_from_fcmp(*op);
+                    return true;
+                }
+                // Float binary arithmetic: children are float, result is float
+                // This case is reached when expr.ty is float but gen_expr was
+                // called (e.g., from a cast context). Dispatch to gen_float_expr.
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && is_float_ty(&expr.ty)
+                {
+                    return self.gen_float_expr(expr);
+                }
+                self.gen_expr(&expr.children[0]);
+                self.mov_w14_w0();
+                self.gen_expr(&expr.children[1]);
+                self.mov_w1_w0();
+                self.mov_w0_w14();
+                self.binop_w0_w1(
+                    *op,
+                    matches!(
+                        &expr.children[0].ty,
+                        ValueType::Integer { signed: true, .. }
+                    ),
+                );
+                return true;
+            }
+            ExprKind::Unary(op) if !expr.children.is_empty() => {
+                self.gen_expr(&expr.children[0]);
+                match op {
+                    UnOp::Neg => self.neg_w0(),
+                    UnOp::Plus => {}
+                    UnOp::Not => self.cmp_w0_zero(),
+                    UnOp::BitNot => self.mvn_w0(),
+                }
+                return true;
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if is_vector_ty(&child.ty) {
+                    self.gen_vector_expr(child);
+                    self.extract_vector_lane_w0(0);
+                } else if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int conversion: child eval puts result in s0,
+                    // emit FCVTZS/FCVTZU to convert to integer in w0
+                    self.gen_expr(child);
+                    let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                    match &child.ty {
+                        ValueType::Float { bits: 32 } => {
+                            if is_unsigned {
+                                // FCVTZU W0, S0: 0x1E190000
+                                self.emit(&0x1E190000u32.to_le_bytes());
+                            } else {
+                                // FCVTZS W0, S0: 0x1E180000
+                                self.emit(&0x1E180000u32.to_le_bytes());
+                            }
+                        }
+                        ValueType::Float { bits: 64 } => {
+                            if is_unsigned {
+                                // FCVTZU W0, D0: 0x9E190000
+                                self.emit(&0x9E190000u32.to_le_bytes());
+                            } else {
+                                // FCVTZS W0, D0: 0x9E180000
+                                self.emit(&0x9E180000u32.to_le_bytes());
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.truncate_w0_to(&expr.ty);
+                } else {
+                    self.gen_expr(child);
+                    self.truncate_w0_to(&expr.ty);
+                }
+                return true;
+            }
+            ExprKind::VaArg { ap, ref arg_ty, .. } => {
+                // M25: __builtin_va_arg(ap, T)
+                // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
+                if is_aggregate(arg_ty) {
+                    self.gen_va_arg_struct(ap, arg_ty);
+                } else {
+                    self.gen_va_arg_int(ap);
+                }
+                return true;
+            }
+            ExprKind::Call => {
+                self.gen_call(expr);
+                return true;
+            }
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                // csel 无分支三元: cond ? true_val : false_val
+                self.gen_expr(&expr.children[0]);
+                self.mov_w15_w0();
+                self.gen_expr(&expr.children[1]);
+                self.mov_w14_w0();
+                self.gen_expr(&expr.children[2]);
+                self.mov_w1_w0();
+                self.mov_w0_w14();
+                self.cmp_w15_zero();
+                self.csel_w0_w0_w1_ne();
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 && is_vector_ty(&expr.children[0].ty) => {
+                self.gen_vector_expr(&expr.children[0]);
+                let idx = expr.children[1]
+                    .literal
+                    .and_then(|lit| match lit {
+                        ExprLiteral::Int(v) => Some(v as usize),
+                        ExprLiteral::Float(_) => None,
+                    })
+                    .unwrap_or(0);
+                self.extract_vector_lane_w0(idx);
+                return true;
+            }
+            ExprKind::Address if !expr.children.is_empty() => {
+                // Extended: support &member, &deref, &index via gen_lvalue_addr
+                match &expr.children[0].kind {
+                    ExprKind::Local(ref name) => {
+                        if let Some(&off) = self.locals.get(name) {
+                            self.mov_x0_sp_off(off);
+                            return true;
+                        }
+                        if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_w0(name);
+                            return true;
+                        }
+                    }
+                    _ => {
+                        self.gen_lvalue_addr(&expr.children[0]);
+                        return true;
+                    }
+                }
+                self.mov_w0_imm(0);
+                return true;
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                // *ptr: evaluate pointer, load value
+                self.gen_expr(&expr.children[0]);
+                // x0 = pointer address
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    // Aggregate dereference: load first word
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
+                return true;
+            }
+            ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
+                // Compute base address
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    // ptr->field: evaluate inner pointer
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    // s.field: compute address of struct
+                    self.gen_lvalue_addr(child);
+                }
+                // x0 = base address
+                // Look up field info
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let field_info = struct_name.as_ref().and_then(|name| {
+                    self.aggregate_fields.get(name).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| {
+                            (f.offset + extra, f.bit_width, f.bit_offset, f.ty.clone())
+                        })
+                    })
+                });
+                let field_off = field_info.as_ref().map(|(off, _, _, _)| *off).unwrap_or(0);
+                // Check if this is a bitfield read
+                let bf_info = field_info
+                    .as_ref()
+                    .and_then(|(_, bw, bo, fty)| bw.map(|w| (w, *bo, fty.clone())));
+                if let Some((bit_width, bit_offset, container_ty)) = bf_info {
+                    if bit_width < (container_ty.size() * 8) as u32 {
+                        // Bitfield extraction
+                        if field_off != 0 {
+                            self.emit_mov_x_reg(12, 0);
+                            self.emit_add_imm_x(0, 12, field_off as u32);
+                        }
+                        // x0 = container address, load container value
+                        let csz = container_ty.size();
+                        self.emit_ldr_x(0, 0, 0, csz); // zero-extend load
+                                                       // LSR x0, x0, bit_offset
+                        if bit_offset > 0 {
+                            self.emit_lsr_x(0, 0, bit_offset as u8);
+                        }
+                        // AND x0, x0, mask
+                        if bit_width < 64 {
+                            let mask: u64 = (1u64 << bit_width) - 1;
+                            self.mov_x_reg_imm(12, mask);
+                            self.emit_and_x_reg(0, 0, 12);
+                        }
+                        // Sign extend for signed bitfields
+                        let is_unsigned =
+                            matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                        if !is_unsigned && bit_width < 64 {
+                            let sign_bit = 1u64 << (bit_width - 1);
+                            self.mov_x_reg_imm(12, sign_bit);
+                            self.emit_ands_x_reg(12, 0, 12); // TST x0, sign_bit
+                                                             // B.NE +2 (skip next ORR, 8 bytes = 2 insns)
+                            self.emit(&0x54000041u32.to_le_bytes());
+                            let inv_mask: u64 = !((1u64 << bit_width) - 1);
+                            self.mov_x_reg_imm(12, inv_mask);
+                            self.emit_or_x_reg(0, 0, 12); // ORR x0, x0, x12
+                        }
+                        return true;
+                    }
+                }
+                // Normal (non-bitfield) field read
+                if field_off != 0 {
+                    self.emit_mov_x_reg(12, 0); // x12 = base
+                    self.emit_add_imm_x(0, 12, field_off as u32); // x0 = base + off
+                }
+                // Now x0 = address of field, load value
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                let idx = &expr.children[1];
+                // Array base: compute address; Pointer base: evaluate value
+                match &arr.ty {
+                    ValueType::Array(_, _) => {
+                        self.gen_lvalue_addr(arr);
+                    }
+                    _ => {
+                        self.gen_expr(arr);
+                    }
+                }
+                // x0 = base address
+                self.emit_mov_x_reg(12, 0); // x12 = base
+                self.gen_expr(idx); // x0 = index
+                                    // Scale index by element size
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                if elem_sz != 1 {
+                    self.emit_mov_x_reg(9, 0); // x9 = index
+                                               // Use LSL for power-of-2 sizes
+                    match elem_sz {
+                        2 => {
+                            self.emit(&[0x09, 0x01, 0x00, 0xd3]);
+                        } // lsl x9, x9, #1
+                        4 => {
+                            self.emit(&[0x09, 0x02, 0x00, 0xd3]);
+                        } // lsl x9, x9, #2
+                        8 => {
+                            self.emit(&[0x09, 0x03, 0x00, 0xd3]);
+                        } // lsl x9, x9, #3
+                        16 => {
+                            self.emit(&[0x09, 0x04, 0x00, 0xd3]);
+                        } // lsl x9, x9, #4
+                        _ => {
+                            self.mov_x_reg_imm(10, elem_sz as u64);
+                            self.emit_mul_x(9, 9, 10); // x9 = idx * elem_sz
+                        }
+                    }
+                } else {
+                    self.emit_mov_x_reg(9, 0); // x9 = index (no scaling)
+                }
+                // x12 = base, x9 = scaled offset
+                self.emit_add_x_reg(0, 12, 9); // x0 = base + offset
+                                               // Load value
+                let sz = value_type_size(&expr.ty).max(1);
+                let signed = matches!(&expr.ty, ValueType::Integer { signed: true, .. });
+                if sz <= 8 {
+                    self.emit_load_sz(0, 0, 0, sz, signed);
+                } else {
+                    self.emit_ldr_x(0, 0, 0, 8);
+                }
+                return true;
+            }
+            ExprKind::Opaque => {
+                // Opaque represents inline asm or label addresses that cannot be
+                // represented in the typed IR. These should be handled at the AST
+                // level via gen_expr_from_ast. For now, return 0 as a placeholder.
+                self.mov_w0_imm(0);
+                return true;
+            }
+            ExprKind::Aggregate => {
+                // Aggregate expressions (struct/array values) are not yet fully
+                // supported in the aarch64 backend. Return 0 as a placeholder.
+                self.mov_w0_imm(0);
+                return true;
             }
             _ => {
-                // For same size or larger extensions not covered
-                if src_reg != dest_reg {
-                    self.cg.emit_arm64_mov(dest_reg, src_reg, bits_to as usize / 8)?;
-                }
-                Ok(())
+                // Unhandled IR expression: emit diagnostic instead of
+                // silently producing wrong code (mov w0, #0).
+                let span = expr.span.clone();
+                let mut diag = crate::diagnostics::Diagnostic::err(
+                    "E0312",
+                    format!("unsupported IR expression on aarch64: {:?}", expr.kind),
+                    span,
+                );
+                diag.hint = Some("add handling in gen_expr or lower in SSA pass".to_string());
+                self.diagnostics.push(diag);
+                self.mov_w0_imm(0);
             }
         }
+        false
     }
 
-    fn zero_extend(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        bits_from: usize,
-        bits_to: usize,
-    ) -> ExprResult<()> {
-        // ARM64: UXTB/UXTH/UXTW for zero extension
-        match bits_from {
-            8 => {
-                self.cg.emit_uxtb(dest_reg, src_reg, bits_to);
-                Ok(())
+    /// Compute the address of an lvalue expression into x0.
+    /// Supports: Local, Member, Dereference, Index, Cast, Address.
+    pub(crate) fn gen_lvalue_addr(&mut self, expr: &TypedExpr) {
+        match &expr.kind {
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.mov_x0_sp_off(off);
+                } else if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_w0(name);
+                } else {
+                    self.mov_w0_imm(0);
+                }
             }
-            16 => {
-                self.cg.emit_uxth(dest_reg, src_reg, bits_to);
-                Ok(())
+            ExprKind::Member(ref field_name) => {
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    // ptr->field: evaluate pointer
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    // s.field: compute address of struct
+                    self.gen_lvalue_addr(child);
+                }
+                // x0 = base address, add field offset
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let off = struct_name
+                    .and_then(|n| {
+                        self.aggregate_fields.get(&n).and_then(|(fields, _)| {
+                            find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                        })
+                    })
+                    .unwrap_or(0);
+                if off != 0 {
+                    self.emit_mov_x_reg(12, 0);
+                    self.emit_add_imm_x(0, 12, off as u32);
+                }
             }
-            32 => {
-                self.cg.emit_uxtw(dest_reg, src_reg, bits_to);
-                Ok(())
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                match &arr.ty {
+                    ValueType::Array(_, _) => {
+                        self.gen_lvalue_addr(arr);
+                    }
+                    _ => {
+                        self.gen_expr(arr);
+                    }
+                }
+                // x0 = base address
+                self.emit_mov_x_reg(12, 0); // x12 = base
+                self.gen_expr(&expr.children[1]); // x0 = index
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                self.emit_mov_x_reg(9, 0); // x9 = index
+                if elem_sz != 1 {
+                    match elem_sz {
+                        2 => {
+                            self.emit(&[0x09, 0x01, 0x00, 0xd3]);
+                        }
+                        4 => {
+                            self.emit(&[0x09, 0x02, 0x00, 0xd3]);
+                        }
+                        8 => {
+                            self.emit(&[0x09, 0x03, 0x00, 0xd3]);
+                        }
+                        16 => {
+                            self.emit(&[0x09, 0x04, 0x00, 0xd3]);
+                        }
+                        _ => {
+                            self.mov_x_reg_imm(10, elem_sz as u64);
+                            self.emit_mul_x(9, 9, 10);
+                        }
+                    }
+                }
+                self.emit_add_x_reg(0, 12, 9); // x0 = base + scaled_idx
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                self.gen_expr(&expr.children[0]);
+                // x0 = pointer value = address
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
+            }
+            ExprKind::Address if !expr.children.is_empty() => {
+                self.gen_lvalue_addr(&expr.children[0]);
             }
             _ => {
-                if src_reg != dest_reg {
-                    self.cg.emit_arm64_mov(dest_reg, src_reg, bits_to as usize / 8)?;
-                }
-                Ok(())
+                self.mov_w0_imm(0);
             }
-        }
-    }
-
-    // ========== MEMORY OPERATIONS =========
-
-    fn load_from_register(
-        &self,
-        addr_reg: u8,
-        dest_reg: u8,
-        size: usize,
-        signed: bool,
-    ) -> ExprResult<()> {
-        // LDRA instructions (LDRA for signed, LDR for unsigned)
-        let load_signed = signed && size <= 8;
-        self.cg.load_from_memory_address(addr_reg, dest_reg, size, load_signed)?;
-        Ok(())
-    }
-
-    fn store_to_register(
-        &self,
-        src_reg: u8,
-        addr_reg: u8,
-        size: usize,
-    ) -> ExprResult<()> {
-        // STR instruction family
-        self.cg.store_to_memory_address(src_reg, addr_reg, size)?;
-        Ok(())
-    }
-
-    // ========== REGISTER ALLOCATION ==========
-    
-    fn allocate_gpr(&mut self, _ty: &Type) -> ExprResult<u8> {
-        // Allocate general purpose register (X0-X30)
-        let reg = self.cg.alloc_xreg()?;
-        Ok(reg)
-    }
-    
-    fn allocate_fpr(&mut self, _ty: &Type) -> ExprResult<u8> {
-        // Allocate floating-point register (V0-V31)
-        let reg = self.cg.alloc_vreg()?;
-        Ok(reg)
-    }
-
-    fn spill_register(&mut self, reg: u8, stack_offset: i64) -> ExprResult<()> {
-        // Store register to stack
-        self.cg.store_to_stack(reg as u32, stack_offset)?;
-        Ok(())
-    }
-
-    // ========== ADDITIONAL BACKEND HOOKS FOR load_operand() ==========
-    
-    fn load_immediate_constant(&mut self, value: u64, dest_reg: u8, _ty: &Type) -> ExprResult<()> {
-        let size = 8; // AArch64 immediate constants are 64-bit
-        // ARM64 uses MOVZ/MOVK for large immediates
-        self.cg.emit_arm64_mov_imm(dest_reg, value, size)?;
-        Ok(())
-    }
-
-    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type) -> ExprResult<()> {
-        let size = ty.size() as usize;
-        // Load address of symbol
-        self.cg.load_symbol_address(symbol, dest_reg)?;
-        // Then load the value; multi-word aggregates are handled separately.
-        self.cg.load_from_memory_address(dest_reg, dest_reg, size, ty_is_signed(ty))?;
-        Ok(())
-    }
-
-    fn shift_left(&mut self, src_reg: u8, dest_reg: u8, count: u8) -> ExprResult<()> {
-        // LSL (logical shift left) with register operand
-        self.cg.emit_arm64_lsl_reg(dest_reg, src_reg, count)?;
-        Ok(())
-    }
-
-    fn imul_imm(&mut self, dest_reg: u8, src_reg: u8, imm: u64) -> ExprResult<()> {
-        // UMOV + MUL for immediate multiplication
-        self.cg.imul_with_imm(dest_reg, src_reg, imm)?;
-        Ok(())
-    }
-
-    fn add_regs(&mut self, src1: u8, src2: u8, dest: u8) -> ExprResult<()> {
-        // ADD dest, src1, src2
-        self.cg.emit_arm64_add(dest, src1, src2);
-        Ok(())
-    }
-
-    fn sub_regs(&mut self, src1: u8, src2: u8, dest: u8) -> ExprResult<()> {
-        // SUB dest, src1, src2
-        self.cg.emit_arm64_sub(dest, src1, src2);
-        Ok(())
-    }
-
-    fn add_imm(&mut self, base_reg: u8, offset: i64, dest_reg: u8) -> ExprResult<()> {
-        // ADRP/ADD or ADR for address calculation
-        if offset >= 0 && offset < 4096 {
-            self.cg.add_positive_offset(base_reg, dest_reg, offset as u32)?;
-        } else if offset >= -4096 && offset < 0 {
-            self.cg.add_negative_offset(base_reg, dest_reg, (-offset) as u32)?;
-        } else {
-            // Large offsets: movz/movk pattern
-            self.cg.ldr_with_large_offset(dest_reg, base_reg, offset)?;
-        }
-        Ok(())
-    }
-
-    fn mov_reg_to_reg(&mut self, src_reg: u8, dest_reg: u8, size_bytes: usize) -> ExprResult<()> {
-        // MOV/MOVK pair if needed
-        self.cg.emit_arm64_mov(dest_reg, src_reg, size_bytes)?;
-        Ok(())
-    }
-
-    fn store_address(&mut self, dest_reg: u8, symbol: &str) -> ExprResult<()> {
-        // Get symbol address
-        self.cg.load_symbol_address(symbol, dest_reg)?;
-        Ok(())
-    }
-
-    fn emit_call(&mut self, func: &crate::ast::Expr, args: &[crate::ast::Expr], _result_reg: u8) -> ExprResult<()> {
-        // Evaluate arguments (AAPCS64 calling convention)
-        // First 8 args in X0-X7, rest on stack.
-        // TODO: Full argument lowering (stack args, HFA/HVA in V registers).
-        for (i, _arg) in args.iter().enumerate().take(8) {
-            let reg = self.cg.alloc_xreg()?;
-            let _ = (i, reg);
-        }
-
-        // Call function
-        if let crate::ast::Expr::Ident { name, .. } = func {
-            self.cg.call_label(name.name.as_str(), true)?;
-        }
-
-        Ok(())
-    }
-
-    fn branch_if_zero(&mut self, cond_reg: u8, target: &str) -> ExprResult<()> {
-        // CBZ/X (compare and branch on zero)
-        self.cg.branch_if_zero(cond_reg, target)?;
-        Ok(())
-    }
-
-    fn jump(&mut self, target: &str) -> ExprResult<()> {
-        // B (branch unconditional)
-        self.cg.jump(target)?;
-        Ok(())
-    }
-
-    fn define_label(&mut self, label: &str) -> ExprResult<()> {
-        // Label definition
-        self.cg.define_label(label)?;
-        Ok(())
-    }
-
-    fn clear_register(&mut self, reg: u8, ty: &Type) -> ExprResult<()> {
-        // ORR dest, reg, #0 (or MOVZX for efficiency)
-        let size = ty.size() as usize;
-        self.cg.orr_clear(reg, size)?;
-        Ok(())
-    }
-}
-
-// ARM64-specific constants
-pub(crate) mod arm64 {
-    #[derive(Clone, Copy, PartialEq)]
-    pub enum SetCC {
-        EQ, NE, LT, GE, GT, LE, HI, LS, MI, PL, VS, VC, HS, LO,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_binary_ops_covered() {
-        // Verify all binary operations are handled
-        let ops = [
-            BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem,
-            BinOp::And, BinOp::Or, BinOp::Xor,
-            BinOp::Shl, BinOp::Shr,
-            BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
-        ];
-        
-        for _op in &ops {
-            // Just verify structure compiles
-        }
-    }
-    
-    #[test]
-    fn test_unary_ops_covered() {
-        // Verify unary operations
-        let ops = [
-            UnOp::Neg, UnOp::Not, UnOp::Plus, UnOp::AddrOf, UnOp::Deref,
-        ];
-        
-        for _op in &ops {
-            // Structure verification
         }
     }
 }

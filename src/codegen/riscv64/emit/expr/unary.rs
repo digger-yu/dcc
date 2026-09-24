@@ -1,448 +1,517 @@
-// src/codegen/riscv64/emit/expr/unary.rs - Unary operators emission (RISC-V 64 backend)
-// Priority 4 Task: Extract working implementations from riscv64.rs.bak
-
-use crate::ast::{Expr, Type, UnOp};
-use crate::codegen::riscv64::codegen::Riscv64Codegen;
-use crate::ir::{TypedExpr, ValueType};
-use crate::target::Target;
-use std::collections::HashMap;
+// RISC-V 64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::codegen::riscv64::codegen::{Riscv64Codegen, align_up_u64, value_type_size};
+use crate::codegen::shared::elf::{self, ElfRela};
+use crate::ir::{ExprLiteral, TypedExpr, ValueType};
 
 impl Riscv64Codegen {
-    // ========================================================================
-    // 一元表达式发射逻辑
-    // ========================================================================
-
-    /// 发射一元运算：operand -> result
-    pub fn emit_unary(&mut self, unop: UnOp, operand: &TypedExpr) -> TypedExpr {
-        match unop {
-            UnOp::AddrOf => self.emit_address_of(operand),
-            UnOp::Deref => self.emit_dereference(operand),
-            UnOp::PreInc => self.emit_pre_increment(operand),
-            UnOp::PreDec => self.emit_pre_decrement(operand),
-            UnOp::PostInc => self.emit_post_increment(operand),
-            UnOp::PostDec => self.emit_post_decrement(operand),
-            UnOp::NotBitwise => self.emit_bitwise_not(operand),
-            UnOp::NotLogical => self.emit_logical_not(operand),
-            UnOp::Cast(cast_ty) => self.emit_type_cast(operand, cast_ty),
+    pub(crate) fn load_global_addr_a0(&mut self, name: &str) {
+        // TLS 全局变量: 分发 TLS 访问序列 (获取 TLS 变量地址到 a0)
+        if self.tls_globals.contains_key(name) {
+            self.emit_tls_le_access(name);
+            return;
+        }
+        if self.relocatable {
+            let pos = self.pos();
+            self.emit_auipc_a0(0);
+            if let Some(&idx) = self.sym_index.get(name) {
+                self.relocations.push(ElfRela {
+                    offset: pos,
+                    sym_index: idx,
+                    rel_type: elf::R_RISCV_PCREL_HI20,
+                    addend: 0,
+                });
+                let pos2 = self.pos();
+                self.emit_ld_a0_a0(0);
+                self.rodata_relocations.push(ElfRela {
+                    offset: pos2,
+                    sym_index: idx,
+                    rel_type: elf::R_RISCV_PCREL_LO12_I,
+                    addend: 0,
+                });
+            }
+        } else if let Some(&off) = self.global_rodata.get(name) {
+            let addr = self.entry + align_up_u64(self.code.len() as u64, 8) + off;
+            self.li_a0(addr as i32);
         }
     }
 
-    /// 发射地址取址 (&): generate LEA instruction
-    fn emit_address_of(&mut self, operand: &TypedExpr) -> TypedExpr {
-        match &operand.kind {
-            crate::ir::ExprKind::Local(name) => {
-                // 局部变量：加载栈偏移地址
-                if let Some(&off) = self.locals.get(name) {
-                    self.li_a0(off as i32); // Load offset directly as address
-                    // Adjust for stack pointer
-                    self.add_sp_fp();
-                } else if let Some(&offset) = self.global_rodata.get(name) {
-                    // 全局变量：计算绝对地址
-                    let addr = self.entry + crate::codegen::riscv64::align_up_u64(self.code.len() as u64, 8) + offset;
-                    self.li_a0(addr as i32);
-                } else {
-                    self.li_a0(0);
+    // ========================================================================
+    // 原子操作内建函数 (__atomic_* 系列)
+    // ========================================================================
+
+    /// 获取指针参数所指元素的大小
+    pub(crate) fn atomic_elem_size(&self, args: &[TypedExpr], idx: usize) -> usize {
+        if idx >= args.len() {
+            return 8;
+        }
+        match &args[idx].ty {
+            ValueType::Pointer(inner) => value_type_size(inner),
+            ValueType::Array(inner, _) => value_type_size(inner),
+            _ => 8,
+        }
+    }
+
+    /// 尝试从 IR 表达式中提取原子内存序常量值.
+    pub(crate) fn eval_mem_order(&self, arg: &TypedExpr) -> i32 {
+        match &arg.literal {
+            Some(ExprLiteral::Int(v)) => *v as i32,
+            _ => 5, // default SEQ_CST for safety
+        }
+    }
+
+    /// 原子内建函数 codegen: 返回 true 表示已处理
+    /// 参数约定: args[0]=ptr (a0), args[1]=val (a0)
+    /// 结果返回在 a0
+    pub(crate) fn gen_atomic_builtin(&mut self, name: &str, args: &[TypedExpr]) -> bool {
+        match name {
+            "__atomic_load_n" => {
+                if args.len() < 2 {
+                    return false;
                 }
-            }
-            crate::ir::ExprKind::Member(field_name) => {
-                // 结构体成员：计算成员地址
-                if !operand.children.is_empty() {
-                    let base = &operand.children[0];
-                    self.gen_expr(base); // a0 = base address
-                    
-                    // 获取字段偏移
-                    if let ValueType::Aggregate { name, .. } = &base.ty {
-                        if let Some(fields) = crate::codegen::riscv64::find_aggregate_fields(name) {
-                            if let Some((field_info, extra)) = crate::ast::find_field(&fields, field_name) {
-                                let offset = field_info.offset + extra;
-                                if offset != 0 {
-                                    self.emit_addi(10, 10, offset as i32);
-                                }
-                            }
-                        }
+                let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[1]);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr (save)
+                match ord {
+                    0 => {} // RELAXED: no fence
+                    2 => { // ACQUIRE: fence r, rw
+                        self.emit_fence();
                     }
+                    _ => { // SEQ_CST/RELEASE: fence rw, rw
+                        self.emit_fence();
+                    }
+                }
+                // load from [a1] to a0
+                self.emit_load_sz(10, 11, 0, sz);
+                true
+            }
+            "__atomic_store_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                let ord = self.eval_mem_order(&args[2]);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = val
+                self.gen_expr(&args[1]);
+                match ord {
+                    0 => {} // RELAXED: no fence
+                    _ => { // SEQ_CST/ACQUIRE/RELEASE: fence before store
+                        self.emit_fence();
+                    }
+                }
+                // store a0 to [a1]
+                self.emit_store_sz(10, 11, 0, sz);
+                true
+            }
+            "__atomic_exchange_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = val
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12); // a2 = val
+                // amoswap [a1], a2 -> a0 (old value)
+                self.emit_amoswap(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_add" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                // amoadd [a1], a2 -> a0 (old value)
+                self.emit_amoadd(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_sub" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                // negate a0 (a0 = -val)
+                self.emit_neg(10, 10);
+                self.mv_a_reg(12);
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                // amoadd [a1], a2 -> a0 (old value, adding negative)
+                self.emit_amoadd(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_and" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                // amoand [a1], a2 -> a0
+                self.emit_amoand(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_or" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                // amoor [a1], a2 -> a0
+                self.emit_amoor(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_xor" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // fence rw, rw only for SEQ_CST before AMO
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                // amoxor [a1], a2 -> a0
+                self.emit_amoxor(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_nand" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12); // a2 = val
+                let ord = self.eval_mem_order(&args[2]);
+                if ord == 5 { self.emit_fence(); }
+                let l_retry = self.fresh_label("atomic_nand");
+                let l_done = self.fresh_label("atomic_nand_done");
+                self.label(&l_retry);
+                self.emit_lr(sz, 10, 11);    // a0 = old
+                self.emit_and(13, 10, 12);    // a3 = old & val
+                self.emit_xori(13, 13, -1);   // a3 = ~(old & val)
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &l_retry);
+                self.label(&l_done);
+                true
+            }
+            "__atomic_compare_exchange_n" => {
+                // args: (ptr, expected, desired, weak, success_order, failure_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = *expected (dereference expected pointer)
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(13); // a3 = expected_ptr
+                // load *expected_ptr to a2
+                self.emit_load_sz(12, 13, 0, sz); // a2 = *expected
+                // a0 = desired
+                self.gen_expr(&args[2]);
+                self.mv_a_reg(14); // a4 = desired
+                // fence rw, rw only for SEQ_CST before LR/SC
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
                 } else {
-                    self.li_a0(0);
-                }
-            }
-            crate::ir::ExprKind::Index => {
-                // 数组索引：计算元素地址
-                if operand.children.len() >= 2 {
-                    let base_expr = &operand.children[0];
-                    let index_expr = &operand.children[1];
-                    
-                    self.gen_expr(base_expr); // a0 = base
-                    
-                    self.gen_expr(index_expr); // a1 = index
-                    let elem_size = crate::ir::value_type_size(&operand.ty);
-                    self.emit_slli(11, 11, elem_size.trailing_zeros() as i32); // index * size
-                    self.emit_add(10, 10, 11); // a0 += index * size
-                } else {
-                    self.li_a0(0);
-                }
-            }
-            _ => {
-                // 默认情况：直接加载为地址
-                self.gen_expr(operand);
-            }
-        }
-
-        TypedExpr {
-            kind: crate::ir::ExprKind::Address,
-            ty: crate::ir::ValueType::Pointer(Box::new(operand.ty.clone())),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射取消引用 (*): generate LOAD from address
-    fn emit_dereference(&mut self, operand: &TypedExpr) -> TypedExpr {
-        match &operand.ty {
-            crate::ir::ValueType::Pointer(inner_ty) => {
-                // 加载指针指向的值
-                self.gen_expr(operand); // a0 = address
-                
-                // 根据类型大小选择合适的加载指令
-                let size = inner_ty.size().max(1);
-                self.emit_load_sz(10, 10, 0, size);
-                
-                // 整数提升处理
-                if matches!(inner_ty.as_ref(), 
-                    crate::ir::ValueType::Char(_) | 
-                    crate::ir::ValueType::Int(_)
-                ) {
-                    self.gen_int_promote_ir(inner_ty);
-                }
-            }
-            crate::ir::ValueType::Float { bits: 64 } => {
-                // 浮点指针加载
-                self.gen_expr(operand); // a0 = address
-                self.emit_fld_fa0(10, 0); // fload double precision
-            }
-            _ => {
-                // 默认处理：零值
+                    5
+                };
+                if sord == 5 { self.emit_fence(); }
+                // LR/SC CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                // lr.w/d a0, [a1] (load current value)
+                self.emit_lr(sz, 10, 11);
+                // bne a0, a2, fail (compare current with expected)
+                self.emit_bne(10, 12, &l_fail);
+                // sc.w/d a5, a4, [a1] (store desired)
+                self.emit_sc(sz, 15, 14, 11);
+                // bnez a5, retry (if store failed, retry)
+                self.emit_bnez(15, &l_retry);
+                // success: a0 = 1
+                self.li_a0(1);
+                self.j(&l_done);
+                // failure: store current to *expected, a0 = 0
+                self.label(&l_fail);
+                self.emit_store_sz(10, 13, 0, sz); // *expected = current
                 self.li_a0(0);
+                self.label(&l_done);
+                true
             }
-        }
-
-        // 从操作数提取内层类型
-        let inner_ty = match &operand.ty {
-            crate::ir::ValueType::Pointer(t) => t.clone(),
-            _ => crate::ir::ValueType::Int(32),
-        };
-
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::Deref),
-            ty: inner_ty,
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射前置增量 (++x): load-modify-store sequence
-    fn emit_pre_increment(&mut self, operand: &TypedExpr) -> TypedExpr {
-        let one = TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: crate::ir::ValueType::Int(32),
-            literal: Some(crate::ir::ExprLiteral::Int(1)),
-            children: Vec::new(),
-            span: operand.span.clone(),
-        };
-
-        // ++x: x = x + 1, 返回新值
-        self.gen_expr(operand); // Load current value
-        
-        let val_reg = 11; // a1 = current value
-        self.emit_mv(val_reg, 10);
-        
-        self.gen_expr_from_ast_opt(&one); // a0 = 1
-        self.emit_add(10, val_reg, 10); // a0 += 1
-        
-        // Store back to memory (L-value required)
-        self.store_to_lvalue(operand, 10);
-        
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::PreInc),
-            ty: operand.ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射前置减量 (--x): load-modify-store sequence  
-    fn emit_pre_decrement(&mut self, operand: &TypedExpr) -> TypedExpr {
-        let minus_one = TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: crate::ir::ValueType::Int(32),
-            literal: Some(crate::ir::ExprLiteral::Int(-1)),
-            children: Vec::new(),
-            span: operand.span.clone(),
-        };
-
-        // --x: x = x - 1, 返回新值
-        self.gen_expr(operand); // Load current value
-        
-        let val_reg = 11; // a1 = current value
-        self.emit_mv(val_reg, 10);
-        
-        self.gen_expr_from_ast_opt(&minus_one); // a0 = -1
-        self.emit_add(10, val_reg, 10); // a0 -= 1
-        
-        // Store back to memory
-        self.store_to_lvalue(operand, 10);
-        
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(crate::ast::UnOp::PreDec),
-            ty: operand.ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射后置增量 (x++): load with increment after
-    fn emit_post_increment(&mut self, operand: &TypedExpr) -> TypedExpr {
-        // x++: return old value, then x = x + 1
-        let temp_off = self.alloc_local("<post_inc>", 8);
-        
-        // Save current value
-        self.gen_expr(operand);
-        self.emit_sd(10, 2, temp_off); // Save original value
-        
-        // Calculate new value
-        let one = TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: crate::ir::ValueType::Int(32),
-            literal: Some(crate::ir::ExprLiteral::Int(1)),
-            children: Vec::new(),
-            span: operand.span.clone(),
-        };
-        
-        let orig_reg = 11; // a1 = old value
-        self.emit_mv(orig_reg, 10);
-        
-        self.gen_expr_from_ast_opt(&one);
-        self.emit_add(10, orig_reg, 10);
-        
-        // Store back
-        self.store_to_lvalue(operand, 10);
-        
-        // Return original value
-        self.emit_ld(10, 2, temp_off);
-        
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(UnOp::PostInc),
-            ty: operand.ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射后置减量 (x--): load with decrement after
-    fn emit_post_decrement(&mut self, operand: &TypedExpr) -> TypedExpr {
-        let temp_off = self.alloc_local("<post_dec>", 8);
-        
-        // Save current value
-        self.gen_expr(operand);
-        self.emit_sd(10, 2, temp_off); // Save original value
-        
-        // Calculate new value
-        let minus_one = TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: crate::ir::ValueType::Int(32),
-            literal: Some(crate::ir::ExprLiteral::Int(-1)),
-            children: Vec::new(),
-            span: operand.span.clone(),
-        };
-        
-        let orig_reg = 11; // a1 = old value
-        self.emit_mv(orig_reg, 10);
-        
-        self.gen_expr_from_ast_opt(&minus_one);
-        self.emit_add(10, orig_reg, 10);
-        
-        // Store back
-        self.store_to_lvalue(operand, 10);
-        
-        // Return original value
-        self.emit_ld(10, 2, temp_off);
-        
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(UnOp::PostDec),
-            ty: operand.ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射逻辑 NOT (!): zero-check comparison
-    fn emit_logical_not(&mut self, operand: &TypedExpr) -> TypedExpr {
-        let l_nonzero = self.fresh_label("Lnonzero");
-        let l_zero = self.fresh_label("Lzero");
-        
-        self.gen_expr(operand);
-        
-        // 如果非零，则结果为 false (0)
-        self.emit_bnez(10, &l_nonzero);
-        
-        // 否则结果为 true (1)
-        self.li_a0(1);
-        let l_done = self.fresh_label("Ldone");
-        self.j(&l_done);
-        
-        self.label(&l_nonzero);
-        self.li_a0(0);
-        
-        self.label(&l_done);
-        
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(UnOp::NotLogical),
-            ty: crate::ir::ValueType::Int(32), // 逻辑结果总是 int
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射按位 NOT (~): XOR with all-ones
-    fn emit_bitwise_not(&mut self, operand: &TypedExpr) -> TypedExpr {
-        self.gen_expr(operand); // a0 = operand
-        
-        // 按位取反：XOR 全 1 (对于不同类型宽度不同)
-        match &operand.ty {
-            crate::ir::ValueType::Int(bits) if *bits == 8 => {
-                // 字节操作
-                self.emit_xori(10, 10, 0xFF);
-            }
-            crate::ir::ValueType::Int(bits) if *bits == 16 => {
-                // 半字操作
-                self.emit_xori(10, 10, 0xFFFF);
-            }
-            crate::ir::ValueType::Int(64) => {
-                // 双字：先设置全 1，然后 XNOR（或两次 XOR）
-                self.load_all_ones_64();
-                self.emit_xor(10, 10, 11);
-            }
-            _ => {
-                // 默认 32 位
-                self.emit_xori(10, 10, 0xFFFFFFFF);
-            }
-        }
-
-        TypedExpr {
-            kind: crate::ir::ExprKind::Unary(UnOp::NotBitwise),
-            ty: operand.ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
-    }
-
-    /// 发射类型转换 (explicit casts)
-    fn emit_type_cast(&mut self, operand: &TypedExpr, cast_ty: Box<crate::ast::Type>) -> TypedExpr {
-        let from_ty = &operand.ty;
-        let to_ty = &cast_ty.to_value_type();
-
-        match (from_ty, to_ty) {
-            // Integer to integer conversion
-            (crate::ir::ValueType::Int(from_bits), crate::ir::ValueType::Int(to_bits)) => {
-                self.gen_expr(operand);
-                
-                if *from_bits > *to_bits {
-                    // 截断：高位丢弃
-                    // 例如：long -> int, int -> short
-                } else if *from_bits < *to_bits {
-                    // 扩展：有符号符号扩展到目标宽度
-                    if matches!(from_ty, crate::ir::ValueType::Char(Type::SChar)) {
-                        self.sign_extend_to_reg(10);
-                    }
+            "__atomic_compare_exchange" => {
+                // Non-_n variant: desired is also a pointer (must dereference)
+                // args: (ptr, expected_ptr, desired_ptr, weak, succ_order, fail_order)
+                if args.len() < 3 {
+                    return false;
                 }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = expected_ptr
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(13); // a3 = expected_ptr
+                // load *expected_ptr to a2
+                self.emit_load_sz(12, 13, 0, sz); // a2 = *expected
+                // a0 = desired_ptr -> dereference to get desired
+                self.gen_expr(&args[2]);
+                self.mv_a_reg(15); // a5 = desired_ptr (reuse for temp)
+                self.emit_load_sz(14, 15, 0, sz); // a4 = *desired_ptr
+                // fence only for SEQ_CST
+                let sord = if args.len() > 4 {
+                    self.eval_mem_order(&args[4])
+                } else {
+                    5
+                };
+                if sord == 5 { self.emit_fence(); }
+                // LR/SC CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &l_fail);
+                self.emit_sc(sz, 15, 14, 11);
+                self.emit_bnez(15, &l_retry);
+                self.li_a0(1);
+                self.j(&l_done);
+                self.label(&l_fail);
+                self.emit_store_sz(10, 13, 0, sz); // *expected = current
+                self.li_a0(0);
+                self.label(&l_done);
+                true
             }
-            
-            // Integer to float
-            (crate::ir::ValueType::Int(_), crate::ir::ValueType::Float { bits: 32 }) => {
-                self.gen_expr(operand);
-                self.emit_fcvt_s_w_fa0(); // 整数到单精度浮点
+            "__atomic_thread_fence" => {
+                self.emit_fence();
+                true
             }
-            (crate::ir::ValueType::Int(_), crate::ir::ValueType::Float { bits: 64 }) => {
-                self.gen_expr(operand);
-                self.emit_fcvt_d_w_fa0(); // 整数到双精度浮点
+            "__atomic_signal_fence" => {
+                // Compiler barrier only, no hardware instruction
+                true
             }
-            
-            // Float to integer
-            (crate::ir::ValueType::Float { bits: 32 }, crate::ir::ValueType::Int(_)) => {
-                self.gen_expr(operand);
-                self.emit_fcvt_w_s_a0(); // 单精度浮点到整数
+            "__atomic_test_and_set" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.li_reg(12, 1); // a2 = 1
+                self.emit_amoswap(sz, 10, 12, 11); // a0 = old
+                true
             }
-            (crate::ir::ValueType::Float { bits: 64 }, crate::ir::ValueType::Int(_)) => {
-                self.gen_expr(operand);
-                self.emit_fcvt_w_d_a0(); // 双精度浮点到整数
+            "__atomic_clear" => {
+                // args: (ptr, mem_order)
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                self.li_reg(12, 0); // a2 = 0
+                let ord = self.eval_mem_order(&args[1]);
+                if ord == 5 { self.emit_fence(); }
+                self.emit_store_sz(10, 11, 0, sz);
+                true
             }
-            
-            // Pointer conversions
-            (crate::ir::ValueType::Pointer(_), _) => {
-                self.gen_expr(operand);
+            "__atomic_is_lock_free" => {
+                self.li_a0(1);
+                true
             }
-            (_, crate::ir::ValueType::Pointer(_)) => {
-                self.gen_expr(operand);
+            // ===== __sync_* legacy atomic operations =====
+            "__sync_fetch_and_add" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoadd(sz, 10, 12, 11); true
             }
-            
-            _ => {
-                // 默认：直接传递
-                self.gen_expr(operand);
+            "__sync_fetch_and_sub" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.emit_neg(10, 10); self.mv_a_reg(12);
+                self.emit_amoadd(sz, 10, 12, 11); true
             }
+            "__sync_fetch_and_or" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoor(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_and" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoand(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_xor" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoxor(sz, 10, 12, 11); true
+            }
+            "__sync_fetch_and_nand" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_fn"); let ld = self.fresh_label("sy_fn_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(13, 10, 12); self.emit_xori(13, 13, -1);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_add_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_af"); let ld = self.fresh_label("sy_af_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_add(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_sub_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_sf"); let ld = self.fresh_label("sy_sf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_sub(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_or_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_of"); let ld = self.fresh_label("sy_of_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_or(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_and_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_anf"); let ld = self.fresh_label("sy_anf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_xor_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_xf"); let ld = self.fresh_label("sy_xf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_xor(10, 10, 12); self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_nand_and_fetch" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                let lr = self.fresh_label("sy_nf"); let ld = self.fresh_label("sy_nf_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_and(10, 10, 12); self.emit_xori(10, 10, -1);
+                self.emit_sc(sz, 15, 10, 11);
+                self.emit_bnez(15, &lr); self.label(&ld); true
+            }
+            "__sync_bool_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.gen_expr(&args[2]); self.mv_a_reg(13);
+                let lr = self.fresh_label("sy_cas");
+                let lf = self.fresh_label("sy_cas_f");
+                let ld = self.fresh_label("sy_cas_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &lf);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr);
+                self.li_a0(1); self.j(&ld);
+                self.label(&lf); self.li_a0(0);
+                self.label(&ld); true
+            }
+            "__sync_val_compare_and_swap" => {
+                if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.gen_expr(&args[2]); self.mv_a_reg(13);
+                let lr = self.fresh_label("sy_casv");
+                let lf = self.fresh_label("sy_casv_f");
+                let ld = self.fresh_label("sy_casv_d");
+                self.label(&lr); self.emit_lr(sz, 10, 11);
+                self.emit_bne(10, 12, &lf);
+                self.emit_sc(sz, 15, 13, 11);
+                self.emit_bnez(15, &lr);
+                self.j(&ld);
+                self.label(&lf); // a0 = old value from lr
+                self.label(&ld); true
+            }
+            "__sync_lock_test_and_set" => {
+                if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.gen_expr(&args[1]); self.mv_a_reg(12);
+                self.emit_amoswap(sz, 10, 12, 11); true
+            }
+            "__sync_lock_release" => {
+                if args.is_empty() { return false; }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]); self.mv_a_reg(11);
+                self.li_reg(12, 0);
+                self.emit_store_sz(10, 11, 0, sz); true
+            }
+            "__sync_synchronize" => {
+                self.emit_fence(); true
+            }
+            _ => false,
         }
-
-        TypedExpr {
-            kind: crate::ir::ExprKind::Cast,
-            ty: to_ty.clone(),
-            literal: None,
-            children: vec![operand.clone()],
-            span: operand.span.clone(),
-        }
     }
 
-    /// 将值存储到 L-value
-    fn store_to_lvalue(&mut self, lvalue: &TypedExpr, value_reg: u8) {
-        match &lvalue.kind {
-            crate::ir::ExprKind::Local(name) => {
-                if let Some(&off) = self.locals.get(name) {
-                    self.emit_store_sz(value_reg, 2, off, 8);
-                }
-            }
-            _ => {
-                // 通用 L-value 存储
-                self.gen_lvalue_addr(lvalue); // a0 = address
-                self.emit_addi(12, 10, 0); // a2 = address (save)
-                self.emit_store_sz(value_reg, 12, 0, 8);
-            }
-        }
-    }
-
-    /// 生成所有 1 的 64 位常量
-    fn load_all_ones_64(&mut self) {
-        // li a1, -1 产生全 1 模式
-        self.li_a0(-1_i32);
-        self.emit_mv(11, 10);
-    }
-
-    /// 从 AST 解析的表达式中评估常量 (辅助函数)
-    fn gen_expr_from_ast_opt(&mut self, expr: &Option<Box<crate::ast::Expr>>) {
-        if let Some(e) = expr {
-            self.gen_expr_from_ast(e);
-        } else {
-            self.li_a0(0);
-        }
-    }
-
-    /// 添加 SP 和 FP 以计算有效地址
-    fn add_sp_fp(&mut self) {
-        // 假设 fp 寄存器是 x19 (s0)
-        self.emit_add(10, 2, 19); // a0 += sp + fp
-    }
 }

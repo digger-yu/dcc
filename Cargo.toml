@@ -10,12 +10,14 @@ license    = "Apache-2.0"
 # GCC source tree integration tests (libdecnumber, etc.)
 gcc_src = []
 
-# ARM/MIPS modular backends
-arm-modular = []      # Enable new modular ARM implementation
-mips-modular = []     # Enable new modular MIPS implementation
-
-# Combined features
-full-modular = ["arm-modular", "mips-modular"]
+# 后端 family 特性 (默认全部关闭; 主线只编 x86_64 + shared)
+# - `arm`: 启用 32 位 ARM + 64 位 AArch64 后端
+# - `mips`: 启用 32/64 位 MIPS + RISC-V 64 后端 (RISC 家族打包)
+default = []
+arm = []
+mips = []
+# 同时打开两个家族
+all-backends = ["arm", "mips"]
 
 [profile.release]
 opt-level = 3

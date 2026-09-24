@@ -1,215 +1,316 @@
-// src/codegen/riscv64/emit/expr/literal.rs - Literal values emission (RISC-V 64 backend)
-// Priority 4 Task: Extract working implementations from riscv64.rs.bak
-
-use crate::ast::Type;
-
-use crate::codegen::riscv64::codegen::Riscv64Codegen;
-use crate::ir::{TypedExpr, ValueType};
-
-use crate::target::Target;
-use std::collections::HashMap;
-
+// RISC-V 64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::codegen::riscv64::codegen::{BranchKind, Riscv64Codegen};
 
 impl Riscv64Codegen {
-    // ========================================================================
-    // 字面量发射逻辑
-    // ========================================================================
-
-    /// 发射字面量值到寄存器
-    pub fn emit_literal(&mut self, literal: &crate::ir::ExprLiteral) -> TypedExpr {
-        match literal {
-            crate::ir::ExprLiteral::Int(v) => {
-                self.emit_integer_literal(*v)
-            }
-            crate::ir::ExprLiteral::Float(v) => {
-                self.emit_float_literal(*v as f32)
-            }
-            _ => {
-                // 其他类型的字面量（如字符串）需要特殊处理
-                self.emit_string_literal()
-            }
-        }
+    pub(crate) fn emit_slt(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x33;
+        self.emit(&insn.to_le_bytes());
     }
 
-    /// 发射整数常量 (hex, octal, decimal)
-    fn emit_integer_literal(&mut self, value: i128) -> TypedExpr {
-        // 将 i128 转换为适合 RISC-V 的格式
-        let value_64 = value as u64;
-        
-        if value <= i32::MAX as i128 && value >= i32::MIN as i128 {
-            // 小值：使用 li 指令直接加载
-            self.li_a0(value as i32);
-            
-            return TypedExpr {
-                kind: crate::ir::ExprKind::Constant,
-                ty: ValueType::Int(64),
-                literal: Some(crate::ir::ExprLiteral::Int(value)),
-                children: Vec::new(),
-                span: crate::diagnostics::Span::unknown(),
-            };
+    pub(crate) fn emit_sltu(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_lw(&mut self, rd: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.LW
+        if (8..=15).contains(&rd)
+            && (8..=15).contains(&rs1)
+            && (0..=124).contains(&off)
+            && off % 4 == 0
+        {
+            self.emit_c_lw(rd - 8, rs1 - 8, off as u8);
+            return;
+        }
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_sw(&mut self, rs2: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.SW
+        if (8..=15).contains(&rs2)
+            && (8..=15).contains(&rs1)
+            && (0..=124).contains(&off)
+            && off % 4 == 0
+        {
+            self.emit_c_sw(rs2 - 8, rs1 - 8, off as u8);
+            return;
+        }
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b010 << 12
+            | (imm & 0x1f) << 7
+            | 0x23;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LB - 加载字节 (有符号扩展)
+    pub(crate) fn emit_lb(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LH - 加载半字 (有符号扩展)
+    pub(crate) fn emit_lh(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SH - 存储半字
+    pub(crate) fn emit_sh(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b001 << 12
+            | (imm & 0x1f) << 7
+            | 0x23;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_jal(&mut self, rd: u8, _offset: i32) {
+        let insn = (rd as u32) << 7 | 0x6f;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_jalr(&mut self, rd: u8, rs1: u8, imm: i32) {
+        let imm = imm as u32 & 0xfff;
+        let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x67;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_beq(&mut self, rs1: u8, rs2: u8, _offset: i32) {
+        let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// AUIPC rd, imm: rd = PC + imm << 12
+    pub(crate) fn emit_auipc(&mut self, rd: u8, imm: i32) {
+        let imm = (imm as u32 & 0xfffff) << 12;
+        let insn = imm | (rd as u32) << 7 | 0x17;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// BNE rs1, rs2, label: Branch if not equal
+    pub(crate) fn emit_bne(&mut self, rs1: u8, rs2: u8, label: &str) {
+        let pos = self.pos();
+        // BNE: funct3=001, opcode=1100011
+        let insn = (1u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_bne(pos, rs1, rs2, target);
         } else {
-            // 大值：使用 auipc + ld 或 lui + addi 组合
-            self.load_large_constant(value_64);
-            
-            return TypedExpr {
-                kind: crate::ir::ExprKind::Constant,
-                ty: ValueType::Int(64),
-                literal: Some(crate::ir::ExprLiteral::Int(value)),
-                children: Vec::new(),
-                span: crate::diagnostics::Span::unknown(),
-            };
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Bne));
         }
     }
 
-    /// 发射单精度浮点常量
-    fn emit_float_literal(&mut self, value: f32) -> TypedExpr {
-        // 将 f32 转换为 IEEE 754 位模式并加载
-        let bits = value.to_bits();
-        self.load_float_fa0(value);
-        
-        return TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: ValueType::Float { bits: 32 },
-            literal: Some(crate::ir::ExprLiteral::Float(value as f64)),
-            children: Vec::new(),
-            span: crate::diagnostics::Span::unknown(),
-        };
+    /// Patch BNE instruction at given position
+    pub(crate) fn patch_bne(&mut self, at: u64, rs1: u8, rs2: u8, target: u64) {
+        self.patch_branch(at, rs1, rs2, target, 1);
     }
 
-    /// 发射双精度浮点常量
-    fn emit_double_literal(&mut self, value: f64) -> TypedExpr {
-        // 使用 double precision load
-        let bits = value.to_bits();
-        
-        // 如果可能，直接使用 fmv.x.d 从 FPU 寄存器加载
-        // 否则使用 auipc + fld 加载到 rodata
-        self.load_double_fa0(value);
-        
-        return TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: ValueType::Float { bits: 64 },
-            literal: Some(crate::ir::ExprLiteral::Float(value)),
-            children: Vec::new(),
-            span: crate::diagnostics::Span::unknown(),
-        };
+    /// Patch generic B-type branch instruction
+    pub(crate) fn patch_branch(&mut self, at: u64, rs1: u8, rs2: u8, target: u64, funct3: u32) {
+        let pc = at;
+        let offset = (target as i64 - pc as i64) as i32;
+        let imm = offset as u32;
+        // B-type: imm[12|10:5] | rs2 | rs1 | funct3 | imm[4:1|11] | opcode
+        let insn = ((imm >> 12) & 1) << 31
+            | ((imm >> 5) & 0x3f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | (funct3 & 0x7) << 12
+            | ((imm >> 1) & 0xf) << 8
+            | ((imm >> 11) & 1) << 7
+            | 0x63;
+        let pos = at as usize;
+        self.code[pos..pos + 4].copy_from_slice(&insn.to_le_bytes());
     }
 
-    /// 发射字符串常量 (store in .rodata)
-    fn emit_string_literal(&mut self) -> TypedExpr {
-        // 将字符串放入只读数据段
-        // 这需要先分配 rodata 空间，然后返回地址
-        
-        let label = self.fresh_label("Lstr");
-        let addr = self.register_rodata_offset(label);
-        
-        // 生成字符串的实际存储
-        // 注意：这需要访问更详细的上下文信息
-        
-        // 返回字符串的地址到 a0
-        self.li_a0(addr as i32);
-        
-        return TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: ValueType::Pointer(Box::new(ValueType::Char(Type::Char))),
-            literal: None,
-            children: Vec::new(),
-            span: crate::diagnostics::Span::unknown(),
-        };
-    }
-
-    /// 发射字符常量
-    fn emit_char_literal(&mut self, value: char) -> TypedExpr {
-        let code = value as u32;
-        self.li_a0(code as i32);
-        
-        return TypedExpr {
-            kind: crate::ir::ExprKind::Constant,
-            ty: ValueType::Char(Type::Int), // char 提升为 int
-            literal: Some(crate::ir::ExprLiteral::Int(code as i128)),
-            children: Vec::new(),
-            span: crate::diagnostics::Span::unknown(),
-        };
-    }
-
-    // ============================================================
-    // 辅助函数
-    // ============================================================
-
-    /// 加载大的 64 位常量到寄存器
-    fn load_large_constant(&mut self, value: u64) {
-        // 尝试分解为 auipc + lo12 的形式
-        let hi = (value >> 12) as i32;
-        let lo = (value & 0xFFF) as i32;
-        
-        // 如果高 20 位可表示为 PC-relative 偏移
-        if hi != 0 {
-            self.emit_auipc_a0(hi);
-            
-            // 计算实际地址
-            let pos = self.pos();
-            let abs_addr = (pos as i64).wrapping_add((hi as i64) << 12) as u64;
-            
-            // 调整低 12 位以匹配目标值
-            let adjusted_lo = ((value & 0xFFF) as i32).wrapping_sub((((abs_addr >> 12) as i32) << 12).wrapping_mul(-1));
-            
-            if adjusted_lo != 0 {
-                self.emit_ld_a0_a0(adjusted_lo);
-            }
+    /// BEQ rs1, rs2, label: Branch if equal
+    pub(crate) fn emit_beq_label(&mut self, rs1: u8, rs2: u8, label: &str) {
+        let pos = self.pos();
+        // funct3=000, opcode=1100011
+        let insn = ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_branch(pos, rs1, rs2, target, 0);
         } else {
-            // 可以直接用 li 指令
-            self.li_a0(lo);
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Beq));
         }
     }
 
-    /// 将标签注册到 rodata
-    fn register_rodata_offset(&mut self, label: String) -> u64 {
-        *self.global_rodata.entry(label).or_insert_with(|| {
-            let offset = self.rodata.len() as u64;
-            offset
-        })
-    }
-
-    /// 加载浮点常量到 fa0
-    fn load_float_fa0(&mut self, value: f32) {
-        let bits = value.to_bits() as i32;
-        
-        // 检查是否可以直接用 li + fmv 加载
-        if bits >= -2048 && bits < 2048 {
-            self.li_a0(bits);
-            self.emit_fmv_x_w_fa0();
+    /// BGE rs1, rs2, label: Branch if greater or equal (signed)
+    pub(crate) fn emit_bge_label(&mut self, rs1: u8, rs2: u8, label: &str) {
+        let pos = self.pos();
+        // funct3=101, opcode=1100011
+        let insn = (5u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_branch(pos, rs1, rs2, target, 5);
         } else {
-            // 复杂的情况：需要通过 rodata 加载
-            // 这个实现需要更完整的上下文
-            self.li_a0(0);
-            self.emit_fmv_x_w_fa0();
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Bge));
         }
     }
 
-    /// 加载双精度浮点常量到 fa0
-    fn load_double_fa0(&mut self, value: f64) {
-        let bits = value.to_bits();
-        
-        // 简单的情况：低 32 位可以作为立即数
-        let low_32 = bits as i32;
-        
-        if low_32 >= -2048 && low_32 < 2048 {
-            self.li_a0(low_32);
-            // 这里需要特殊的 FPU 指令来处理双精度
-            // 简化处理
+    /// BLT rs1, rs2, label: Branch if less than (signed)
+    pub(crate) fn emit_blt_label(&mut self, rs1: u8, rs2: u8, label: &str) {
+        let pos = self.pos();
+        // funct3=100, opcode=1100011
+        let insn = (4u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_branch(pos, rs1, rs2, target, 4);
         } else {
-            self.li_a0(0);
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Blt));
         }
     }
 
-    /// 从 FPU 寄存器移动 X 寄存器值到 FPU
-    fn emit_fmv_x_w_fa0(&mut self) {
-        // fmv.x.w fa0, a0 - 将整型寄存器的位模式移动到浮点寄存器
-        // 编码：0x20200053 for fmv.x.w, 0x00A08053 for fmv.x.w reverse
-        self.emit(&[0x53, 0x00, 0xA0, 0x20]); // fmv.x.w fa0, a0
+    pub(crate) fn emit_auipc_a0(&mut self, imm: i32) {
+        let imm = (imm as u32 & 0xfffff) << 12;
+        let insn = imm | 10 << 7 | 0x17;
+        self.emit(&insn.to_le_bytes());
     }
 
-    /// 获取当前位置
-    fn pos(&self) -> u64 {
-        self.code.len() as u64
+    pub(crate) fn emit_ld_a0_a0(&mut self, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | 10 << 15 | 0b011 << 12 | 10 << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
     }
+
+    pub(crate) fn emit_flw_fa0_a0(&mut self, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | 10 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    pub(crate) fn emit_fadd_fa0(&mut self) {
+        let insn: u32 = 0x08000053 | 10 << 20 | 10 << 15 | 10 << 7;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Move fa0 to fa1: FSGNJ.S fa1, fa0, fa0
+    pub(crate) fn mv_fa1_fa0(&mut self) {
+        self.emit_fsgnj_s(11, 10, 10);
+    }
+
+    /// Move fa1 to fa2: FSGNJ.S fa2, fa1, fa1
+    pub(crate) fn mv_fa2_fa1(&mut self) {
+        self.emit_fsgnj_s(12, 11, 11);
+    }
+
+    /// FADD.S fd, fs1, fs2: single-precision add
+    pub(crate) fn emit_fadd_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            (((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7) | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSUB.S fd, fs1, fs2: single-precision subtract
+    pub(crate) fn emit_fsub_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0000100 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMUL.S fd, fs1, fs2: single-precision multiply
+    pub(crate) fn emit_fmul_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001000 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FDIV.S fd, fs1, fs2: single-precision divide
+    pub(crate) fn emit_fdiv_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001100 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FADD.S fa0, fa1, fa0 (convenience for binary op)
+    pub(crate) fn emit_fadd_s_fa0_fa1_fa0(&mut self) {
+        self.emit_fadd_s(10, 11, 10);
+    }
+
+    /// FSUB.S fa0, fa1, fa0 (convenience for binary op)
+    pub(crate) fn emit_fsub_s_fa0_fa1_fa0(&mut self) {
+        self.emit_fsub_s(10, 11, 10);
+    }
+
+    /// FMUL.S fa0, fa1, fa0 (convenience for binary op)
+    pub(crate) fn emit_fmul_s_fa0_fa1_fa0(&mut self) {
+        self.emit_fmul_s(10, 11, 10);
+    }
+
+    /// FDIV.S fa0, fa1, fa0 (convenience for binary op)
+    pub(crate) fn emit_fdiv_s_fa0_fa1_fa0(&mut self) {
+        self.emit_fdiv_s(10, 11, 10);
+    }
+
+    /// FEQ.S rd, fs1, fs2: single-precision equal comparison
+    pub(crate) fn emit_feq_s(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b010 << 12
+            | (rd as u32) << 7
+            | 0b1010000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FLT.S rd, fs1, fs2: single-precision less-than comparison
+    pub(crate) fn emit_flt_s(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1010000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FLE.S rd, fs1, fs2: single-precision less-equal comparison
+    pub(crate) fn emit_fle_s(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (rd as u32) << 7 | 0b1010000 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSQRT.S fd, fs1: 单精度平方根, funct7=0101101
+    pub(crate) fn emit_fsqrt_s(&mut self, fd: u8, fs1: u8) {
+        let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0101101 << 25 | 0x53;
+        // rm field (bits [14:12]) = 000 (RNE) — encoded as part of funct7 shift
+        let insn = insn & !(0b111 << 12); // clear rm bits
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMIN.S fd, fs1, fs2: 单精度最小值, funct7=0010101, funct3=000
+    pub(crate) fn emit_fmin_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010100 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMAX.S fd, fs1, fs2: 单精度最大值, funct7=0010101, funct3=001
+    pub(crate) fn emit_fmax_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b001 << 12
+            | (fd as u32) << 7
+            | 0b0010100 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
 }

@@ -1,11 +1,10 @@
-// src/codegen/riscv64/special/mod.rs (Placeholder)
+// src/codegen/riscv64/special/mod.rs - special backend features.
 
-mod rvv;
-
-#[cfg(feature = "tls")]
-mod tls;
-
-pub use rvv::*;
-
-#[cfg(feature = "tls")]
-pub use tls::*;
+pub mod atomic_amo;
+pub mod builtins;
+pub mod csr;
+pub mod float_conv;
+pub mod float_d;
+pub mod inline_asm;
+pub mod rvv;
+pub mod tls;

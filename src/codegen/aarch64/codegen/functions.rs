@@ -1,403 +1,339 @@
-// src/codegen/aarch64/codegen/functions.rs - Function-Level Code Generation
-// Phase A Week 2-3 - Extracted from original_monolith.rs::gen_function()
-//
-// This module handles compilation of individual functions, including:
-/// - Prologue/epilogue generation
-/// - Basic block traversal
-/// - Statement emission dispatching
-/// - Expression evaluation and code emission
+// AArch64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Stmt, Type};
+use crate::codegen::aarch64::codegen::{
+    aggregate_size, local_stack_size, stmt_has_call, Aarch64Codegen,
+};
+use crate::ir::Function;
 
-use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Stmt};
-use crate::codegen::shared::asm_constraints::{self, resolve_asm_template_enhanced, AsmArch};
-use crate::codegen::Program;
-use crate::codegen::aarch64::codegen::{CodegenContext, CodegenError};
-use crate::codegen::shared::CaseInfo;
-use crate::ir::{Function, TypedStmt, ValueType, ExprKind, TypedExpr};
-use std::collections::HashMap;
-use std::sync::Arc;
-
-/// Function code generation context
-/// 
-/// Holds per-function state during compilation, including:
-/// - Local variable to stack offset mapping
-/// - Stack frame size calculations
-/// - Calling convention state (saved registers, varargs)
-/// - Return type information for special cases (sret, HFA)
-#[derive(Debug)]
-pub struct FunctionContext {
-    /// Current function name
-    pub func_name: String,
-    
-    /// AST function declaration (if available)
-    pub ast_decl: Option<Arc<FuncDecl>>,
-    
-    /// Local variables mapped to stack offsets
-    pub locals: HashMap<String, i32>,
-}
-
-impl FunctionContext {
-    /// Create new function context
-    pub fn new(func_name: String, func_ty: crate::ir::ValueType) -> Self {
-        Self {
-            func_name,
-            ast_decl: None,
-            locals: HashMap::new(),
+impl Aarch64Codegen {
+    pub(crate) fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        // __attribute__((naked)): 不生成 prologue/epilogue
+        if ast.map(|f| f.is_naked).unwrap_or(false) {
+            self.emitted_return = false;
+            if let Some(body) = ast.and_then(|f| f.body.as_ref()) {
+                for item in &body.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                            self.gen_naked_asm_expr(e);
+                        }
+                        BlockItem::Stmt(Stmt::AsmGoto {
+                            asm_str,
+                            outputs,
+                            output_names: _,
+                            output_constraints: _,
+                            inputs: _,
+                            input_names: _,
+                            input_constraints: _,
+                            clobbers: _,
+                            goto_labels,
+                            volatile: _,
+                            span,
+                        }) => {
+                            let mut resolved = asm_str.clone();
+                            let label_base = outputs.len();
+                            for (i, label) in goto_labels.iter().enumerate().rev() {
+                                resolved = resolved.replace(&format!("%l{}", i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l{}", label_base + i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l[{}]", label.name), &label.name);
+                            }
+                            for line in resolved.split('\n') {
+                                let line = line.trim();
+                                if !line.is_empty() {
+                                    self.emit_asm_line_naked(line, span);
+                                }
+                            }
+                        }
+                        _ => {} // naked 函数忽略非 asm 语句
+                    }
+                }
+            }
+            if !self.emitted_return {
+                // naked 函数应包含自己的返回指令 (如 asm "ret")
+                // 不发射额外 epilogue
+            }
+            return;
         }
-    }
-}
-
-/// Main function compilation entry point
-///
-/// Extracted from original_monolith.rs::gen_function (~line 806).
-/// Handles complete function body compilation from prologue to epilogue.
-///
-/// # Algorithm
-/// 1. Check for naked attribute (skip standard prologue/epilogue)
-/// 2. Emit ftrace calls if instrumentation enabled
-/// 3. Calculate stack frame layout
-/// 4. Generate function prologue (stack allocation, save registers)
-/// 5. Traverse basic blocks and emit statements
-/// 6. Generate epilogue (restore registers, return)
-///
-/// # Arguments
-/// * `ctx` - Shared code generation context (for labels, relocations)
-/// * `cg` - Mutable AArch64 codegen state (for field access like current_return_ty, va_gp_offs, etc.)
-/// * `func` - IR function being compiled
-/// * `ast` - Original AST declaration (for attributes, names)
-pub fn generate_function(
-    ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    func: &Function,
-    ast: Option<&FuncDecl>,
-) -> Result<(), CodegenError> {
-    // Check for __attribute__((naked))
-    let is_naked = ast.map(|f| f.is_naked).unwrap_or(false);
-    
-    if is_naked {
-        // Naked function: no prologue/epilogue, just emit inline assembly
-        generate_naked_function(ctx, cg, func, ast)?;
-    } else {
-        // Standard function with full prologue/epilogue
-        
-        // Step 1: Emit ftrace calls for function tracing
-        emit_ftrace_calls(ctx, cg, func.name.as_str());
-        
-        // Step 2: Plan local variable layout
-        plan_locals(cg.locals.as_mut(), ast);
-        
-        // Step 3: Track return type for large aggregate handling
-        cg.current_return_ty = Some(func.return_type.clone());
-        
-        // Step 4: Handle nested sret pointer saving
+        // ftrace: emit call to __fentry__/mcount before prologue
+        // The kernel patches these call sites at runtime for tracing.
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.pos();
+                self.emit_bl_to("__fentry__");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.pos();
+                self.emit_bl_to("mcount");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(
+            self._target.ftrace_mode,
+            crate::cli::FtraceMode::RecordMCount
+        ) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
+        }
+        self.plan_locals(ast);
+        self.current_return_ty = Some(func.return_type.clone());
+        self.saved_sret_ptr = None;
+        // 嵌套 sret: 如果函数返回 >16B 聚合类型, 在帧建立后立即保存 x0 (caller 传入的
+        // sret 指针) 到栈局部 <sret_ptr>, 防止后续调用覆盖 x0 导致返回时丢失目标地址.
         let returns_large_agg = aggregate_size(&func.return_type).is_some_and(|s| s > 16);
-        
-        // Step 5: Handle variadic function setup
+        // 变参函数需要在 frame 顶部预留寄存器保存区:
+        // x0..x7 (64 字节) + v0..v7 (64 字节) = 128 字节.
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
-        cg.is_current_func_variadic = is_variadic;
-        cg.va_gp_offs = 0;
-        cg.va_flt_offs = 0;
-        
+        self.is_current_func_variadic = is_variadic;
+        self.va_gp_offs = 0;
+        self.va_flt_offs = 0;
         if is_variadic {
-            cg.va_save_base_off = cg.stack_bytes;
-            cg.stack_bytes += 128; // x0..x7 + v0..v7 slots
+            self.va_save_base_off = self.stack_bytes;
+            self.stack_bytes += 128;
         } else {
-            cg.va_save_base_off = 0;
+            self.va_save_base_off = 0;
         }
-        
-        // Step 6: Mark function start position
-        let start_pos = ctx.pos();
-        
-        // Step 7: Generate function body
-        generate_function_body(ctx, cg, func, ast)?;
-        
-        // Step 8: Record function size
-        let end_pos = ctx.pos();
-        let size = end_pos - start_pos;
-        ctx.func_sizes.insert(func.name.clone(), size);
+        // MTE (HWASAN 硬件 tag): 为 callee-saved x19 预留槽位, 该槽位计入帧内,
+        // 因此只要函数有栈内容 (局部/变参保存区) 就会产生可打 tag 的帧。
+        if self.mte_enabled && self.stack_bytes > 0 {
+            self.mte_save_off = self.alloc_local("<mte_x19_save>", 8);
+        } else {
+            self.mte_save_off = 0;
+        }
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 8);
+        } else {
+            self.canary_slot_off = 0;
+        }
+        self.frame_bytes = (self.stack_bytes + 15) & !15;
+        // 非叶子函数必须保存 lr(x30): `bl` 会覆写 x30, 否则本函数 `ret`
+        // 返回到错误地址(实测 main->callee 嵌套调用死循环)。叶子函数不需帧存
+        // lr, 保持帧尺寸不变(不扰动已有产物字节)。ftrace/__fentry__/mcount 与
+        // stack-protector 的 __stack_chk_fail 也是调用, 同样需保存 lr。
+        let is_leaf = !func.body.iter().any(stmt_has_call)
+            && ftrace_call_pos.is_none()
+            && !(self._target.stack_protector && self.canary_slot_off > 0);
+        self.lr_off = if is_leaf {
+            -1
+        } else {
+            let off = self.frame_bytes;
+            self.frame_bytes += 16; // 帧顶留 16B 保 sp 16-对齐, x30 存 [sp, lr_off]
+            off
+        };
+        if self.frame_bytes > 0 {
+            if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+                self.emit_stack_clash_probes(self.frame_bytes as u32);
+            } else {
+                self.sub_sp_imm(self.frame_bytes as u32);
+            }
+        }
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // 存 lr 必须在帧零初始化之后, 否则 x30 会被清零覆盖。
+        if self.lr_off >= 0 {
+            self.str_xt_sp(30, self.lr_off);
+        }
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
+        }
+        // MTE (HWASAN 硬件 tag): prologue tag 栈帧 + 指针 tag 流程。
+        //   1) irg  x16, sp          : 随机 tag 写入 x16 (地址不变)
+        //   2) addg sp, x16, #0, #0  : sp 携带本帧随机 tag, 由 sp 派生的所有
+        //      局部地址 (mov_x_reg_sp_off / [sp,#off]) 自动继承该 tag
+        //   3) stg  x16, [sp, #g*16] : 为每个 16B tag granule 写入本帧 tag,
+        //      使带 tag 的 sp 访问通过硬件 tag 检查 (STG 本身是 unchecked access)
+        //   4) str  x19, [sp, #off]  : 保存入参 x19 (本函数占用 callee-saved 需归还)
+        //   5) add  x19, sp, #0      : x19 = 带 tag 的帧基址, 供调用点 untag/retag
+        if self.mte_active() {
+            self.tag_frame_size = self.frame_bytes;
+            self.emit_irg(16, 31); // irg x16, sp
+            self.emit_addg(31, 16, 0, 0); // addg sp, x16, #0, #0
+            let granules = (self.frame_bytes as u32) / 16;
+            for g in 0..granules {
+                self.emit_stg(16, 31, g); // stg x16, [sp, #g*16]
+            }
+            self.str_xt_sp(19, self.mte_save_off); // str x19, [sp, #mte_save_off]
+            self.emit_add_imm_x(19, 31, 0); // add x19, sp, #0 (mov x19, sp)
+        }
+        // 在帧建立后保存 sret 指针 (必须在 sub_sp 之后, 因为此时 sp 才稳定)
+        if returns_large_agg {
+            let sret_off = self.alloc_local("<sret_ptr>", 8);
+            // str x0, [sp, #sret_off]
+            self.store_w0(sret_off);
+            self.saved_sret_ptr = Some(sret_off);
+        }
+        // 进入变参函数立即把 x0..x7 和 v0..v7 写入保存区
+        if is_variadic {
+            for i in 0..8u8 {
+                self.str_xt_sp(i, self.va_save_base_off + (i as i32) * 8);
+            }
+            for i in 0..8u8 {
+                self.str_dt_sp(i, self.va_save_base_off + 64 + (i as i32) * 8);
+            }
+        }
+        // Save function parameters to stack (parameters are in x0-x7 for integers, v0-v7 for floats)
+        if let Some(func_ast) = ast {
+            let mut gp_reg_idx = 0u8; // x0-x7 for integer/pointer params
+            let mut fp_reg_idx = 0u8; // v0-v7 for float params
+            for param in &func_ast.params {
+                if let Some(ref name) = param.name {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        let is_float =
+                            matches!(param.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if is_float && fp_reg_idx < 8 {
+                            // Save float parameter from v register to stack
+                            match param.ty {
+                                Type::Float => {
+                                    // str s{fp_reg_idx}, [sp, #off]
+                                    let imm = off as u32 & 0xfff;
+                                    let insn = imm << 10
+                                        | (fp_reg_idx as u32) << 5
+                                        | 0b010 << 10
+                                        | 2 << 22
+                                        | 0x2e000000;
+                                    self.emit(&insn.to_le_bytes());
+                                }
+                                Type::Double | Type::LongDouble => {
+                                    // str d{fp_reg_idx}, [sp, #off]
+                                    self.str_dt_sp(fp_reg_idx, off);
+                                }
+                                _ => {}
+                            }
+                            fp_reg_idx += 1;
+                        } else if gp_reg_idx < 8 {
+                            // Save integer/pointer parameter from x register to stack
+                            match param.ty {
+                                Type::Char
+                                | Type::UChar
+                                | Type::SChar
+                                | Type::Short
+                                | Type::UShort
+                                | Type::Int
+                                | Type::UInt
+                                | Type::Long
+                                | Type::ULong
+                                | Type::LongLong
+                                | Type::ULongLong
+                                | Type::Ptr(_)
+                                | Type::Array(_, _) => {
+                                    let size = match param.ty {
+                                        Type::Char | Type::UChar | Type::SChar => 1,
+                                        Type::Short | Type::UShort => 2,
+                                        Type::Int | Type::UInt => 4,
+                                        _ => 8,
+                                    };
+                                    self.emit_store_sz(gp_reg_idx, 31, off as u32, size);
+                                }
+                                _ => {}
+                            }
+                            gp_reg_idx += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.emitted_return = false;
+        let body = ast.and_then(|f| f.body.as_ref());
+        let items = body.map(|b| b.items.as_slice()).unwrap_or(&[]);
+        for (item, ir) in items.iter().zip(func.body.iter()) {
+            self.gen_block_item(item, ir);
+        }
+        if !self.emitted_return {
+            self.mov_w0_imm(0);
+            self.ret();
+        }
     }
-    
-    Ok(())
-}
 
-/// Generate naked function (no prologue/epilogue)
-///
-/// Naked functions are used for low-level boot code or OS kernels where
-/// the compiler shouldn't generate standard function entry/exit code.
-fn generate_naked_function(
-    ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _func: &Function,
-    _ast: Option<&FuncDecl>,
-) -> Result<(), CodegenError> {
-    // TODO: Extract from original_monolith.rs gen_function line ~810
-    // Iterate over function body items and emit only:
-    // - Expr statements as naked assembly expressions
-    // - AsmGoto statements as inline assembly
-    // Skip all non-assembly statements
-    
-    todo!("Extract naked function logic from original_monolith.rs line ~810")
-}
-
-/// Emit ftrace instrumentation calls
-///
-/// For kernel development and profiling, ftrace adds calls to:
-/// - __fentry__ when using FEntry mode
-/// - mcount in classic MCount mode
-///
-/// These are patched by the kernel at runtime.
-fn emit_ftrace_calls(_ctx: &mut CodegenContext, cg: &mut crate::codegen::aarch64::Aarch64Codegen, _func_name: &str) {
-    // TODO: Based on original at line ~864
-    // Check target.ftrace_mode and emit BL instruction if needed
-    // Record call site for __mcount_loc section if -mrecord-mcount
-    
-    todo!("Implement ftrace call emission based on line ~864")
-}
-
-/// Plan local variable allocation
-///
-/// Calculates total stack space needed for all local variables,
-/// accounting for:
-/// - Alignment requirements
-/// - Vector types (16-byte alignment)
-/// - Large aggregates (>16 bytes)
-fn plan_locals(locals: &mut HashMap<String, i32>, _ast: Option<&FuncDecl>) {
-    // TODO: Extract from original at line ~883
-    // Walk through function parameters and local declarations
-    // Assign stack slots with proper alignment
-    // Returns total stack_bytes required
-    
-    *locals = HashMap::new();
-    // Implementation would iterate decls and assign offsets
-}
-
-/// Generate function body (basic block traversal)
-fn generate_function_body(
-    _ctx: &mut CodegenContext,
-    _func: &Function,
-    _ast: Option<&FuncDecl>,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-) -> Result<(), CodegenError> {
-    // TODO: Core logic extracted from lines ~910+
-    // After prologue setup, traverse statement list:
-    // - Loop over basic blocks
-    // - For each statement, determine type and emit code
-    // - Handle control flow (if, while, for, switch)
-    // - Manage labels and jumps
-    
-    // Pseudo-code structure:
-    // for item in func.body.items:
-    //     match item:
-    //         BlockItem::Stmt(stmt) => emit_statement(ctx, stmt)?
-    //         BlockItem::VarDecl(decl) => declare_local_variable(decl)
-    
-    // This delegates to specialized handlers based on statement type
-    
-    todo!("Implement function body generation - core loop over statements")
-}
-
-/// Emit single statement
-///
-/// Dispatcher that routes different statement types to specific handlers:
-/// - Expr: expression evaluation
-/// - If: conditional branch
-/// - While: loop construction
-/// - Break/Continue: loop control
-/// - Return: return value handling
-/// - Inline asm: direct assembly emission
-pub fn emit_statement(
-    ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    stmt: &crate::ir::TypedStmt,
-    locals: &mut HashMap<String, i32>,
-) -> Result<(), CodegenError> {
-    match stmt {
-        TypedStmt::Expr(expr) => {
-            // Expression statement (e.g., "foo();", "x + y;")
-            evaluate_expression(ctx, cg, expr)
+    /// naked 函数中处理表达式: 仅处理 AsmExpr，其他忽略
+    pub(crate) fn gen_naked_asm_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                volatile,
+                span,
+                ..
+            } => {
+                self.emit_inline_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
+                    *volatile,
+                );
+            }
+            // 语句表达式 ({...}) 可能包含 asm: 递归处理
+            Expr::StmtExpr { block, .. } => {
+                for item in &block.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e: inner, .. }) = item {
+                        self.gen_naked_asm_expr(inner);
+                    }
+                }
+            }
+            _ => {} // 忽略非 asm 表达式
         }
-        TypedStmt::If(cond, then_stmt, else_stmt) => {
-            // If statement with optional else branch
-            emit_if_statement(ctx, cg, cond, then_stmt, else_stmt, locals)
-        }
-        TypedStmt::While(cond, body) => {
-            // While loop
-            emit_while_loop(ctx, cg, cond, body, locals)
-        }
-        TypedStmt::For(init, cond, increment, body) => {
-            // For loop
-            emit_for_loop(ctx, cg, init, cond, increment, body, locals)
-        }
-        TypedStmt::Switch(scrutinee, cases, default_case) => {
-            // Switch statement
-            emit_switch_statement(ctx, cg, scrutinee, cases, default_case, locals)
-        }
-        TypedStmt::Break => {
-            // Break statement - jump to outer loop break label
-            emit_break(ctx, cg, locals)
-        }
-        TypedStmt::Continue => {
-            // Continue statement - jump to loop iteration
-            emit_continue(ctx, cg, locals)
-        }
-        TypedStmt::Return(opt_expr) => {
-            // Return statement
-            emit_return(ctx, cg, opt_expr, locals)
-        }
-        TypedStmt::AsmInline(template, operands) => {
-            // Generic inline assembly
-            emit_inline_asm(ctx, cg, template, operands, locals)
-        }
-        TypedStmt::Label(name) => {
-            // Label definition
-            emit_label(ctx, name)
-        }
-        // TODO: Add more statement types as needed
-        _ => Err(CodegenError::new(format!(
-            "Unsupported statement type: {:?}",
-            stmt
-        ))),
     }
-}
 
-/// Evaluate expression and emit code
-///
-/// Complex dispatcher that handles:
-/// - Literals: constant values
-/// - Identifiers: load variable/value
-/// - Binary operators: arithmetic, logical, comparison
-/// - Unary operators: negation, address-of, dereference
-/// - Function calls: argument passing, BL instruction
-/// - Casts: type conversion
-/// - Arrays: base address calculation
-/// - Struct fields: offset-based access
-pub fn evaluate_expression(
-    _ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _expr: &crate::ir::TypedExpr,
-) -> Result<(), CodegenError> {
-    // TODO: Extract comprehensive expression evaluation logic
-    // Match on expr.kind to route to specific handlers:
-    //
-    // ExprKind::Literal(_)      -> emit_load_constant
-    // ExprKind::Ident(name)     -> load_global_addr_w0 or get_local_value
-    // ExprKind::BinOp(op, l, r) -> emit_binary_operation
-    // ExprKind::Unary(op, e)   -> emit_unary_operation
-    // ExprKind::Call(func, args) -> emit_call
-    // ExprKind::Cast(ty, e)    -> emit_cast
-    // ExprKind::Array(base)    -> array_address
-    // ExprKind::Field(base, idx) -> struct field access
-    // ExprKind::Deref          -> pointer load
-    // ExprKind::Assign(lhs, rhs) -> store operation
-    // ... many more variants
-    
-    todo!("Implement comprehensive expression evaluation - ~500 lines of logic")
-}
-
-/// Helper: check if type is homogeneous floating-point aggregate (HFA)
-fn is_hfa(ty: &crate::ir::ValueType) -> bool {
-    // TODO: Implement HFA detection based on aggregate_fields map
-    // A vector type where all elements are same FP type
-    matches!(ty, ValueType::Vector(_, _) if true /* detailed check */)
-}
-
-/// Helper: get aggregate size
-fn aggregate_size(ty: &crate::ir::ValueType) -> Option<usize> {
-    match ty {
-        ValueType::Aggregate { size, .. } => Some(*size),
-        ValueType::Array(elem, count) => {
-            Some(elem.size().saturating_mul(count.unwrap_or(0)))
+    /// naked 函数中发射单条 asm 文本行 (asm goto 用)
+    pub(crate) fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
+        if self.asm_text_mode {
+            self.raw_func_asm_lines.push((
+                format!("__naked_{}", self.label_serial),
+                vec![line.to_string()],
+            ));
+            self.label_serial += 1;
+        } else {
+            self.encode_and_emit_asm(line, &span.file, span.line);
         }
-        _ => None,
     }
-}
 
-/// Helper: emit label at current position
-fn emit_label(ctx: &mut CodegenContext, name: &str) {
-    ctx.labels.insert(name.to_string(), ctx.pos());
-}
-
-/// Helpers for control flow (see blocks.rs)
-fn emit_if_statement(
-    _ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _cond: &crate::ir::TypedExpr,
-    _then_stmt: &crate::ir::TypedStmt,
-    _else_stmt: &Option<crate::ir::TypedStmt>,
-    locals: &mut HashMap<String, i32>,
-) -> Result<(), CodegenError> {
-    todo!("Implement if statement generation")
-}
-
-fn emit_while_loop(
-    _ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _cond: &crate::ir::TypedExpr,
-    _body: &[crate::ir::TypedStmt],
-    locals: &mut HashMap<String, i32>,
-) -> Result<(), CodegenError> {
-    todo!("Implement while loop generation")
-}
-
-fn emit_for_loop(
-    _ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _init: &Option<crate::ast::Decl>,
-    _cond: &Option<crate::ir::TypedExpr>,
-    _increment: &Option<crate::ir::TypedExpr>,
-    _body: &[crate::ir::TypedStmt],
-    locals: &mut HashMap<String, i32>,
-) -> Result<(), CodegenError> {
-    todo!("Implement for loop generation")
-}
-
-fn emit_switch_statement(
-    _ctx: &mut CodegenContext,
-    cg: &mut crate::codegen::aarch64::Aarch64Codegen,
-    _scrutinee: &crate::ir::TypedExpr,
-    _cases: &[CaseInfo],
-    _default_case: &Option<Vec<crate::ir::TypedStmt>>,
-    locals: &mut HashMap<String, i32>,
-) -> Result<(), CodegenError> {
-    todo!("Implement switch statement generation")
-}
-
-fn emit_break(ctx: &mut CodegenContext, cg: &mut crate::codegen::aarch64::Aarch64Codegen, _locals: &mut HashMap<String, i32>) -> Result<(), CodegenError> {
-    // Jump to break label from top of break_continue_stack
-    if let Some((break_label, _)) = cg.break_continue_stack.last().map(|(b, c)| b) {
-        emit_branch_to_label(ctx, break_label)
-    } else {
-        Err(CodegenError::new("break outside of loop"))
+    pub(crate) fn plan_locals(&mut self, ast: Option<&FuncDecl>) {
+        self.locals.clear();
+        self.stack_bytes = 0;
+        let Some(body) = ast.and_then(|f| f.body.as_ref()) else {
+            return;
+        };
+        // Allocate space for function parameters and add them to locals map
+        if let Some(func_ast) = ast {
+            for (i, param) in func_ast.params.iter().enumerate() {
+                if let Some(ref name) = param.name {
+                    let size = local_stack_size(&param.ty);
+                    let off = self.alloc_local(&name.name, size);
+                    // Save parameter register to stack in prologue will be done later
+                    // For now, just register the parameter in locals map
+                    // Parameters are passed in x0-x7 (integers) or v0-v7 (floats)
+                    // We'll handle the actual saving in gen_function prologue
+                    let _ = (i, off); // Suppress unused variable warning
+                }
+            }
+        }
+        for item in &body.items {
+            if let BlockItem::Decl(Decl::Var(v)) = item {
+                self.alloc_local(&v.name.name, local_stack_size(&v.ty));
+            }
+        }
+        self.alloc_local("<vec_lit>", 16);
     }
-}
-
-fn emit_continue(ctx: &mut CodegenContext, cg: &mut crate::codegen::aarch64::Aarch64Codegen, _locals: &mut HashMap<String, i32>) -> Result<(), CodegenError> {
-    // Jump to continue label
-    if let Some((_, continue_label)) = cg.break_continue_stack.last().map(|(b, c)| c) {
-        emit_branch_to_label(ctx, continue_label)
-    } else {
-        Err(CodegenError::new("continue outside of loop"))
-    }
-}
-
-fn emit_return(ctx: &mut CodegenContext, cg: &mut crate::codegen::aarch64::Aarch64Codegen, opt_expr: &Option<crate::ir::TypedExpr>, locals: &mut HashMap<String, i32>) -> Result<(), CodegenError> {
-    // TODO: Emit return value in x0/x1/v0 depending on type
-    // Then branch to epilogue or ret directly for leaf functions
-    todo!("Implement return statement generation")
-}
-
-fn emit_inline_asm(ctx: &mut CodegenContext, cg: &mut crate::codegen::aarch64::Aarch64Codegen, template: &str, _operands: &[&str], locals: &mut HashMap<String, i32>) -> Result<(), CodegenError> {
-    // TODO: Resolve constraints and emit actual instructions
-    todo!("Implement inline assembly emission")
-}
-
-fn emit_branch_to_label(ctx: &mut CodegenContext, label: &str) -> Result<(), CodegenError> {
-    // Emitter unconditional branch to labeled target
-    if let Some(&target) = ctx.labels.get(label) {
-        // Emit B instruction or pending if not yet defined
-        todo!("Emit B or CBZ instruction")
-    } else {
-        // Defer patching - add to pending_branches
-        todo!("Record pending branch")
-    }
-    Ok(())
 }

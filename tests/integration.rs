@@ -8809,7 +8809,7 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
     let p2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.cpp"));
     let o1 = dir.join(format!("dcc-cpp-weak-tu1-{pid}.o"));
     let o2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.o"));
-    let exe = dir.join(format!("dcc-cpp-weak-{pid}"));
+    let _exe = dir.join(format!("dcc-cpp-weak-{pid}"));
     fs::write(&p1, &tu1).unwrap();
     fs::write(&p2, &tu2).unwrap();
     let dcc = env!("CARGO_BIN_EXE_dcc");
@@ -11870,8 +11870,6 @@ fn cpp_template_depth_ok() {
 #[ignore] // FIXME: 解析器处理超深嵌套模板时性能问题，待优化
 /// M18.x: 模板深度限制验证
 /// M18.x: 模板深度限制验证 (compile-only smoke test)
-#[test]
-#[cfg(unix)]
 fn cpp_template_depth_limit_rejected() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-depth-limit-{}.cpp", std::process::id()));
@@ -11886,7 +11884,7 @@ fn cpp_template_depth_limit_rejected() {
     src.push_str("* p) { return p != 0; }\n");
     src.push_str("int main() { return 0; }\n");
     fs::write(&source_path, &src).expect("write C++ fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let _output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&object_path)
         .arg(&source_path)
@@ -13904,7 +13902,6 @@ fn pie_builtin_linker_emits_interp_segment() {
 #[test]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
 /// C++ 模板 vector: 简化为 compile-only smoke test
-#[test]
 fn cpp_template_vector_int_instantiation() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-vec-int-{}.cpp", std::process::id()));
@@ -13919,7 +13916,7 @@ int main() {
 }
 ";
     fs::write(&source_path, source).expect("write C++ fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let _output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-S", "-o"])
         .arg(&asm_path)
         .arg(&source_path)
@@ -13946,7 +13943,7 @@ int main() {
 }
 ";
     fs::write(&source_path, source).expect("write C++ fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let _output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-S", "-o"])
         .arg(&asm_path)
         .arg(&source_path)
@@ -16928,7 +16925,6 @@ fn windows_darwin_triple_object_format() {
 #[cfg(unix)]
 #[ignore = "TODO: native path needs runtime/stdlib support"]
 /// Semantic enum: type traits runtime - compile-only smoke test
-#[test]
 fn semantic_enum_type_traits_runtime() {
     // Semantic run test: enum values, scoped enum, sizeof type properties
     let src = include_str!("fixtures/cpp/semantic_run.cpp");
@@ -21396,7 +21392,7 @@ int main(void) { return 0; }
 #[cfg(unix)]
 fn vdso_embed_note_section_verification() {
     // 构造最小 vDSO ELF
-    use dcc::codegen::elf;
+    use dcc::codegen::shared::elf;
     let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
     let text = b"\x90\x90\x90\x90\xc3";
     let mut strtab = vec![0u8];
@@ -23886,9 +23882,11 @@ fn riscv64_cross_call_preserves_ra() {
     let dcc = env!("CARGO_BIN_EXE_dcc");
     let dir = std::env::temp_dir();
     let pid = std::process::id();
-    // _start: jal main; li a0,93; ecall (RISC-V exit via syscall 93)
+    // _start: jal main; li a7,93; ecall (RISC-V exit via syscall 93).
+    // main's return value stays in a0 as the exit status; the syscall
+    // number must go in a7 (Linux RISC-V convention), not a0.
     let start_s = dir.join(format!("dcc-rvv-xrun-{pid}.s"));
-    std::fs::write(&start_s, ".globl _start\n_start:\n jal ra,main\n li a0,93\necall\n")
+    std::fs::write(&start_s, ".globl _start\n_start:\n jal ra,main\n li a7,93\necall\n")
         .expect("write start.s");
     let start_o = dir.join(format!("dcc-rvv-xrun-{pid}-start.o"));
     assert!(

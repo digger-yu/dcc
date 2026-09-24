@@ -137,13 +137,22 @@ impl ABILoweringEngine {
                 // First 8 floating-point args in XMM0-XMM7
                 let fp_regs = ["XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7"];
 
+                // SysV: integer args are placed in GP slots by argument
+                // position (so the 3rd argument lands in RDX even when an
+                // FP arg intervenes), while XMM slots are numbered by the
+                // count of floating arguments (the first FP arg is XMM0,
+                // not XMM1).
+                let mut fp_next = 0usize;
                 for (idx, ty) in params.iter().enumerate() {
-                    if idx < gp_regs.len() {
-                        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                            result.push(Some(fp_regs[idx].to_string()));
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                        if fp_next < fp_regs.len() {
+                            result.push(Some(fp_regs[fp_next].to_string()));
+                            fp_next += 1;
                         } else {
-                            result.push(Some(gp_regs[idx].to_string()));
+                            result.push(None); // Stack
                         }
+                    } else if idx < gp_regs.len() {
+                        result.push(Some(gp_regs[idx].to_string()));
                     } else {
                         result.push(None); // Stack
                     }

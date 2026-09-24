@@ -390,14 +390,18 @@ impl Arch {
     /// 经常在 host 端用 --target 探测目标架构，只解析不解码能避免误伤。
     pub fn has_backend(self) -> bool {
         match self {
-            Arch::X86_64
-            | Arch::AArch64
-            | Arch::RiscV64
-            | Arch::Mips64
-            | Arch::Mips
-            | Arch::Arm => true,
+            Arch::X86_64 => true,
+            #[cfg(feature = "arm")]
+            Arch::AArch64 | Arch::Arm => true,
+            #[cfg(feature = "mips")]
+            Arch::RiscV64 | Arch::Mips64 | Arch::Mips => true,
             // RiscV32 backend is not yet implemented (Phase 7)
             Arch::RiscV32 => false,
+            // 未启用对应 feature 的 arch: 该后端不在本构建中.
+            #[cfg(not(feature = "arm"))]
+            Arch::AArch64 | Arch::Arm => false,
+            #[cfg(not(feature = "mips"))]
+            Arch::RiscV64 | Arch::Mips64 | Arch::Mips => false,
         }
     }
 
@@ -3625,7 +3629,10 @@ mod tests {
         assert_eq!(t.vendor, "unknown");
         assert_eq!(t.os, super::Os::Linux);
         assert_eq!(t.abi, super::Abi::Gnu);
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -3633,14 +3640,20 @@ mod tests {
         let t = TargetTriple::parse("mips-unknown-linux-gnu").expect("mips w/ vendor must parse");
         assert_eq!(t.arch, Arch::Mips);
         assert_eq!(t.vendor, "unknown");
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
     fn target_triple_parses_mips64_linux_gnuabi64() {
         let t = TargetTriple::parse("mips64-linux-gnuabi64").expect("mips64 must parse");
         assert_eq!(t.arch, Arch::Mips64);
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -3648,7 +3661,10 @@ mod tests {
         let t = TargetTriple::parse("arm-linux-gnueabihf").expect("armhf must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.abi, super::Abi::Gnu);
+        #[cfg(feature = "arm")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "arm"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -3711,11 +3727,30 @@ mod tests {
     fn has_backend_distinguishes_implemented_vs_parse_only() {
         // Tier-1 architectures with full backend support
         assert!(Arch::X86_64.has_backend());
-        assert!(Arch::AArch64.has_backend());
-        assert!(Arch::RiscV64.has_backend());
-        assert!(Arch::Mips.has_backend());
-        assert!(Arch::Mips64.has_backend());
-        assert!(Arch::Arm.has_backend());
+        // arm/mips family backends are gated behind cargo features
+        #[cfg(feature = "arm")]
+        {
+            assert!(Arch::AArch64.has_backend());
+            assert!(Arch::Arm.has_backend());
+        }
+        #[cfg(feature = "mips")]
+        {
+            assert!(Arch::RiscV64.has_backend());
+            assert!(Arch::Mips.has_backend());
+            assert!(Arch::Mips64.has_backend());
+        }
+        // Without the features these arches parse triples but have no backend
+        #[cfg(not(feature = "arm"))]
+        {
+            assert!(!Arch::AArch64.has_backend());
+            assert!(!Arch::Arm.has_backend());
+        }
+        #[cfg(not(feature = "mips"))]
+        {
+            assert!(!Arch::RiscV64.has_backend());
+            assert!(!Arch::Mips.has_backend());
+            assert!(!Arch::Mips64.has_backend());
+        }
         // RiscV32: parsed but no codegen backend (E0399)
         assert!(!Arch::RiscV32.has_backend());
     }
@@ -3751,7 +3786,10 @@ mod tests {
         ];
         let cfg = parse(&args).expect("--target mips must parse at cli level");
         assert_eq!(cfg.target.arch, Arch::Mips);
+        #[cfg(feature = "mips")]
         assert!(cfg.target.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!cfg.target.arch.has_backend());
     }
 
     #[test]

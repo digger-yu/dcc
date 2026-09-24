@@ -9,6 +9,53 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Package metadata block used by the TOML spec files.
+///
+/// In the on-disk wire layout `[package]` is the first table header and the
+/// identity fields (`arch`/`aliases`) are written before any subsequent
+/// table header, so TOML nests them inside this table.
+#[derive(Debug, Deserialize)]
+struct PackageInfo {
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    arch: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+/// Wire layout of a TOML instruction spec: identity lives under
+/// `[package]` while semantics are named `class_semantics`.
+#[derive(Debug, Deserialize)]
+struct RawInstruction {
+    package: PackageInfo,
+    #[serde(default)]
+    operands: Vec<OperandSpec>,
+    encoding_spec: EncodingSpecification,
+    #[serde(default)]
+    class_semantics: Option<InstructionSemantics>,
+    #[serde(default)]
+    examples: Vec<UsageExample>,
+}
+
+impl RawInstruction {
+    fn into_definition(self) -> InstructionDefinition {
+        InstructionDefinition {
+            name: self.package.name,
+            version: self.package.version,
+            description: self.package.description,
+            arch: self.package.arch,
+            aliases: self.package.aliases,
+            operands: self.operands,
+            encoding_spec: self.encoding_spec,
+            semantics: self.class_semantics,
+            examples: self.examples,
+        }
+    }
+}
+
 /// Complete instruction definition combining metadata and encodings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstructionDefinition {
@@ -167,16 +214,13 @@ impl InstructionLoader {
     
     /// Load single instruction by name
     pub fn load_instruction(&mut self, name: &str) -> Result<&InstructionDefinition> {
-        if let Some(instr) = self.cache.get(name) {
-            return Ok(instr);
+        if !self.cache.contains_key(name) {
+            let file_path = self.base_path.join(format!("{}.toml", name));
+            let content = fs::read_to_string(&file_path)?;
+            let raw: RawInstruction = toml::from_str(&content)?;
+            self.cache.insert(raw.package.name.clone(), raw.into_definition());
         }
-        
-        let file_path = self.base_path.join(format!("{}.toml", name));
-        let content = fs::read_to_string(&file_path)?;
-        let instruction: InstructionDefinition = toml::from_str(&content)?;
-        
-        self.cache.insert(instruction.name.clone(), instruction);
-        
+
         Ok(self.cache.get(name).unwrap())
     }
     
@@ -197,7 +241,8 @@ impl InstructionLoader {
             
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
                 let content = fs::read_to_string(&path)?;
-                let instruction: InstructionDefinition = toml::from_str(&content)?;
+                let raw: RawInstruction = toml::from_str(&content)?;
+                let instruction = raw.into_definition();
                 self.cache.insert(instruction.name.clone(), instruction);
             }
         }

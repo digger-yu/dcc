@@ -40,7 +40,6 @@ description = "Source operand"
 
 # Instruction semantics
 class_semantics.effect = "dest = src"
-class_semantics.flags_modified = null
 class_semantics.cpu_modes = ["real", "protected", "long"]
 
 # Example usage

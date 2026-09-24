@@ -3261,10 +3261,13 @@ impl Sema {
             | CppDecl::UsingEnum { .. }
             | CppDecl::InheritingCtor { .. }
             | CppDecl::AnonAggr { .. }
-            | CppDecl::Empty
-            | CppDecl::Opaque(_) => {
+            | CppDecl::Empty => {
                 // no-op: 模块/概念/继承构造/匿名聚合等占位
                 Ok(())
+            }
+            CppDecl::Opaque(text) => {
+                // 无法解析的声明不能静默进入 HIR, 必须报错让上层降级
+                Err(format!("unsupported opaque declaration: {}", text))
             }
             CppDecl::Typedef { target, name } => {
                 // typedef/using 别名: 注册 TypeAlias 符号, 方便 convert_type 展开
@@ -3284,7 +3287,7 @@ impl Sema {
                 variants,
             } => {
                 // 顶层 enum: 注册枚举值为全局 int 符号
-                let _next_val: i128 = 0;
+                let mut _next_val: i128 = 0;
                 for (var_name, init_text) in variants {
                     // 尝试 parse init_text 为 i128, 成功则更新 next_val;
                     // 失败也注册 (scoped enum 成员如 B = A+2 无法 parse)
@@ -3301,7 +3304,7 @@ impl Sema {
                         } else {
                             trimmed.parse::<i128>().ok()
                         };
-                        if let Some(v) = parsed { next_val = v; }
+                        if let Some(v) = parsed { _next_val = v; }
                     }
                     self.add_symbol(
                         var_name.clone(),
@@ -3309,7 +3312,7 @@ impl Sema {
                         CxxType::Integer { bits: 32, signed: true },
                         Access::Public,
                     );
-                    next_val += 1;
+                    _next_val += 1;
                 }
                 if !name.is_empty() {
                     self.add_symbol(
@@ -3709,7 +3712,7 @@ impl Sema {
                 variants,
             } => {
                 // 类内 enum: 注册枚举常量到类作用域
-                let _next_val: i128 = 0;
+                let mut _next_val: i128 = 0;
                 for (var_name, init_text) in variants {
                     if let Some(text) = init_text {
                         let trimmed = text.trim();
@@ -3724,7 +3727,7 @@ impl Sema {
                         } else {
                             trimmed.parse::<i128>().ok()
                         };
-                        if let Some(v) = parsed { next_val = v; }
+                        if let Some(v) = parsed { _next_val = v; }
                     }
                     self.add_symbol(
                         var_name.clone(),
@@ -3732,7 +3735,7 @@ impl Sema {
                         CxxType::Integer { bits: 32, signed: true },
                         Access::Private,
                     );
-                    next_val += 1;
+                    _next_val += 1;
                 }
                 if !name.is_empty() {
                     self.add_symbol(

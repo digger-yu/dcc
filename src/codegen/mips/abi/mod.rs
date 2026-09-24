@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use super::registers::{MipsFpr, MipsGpr, MAX_INREG_ARG_COUNT};
+use super::registers::{MipsFpr, MipsGpr};
 
 /// O32 ABI: Stack alignment requirement (8-byte)
 pub const STACK_ALIGNMENT_O32: usize = 8;
@@ -97,7 +97,7 @@ impl MipsArgReg {
 }
 
 /// Category of argument type
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgCategory {
     Integer,   // General-purpose register
     Float,     // Floating-point register
@@ -164,7 +164,8 @@ impl MipsAbi {
     fn classify_arg_type(ty_kind: &str) -> ArgCategory {
         match ty_kind {
             "int" | "uint" | "byte" | "short" | "ushort" | "long" | "ulong" 
-            | "char" | "uchar" | "bool" | "ptr" | "enum" | "void_ptr" => {
+            | "char" | "uchar" | "bool" | "ptr" | "enum" | "void_ptr"
+            | "u64" | "i64" => {
                 ArgCategory::Integer
             }
             "float" => ArgCategory::Float,
@@ -187,6 +188,18 @@ impl MipsAbi {
 
     /// Return value passing rules
     pub fn return_info(ty_kind: &str) -> ReturnInfo {
+        // 未知类型名视为聚合 (struct/union): 无法在寄存器中返回,
+        // 通过 $a0 隐藏指针. 必须在查 size 之前判定, 否则 type_size
+        // 对未知类型返回默认值 4 会被误判成整数.
+        if Self::classify_arg_type(ty_kind) == ArgCategory::Aggregate {
+            return ReturnInfo {
+                via_reg: false,
+                reg: None,
+                size: Self::type_size(ty_kind) as i32,
+                kind: ReturnKind::ViaMemory,
+            };
+        }
+
         let size = Self::type_size(ty_kind);
 
         // Simple types returned in $v0
@@ -377,7 +390,7 @@ pub struct ReturnInfo {
 }
 
 /// Return mechanism type
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnKind {
     SimpleInt,           // $v0 (1-4 bytes)
     Int64TwoRegs,        // $v0+$v1 (8 bytes)
@@ -428,12 +441,12 @@ mod mips_abi_tests {
         
         // First 4 integers in $a0-$a3
         for i in 0..4 {
-            let arg = abi.arg_info("int", i).unwrap();
+            let arg = MipsAbi::arg_info("int", i).unwrap();
             assert!(arg.reg.is_some());
         }
 
         // 5th argument spilled
-        let arg = abi.arg_info("int", 4);
+        let arg = MipsAbi::arg_info("int", 4);
         assert!(arg.is_none());
     }
 
@@ -442,13 +455,13 @@ mod mips_abi_tests {
         let abi = MipsAbi::new(MipsAbiType::O32);
         
         // Float args in $f12, $f14
-        let arg0 = abi.arg_info("float", 0).unwrap();
+        let arg0 = MipsAbi::arg_info("float", 0).unwrap();
         assert!(arg0.reg.is_some());
         if let Some(MipsArgReg::Fpr(f)) = arg0.reg {
             assert_eq!(f.index(), 12);
         }
         
-        let arg1 = abi.arg_info("float", 1).unwrap();
+        let arg1 = MipsAbi::arg_info("float", 1).unwrap();
         assert!(arg1.reg.is_some());
         if let Some(MipsArgReg::Fpr(f)) = arg1.reg {
             assert_eq!(f.index(), 14);
@@ -460,27 +473,27 @@ mod mips_abi_tests {
         let abi = MipsAbi::new(MipsAbiType::O32);
         
         // Integer in $v0
-        let ret = abi.return_info("int");
+        let ret = MipsAbi::return_info("int");
         assert!(ret.via_reg);
         assert!(matches!(ret.reg, Some(MipsArgReg::Gpr(MipsGpr::V0))));
 
         // 64-bit int in $v0+$v1
-        let ret = abi.return_info("i64");
+        let ret = MipsAbi::return_info("i64");
         assert_eq!(ret.kind, ReturnKind::Int64TwoRegs);
 
         // Double in $f0
-        let ret = abi.return_info("double");
+        let ret = MipsAbi::return_info("double");
         assert!(matches!(ret.reg, Some(MipsArgReg::Fpr(_))));
 
         // Large struct via memory
-        let ret = abi.return_info("struct_large");
+        let ret = MipsAbi::return_info("struct_large");
         assert!(!ret.via_reg);
     }
 
     #[test]
     fn test_frame_layout() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        let layout = abi.calculate_frame(8, false, false);
+        let layout = MipsAbi::calculate_frame(8, false, false);
         
         assert!(layout.local_bytes > 0);
         assert_eq!(layout.total_size % 8, 0);
@@ -490,21 +503,25 @@ mod mips_abi_tests {
     #[test]
     fn test_prologue_generation() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        let prologue = abi.generate_prologue(32, &[MipsGpr::S0, MipsGpr::S1], true);
+        let prologue = MipsAbi::generate_prologue(32, &[MipsGpr::S0, MipsGpr::S1], true);
         
-        assert!(prologue.contains("sw"));
-        assert!(prologue.contains("$ra"));
-        assert!(prologue.contains("$sp"));
+        assert!(prologue.iter().any(|s| s.contains("sw")));
+        assert!(prologue.iter().any(|s| s.contains("$ra")));
+        assert!(prologue.iter().any(|s| s.contains("$sp")));
     }
 
     #[test]
     fn test_epilogue_generation() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        let epilogue = abi.generate_epilogue(32, &[MipsGpr::S0, MipsGpr::S1], true);
+        let epilogue = MipsAbi::generate_epilogue(32, &[MipsGpr::S0, MipsGpr::S1], true);
         
-        assert!(epilogue.contains("lw"));
-        assert!(epilogue.last().unwrap() == "jr $ra");
-        assert!(epilogue.contains("nop")); // Delay slot
+        assert!(epilogue.iter().any(|s| s.contains("lw")));
+        // jr $ra 后必须紧跟延迟槽指令 nop, 因此 jr 不是最后一行
+        let jr_pos = epilogue
+            .iter()
+            .position(|s| s == "jr $ra")
+            .expect("epilogue must contain jr $ra");
+        assert_eq!(epilogue[jr_pos + 1], "nop"); // Delay slot
     }
 
     #[test]

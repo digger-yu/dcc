@@ -1,544 +1,222 @@
-// src/codegen/riscv64/emit/expr/call.rs - Function calls emission (RISC-V 64 backend)
-// Priority 4 Task: Extract working implementations from riscv64.rs.bak
-
-use crate::ast::{Expr};
-use crate::codegen::riscv64::codegen::Riscv64Codegen;
-use crate::ir::{TypedExpr, ValueType};
-use crate::target::Target;
-use std::collections::HashMap;
+// RISC-V 64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::codegen::riscv64::codegen::{Riscv64Codegen, aggregate_size, is_aggregate};
+use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Riscv64Codegen {
-    // ========================================================================
-    // 函数调用发射逻辑
-    // ========================================================================
-
-    /// 发射函数调用：generate call site handling
-    pub fn emit_call(&mut self, func_name: &str, args: &[TypedExpr], ret_ty: &ValueType) -> TypedExpr {
-        // GCC 兼容内建函数：AST 路径编译期折叠
-        match func_name {
-            "__builtin_expect" | "__builtin_expect_with_probability" => {
-                if let Some(arg0) = args.first() {
-                    self.gen_expr(arg0);
-                } else {
-                    self.li_a0(0);
+    pub(crate) fn gen_call(&mut self, expr: &TypedExpr) {
+        // M25: 识别 __builtin_va_start / __builtin_va_end / __builtin_va_copy
+        // 内置函数, 不生成实际 jal 调用.
+        let callee = match expr.children[0].kind {
+            ExprKind::Local(ref n) => n.clone(),
+            _ => "unknown".to_string(),
+        };
+        if callee == "__builtin_va_start" {
+            if let Some(ap_expr) = expr.children.get(1) {
+                if let ExprKind::Local(ref ap_name) = ap_expr.kind {
+                    self.gen_va_start(ap_name);
                 }
-                
-                return TypedExpr {
-                    kind: crate::ir::ExprKind::Call,
-                    ty: ret_ty.clone(),
-                    literal: None,
-                    children: vec![],
-                    span: crate::diagnostics::Span::unknown(),
-                };
             }
-            "__builtin_nonzero_p" => {
-                let v = args.first()
-                    .and_then(|a| crate::const_eval::eval(a).ok())
-                    .map_or(0, |v| if v != 0 { 1i128 } else { 0i128 });
-                self.li_a0(v as i32);
-                
-                return TypedExpr {
-                    kind: crate::ir::ExprKind::Call,
-                    ty: ret_ty.clone(),
-                    literal: None,
-                    children: vec![],
-                    span: crate::diagnostics::Span::unknown(),
-                };
+            self.li_a0(0);
+            return;
+        }
+        if callee == "__builtin_va_end" {
+            self.li_a0(0);
+            return;
+        }
+        if callee == "__builtin_va_copy" {
+            if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
+                // 解析 dst 地址到 a0, 移动到 t0 (x5)
+                let dst_is_ptr = matches!(dst.ty, ValueType::Pointer(_));
+                if dst_is_ptr {
+                    self.gen_expr(dst);
+                } else {
+                    self.gen_lvalue_addr(dst);
+                }
+                self.emit_mv(5, 10); // t0 = a0 = dst va_list 地址
+                // 解析 src 地址到 a0, 移动到 t1 (x6)
+                let src_is_ptr = matches!(src.ty, ValueType::Pointer(_));
+                if src_is_ptr {
+                    self.gen_expr(src);
+                } else {
+                    self.gen_lvalue_addr(src);
+                }
+                self.emit_mv(6, 10); // t1 = a0 = src va_list 地址
+                // 24 字节结构体拷贝: 3 个 doubleword (寄存器间接寻址)
+                // qword 1: gp_offset(4B) + fp_offset(4B)
+                self.emit_ld(10, 6, 0);  // ld a0, [t1]
+                self.emit_sd(10, 5, 0);  // sd a0, [t0]
+                // qword 2: overflow_arg_area
+                self.emit_ld(10, 6, 8);  // ld a0, [t1+8]
+                self.emit_sd(10, 5, 8);  // sd a0, [t0+8]
+                // qword 3: reg_save_area
+                self.emit_ld(10, 6, 16); // ld a0, [t1+16]
+                self.emit_sd(10, 5, 16); // sd a0, [t0+16]
             }
-            "__builtin_constant_p" => {
-                let v = args.first()
-                    .map_or(0, |a| crate::const_eval::is_constant(a) as i32);
-                self.li_a0(v);
-                
-                return TypedExpr {
-                    kind: crate::ir::ExprKind::Call,
-                    ty: ret_ty.clone(),
-                    literal: None,
-                    children: vec![],
-                    span: crate::diagnostics::Span::unknown(),
-                };
-            }
-            "__builtin_object_size" | "__builtin_dynamic_object_size" => {
-                self.li_a0(-1);
-                
-                return TypedExpr {
-                    kind: crate::ir::ExprKind::Call,
-                    ty: ret_ty.clone(),
-                    literal: None,
-                    children: vec![],
-                    span: crate::diagnostics::Span::unknown(),
-                };
-            }
-            "__builtin_mul_loop" => {
+            self.li_a0(0);
+            return;
+        }
+        // __atomic_* / __sync_* 内建函数特殊处理 (生成 RISC-V 原子指令)
+        let args = &expr.children[1..];
+        if (callee.starts_with("__atomic_") || callee.starts_with("__sync_"))
+            && self.gen_atomic_builtin(&callee, args)
+        {
+            return;
+        }
+
+        // GCC 兼容内建函数: 编译期折叠, 不生成实际调用
+        // __builtin_expect / __builtin_expect_with_probability:
+        //   分支预测提示, 返回第一个实参的值
+        if callee == "__builtin_expect" || callee == "__builtin_expect_with_probability" {
+            if let Some(arg0) = args.first() {
+                self.gen_expr(arg0);
+            } else {
                 self.li_a0(0);
-                
-                return TypedExpr {
-                    kind: crate::ir::ExprKind::Call,
-                    ty: ret_ty.clone(),
-                    literal: None,
-                    children: vec![],
-                    span: crate::diagnostics::Span::unknown(),
-                };
+            }
+            return;
+        }
+        // __builtin_nonzero_p(x): x 为已知非常量返回 0
+        if callee == "__builtin_nonzero_p" {
+            let value = args.first().and_then(|a| {
+                a.literal.as_ref().and_then(|l| match l {
+                    ExprLiteral::Int(v) => Some(if *v != 0 { 1i128 } else { 0i128 }),
+                    _ => None,
+                })
+            }).unwrap_or(0);
+            self.li_a0(value as i32);
+            return;
+        }
+        // __builtin_constant_p(x): 编译期常量判断
+        if callee == "__builtin_constant_p" {
+            let value = args.first()
+                .and_then(|a| a.literal.as_ref())
+                .map_or(0, |_| 1);
+            self.li_a0(value);
+            return;
+        }
+        // __builtin_object_size(ptr, type): 未知时返回 (size_t)-1
+        if callee == "__builtin_object_size" || callee == "__builtin_dynamic_object_size" {
+            self.li_a0(-1);
+            return;
+        }
+        // __builtin_mul_loop: 非标准, 返回 0
+        if callee == "__builtin_mul_loop" {
+            self.li_a0(0);
+            return;
+        }
+
+        // fenv.h 运行时调用 (C11 7.6): 内联为 CSR 指令序列,
+        // 不依赖 libm (freestanding 无 libc).
+        match callee.as_str() {
+            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept"
+            | "fetestexcept" | "fegetenv" | "fesetenv" | "feholdexcept"
+            | "feupdateenv"
+                if !self.labels.contains_key(&callee) =>
+            {
+                self.gen_fenv_builtin(&callee, args);
+                return;
             }
             _ => {}
         }
 
-        // ==================== SysV AMD64 ABI 参数传递 ====================
-        
-        // 生成所有参数表达式到寄存器
-        for (i, arg) in args.iter().enumerate().take(8) {
-            self.gen_expr(arg);
-            self.mv_a_reg(i as u8);
+        // D 扩展内建函数: sqrt/fmin/fmax 直接使用硬件浮点指令
+        if callee == "__builtin_sqrt" || callee == "sqrt" || callee == "sqrtf" {
+            let is_double = callee == "__builtin_sqrt" || callee == "sqrt";
+            if let Some(arg0) = args.first() {
+                self.gen_expr(arg0);
+            }
+            if is_double {
+                self.emit_fsqrt_d(10, 10);
+            } else {
+                self.emit_fsqrt_s(10, 10);
+            }
+            return;
         }
-        
-        // 对于超过 8 个参数的情况，需要处理栈上的参数
-        if args.len() > 8 {
-            self.handle_varargs(args);
+        if callee == "__builtin_fmin" || callee == "fmin" || callee == "fminf" {
+            let is_double = callee == "__builtin_fmin" || callee == "fmin";
+            if args.len() >= 2 {
+                self.gen_expr(&args[0]);
+                self.mv_fa1_fa0();
+                self.gen_expr(&args[1]);
+            }
+            if is_double {
+                self.emit_fmin_d(10, 11, 10);
+            } else {
+                self.emit_fmin_s(10, 11, 10);
+            }
+            return;
+        }
+        if callee == "__builtin_fmax" || callee == "fmax" || callee == "fmaxf" {
+            let is_double = callee == "__builtin_fmax" || callee == "fmax";
+            if args.len() >= 2 {
+                self.gen_expr(&args[0]);
+                self.mv_fa1_fa0();
+                self.gen_expr(&args[1]);
+            }
+            if is_double {
+                self.emit_fmax_d(10, 11, 10);
+            } else {
+                self.emit_fmax_s(10, 11, 10);
+            }
+            return;
         }
 
-        // 为 variadic 函数保存 a0-a7 和 fa0-fa7 到帧中
-        if self.is_current_func_variadic {
-            self.save_va_args_to_frame();
+        // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
+        // 限制: 仅 caller 分配 <sret> local, callee 写到 [a0]
+        let mut sret_reg_idx = 0usize;
+        let needs_sret = is_aggregate(&expr.ty) && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
+        if needs_sret {
+            let size = aggregate_size(&expr.ty).unwrap();
+            let aligned = (size + 15) & !15;
+            let off = self.alloc_local("<sret>", aligned as i32);
+            self.mov_a0_sp_off(off);
+            sret_reg_idx = 1;
         }
 
-        // Generate jalr t0, function_address
-        self.emit_jal_to(func_name);
-
-        TypedExpr {
-            kind: crate::ir::ExprKind::Call,
-            ty: ret_ty.clone(),
-            literal: None,
-            children: vec![],
-            span: crate::diagnostics::Span::unknown(),
-        }
-    }
-
-    /// 处理可变参数函数
-    fn handle_varargs(&mut self, args: &[TypedExpr]) {
-        // 将额外的参数存储到栈上
-        for (i, arg) in args.iter().enumerate().skip(8) {
-            self.gen_expr(arg);
-            
-            // 计算栈偏移 (从 SP 向上分配空间)
-            let off = -(i as i32 * 8 + 64); // 预留 64 字节用于前 8 个寄存器的溢出
-            
-            self.emit_sd(10, 2, off);
-        }
-    }
-
-    /// 为 variadic 函数保存 a0-a7 和 fa0-fa7 到帧中
-    fn save_va_args_to_frame(&mut self) {
-        // 保存 GP 参数 (a0..a7)
-        for i in 0..8 {
-            let reg = 10 + i; // x10..x17
-            let stack_off = self.va_save_base_off + (i as i32 * 8);
-            self.emit_sd(reg, 2, stack_off);
-        }
-        
-        // 保存 FP 参数 (fa0..fa7)
-        // 注意：RISC-V FPU 寄存器映射到整数寄存器进行保存
-        // 这里假设使用软浮点模式，否则需要使用特殊的保存序列
-    }
-
-    /// 获取 L-value 地址 (for variadic arguments)
-    fn get_lvalue_addr(&mut self, expr: &TypedExpr) {
-        match &expr.kind {
-            crate::ir::ExprKind::Local(name) => {
-                if let Some(&off) = self.locals.get(name) {
-                    self.load_a0(off);
+        // M7 修复: 聚合类型参数 by-ref; > 8 args 走栈 (varargs 基础)
+        // 编码: add aN, sp, #off   (RV64I 形式: addi + 大常量走 mv + addi)
+        //       sw t0, off(sp)     => S-type, imm[11:5]|rs2|rs1|010|imm[4:0]|0100011
+        // 限制: 偏移 12-bit 对齐, 否则需 auipc 序列
+        let mut stack_arg_off = self.frame_bytes;
+        for (i, arg) in args.iter().enumerate() {
+            if is_aggregate(&arg.ty) {
+                if let ExprKind::Local(ref n) = arg.kind {
+                    if let Some(&off) = self.locals.get(n) {
+                        let target_reg = (10 + sret_reg_idx + i) as u8;
+                        self.mov_a_reg_sp_off(target_reg, off);
+                        continue;
+                    }
+                }
+                let target_reg = (10 + sret_reg_idx + i) as u8;
+                self.li_reg(target_reg, 0);
+            } else if sret_reg_idx + i >= 8 {
+                // varargs: 溢出的实参压栈 (M7 最小)
+                self.gen_expr(arg);
+                if let ValueType::Float { bits } = &arg.ty {
+                    if *bits <= 32 {
+                        self.emit_fsw(10, 2, stack_arg_off);
+                    } else {
+                        self.emit_fsd(10, 2, stack_arg_off);
+                    }
                 } else {
-                    self.li_a0(0);
+                    self.store_a0(stack_arg_off);
                 }
-            }
-            _ => {
-                self.gen_lvalue_addr(expr);
-            }
-        }
-    }
-
-    // ============================================================
-    // 辅助函数：寄存器分配与调用约定处理
-    // ============================================================
-
-    /// 根据 SysV ABI 将值移动到参数寄存器
-    pub(crate) fn mv_a_reg(&mut self, reg_idx: u8) {
-        // a0-a7 are x10-x17
-        if reg_idx < 8 {
-            let target_reg = 10 + reg_idx;
-            self.emit_mv(target_reg, 10); // a0 -> target
-        }
-    }
-
-    /// 保存当前返回值寄存器内容
-    fn save_return_value(&mut self, tmp_off: i32) {
-        // 将返回结果保存到临时槽
-        self.emit_sd(10, 2, tmp_off);
-    }
-
-    /// 从临时槽恢复返回值
-    fn restore_return_value(&mut self, tmp_off: i32) {
-        self.emit_ld(10, 2, tmp_off);
-    }
-
-    // ============================================================
-    // 内联汇编支持
-    // ============================================================
-
-    /// 发射内联汇编指令序列
-    pub fn emit_inline_asm(
-        &mut self,
-        asm_str: &str,
-        outputs: &[Box<Expr>],
-        output_names: &[String],
-        output_constraints: &[String],
-        inputs: &[Box<Expr>],
-        input_names: &[String],
-        input_constraints: &[String],
-        clobbers: &[String],
-        span_file: &str,
-        span_line: u32,
-        volatile: bool,
-    ) {
-        // 解析并解析内联汇编模板
-        let resolved = Self::resolve_asm_template_enhanced(
-            asm_str,
-            output_constraints,
-            input_constraints,
-            output_names,
-            input_names,
-            &[],
-        );
-
-        if self.asm_text_mode {
-            // -S 模式：保留原始文本
-            let lines: Vec<String> = resolved
-                .split('\n')
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            self.raw_func_asm_lines
-                .push((self.source_name.clone(), lines));
-        } else {
-            // 正常编译：编码为机器码
-            self.encode_and_emit_asm(&resolved, span_file, span_line);
-        }
-
-        // 内存屏障
-        if clobbers.iter().any(|c| c == "memory") {
-            self.emit_fence();
-        }
-    }
-
-    // ============================================================
-    // 原子操作内建函数
-    // ============================================================
-
-    /// 原子内建函数 codegen: 返回 true 表示已处理
-    pub fn gen_atomic_builtin(&mut self, name: &str, args: &[TypedExpr]) -> bool {
-        match name {
-            "__atomic_load_n" => {
-                if args.len() < 2 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                let ord = self.eval_mem_order(&args[1]);
-
-                // a0 = ptr
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11); // a1 = ptr (save)
-                
-                match ord {
-                    0 => {} // RELAXED: no fence
-                    2 => { // ACQUIRE: fence r, rw
-                        self.emit_fence();
-                    }
-                    _ => { // SEQ_CST/RELEASE: fence rw, rw
-                        self.emit_fence();
-                    }
-                }
-                
-                // load from [a1] to a0
-                self.emit_load_sz(10, 11, 0, sz);
-                true
-            }
-            "__atomic_store_n" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                let ord = self.eval_mem_order(&args[2]);
-
-                // a0 = ptr
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11); // a1 = ptr
-                
-                // a0 = val
-                self.gen_expr(&args[1]);
-                
-                match ord {
-                    0 => {} // RELAXED: no fence
-                    _ => { // SEQ_CST/ACQUIRE/RELEASE: fence before store
-                        self.emit_fence();
-                    }
-                }
-                
-                // store a0 to [a1]
-                self.emit_store_sz(10, 11, 0, sz);
-                true
-            }
-            "__atomic_exchange_n" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                // a0 = ptr
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11); // a1 = ptr
-                
-                // a0 = val
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12); // a2 = val
-                
-                // amoswap [a1], a2 -> a0 (old value)
-                self.emit_amoswap(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_add" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11);
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12);
-                
-                // fence rw, rw only for SEQ_CST before AMO
-                let ord = self.eval_mem_order(&args[2]);
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                // amoadd [a1], a2 -> a0 (old value)
-                self.emit_amoadd(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_sub" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11);
-                self.gen_expr(&args[1]);
-                
-                // negate a0 (a0 = -val)
-                self.emit_neg(10, 10);
-                self.mv_a_reg(12);
-                
-                // fence rw, rw only for SEQ_CST before AMO
-                let ord = self.eval_mem_order(&args[2]);
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                // amoadd [a1], a2 -> a0 (old value, adding negative)
-                self.emit_amoadd(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_and" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11);
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12);
-                
-                // fence rw, rw only for SEQ_CST before AMO
-                let ord = self.eval_mem_order(&args[2]);
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                // amoand [a1], a2 -> a0
-                self.emit_amoand(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_or" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11);
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12);
-                
-                // fence rw, rw only for SEQ_CST before AMO
-                let ord = self.eval_mem_order(&args[2]);
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                // amoor [a1], a2 -> a0
-                self.emit_amoor(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_xor" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11);
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12);
-                
-                // fence rw, rw only for SEQ_CST before AMO
-                let ord = self.eval_mem_order(&args[2]);
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                // amoxor [a1], a2 -> a0
-                self.emit_amoxor(sz, 10, 12, 11);
-                true
-            }
-            "__atomic_fetch_nand" => {
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11); // a1 = ptr
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(12); // a2 = val
-                let ord = self.eval_mem_order(&args[2]);
-                
-                if ord == 5 { 
-                    self.emit_fence(); 
-                }
-                
-                let l_retry = self.fresh_label("atomic_nand");
-                let l_done = self.fresh_label("atomic_nand_done");
-                
-                self.label(&l_retry);
-                self.emit_lr(sz, 10, 11);    // a0 = old
-                self.emit_and(13, 10, 12);    // a3 = old & val
-                self.emit_xori(13, 13, -1);   // a3 = ~(old & val)
-                self.emit_sc(sz, 15, 13, 11);
-                self.emit_bnez(15, &l_retry);
-                
-                self.label(&l_done);
-                true
-            }
-            "__atomic_compare_exchange_n" => {
-                // args: (ptr, expected, desired, weak, success_order, failure_order)
-                if args.len() < 3 {
-                    return false;
-                }
-                let sz = self.atomic_elem_size(args, 0);
-                
-                // a0 = ptr
-                self.gen_expr(&args[0]);
-                self.mv_a_reg(11); // a1 = ptr
-                
-                // a0 = *expected (dereference expected pointer)
-                self.gen_expr(&args[1]);
-                self.mv_a_reg(13); // a3 = expected_ptr
-                
-                // load *expected_ptr to a2
-                self.emit_load_sz(12, 13, 0, sz); // a2 = *expected
-                
-                // a0 = desired
-                self.gen_expr(&args[2]);
-                self.mv_a_reg(14); // a4 = desired
-                
-                // fence rw, rw only for SEQ_CST before LR/SC
-                let sord = if args.len() > 4 {
-                    self.eval_mem_order(&args[4])
+                stack_arg_off += 8;
+            } else {
+                self.gen_expr(arg);
+                if let ValueType::Float { bits } = &arg.ty {
+                    self.mv_fa_reg((sret_reg_idx + i) as u8, *bits);
                 } else {
-                    5
-                };
-                if sord == 5 { 
-                    self.emit_fence(); 
+                    self.mv_a_reg((sret_reg_idx + i) as u8);
                 }
-                
-                // LR/SC CAS loop
-                let l_retry = self.fresh_label("atomic_cas");
-                let l_fail = self.fresh_label("atomic_cas_fail");
-                let l_done = self.fresh_label("atomic_cas_done");
-                
-                self.label(&l_retry);
-                // lr.w/d a0, [a1] (load current value)
-                self.emit_lr(sz, 10, 11);
-                // bne a0, a2, fail (compare current with expected)
-                self.emit_bne(10, 12, &l_fail);
-                // sc.w/d a5, a4, [a1] (store desired)
-                self.emit_sc(sz, 15, 14, 11);
-                // bnez a5, retry (if store failed, retry)
-                self.emit_bnez(15, &l_retry);
-                
-                // success: a0 = 1
-                self.li_a0(1);
-                self.j(&l_done);
-                
-                // failure: store current to *expected, a0 = 0
-                self.label(&l_fail);
-                self.emit_store_sz(10, 13, 0, sz); // *expected = current
-                self.li_a0(0);
-                
-                self.label(&l_done);
-                true
             }
-            _ => false,
         }
-    }
 
-    /// 获取指针参数所指元素的大小
-    fn atomic_elem_size(&self, args: &[TypedExpr], idx: usize) -> usize {
-        if idx >= args.len() {
-            return 8;
-        }
-        match &args[idx].ty {
-            ValueType::Pointer(inner) => crate::ir::value_type_size(inner),
-            ValueType::Array(inner, _) => crate::ir::value_type_size(inner),
-            _ => 8,
-        }
-    }
-
-    /// 尝试从 IR 表达式中提取原子内存序常量值
-    fn eval_mem_order(&self, arg: &TypedExpr) -> i32 {
-        match &arg.literal {
-            Some(crate::ir::ExprLiteral::Int(v)) => *v as i32,
-            _ => 5, // default SEQ_CST for safety
-        }
-    }
-
-    /// 加载变量到寄存器 (for inline asm)
-    pub(crate) fn asm_load_var_to_reg(&mut self, name: &str, reg_idx: u8) {
-        if let Some(&off) = self.locals.get(name) {
-            self.load_a0(off);
-            self.emit_mv(reg_idx as u8, 10);
-        } else {
-            self.li_a0(0);
-            self.emit_mv(reg_idx as u8, 10);
-        }
-    }
-
-    /// 从寄存器写回变量 (for inline asm)
-    pub(crate) fn asm_store_reg_to_var(&mut self, name: &str, reg_idx: u8) {
-        if let Some(&off) = self.locals.get(name) {
-            self.emit_store_sz(reg_idx as u8, 2, off, 8);
-        }
+        let callee_final = match expr.children[0].kind {
+            ExprKind::Local(ref n) => n.clone(),
+            _ => "unknown".to_string(),
+        };
+        self.emit_jal_to(&callee_final);
     }
 }

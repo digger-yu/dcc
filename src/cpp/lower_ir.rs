@@ -5667,7 +5667,7 @@ mod tests {
         // Save symbols BEFORE consuming sema
         let symbols = sema.take_symbols();
 
-        let mut hir = sema.into_hir();
+        let hir = sema.into_hir();
 
         // 测试：lower C* -> B* (non-primary base, offset=8)
 

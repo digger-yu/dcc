@@ -74,7 +74,7 @@ pub fn collect_adl_namespaces_for_type(ty: &CxxType) -> Vec<String> {
 }
 
 /// Extract namespace path from class ID
-fn extract_class_namespace(class_id: ClassId) -> Vec<String> {
+fn extract_class_namespace(_class_id: ClassId) -> Vec<String> {
     // TODO: This needs access to the ClassTable to get the full namespace path
     // For now, return empty - will be enhanced when ClassTable is integrated
     Vec::new()

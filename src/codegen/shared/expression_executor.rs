@@ -2,7 +2,6 @@
 //! Provides common expression evaluation logic across architectures
 
 use crate::ast::{BinOp, Type, UnOp};
-use std::fmt;
 
 /// Result type for expression operations
 pub type ExprResult<T> = Result<T, String>;

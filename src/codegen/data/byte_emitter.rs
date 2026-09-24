@@ -141,9 +141,9 @@ impl ByteEmitter {
             let rex_byte = 0x48u8;
             
             // Only emit if next byte is valid instruction opcode
-            if !bytes.is_empty() && bytes[0] <= 255 {
+            if !bytes.is_empty() {
                 bytes.insert(0, rex_byte);
-            } else if bytes.is_empty() && selected.format.opcode.first().map_or(false, |&b| b <= 255) {
+            } else if !selected.format.opcode.is_empty() {
                 // Insert before opcodes
                 bytes.insert(0, rex_byte);
             }
@@ -159,7 +159,7 @@ impl ByteEmitter {
     fn emit_modrm(
         &self,
         bytes: &mut Vec<u8>,
-        selected: &SelectedFormat,
+        _selected: &SelectedFormat,
         address: &MemoryAddress,
     ) -> Result<()> {
         let mut modrm = 0u8;

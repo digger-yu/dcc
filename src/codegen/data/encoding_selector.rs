@@ -5,7 +5,6 @@
 
 use crate::codegen::data::instruction_loader::{EncodingFormat, InstructionDefinition};
 use anyhow::Result;
-use std::collections::HashMap;
 
 /// Represents the binding of an operand to a pattern position
 #[derive(Debug, Clone)]
@@ -90,8 +89,8 @@ impl SmartEncodingSelector {
         let (best_format, best_confidence) = candidates.remove(0);
         
         Ok(SelectedFormat {
-            format: best_format,
             bindings: self.create_bindings(&best_format, operands),
+            format: best_format,
             confidence: best_confidence,
         })
     }
@@ -111,7 +110,7 @@ impl SmartEncodingSelector {
         
         let mut total_score: f64 = 0.0;
         
-        for (i, (pattern_part, analysis)) in pattern_parts.iter().zip(operands.iter()).enumerate() {
+        for (_i, (pattern_part, analysis)) in pattern_parts.iter().zip(operands.iter()).enumerate() {
             let match_score = self.match_operand_type(pattern_part, analysis);
             total_score += match_score;
         }
@@ -230,8 +229,7 @@ impl SmartEncodingSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::data::instruction_loader::InstructionDefinition;
-    
+
     #[test]
     fn test_operand_analysis_match() {
         let selector = SmartEncodingSelector::new();

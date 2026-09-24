@@ -1,17 +1,24 @@
 // src/codegen/mod.rs - 代码生成调度
 // 第一性原理：codegen 入口只做"按 target 选后端"。
 
-pub mod aarch64;
-pub mod arm;
 pub mod asm_event;
 pub mod coff;
 pub mod data;
 pub mod disasm;
-pub mod mips;
-pub mod riscv64;
 // Note: backend, registry, features, elf, asm_constraints, mini_asm moved to shared/
 pub mod shared;
 pub mod x86_64;
+
+// 后端 family 通过 cargo feature gate, 避免主线构建被未完成实现拖住.
+// 见 Cargo.toml: `arm` (arm + aarch64), `mips` (mips + mips64 + riscv64).
+#[cfg(feature = "arm")]
+pub mod aarch64;
+#[cfg(feature = "arm")]
+pub mod arm;
+#[cfg(feature = "mips")]
+pub mod mips;
+#[cfg(feature = "mips")]
+pub mod riscv64;
 
 use crate::ast::{Block, BlockItem, Decl, Designator, Expr, InitItem, Program, Stmt, Type};
 use crate::const_eval::{self, ConstValue};

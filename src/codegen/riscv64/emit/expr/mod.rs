@@ -1,9 +1,9 @@
-// src/codegen/riscv64/emit/expr/mod.rs (Stub)
+// src/codegen/riscv64/emit/expr/mod.rs - expression-level emission.
 
 pub mod binary;
-pub mod unary;
+pub mod binary2;
+pub mod bitfield;
+pub mod call;
 pub mod literal;
 pub mod lvalue;
-pub mod call;
-
-pub fn emit_expr(_expr: &crate::ir::TypedExpr, _output: &mut String) {}
+pub mod unary;

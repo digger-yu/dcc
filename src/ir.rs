@@ -1040,7 +1040,7 @@ impl ValueType {
             Self::Void => 0,
             Self::Integer { bits, .. } => (*bits as usize).div_ceil(8),
             Self::Float { bits } => (*bits as usize).div_ceil(8),
-            Self::Pointer(pointee) => {
+            Self::Pointer(_pointee) => {
                 // On all supported targets, pointers are 8 bytes (64-bit)
                 std::mem::size_of::<usize>()
             }
@@ -1063,7 +1063,7 @@ impl ValueType {
             }
             Self::Pointer(_) => 8,
             Self::Array(elem, _) => elem.align(),
-            Self::Aggregate { align: a, .. } => *a,
+            Self::Aggregate { .. } => 1,
             Self::Function { .. } => 8,
             Self::Vector(elem, _) => elem.align(),
             Self::Complex(inner) => inner.align(),

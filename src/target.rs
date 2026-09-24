@@ -662,7 +662,10 @@ mod tests {
         assert_eq!(t.ptr_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::AAPCS64);
+        #[cfg(feature = "arm")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "arm"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -671,7 +674,10 @@ mod tests {
         assert_eq!(t.ptr_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::SysV);
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -701,7 +707,10 @@ mod tests {
         assert_eq!(t.endian, Endian::Big);
         // 锁的是“不是 ARM 的 AAPCS”这一事实: MIPS O32 自有 callee-saved 集
         assert_eq!(t.callee_save, CalleeSave::MipsO32);
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -712,7 +721,10 @@ mod tests {
         assert_eq!(t.long_size, 8);
         assert_eq!(t.endian, Endian::Big);
         assert_eq!(t.callee_save, CalleeSave::MipsN64);
+        #[cfg(feature = "mips")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "mips"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]
@@ -725,7 +737,10 @@ mod tests {
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::AAPCS);
+        #[cfg(feature = "arm")]
         assert!(t.arch.has_backend());
+        #[cfg(not(feature = "arm"))]
+        assert!(!t.arch.has_backend());
     }
 
     #[test]

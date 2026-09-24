@@ -1,61 +1,24 @@
-// src/codegen/arm/mod.rs - ARM Backend Implementation
-// Phase C Extension - Modular ARM backend (stub implementation)
+// src/codegen/arm/mod.rs - ARM backend (AAPCS, modular).
+//
+// Mechanically split from the original monolithic implementation. The
+// split is a pure move: every method body is unchanged; only visibility
+// and import paths were adjusted.
+//
+// Layout:
+//   backend.rs            - Backend trait implementation / entry wiring
+//   codegen/              - state struct, constructor, compile pipeline,
+//                           function generation, output builders
+//   emit/block.rs         - statement / block-item emission
+//   emit/expression.rs    - gen_expr_from_ast
+//   special/inline_asm.rs - inline asm emission
+//   special/float.rs      - VFPv3 float instruction emitters
 
-use crate::cli::Arch;
-use crate::codegen::shared::backend::{
-    Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
-};
-use crate::codegen::shared::features::FeatureSet;
-use crate::diagnostics::Diagnostic;
+mod backend;
+mod codegen;
+mod emit;
+mod special;
 
-pub struct ArmCodegen {
-    // TODO: Implement full ARM backend
-    // For now, placeholder to allow compilation
-}
+#[cfg(test)]
+mod tests_split;
 
-impl ArmCodegen {
-    pub fn new(_target: crate::target::Target, _relocatable: bool) -> Self {
-        ArmCodegen {}
-    }
-}
-
-impl Backend for ArmCodegen {
-    fn arch(&self) -> Arch {
-        Arch::Arm
-    }
-
-    fn features(&self) -> FeatureSet {
-        // ARM backend has limited feature support
-        FeatureSet { tier1_offload: false, ..FeatureSet::default() }
-    }
-
-    fn compile(&mut self, _input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
-        Err(vec![Diagnostic {
-            level: "ERROR".to_string(),
-            location: None,
-            message: "ARM backend not yet implemented".to_string(),
-            detail: None,
-            hint: None,
-        }])
-    }
-
-    fn render_asm(&mut self, _input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        Err(vec![Diagnostic {
-            level: "ERROR".to_string(),
-            location: None,
-            message: "ARM backend not yet implemented".to_string(),
-            detail: None,
-            hint: None,
-        }])
-    }
-
-    fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        Err(vec![Diagnostic {
-            level: "ERROR".to_string(),
-            location: None,
-            message: "ARM backend not yet implemented".to_string(),
-            detail: None,
-            hint: None,
-        }])
-    }
-}
+pub(crate) use codegen::ArmCodegen;

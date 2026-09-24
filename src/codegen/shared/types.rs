@@ -8,7 +8,6 @@
 // 目标：提取通用类型逻辑，减少重复代码
 
 use crate::ast::Type;
-use std::collections::HashMap;
 
 /// Type classification for instruction selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,8 +226,6 @@ impl TypeCoercionEngine {
     
     /// Integer usual conversions (C11 6.3.1.9)
     fn integer_usual_conversions(&self, lhs: &Type, rhs: &Type) -> Type {
-        use crate::ast::Type;
-        
         // Get signedness and rank
         let lhs_signed = Self::is_signed(&lhs);
         let rhs_signed = Self::is_signed(&rhs);

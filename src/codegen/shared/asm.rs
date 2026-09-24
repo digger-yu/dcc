@@ -193,32 +193,31 @@ impl Operand {
             Operand::Register(name, _) => format!("{}", name),
             Operand::Immediate(val) => format!("${}", val),
             Operand::Memory { base, index, scale, offset } => {
-                let mut result = String::new();
-                
+                let mut inner = String::new();
+
                 if *offset != 0 {
-                    result.push_str(&format!("{}", offset));
+                    inner.push_str(&format!("{}", offset));
                 }
-                
-                result.push('[');
-                
+
                 if let Some(b) = base {
-                    result.push_str(b);
+                    inner.push('(');
+                    inner.push_str(b);
+                    inner.push(')');
                 }
-                
+
                 if let Some(i) = index {
-                    if !result.is_empty() {
-                        result.push('+');
+                    if !inner.is_empty() {
+                        inner.push('+');
                     }
-                    result.push_str(i);
-                    
+                    inner.push_str(i);
+
                     if *scale != 0 {
-                        result.push('*');
-                        result.push_str(&scale.to_string());
+                        inner.push('*');
+                        inner.push_str(&scale.to_string());
                     }
                 }
-                
-                result.push(']');
-                result
+
+                format!("[{}]", inner)
             }
             Operand::Label(label) => label.clone(),
             Operand::SymbolOffset { symbol, offset } => {

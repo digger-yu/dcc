@@ -9736,7 +9736,7 @@ impl Lower {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
             }
             // G13: Full specialization - emit as weak symbol
-            CppDecl::FullSpec { _primary_name, _specific_args, _body } => {
+            CppDecl::FullSpec { .. } => {
                 // Skip full spec in legacy mode for now - native will handle properly
                 // TODO: Implement proper lowering for FullSpec when needed
             }
@@ -10495,7 +10495,7 @@ impl Lower {
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
             }
-            CppStmt::StructuredBinding { names, _ty, init: _, is_volatile: _ } => {
+            CppStmt::StructuredBinding { names, ty: _, init: _, is_volatile: _ } => {
                 // M30.4: 结构化绑定降级 - 暂时输出注释警告
                 self.out.push_str("// structured binding not yet fully implemented: ");
                 self.out.push_str(&format!("{:?}\n", names));

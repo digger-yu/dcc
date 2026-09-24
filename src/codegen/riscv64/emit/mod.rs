@@ -1,7 +1,4 @@
-// src/codegen/riscv64/emit/mod.rs (Placeholder)
+// src/codegen/riscv64/emit/mod.rs - statement/expression emission.
 
-pub mod stmt;
+pub mod block;
 pub mod expr;
-
-pub use stmt::*;
-pub use expr::*;

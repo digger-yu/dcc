@@ -345,7 +345,7 @@ pub enum RelocKind {
 }
 
 impl RelocKind {
-    pub fn from_elf_rela(rela: &crate::codegen::shared::elf::ElfRela) -> Option<Self> {
+    pub fn from_elf_rela(rela: &ElfRela) -> Option<Self> {
         match rela.rel_type {
             R_X86_64_PC32 => Some(RelocKind::Pc32),
             R_X86_64_PLT32 => Some(RelocKind::Plt32),
@@ -519,7 +519,7 @@ fn format_operand(op: &AsmOperand, _pc: u64, symbol_addrs: &std::collections::Ha
         AsmOperand::Reg { class: c, index, width } => {
             format_register(*c, *index, *width)
         }
-        AsmOperand::Imm { value, width } => {
+        AsmOperand::Imm { value, width: _ } => {
             let imm_str = if *value >= 0 {
                 format!("${}", value)
             } else {
@@ -609,7 +609,7 @@ fn get_seg_name(idx: u8) -> String {
 }
 
 /// Format memory operand in AT&T syntax
-fn format_memory(mem: &AsmMem, symbol_addrs: &std::collections::HashMap<String, u64>) -> String {
+fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String, u64>) -> String {
     let mut parts = Vec::new();
 
     // Displacement or symbol
@@ -639,7 +639,7 @@ fn format_memory(mem: &AsmMem, symbol_addrs: &std::collections::HashMap<String, 
     }
 
     // Index*scale
-if let Some(index) = mem.index {
+if let Some(_index) = mem.index {
         if mem.scale != 1 {
             parts.push(format!("%r{},{}", get_gp_name_64bit(13), mem.scale));
         } else {

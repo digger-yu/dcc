@@ -616,7 +616,7 @@ impl ConstexprContext<'_> {
     fn eval_simple_stmt(
         &self,
         stmt: &CppStmt,
-        _locals: &HashMap<String, i128>,
+        locals: &HashMap<String, i128>,
     ) -> ConstEvalResult<()> {
         match stmt {
             CppStmt::Expr(expr) => {
@@ -661,7 +661,7 @@ impl ConstexprContext<'_> {
     fn extract_loop_bound(
         &self,
         condition: &CppExpr,
-        locals: &HashMap<String, i128>,
+        _locals: &HashMap<String, i128>,
     ) -> Option<usize> {
         // Match i < N or similar patterns
         if let CppExpr::BinOp(op, lhs, rhs) = condition {

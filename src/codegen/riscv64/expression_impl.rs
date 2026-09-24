@@ -1,407 +1,436 @@
-// src/codegen/riscv64/expression_impl.rs
-// Phase C: Data-Driven Code Generation Architecture - RISC-V 64 Expression Backend
-//
-// First Principle: RISC-V implements same ExpressionExecutor trait as x86_64/AArch64
-// Enables shared expression evaluation across all ISAs
+// RISC-V 64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::ast::{find_field, BinOp, UnOp};
+use crate::codegen::riscv64::codegen::{Riscv64Codegen, is_aggregate, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size};
+use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
-use crate::ast::{BinOp, Type, UnOp};
-use crate::codegen::shared::expression_executor::{ExpressionExecutor, ExprResult};
-
-/// RISC-V 64-specific ExpressionExecutor implementation
-pub struct RiscV64ExpressionBackend<'a> {
-    pub cg: &'a mut crate::codegen::riscv64::codegen::Riscv64Codegen,
-}
-
-impl<'a> RiscV64ExpressionBackend<'a> {
-    pub fn new(cg: &'a mut crate::codegen::riscv64::codegen::Riscv64Codegen) -> Self {
-        Self { cg }
-    }
-}
-
-impl<'a> ExpressionExecutor for RiscV64ExpressionBackend<'a> {
-    // ========== RISCV64 BINARY OPERATIONS =========
-
-    fn emit_binary_op(
-        &self,
-        op: &BinOp,
-        result_ty: &Type,
-        lhs_reg: u8,
-        rhs_reg: u8,
-        dest_reg: u8,
-    ) -> ExprResult<()> {
-        use crate::ast::BinOp::*;
-        
-        let is_float = result_ty.is_floating_point();
-        
-        match op {
-            // Integer arithmetic (RV64I base instruction set)
-            Add => self.cg.emit_add(dest_reg, lhs_reg, rhs_reg),
-            Sub => self.cg.emit_sub(dest_reg, lhs_reg, rhs_reg),
-            
-            Mul => {
-                // MUL instruction (RV64I)
-                self.cg.emit_mul(dest_reg, lhs_reg, rhs_reg);
-            }
-            
-            Div => {
-                // SDIV (signed) or DIVU (unsigned)
-                let signed = result_ty.is_signed();
-                if signed {
-                    self.cg.emit_div(dest_reg, lhs_reg, rhs_reg);
-                } else {
-                    self.cg.emit_divu(dest_reg, lhs_reg, rhs_reg);
+impl Riscv64Codegen {
+    pub(crate) fn gen_expr(&mut self, expr: &TypedExpr) -> bool {
+        if is_vector_ty(&expr.ty) {
+            return self.gen_vector_expr(expr);
+        }
+        // Handle Assign before float/complex dispatch to avoid
+        // infinite recursion (Assign node ty may be float/aggregate).
+        if let ExprKind::Assign = &expr.kind {
+            if expr.children.len() >= 2
+                && !is_float_ty(&expr.children[1].ty)
+                && !is_complex_ty(&expr.children[1].ty)
+                && !is_vector_ty(&expr.children[1].ty)
+            {
+                // Check for bitfield write before normal assignment
+                let lhs = &expr.children[0];
+                if let ExprKind::Member(ref field_name) = lhs.kind {
+                    if !lhs.children.is_empty() {
+                        let child = &lhs.children[0];
+                        let sn = match &child.ty {
+                            ValueType::Aggregate { name, .. } => Some(name.clone()),
+                            ValueType::Pointer(inner) => {
+                                if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                                    Some(name.clone())
+                                } else { None }
+                            }
+                            _ => None,
+                        };
+                        let bf = sn.as_ref().and_then(|n| {
+                            self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                                find_field(fields, field_name).and_then(|(f, extra)| {
+                                    f.bit_width.map(|bw| {
+                                        (f.offset + extra, bw, f.bit_offset, f.ty.clone())
+                                    })
+                                })
+                            })
+                        });
+                        if let Some((f_off, bw, b_off, cty)) = bf {
+                            if bw < (cty.size() * 8) as u32 {
+                                self.gen_bitfield_store_riscv64(
+                                    &lhs.children[0], &expr.children[1],
+                                    f_off, bw, b_off, &cty,
+                                );
+                                return true;
+                            }
+                        }
+                    }
                 }
-            }
-            
-            Rem => {
-                // REM (signed) or REMU (unsigned)
-                let signed = result_ty.is_signed();
-                if signed {
-                    self.cg.emit_rem(dest_reg, lhs_reg, rhs_reg);
-                } else {
-                    self.cg.emit_remu(dest_reg, lhs_reg, rhs_reg);
+                // Normal (non-bitfield) assignment
+                // Evaluate rhs -> a0
+                self.gen_expr(&expr.children[1]);
+                // Save rhs value to stack
+                let save_off = self.alloc_local("<asgn>", 8);
+                self.emit_sd(10, 2, save_off); // sd a0, [sp+save_off]
+                let lhs = &expr.children[0];
+                match &lhs.kind {
+                    ExprKind::Local(ref name) => {
+                        // Reload rhs
+                        self.emit_ld(10, 2, save_off); // a0 = rhs
+                        if let Some(&off) = self.locals.get(name) {
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(10, 2, off, sz);
+                        } else if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_a0(name); // a0 = global addr
+                            self.emit_ld(11, 2, save_off); // a1 = rhs
+                            let sz = value_type_size(&lhs.ty).max(1);
+                            self.emit_store_sz(11, 10, 0, sz);
+                        }
+                    }
+                    _ => {
+                        self.gen_lvalue_addr(lhs); // a0 = addr
+                        self.emit_addi(12, 10, 0); // a2 = addr (save)
+                        self.emit_ld(11, 2, save_off); // a1 = rhs
+                        let sz = value_type_size(&expr.ty).max(1);
+                        if sz <= 8 {
+                            self.emit_store_sz(11, 12, 0, sz);
+                        } else {
+                            // Aggregate: word-by-word copy
+                            let mut off: i32 = 0;
+                            while (off as usize) + 8 <= sz {
+                                self.emit_ld(13, 11, off);
+                                self.emit_sd(13, 12, off);
+                                off += 8;
+                            }
+                            if (off as usize) < sz {
+                                self.emit_ld(13, 11, off);
+                                self.emit_store_sz(13, 12, off, sz - off as usize);
+                            }
+                        }
+                    }
                 }
-            }
-            
-            // Bitwise operations
-            And => self.cg.emit_and(dest_reg, lhs_reg, rhs_reg),
-            Or => self.cg.emit_or(dest_reg, lhs_reg, rhs_reg),
-            Xor => self.cg.emit_xor(dest_reg, lhs_reg, rhs_reg),
-            
-            // Shift operations
-            Shl => {
-                // SLL (shift logical left)
-                self.cg.emit_sll(dest_reg, lhs_reg, rhs_reg);
-            }
-            Shr => {
-                // SRL (shift logical right) / SRA (arithmatic right)
-                let signed = result_ty.is_signed();
-                if signed {
-                    self.cg.emit_sra(dest_reg, lhs_reg, rhs_reg);
-                } else {
-                    self.cg.emit_srl(dest_reg, lhs_reg, rhs_reg);
-                }
-            }
-            
-            // Comparison operations (returns 0 or 1)
-            Eq => {
-                // Implement equality comparison using slt logic like binary.rs
-                self.cg.emit_slt(12, lhs_reg, rhs_reg); // t1 = (lhs < rhs)
-                self.cg.emit_slt(13, rhs_reg, lhs_reg); // t2 = (rhs < lhs)
-                self.cg.emit_or(dest_reg, 12, 13); // dest = t1 | t2 → 0 if equal, else 1
-                self.cg.xori(dest_reg, dest_reg, 1); // dest = !dest → 1 if equal, else 0
-            }
-            Ne => {
-                // Inequality is inverse of equality
-                self.cg.emit_slt(12, lhs_reg, rhs_reg); // t1 = (lhs < rhs)
-                self.cg.emit_slt(13, rhs_reg, lhs_reg); // t2 = (rhs < lhs)
-                self.cg.emit_or(dest_reg, 12, 13); // dest = t1 | t2 → 1 if not equal, else 0
-            }
-            Lt => {
-                self.cg.emit_slt(dest_reg, lhs_reg, rhs_reg);
-            }
-            Le => {
-                // a <= b → !(a > b) → which is equivalent to (b >= a)
-                self.cg.emit_slt(12, rhs_reg, lhs_reg); // t1 = (rhs < lhs) → 1 if rhs < lhs (so lhs > rhs)
-                self.cg.xori(dest_reg, 12, 1); // dest = t1 ^1 → 1 if rhs >= lhs → a <= b
-            }
-            Gt => {
-                // a > b → equivalent to (b < a)
-                self.cg.emit_slt(dest_reg, rhs_reg, lhs_reg);
-            }
-            Ge => {
-                // a >= b → equivalent to !(a < b)
-                self.cg.emit_slt(dest_reg, lhs_reg, rhs_reg); // t1 = (lhs < rhs) → 1 when a < b
-                self.cg.xori(dest_reg, dest_reg, 1); // dest = !t1 → 1 when a >= b
-            }
-            
-            // Logical operators need short-circuit
-            AndAnd | OrOr => {
-                Err("Logical ops require branching in RISC-V".into())
+                // Result of assignment is the rhs value
+                self.emit_ld(10, 2, save_off); // a0 = rhs
+                return true;
             }
         }
-        
-        Ok(())
-    }
-
-    // ========== RISCV64 UNARY OPERATIONS =========
-
-    fn emit_unary_op(
-        &self,
-        op: &UnOp,
-        src_reg: u8,
-        dest_reg: u8,
-        result_ty: &Type,
-    ) -> ExprResult<()> {
-        use crate::ast::UnOp::*;
-        
-        match op {
-            Neg => {
-                // NEG: subtract from zero
-                self.cg.emit_sub(dest_reg, 0, src_reg);
-            }
-            Not => {
-                // Bitwise NOT: use bitwise_not method
-                self.cg.emit_bitwise_not(dest_reg, src_reg);
-            }
-            Plus => {
-                // No-op for unary plus, just move if needed
-                if src_reg != dest_reg {
-                    self.cg.emit_mv(dest_reg, src_reg, result_ty.size() as usize);
-                }
-            }
-            AddrOf => {
-                Err("Address-of requires lvalue handling".into())
-            }
-            Deref => {
-                // Load from address: use emit_load_sz as per unary.rs
-                let size = result_ty.size() as usize;
-                self.cg.emit_load_sz(dest_reg, src_reg, 0, size);
-                Ok(())
-            }
+        // expr.ty 自身是 float/vector 时走 gen_float_expr.
+        // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
+        // gen_float_expr 形成死循环). 例如 (int)sum(double) 这个 Cast
+        // children[0]=Double 但 expr.ty=Integer, 应走 gen_expr 主路径,
+        // 内层 Call(Double) 再递归调 gen_expr -> gen_float_expr.
+        if is_float_ty(&expr.ty) {
+            return self.gen_float_expr(expr);
         }
-        
-        Ok(())
-    }
-
-    // ========== TYPE CONVERSIONS =========
-
-    fn convert_float_to_int(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        signed: bool,
-        dest_bits: usize,
-    ) -> ExprResult<()> {
-        // FCVT.W.S/F (float to integer)
-        self.cg.fcvt_float_to_int(src_reg, dest_reg, signed, dest_bits)?;
-        Ok(())
-    }
-
-    fn convert_int_to_float(&self, src_reg: u8, dest_reg: u8) -> ExprResult<()> {
-        // FCVT.S.W (integer to float)
-        self.cg.fcvt_int_to_float(src_reg, dest_reg)?;
-        Ok(())
-    }
-
-    fn sign_extend(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        bits_from: usize,
-        bits_to: usize,
-    ) -> ExprResult<()> {
-        // SEXT.W, EXT.H, EXT.B sign extensions
-        match bits_from {
-            8 => self.cg.emit_sext_b(dest_reg, src_reg, bits_to),
-            16 => self.cg.emit_sext_h(dest_reg, src_reg, bits_to),
-            32 => self.cg.emit_sext_w(dest_reg, src_reg, bits_to),
+        // Complex type: dispatch to gen_complex_expr
+        // Complex values are stored as pairs (real, imag) in consecutive
+        // stack slots or register pairs (fa0, fa1).
+        if is_complex_ty(&expr.ty) {
+            return self.gen_complex_expr(expr);
+        }
+        match &expr.kind {
+            ExprKind::Constant => {
+                if let Some(ExprLiteral::Int(v)) = expr.literal {
+                    self.li_a0(trunc_i32(v) as i32);
+                    return true;
+                }
+                if let Some(ExprLiteral::Float(v)) = expr.literal {
+                    self.load_float_fa0(v as f32);
+                    return true;
+                }
+                self.li_a0(0);
+            }
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.load_a0(off);
+                    // 整数提升: char/short → int
+                    self.gen_int_promote_ir(&expr.ty);
+                    return true;
+                }
+                if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_a0(name);
+                    return true;
+                }
+                self.li_a0(0);
+            }
+            ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                // Float comparison: children are float, result is integer
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && matches!(
+                        op,
+                        BinOp::EqEq
+                            | BinOp::Ne
+                            | BinOp::Lt
+                            | BinOp::Le
+                            | BinOp::Gt
+                            | BinOp::Ge
+                    )
+                {
+                    // Evaluate left float -> fa0
+                    self.gen_float_expr(&expr.children[0]);
+                    self.mv_fa1_fa0(); // save left to fa1
+                    // Evaluate right float -> fa0
+                    self.gen_float_expr(&expr.children[1]);
+                    // Now fa0 = right, fa1 = left
+                    // Compare and set a0 from result
+                    self.float_cmp_a0_fa1_fa0(*op, &expr.children[0].ty);
+                    return true;
+                }
+                // Float binary arithmetic: children are float, result is float
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && is_float_ty(&expr.ty)
+                {
+                    return self.gen_float_expr(expr);
+                }
+                self.gen_expr(&expr.children[0]);
+                self.mv_a1_a0();
+                self.gen_expr(&expr.children[1]);
+                self.binop_a0_a1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
+                return true;
+            }
+            ExprKind::Unary(op) if !expr.children.is_empty() => {
+                self.gen_expr(&expr.children[0]);
+                match op {
+                    UnOp::Neg => self.neg_a0(),
+                    UnOp::Plus => {}
+                    UnOp::Not => self.cmp_a0_zero(),
+                    UnOp::BitNot => self.not_a0(),
+                }
+                return true;
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
+                    // Float → Int: child eval puts float in fa0,
+                    // emit FCVT.W.S/FCVT.WU.S to convert to int in a0
+                    self.gen_expr(child);
+                    let is_unsigned = matches!(&expr.ty,
+                        ValueType::Integer { signed: false, .. });
+                    match &child.ty {
+                        ValueType::Float { bits: 32 } => {
+                            if is_unsigned {
+                                // FCVT.WU.S a0, fa0
+                                self.emit_fcvt_wu_s(10, 10);
+                            } else {
+                                // FCVT.W.S a0, fa0
+                                self.emit_fcvt_w_s(10, 10);
+                            }
+                        }
+                        ValueType::Float { bits: 64 } => {
+                            if is_unsigned {
+                                // FCVT.WU.D a0, fa0
+                                self.emit_fcvt_wu_d(10, 10);
+                            } else {
+                                // FCVT.W.D a0, fa0
+                                self.emit_fcvt_w_d(10, 10);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.gen_expr(child);
+                }
+                return true;
+            }
+            ExprKind::VaArg { ap, ref arg_ty, .. } => {
+                // M25: __builtin_va_arg(ap, T)
+                // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
+                if is_aggregate(arg_ty) {
+                    self.gen_va_arg_struct(ap, arg_ty);
+                } else {
+                    self.gen_va_arg_int(ap);
+                }
+                return true;
+            }
+            ExprKind::Call if !expr.children.is_empty() => {
+                self.gen_call(expr);
+                return true;
+            }
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                self.gen_expr(&expr.children[0]);
+                let lbl_else = self.fresh_label("Lc0");
+                let lbl_end = self.fresh_label("Lc1");
+                self.beqz_a0(&lbl_else);
+                self.gen_expr(&expr.children[1]);
+                self.j(&lbl_end);
+                self.label(&lbl_else);
+                self.gen_expr(&expr.children[2]);
+                self.label(&lbl_end);
+                return true;
+            }
+            ExprKind::Address if !expr.children.is_empty() => {
+                // Extended: support &member, &deref, &index via gen_lvalue_addr
+                match &expr.children[0].kind {
+                    ExprKind::Local(ref name) => {
+                        if let Some(&off) = self.locals.get(name) {
+                            self.mov_a0_sp_off(off);
+                            return true;
+                        }
+                        if self.global_rodata.contains_key(name) {
+                            self.load_global_addr_a0(name);
+                            return true;
+                        }
+                    }
+                    _ => {
+                        self.gen_lvalue_addr(&expr.children[0]);
+                        return true;
+                    }
+                }
+                self.li_a0(0);
+                return true;
+            }
+            ExprKind::Dereference if !expr.children.is_empty() => {
+                // *ptr: evaluate pointer, load value
+                self.gen_expr(&expr.children[0]);
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
+                return true;
+            }
+            ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if let ExprKind::Dereference = &child.kind {
+                    self.gen_expr(&child.children[0]);
+                } else {
+                    self.gen_lvalue_addr(child);
+                }
+                // a0 = base address
+                let struct_name = match &child.ty {
+                    ValueType::Aggregate { name, .. } => Some(name.clone()),
+                    ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
+                        if let ValueType::Aggregate { name, .. } = inner.as_ref() {
+                            Some(name.clone())
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                let field_info = struct_name.as_ref().and_then(|n| {
+                    self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                        find_field(fields, field_name).map(|(f, extra)| {
+                            (f.offset + extra, f.bit_width, f.bit_offset, f.ty.clone())
+                        })
+                    })
+                });
+                let field_off = field_info.as_ref().map(|(off, _, _, _)| *off).unwrap_or(0);
+                // Check if this is a bitfield read
+                let bf_info = field_info.as_ref().and_then(|(_, bw, bo, fty)| {
+                    bw.map(|w| (w, *bo, fty.clone()))
+                });
+                if let Some((bit_width, bit_offset, container_ty)) = bf_info {
+                    if bit_width < (container_ty.size() * 8) as u32 {
+                        // Bitfield extraction
+                        if field_off != 0 {
+                            self.emit_addi(10, 10, field_off as i32);
+                        }
+                        // a0 = container address, load container value
+                        let csz = container_ty.size();
+                        self.emit_load_sz(10, 10, 0, csz);
+                        // SRLI a0, a0, bit_offset
+                        if bit_offset > 0 {
+                            self.emit_srli(10, 10, bit_offset as u8);
+                        }
+                        // Mask: a0 &= (1 << bit_width) - 1
+                        if bit_width < 64 {
+                            let mask: u64 = (1u64 << bit_width) - 1;
+                            if mask <= 0x7FF {
+                                self.emit_andi(10, 10, mask as i32);
+                            } else {
+                                // Save shifted value, load mask to a1, reload, AND
+                                let sv = self.alloc_local("<bf_m>", 8);
+                                self.emit_sd(10, 2, sv);       // save
+                                self.load_const64_a0(mask);     // a0 = mask
+                                self.emit_addi(11, 10, 0);     // a1 = mask
+                                self.emit_ld(10, 2, sv);       // a0 = shifted
+                                self.emit_and(10, 10, 11);     // a0 &= mask
+                            }
+                        }
+                        // Sign extend for signed bitfields
+                        let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                        if !is_unsigned && bit_width < 64 {
+                            let sign_bit = 1u64 << (bit_width - 1);
+                            let inv_mask: u64 = !((1u64 << bit_width) - 1);
+                            let sv2 = self.alloc_local("<bf_v>", 8);
+                            self.emit_sd(10, 2, sv2);          // save masked value
+                            // Test sign bit
+                            if sign_bit <= 0x7FF {
+                                self.emit_andi(10, 10, sign_bit as i32);
+                            } else {
+                                let sv3 = self.alloc_local("<bf_t>", 8);
+                                self.emit_sd(10, 2, sv3);
+                                self.load_const64_a0(sign_bit);
+                                self.emit_addi(11, 10, 0);
+                                self.emit_ld(10, 2, sv3);
+                                self.emit_and(10, 10, 11);
+                            }
+                            let lbl_end = format!(".Lbf_end_{}", self.pos());
+                            // BNEZ a0, do_ext (sign bit set -> extend)
+                            let lbl_do = format!(".Lbf_do_{}", self.pos());
+                            self.emit_bnez(10, &lbl_do);
+                            // Sign bit NOT set: reload value, skip extension
+                            self.emit_ld(10, 2, sv2);          // a0 = masked value
+                            self.j(&lbl_end);
+                            // Sign bit set: OR with inv_mask
+                            self.label(&lbl_do);
+                            self.load_const64_a0(inv_mask);    // a0 = inv_mask
+                            self.emit_addi(11, 10, 0);         // a1 = inv_mask
+                            self.emit_ld(10, 2, sv2);          // a0 = masked value
+                            self.emit_or(10, 10, 11);          // a0 |= inv_mask
+                            self.label(&lbl_end);
+                        }
+                        return true;
+                    }
+                }
+                // Normal (non-bitfield) field read
+                if field_off != 0 {
+                    self.emit_addi(10, 10, field_off as i32);
+                }
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 => {
+                let arr = &expr.children[0];
+                let idx = &expr.children[1];
+                match &arr.ty {
+                    ValueType::Array(_, _) => { self.gen_lvalue_addr(arr); }
+                    _ => { self.gen_expr(arr); }
+                }
+                // a0 = base address
+                self.emit_addi(12, 10, 0); // a2 = base (save)
+                self.gen_expr(idx); // a0 = index
+                let elem_sz = value_type_size(&expr.ty).max(1);
+                if elem_sz != 1 {
+                    self.emit_addi(11, 10, 0); // a1 = index
+                    self.li_a0(elem_sz as i32);
+                    self.emit_mul(10, 11, 10); // a0 = idx * elem_sz
+                }
+                // a2 = base, a0 = scaled offset
+                self.emit_add(10, 12, 10); // a0 = base + offset
+                // Load value
+                let sz = value_type_size(&expr.ty).max(1);
+                self.emit_load_sz(10, 10, 0, sz);
+                return true;
+            }
+            ExprKind::Opaque => {
+                // Opaque represents inline asm or label addresses that cannot be
+                // represented in the typed IR. These should be handled at the AST
+                // level via gen_expr_from_ast. For now, return 0 as a placeholder.
+                self.li_a0(0);
+                return true;
+            }
+            ExprKind::Aggregate => {
+                // Aggregate expressions (struct/array values) are not yet fully
+                // supported in the riscv64 backend. Return 0 as a placeholder.
+                self.li_a0(0);
+                return true;
+            }
             _ => {
-                if src_reg != dest_reg && bits_from < bits_to {
-                    self.cg.emit_rv_sign_ext(dest_reg, src_reg, bits_from, bits_to)?;
-                } else if src_reg != dest_reg {
-                    self.cg.emit_rv_mov(dest_reg, src_reg, bits_to as usize / 8)?;
-                }
-                Ok(())
+                // Unhandled IR expression: emit diagnostic instead of
+                // silently producing wrong code (li a0, 0).
+                let span = expr.span.clone();
+                let mut diag = crate::diagnostics::Diagnostic::err(
+                    "E0312",
+                    format!(
+                        "unsupported IR expression on riscv64: {:?}",
+                        expr.kind
+                    ),
+                    span,
+                );
+                diag.hint = Some(
+                    "add handling in gen_expr or lower in SSA pass".to_string(),
+                );
+                self.diagnostics.push(diag);
+                self.li_a0(0);
             }
         }
+        false
     }
 
-    fn zero_extend(
-        &self,
-        src_reg: u8,
-        dest_reg: u8,
-        bits_from: usize,
-        bits_to: usize,
-    ) -> ExprResult<()> {
-        // ZERO.W, HEXT.H, EXTB zero extensions
-        match bits_from {
-            8 => self.cg.emit_zero_b(dest_reg, src_reg, bits_to),
-            16 => self.cg.emit_zero_h(dest_reg, src_reg, bits_to),
-            32 => self.cg.emit_zero_w(dest_reg, src_reg, bits_to),
-            _ => {
-                if src_reg != dest_reg && bits_from < bits_to {
-                    self.cg.emit_rv_zero_ext(dest_reg, src_reg, bits_from, bits_to)?;
-                } else if src_reg != dest_reg {
-                    self.cg.emit_rv_mov(dest_reg, src_reg, bits_to as usize / 8)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    // ========== MEMORY OPERATIONS =========
-
-    fn load_from_register(
-        &self,
-        addr_reg: u8,
-        dest_reg: u8,
-        size: usize,
-        signed: bool,
-    ) -> ExprResult<()> {
-        // LB/LBU/LH/LHU/LW/LWU/LD instructions
-        let load_signed = signed && (size == 1 || size == 2 || size == 4 || size == 8);
-        self.cg.load_memory(addr_reg, dest_reg, size, load_signed)?;
-        Ok(())
-    }
-
-    fn store_to_register(
-        &self,
-        src_reg: u8,
-        addr_reg: u8,
-        size: usize,
-    ) -> ExprResult<()> {
-        // SB/SH/SW/SD store instructions
-        self.cg.store_memory(src_reg, addr_reg, size)?;
-        Ok(())
-    }
-
-    // ========== REGISTER ALLOCATION =========
-
-    fn allocate_gpr(&mut self, ty: &Type) -> ExprResult<u8> {
-        // Allocate general purpose register (x0-x31)
-        let reg = self.cg.alloc_xreg()?;
-        Ok(reg)
-    }
-
-    fn allocate_fpr(&mut self, ty: &Type) -> ExprResult<u8> {
-        // Allocate floating-point register (f0-f31)
-        let reg = self.cg.alloc_freg()?;
-        Ok(reg)
-    }
-
-    fn spill_register(&mut self, reg: u8, stack_offset: i64) -> ExprResult<()> {
-        // SW/SD store to stack
-        self.cg.store_to_stack(reg as u32, stack_offset)?;
-        Ok(())
-    }
-
-    // ========== ADDITIONAL BACKEND HOOKS FOR load_operand() =========
-
-    fn load_immediate_constant(&mut self, value: u64, dest_reg: u8, ty: &Type) -> ExprResult<()> {
-        let size = ty.size() as usize;
-        // LA/LUI + ADDI for immediates
-        self.cg.emit_rv_load_imm(dest_reg, value, size)?;
-        Ok(())
-    }
-
-    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type) -> ExprResult<()> {
-        let size = ty.size() as usize;
-        // Load address of symbol (LA instruction)
-        self.cg.load_symbol_address(symbol, dest_reg)?;
-        // Then load the value
-        if size <= 8 {
-            self.cg.load_memory(dest_reg, dest_reg, size, ty.is_signed())?;
-        } else {
-            self.cg.load_memory(dest_reg, dest_reg, size, ty.is_signed())?;
-        }
-        Ok(())
-    }
-
-    fn shift_left(&mut self, src_reg: u8, dest_reg: u8, count: u8) -> ExprResult<()> {
-        // SLL with immediate or register
-        self.cg.emit_rv_sll_reg(dest_reg, src_reg, count)?;
-        Ok(())
-    }
-
-    fn imul_imm(&mut self, dest_reg: u8, src_reg: u8, imm: u64) -> ExprResult<()> {
-        // MUL + ADDI sequence or SLL if power-of-2
-        self.cg.imul_with_imm(dest_reg, src_reg, imm)?;
-        Ok(())
-    }
-
-    fn add_regs(&mut self, src1: u8, src2: u8, dest: u8) -> ExprResult<()> {
-        // ADD dest, src1, src2
-        self.cg.emit_rv_add(dest, src1, src2);
-        Ok(())
-    }
-
-    fn sub_regs(&mut self, src1: u8, src2: u8, dest: u8) -> ExprResult<()> {
-        // SUB dest, src1, src2
-        self.cg.emit_rv_sub(dest, src1, src2);
-        Ok(())
-    }
-
-    fn add_imm(&mut self, base_reg: u8, offset: i64, dest_reg: u8) -> ExprResult<()> {
-        // ADDI for small offsets, LUI+ADD for large
-        if offset >= -2048 && offset < 2048 {
-            self.cg.emit_rv_addi(dest_reg, base_reg, offset as i32)?;
-        } else {
-            // Large offset: LUI + ADDI sequence
-            self.cg.add_large_offset(dest_reg, base_reg, offset)?;
-        }
-        Ok(())
-    }
-
-    fn mov_reg_to_reg(&mut self, src_reg: u8, dest_reg: u8, size_bytes: usize) -> ExprResult<()> {
-        // MV (MOVE = XOR with zero) or LD
-        self.cg.emit_rv_mov(dest_reg, src_reg, size_bytes)?;
-        Ok(())
-    }
-
-    fn store_address(&mut self, dest_reg: u8, symbol: &str) -> ExprResult<()> {
-        // LA (load address)
-        self.cg.load_symbol_address(symbol, dest_reg)?;
-        Ok(())
-    }
-
-    fn emit_call(&mut self, func: &crate::ast::Expr, args: &[Box<crate::ast::Expr>], result_reg: u8) -> ExprResult<()> {
-        // Evaluate arguments (RISC-V ABI: a0-a7 for first 8 args)
-        let mut arg_regs = [0u8; 8];
-        
-        for (i, arg) in args.iter().enumerate().take(8) {
-            if i < 8 {
-                let reg = self.cg.alloc_a_reg()?;
-                self.load_operand(arg, reg, arg.ty())?;
-                arg_regs[i] = reg;
-            }
-        }
-        
-        // Call function (JAL)
-        if let crate::ast::Expr::Ident { name, .. } = func {
-            self.cg.call_label(name.name.as_str(), true)?;
-        }
-        
-        Ok(())
-    }
-
-    fn branch_if_zero(&mut self, cond_reg: u8, target: &str) -> ExprResult<()> {
-        // BEQZ (branch if equal to zero)
-        self.cg.branch_if_zero(cond_reg, target)?;
-        Ok(())
-    }
-
-    fn jump(&mut self, target: &str) -> ExprResult<()> {
-        // JAL (jump and link)
-        self.cg.jump(target)?;
-        Ok(())
-    }
-
-    fn define_label(&mut self, label: &str) -> ExprResult<()> {
-        // Label definition
-        self.cg.define_label(label)?;
-        Ok(())
-    }
-
-    fn clear_register(&mut self, reg: u8, ty: &Type) -> ExprResult<()> {
-        // ZERO (XOR reg, reg, zero) or MOV x0
-        self.cg.zero_register(reg)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_riscv_ops_covered() {
-        // Verify all operations are handled
-        let _ops = [
-            BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem,
-            BinOp::And, BinOp::Or, BinOp::Xor,
-            BinOp::Shl, BinOp::Shr,
-            BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
-        ];
-    }
 }

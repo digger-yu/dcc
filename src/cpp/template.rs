@@ -597,7 +597,7 @@ impl TemplateRegistry {
         &self,
         name: &str,
         args: &[MangleType],
-    ) -> BestMatchResult {
+    ) -> BestMatchResult<'_> {
         // First try full spec
         if let Some(full) = self.find_full_spec(name, args) {
             return BestMatchResult::FullSpec(full);

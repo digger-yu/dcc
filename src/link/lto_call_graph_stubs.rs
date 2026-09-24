@@ -340,7 +340,7 @@ impl CallGraph {
         // 2. High usage count (>3 calls)
         // 3. Small size (we'd need size info - placeholder)
         
-        for (name, node) in &self.nodes {
+        for (_name, node) in &self.nodes {
             if let CallGraphNode::Function(ref func_name, ref data) = node {
                 // Inline if marked always_inline or hot (high usage)
                 if data.always_inline || data.usage_count > 3 {

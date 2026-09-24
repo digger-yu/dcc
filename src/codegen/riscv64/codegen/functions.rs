@@ -1,478 +1,246 @@
-// src/codegen/riscv64/codegen/functions.rs - Function Generation Logic
-use crate::ast::{Expr, Type, Block, Decl, FuncDecl};
-// Phase B Day 4 - Extracted from riscv64.rs.bak (2026/9/22)
-//
-// Source locations in riscv64.rs.bak:
-// - gen_function() ~line 701+
-// - Function prologue/epilogue generation (~line 500+)
-// - Local variable and stack frame setup
+// RISC-V 64 backend - mechanically split from the monolithic
+// implementation. Pure move: semantics preserved; only visibility and
+// import paths were adjusted for the modular layout.
+use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Stmt};
+use crate::codegen::riscv64::codegen::{Riscv64Codegen, stmt_has_call};
+use crate::ir::{Function};
 
-use crate::ir::Function;
-
-// Use types defined within this module for now
-// use super::*;
-
-/// Code generator for function bodies
-pub struct FunctionCodegen {
-    /// Current function being generated
-    current_func: Option<String>,
-    /// Stack frame size in bytes
-    frame_size: i32,
-    /// Return address offset (-1 if not saved)
-    ret_addr_off: i32,
-    /// Variables tracking return value type
-    return_ty: Option<ValueKind>,
-    /// Whether we've emitted a return instruction
-    emitted_return: bool,
-}
-
-impl Default for FunctionCodegen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FunctionCodegen {
-    pub fn new() -> Self {
-        Self {
-            current_func: None,
-            frame_size: 0,
-            ret_addr_off: -1,
-            return_ty: None,
-            emitted_return: false,
-        }
-    }
-
-    /// Initialize function generation context
-    pub fn init_for_function(&mut self, func_name: &str, returns_pointer: bool) {
-        self.current_func = Some(func_name.to_string());
-        self.ret_addr_off = -1; // Not saved initially
-        self.return_ty = if returns_pointer {
-            Some(ValueKind::Pointer { base: "i8".into() })
-        } else {
-            None
-        };
-        self.emitted_return = false;
-        self.frame_size = 0;
-    }
-
-    /// Generate function entry prologue
-    pub fn generate_prologue(&mut self, args: &[ArgInfo]) {
-        // Allocate stack frame
-        let total_stack = self.calculate_stack_size(args);
-        self.frame_size = total_stack;
-
-        // Check if we need to save ra/fp
-        if !self.is_leaf_function(args) || total_stack > 0 {
-            // Not leaf or needs space - save ra/s0
-            self.save_registers();
-            self.ret_addr_off = -self.frame_size + 16; // Offset for saved registers
-        }
-
-        // Set up frame pointer
-        self.setup_frame_pointer();
-
-        // Clear register arguments in debug mode
-        self.clear_argument_registers(args.len());
-    }
-
-    /// Calculate required stack size for function
-    fn calculate_stack_size(&self, args: &[ArgInfo]) -> i32 {
-        let mut size = 0i32;
-        
-        // Space for callee-saved registers
-        size += 16 * 2; // s0-s11
-        
-        // Space for local variables (placeholder count)
-        size += args.len() as i32 * 16; // Estimate per local
-        
-        // Alignment padding
-        size = ((size + 15) / 16) * 16; // 16-byte alignment
-        
-        size
-    }
-
-    /// Check if function is a leaf (no calls)
-    fn is_leaf_function(&self, _args: &[ArgInfo]) -> bool {
-        true
-    }
-
-    /// Save callee-saved registers (ra/s0-fp)
-    fn save_registers(&mut self) {
-        // sd ra, -24(sp)
-        // sd s0, -16(sp)
-        // addi sp, sp, -48
-        // mv s0, sp
-    }
-
-    /// Setup frame pointer
-    fn setup_frame_pointer(&mut self) {
-        // mv s0, sp
-    }
-
-    /// Clear argument registers for debug tracing
-    fn clear_argument_registers(&mut self, count: usize) {
-        // Zero out a0-a7 for debugging
-        for i in 0..count.min(8) {
-            // li a{}, 0
-        }
-    }
-
-    /// Generate function epilogue (return)
-    pub fn generate_epilogue(&mut self) {
-        if self.emitted_return {
+impl Riscv64Codegen {
+    pub(crate) fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        // __attribute__((naked)): 不生成 prologue/epilogue
+        if ast.map(|f| f.is_naked).unwrap_or(false) {
+            self.emitted_return = false;
+            if let Some(body) = ast.and_then(|f| f.body.as_ref()) {
+                for item in &body.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                            self.gen_naked_asm_expr(e);
+                        }
+                        BlockItem::Stmt(Stmt::AsmGoto {
+                            asm_str,
+                            outputs,
+                            output_names: _,
+                            output_constraints: _,
+                            inputs: _,
+                            input_names: _,
+                            input_constraints: _,
+                            clobbers: _,
+                            goto_labels,
+                            volatile: _,
+                            span,
+                        }) => {
+                            let mut resolved = asm_str.clone();
+                            let label_base = outputs.len();
+                            for (i, label) in goto_labels.iter().enumerate().rev() {
+                                resolved = resolved.replace(
+                                    &format!("%l{}", i),
+                                    &label.name,
+                                );
+                                resolved = resolved.replace(
+                                    &format!("%l{}", label_base + i),
+                                    &label.name,
+                                );
+                                resolved = resolved.replace(
+                                    &format!("%l[{}]", label.name),
+                                    &label.name,
+                                );
+                            }
+                            for line in resolved.split('\n') {
+                                let line = line.trim();
+                                if !line.is_empty() {
+                                    self.emit_asm_line_naked(line, span);
+                                }
+                            }
+                        }
+                        _ => {} // naked 函数忽略非 asm 语句
+                    }
+                }
+            }
             return;
         }
-
-        // Restore callee-saved registers
-        if self.ret_addr_off >= 0 {
-            // ld ra, ... (sp)
-            // ld s0, ... (sp)
-            // addi sp, sp, 48
-            // jr ra
+        self.plan_locals(ast);
+        // 记录当前函数返回类型 (sret/HFA 判定)
+        self.current_return_ty = Some(func.return_type.clone());
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 8);
         } else {
-            // Leaf function - just jr ra
-            // ret
+            self.canary_slot_off = 0;
         }
-
-        self.emitted_return = true;
-    }
-
-    /// Process function body statements
-    pub fn process_body(&mut self, body: &[Statement]) -> Result<(), CompilationError> {
-        for stmt in body {
-            match stmt {
-                Statement::Block(b) => self.process_body(b)?,
-                Statement::If(e, t, f) => self.process_if(e, t, f.as_deref())?,
-                Statement::While(cond, body) => self.process_while(cond, body)?,
-                Statement::For(init, cond, step, body) => {
-                    self.process_for(init.as_deref(), cond, step, body)?
-                }
-                Statement::Switch(expr, cases) => self.process_switch(expr, cases)?,
-                Statement::Return(opt_expr) => {
-                    self.process_return(opt_expr.as_deref())?
-                }
-                Statement::Assign(lhs, rhs) => self.process_assign(lhs, rhs)?,
-                Statement::Expr(expr) => self.emit_expression(expr),
-                Statement::Label(name) => self.label(&name),
-                Statement::Goto(label) => self.emit_goto(label),
-                _ => {}
-            }
+        // 变参函数需要在 frame 顶部预留寄存器保存区:
+        // a0..a7 (64 字节) + fa0..fa7 (64 字节) = 128 字节.
+        let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
+        self.is_current_func_variadic = is_variadic;
+        self.va_gp_offs = 0;
+        self.va_flt_offs = 0;
+        if is_variadic {
+            self.va_save_base_off = self.stack_bytes;
+            self.stack_bytes += 128;
+        } else {
+            self.va_save_base_off = 0;
         }
-        Ok(())
-    }
-
-    /// Handle basic block decomposition
-    pub fn decompose_to_blocks(&self, statements: &[Statement]) -> Vec<BasicBlock> {
-        let mut blocks = Vec::new();
-        let mut current_block = BasicBlock::default();
-        
-        for stmt in statements {
-            if matches!(stmt, Statement::Label(_)) {
-                if !current_block.statements.is_empty() {
-                    blocks.push(current_block);
-                    current_block = BasicBlock::default();
-                }
+        self.frame_bytes = (self.stack_bytes + 15) & !15;
+        // 非叶子函数必须保存 ra/x1: jal 覆写 ra，本函数 ret 需要回退地址。叶子函数不需帧存
+        // ra，保持帧尺寸不变 (不扰动已有产物字节)。ftrace/__fentry__/mcount 也是调用，
+        // stack-protector 的 __stack_chk_fail 也是调用，同样需保存 ra。
+        let ftrace_pos: Option<u64>;
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::None) {
+            ftrace_pos = None;
+        } else {
+            // Check call positions later; for now assume non-leaf if ftrace enabled
+            if func.body.iter().any(stmt_has_call) {
+                ftrace_pos = Some(0); // Placeholder to mark non-leaf
             } else {
-                current_block.statements.push(stmt.clone());
+                ftrace_pos = Some(1); // Will be overwritten
             }
         }
-        
-        if !current_block.statements.is_empty() {
-            blocks.push(current_block);
+        let is_leaf = ftrace_pos.is_none() && !func.body.iter().any(stmt_has_call)
+            && !(self._target.stack_protector && self.canary_slot_off > 0);
+        self.ret_addr_off = if is_leaf {
+            -1
+        } else {
+            let off = self.frame_bytes;
+            self.frame_bytes += 8; // Frame top slot for ra (8 bytes aligned)
+            off
+        };
+        if self.frame_bytes > 0 {
+            if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+                self.emit_stack_clash_probes(self.frame_bytes as u32);
+            } else {
+                self.addi_sp(-self.frame_bytes);
+            }
         }
-
-        blocks
-    }
-
-    // ========================================================================
-    /// Expression Processing Helpers
-    // ========================================================================
-
-    /// Evaluate an expression and store result in a register
-    pub fn evaluate_expression(&mut self, expr: &Expression) -> RegAllocation {
-        match expr {
-            Expression::Binary(bin_expr) => {
-                self.binary_operation(bin_expr.op, &bin_expr.left, &bin_expr.right)
-            }
-            Expression::Unary(op, operand) => {
-                self.unary_operation(*op, operand)
-            }
-            Expression::Call(call_info) => {
-                self.generate_call(call_info)
-            }
-            Expression::Load(addr) => {
-                self.load_memory(addr)
-            }
-            Expression::Const(value) => {
-                self.load_immediate(*value)
-            }
-            _ => RegAllocation::default(),
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
         }
+        // 存 ra 必须在帧零初始化之后，否则 ra 会被清零覆盖。
+        if self.ret_addr_off >= 0 {
+            self.emit_sd(1, 2, self.ret_addr_off); // sd x1, ret_addr_off(sp)
+        }
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
+        }
+        // FTRACE: emit call to mcount/__fentry__ before function body
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.pos();
+                self.emit_jal_to("__fentry__");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.pos();
+                self.emit_jal_to("mcount");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
+        }
+        // 进入变参函数立即把 a0..a7 和 fa0..fa7 写入保存区
+        if is_variadic {
+            for i in 0..8u8 {
+                self.emit_sd(10 + i, 2, self.va_save_base_off + (i as i32) * 8);
+            }
+            for i in 0..8u8 {
+                self.emit_fsd(10 + i, 2, self.va_save_base_off + 64 + (i as i32) * 8);
+            }
+        }
+        self.emitted_return = false;
+        let body = ast.and_then(|f| f.body.as_ref());
+        let items = body.map(|b| b.items.as_slice()).unwrap_or(&[]);
+        for (item, ir) in items.iter().zip(func.body.iter()) {
+            self.gen_block_item(item, ir);
+        }
+        if !self.emitted_return {
+            self.li_a0(0);
+            self.ret();
+        }
+        self.current_return_ty = None;
     }
 
-    fn binary_operation(&mut self, _op: BinOp, _left: &Expression, _right: &Expression) -> RegAllocation {
-        RegAllocation::default()
-    }
-
-    fn unary_operation(&mut self, _op: UnOp, _operand: &Expression) -> RegAllocation {
-        RegAllocation::default()
-    }
-
-    fn generate_call(&mut self, _call_info: &CallInfo) -> RegAllocation {
-        RegAllocation::default()
-    }
-
-    fn load_memory(&mut self, _addr: &MemoryLocation) -> RegAllocation {
-        RegAllocation::default()
-    }
-
-    fn load_immediate(&mut self, _value: i64) -> RegAllocation {
-        RegAllocation::default()
-    }
-
-    // ========================================================================
-    /// Control Flow Handling
-    // ========================================================================
-
-    fn process_if(&mut self, _cond: &Expression, _then: &[Statement], _else: Option<&[Statement]>) -> Result<(), CompilationError> {
-        // Generate branch instructions for condition
-        // Then block
-        // else block (if present)
-        Ok(())
-    }
-
-    fn process_while(&mut self, _cond: &Expression, _body: &[Statement]) -> Result<(), CompilationError> {
-        // Label loop start
-        // Evaluate condition
-        // Branch to exit if false
-        // Body
-        // Jump back to start
-        // Label exit
-        Ok(())
-    }
-
-    fn process_for(&mut self, _init: Option<&Statement>, _cond: &Expression, _step: &Statement, _body: &[Statement]) -> Result<(), CompilationError> {
-        // Init statement
-        self.process_while(_cond, _body)?;
-        Ok(())
-    }
-
-    fn process_switch(&mut self, _expr: &Expression, _cases: &[CaseInfo]) -> Result<(), CompilationError> {
-        // Build jump table or series of comparisons
-        Ok(())
-    }
-
-    fn process_return(&mut self, opt_expr: Option<&Expression>) -> Result<(), CompilationError> {
-        // Copy return values to a0/a1 if needed
-        // Jump to epilogue
-        self.emitted_return = true;
-        Ok(())
-    }
-
-    fn process_assign(&mut self, _lhs: &LValue, _rhs: &Expression) -> Result<(), CompilationError> {
-        // Evaluate rhs
-        // Store to lhs location
-        Ok(())
-    }
-
-    fn emit_expression(&mut self, _expr: &Expression) {
-        // Evaluate but discard result
-    }
-
-    fn label(&mut self, name: &str) {
-        // Register label in label map
-    }
-
-    fn emit_goto(&mut self, label: &str) {
-        // Generate unconditional branch
-    }
-}
-
-// ========================================================================
-// Supporting Structures
-// ========================================================================
-
-#[derive(Debug, Clone)]
-pub struct ArgInfo {
-    pub name: String,
-    pub reg: u8,      // RISC-V register number
-    pub ty: ValueType,
-}
-
-#[derive(Debug, Clone)]
-pub struct CallInfo {
-    pub target: String,
-    pub args: Vec<Expression>,
-    pub return_reg: u8,
-}
-
-#[derive(Debug, Clone)]
-pub enum LValue {
-    Memory(MemoryLocation),
-    Register(u8),
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryLocation {
-    pub base_reg: u8,
-    pub offset: i32,
-    pub ty: ValueType,
-}
-
-#[derive(Debug, Clone)]
-pub struct BasicBlock {
-    pub statements: Vec<Statement>,
-    pub predecessor_count: usize,
-    pub successor_indices: Vec<usize>,
-}
-
-impl Default for BasicBlock {
-    fn default() -> Self {
-        Self {
-            statements: Vec::new(),
-            predecessor_count: 0,
-            successor_indices: Vec::new(),
+    /// naked 函数中处理表达式: 仅处理 AsmExpr，其他忽略
+    pub(crate) fn gen_naked_asm_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                volatile,
+                span,
+                ..
+            } => {
+                self.emit_inline_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
+                    *volatile,
+                );
+            }
+            // 语句表达式 ({...}) 可能包含 asm: 递归处理
+            Expr::StmtExpr { block, .. } => {
+                for item in &block.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e: inner, .. }) = item {
+                        self.gen_naked_asm_expr(inner);
+                    }
+                }
+            }
+            _ => {} // 忽略非 asm 表达式
         }
     }
-}
 
-#[derive(Debug, Clone, Default)]
-pub struct RegAllocation {
-    pub reg: u8,
-    pub value: i64,
-    pub valid: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum Statement {
-    Block(Vec<Statement>),
-    If(Box<Expression>, Vec<Statement>, Option<Vec<Statement>>),
-    While(Box<Expression>, Vec<Statement>),
-    For(Option<Box<Statement>>, Box<Expression>, Box<Statement>, Vec<Statement>),
-    Switch(Box<Expression>, Vec<CaseInfo>),
-    Return(Option<Box<Expression>>),
-    Assign(Box<LValue>, Box<Expression>),
-    Expr(Box<Expression>),
-    Label(String),
-    Goto(String),
-    InlineAsm(String),
-    Break,
-    Continue,
-}
-
-#[derive(Debug, Clone)]
-pub struct CaseInfo {
-    pub expr: Expression,
-    pub body: Vec<Statement>,
-    pub is_default: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CallStmt {
-    pub func_name: String,
-    pub arguments: Vec<Expression>,
-    pub dest_regs: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BinaryExpr {
-    pub op: BinOp,
-    pub left: Box<Expression>,
-    pub right: Box<Expression>,
-    pub result_type: ValueType,
-}
-
-#[derive(Debug, Clone)]
-pub enum Expression {
-    Const(i64),
-    Binary(BinaryExpr),
-    Unary(UnOp, Box<Expression>),
-    Load(MemoryLocation),
-    Call(CallInfo),
-    Ident(String),
-    LValue(LValue),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum UnOp {
-    Neg,      // -x
-    Not,      // ~x
-    AddrOf,   // &x
-    Deref,    // *x
-    PostInc,  // x++
-    PreInc,   // ++x
-    PostDec,  // x--
-    PreDec,   // --x
-    Cast,     // (type)x
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    And, Or, Xor,
-    Sll, Srl, Sra,
-    Lt, Le, Gt, Ge,
-    Eq, Ne,
-}
-
-#[derive(Debug, Clone)]
-pub enum ValueKind {
-    Integer { bits: u8 },
-    Float { is_double: bool },
-    Pointer { base: String },
-    Vector { el_type: String, len: u32 },
-    Aggregate { fields: Vec<FieldInfo> },
-}
-
-#[derive(Debug, Clone)]
-pub struct FieldInfo {
-    pub name: Option<String>,
-    pub ty: ValueKind,
-    pub offset: usize,
-    pub packed: bool,
-}
-
-// Use the unified ValueType from crate::ir
-use crate::ir::ValueType;
-
-#[derive(Debug, Clone)]
-pub struct CompilationError {
-    pub message: String,
-    pub span_line: Option<u32>,
-}
-
-impl From<String> for CompilationError {
-    fn from(msg: String) -> Self {
-        Self {
-            message: msg,
-            span_line: None,
+    /// naked 函数中发射单条 asm 文本行 (asm goto 用)
+    pub(crate) fn emit_asm_line_naked(
+        &mut self,
+        line: &str,
+        span: &crate::diagnostics::Span,
+    ) {
+        if self.asm_text_mode {
+            self.raw_func_asm_lines
+                .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
+            self.label_serial += 1;
+        } else {
+            self.encode_and_emit_asm(line, &span.file, span.line);
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_function_codegen_init() {
-        let mut fc = FunctionCodegen::new();
-        fc.init_for_function("main", false);
-        
-        assert_eq!(fc.current_func, Some("main".to_string()));
+    pub(crate) fn plan_locals(&mut self, ast: Option<&FuncDecl>) {
+        self.locals.clear();
+        self.stack_bytes = 0;
+        let Some(body) = ast.and_then(|f| f.body.as_ref()) else {
+            return;
+        };
+        // Allocate space for function parameters
+        if let Some(func_ast) = ast {
+            for param in &func_ast.params {
+                if let Some(ref name) = param.name {
+                    let size = param.ty.size().max(4) as i32;
+                    self.alloc_local(&name.name, size);
+                }
+            }
+        }
+        for item in &body.items {
+            if let BlockItem::Decl(Decl::Var(v)) = item {
+                self.alloc_local(&v.name.name, v.ty.size().max(4) as i32);
+            }
+        }
     }
 
-    #[test]
-    fn test_basic_block_decomposition() {
-        let fc = FunctionCodegen::new();
-        let blocks = fc.decompose_to_blocks(&[]);
-        assert!(blocks.is_empty());
-    }
-
-    #[test]
-    fn test_reg_allocation() {
-        let alloc = RegAllocation::default();
-        assert!(!alloc.valid);
-    }
 }
