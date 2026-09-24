@@ -116,7 +116,7 @@ fn link_relocatable_builtin(
                 );
             }
             Ok(())
-        }
+        },
         Err(e) => Err(e),
     }
 }
@@ -153,7 +153,8 @@ fn link_relocatable_legacy(
         refs.iter()
             .filter_map(|obj| {
                 lto_bitcode::deserialize_module(
-                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto")
+                        .unwrap_or_default(),
                 )
                 .ok()
             })
@@ -198,11 +199,7 @@ fn link_relocatable_legacy(
     let status = ld.status().map_err(|e| {
         vec![Diagnostic::err(
             "E0202",
-            format!(
-                "cannot invoke {}: {} (set LD= or install binutils)",
-                ld_path.display(),
-                e
-            ),
+            format!("cannot invoke {}: {} (set LD= or install binutils)", ld_path.display(), e),
             Span::point("", 0, 0),
         )]
     })?;
@@ -302,12 +299,42 @@ mod tests {
             visibility: elf::STV_DEFAULT,
         };
         let obj1 = elf::build_elf_rel_x86_64(
-            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            &[sym1], &[], &[], &[], &[], &[],
+            text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            &[sym1],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         let obj2 = elf::build_elf_rel_x86_64(
-            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            &[sym2], &[], &[], &[], &[], &[],
+            text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            &[sym2],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         let p1 = dir.join("dcc-r-lto-1.o");
         let p2 = dir.join("dcc-r-lto-2.o");
@@ -340,19 +367,30 @@ mod tests {
             visibility: elf::STV_DEFAULT,
         };
         let obj1 = elf::build_elf_rel_x86_64(
-            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            &[sym1], &[], &[], &[], &[], &[],
+            text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            &[sym1],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         let p1 = dir.join("dcc-r-script-1.o");
         let out = dir.join("dcc-r-script-out.o");
         let script_path = dir.join("dcc-r-test.lds");
         std::fs::write(&p1, &obj1).unwrap();
         // Simple linker script that defines section layout
-        std::fs::write(
-            &script_path,
-            "SECTIONS { .text : { *(.text) } }\n",
-        )
-        .unwrap();
+        std::fs::write(&script_path, "SECTIONS { .text : { *(.text) } }\n").unwrap();
         let result = link_relocatable_with_script(
             std::slice::from_ref(&p1),
             &out,
@@ -360,11 +398,7 @@ mod tests {
             false,
             Some(&script_path),
         );
-        assert!(
-            result.is_ok(),
-            "builtin -r with linker script: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "builtin -r with linker script: {:?}", result.err());
         let out_bytes = std::fs::read(&out).unwrap();
         assert_eq!(&out_bytes[0..4], b"\x7fELF");
         let _ = std::fs::remove_file(&p1);

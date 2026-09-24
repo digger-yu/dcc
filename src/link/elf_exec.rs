@@ -13,8 +13,8 @@ use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use super::link_opts;
 use crate::codegen::shared::elf::{
     ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
-    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_GROUP, SHT_NOBITS, SHT_PROGBITS,
-    SHT_STRTAB, SHT_SYMTAB,
+    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_GROUP, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB,
+    SHT_SYMTAB,
 };
 
 pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
@@ -297,18 +297,7 @@ pub fn write_elf_internal(
         0x1000,
     );
     // PT_GNU_STACK
-    write_phdr(
-        out,
-        &mut phdr_cursor,
-        PT_GNU_STACK,
-        PF_R | PF_W,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    );
+    write_phdr(out, &mut phdr_cursor, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0, 0);
     // PT_GNU_RELRO: 标识 RELRO 覆盖范围 (default; 由 link_opts 控制是否实际写入)
     if let Some((lo, hi)) = link_opts::compute_relro_range(layout) {
         // 文件偏移: 找出落在 (lo,hi) 范围内的最早一节 (用实际节偏移)
@@ -332,18 +321,7 @@ pub fn write_elf_internal(
                 })
                 .sum::<u64>(),
         );
-        write_phdr(
-            out,
-            &mut phdr_cursor,
-            PT_GNU_RELRO,
-            PF_R,
-            fo,
-            lo,
-            lo,
-            fsz,
-            hi - lo,
-            0x1000,
-        );
+        write_phdr(out, &mut phdr_cursor, PT_GNU_RELRO, PF_R, fo, lo, lo, fsz, hi - lo, 0x1000);
     }
     if layout.has_dynamic {
         // 找到 .dynamic 节 (用实际节偏移)
@@ -447,9 +425,9 @@ pub fn write_elf_internal(
             comdat_data_offsets[i],
             data_size,
             symtab_shdr_idx, // sh_link: index of .symtab
-            0, // sh_info: signature symbol index (0 = unnamed group)
-            4, // 4-byte alignment (flag word + section indices)
-            4, // sh_entsize: size of each entry (section index)
+            0,               // sh_info: signature symbol index (0 = unnamed group)
+            4,               // 4-byte alignment (flag word + section indices)
+            4,               // sh_entsize: size of each entry (section index)
         );
     }
     // .gnu.hash
@@ -519,20 +497,7 @@ pub fn write_elf_internal(
         0,
     );
     // .note.GNU-stack
-    write_shdr(
-        out,
-        &mut shdr_cursor,
-        0,
-        SHT_PROGBITS,
-        0,
-        0,
-        shstrtab_off,
-        0,
-        0,
-        0,
-        1,
-        0,
-    );
+    write_shdr(out, &mut shdr_cursor, 0, SHT_PROGBITS, 0, 0, shstrtab_off, 0, 0, 0, 1, 0);
 
     // 8. ELF 头
     write_elf_header(

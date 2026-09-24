@@ -79,11 +79,7 @@ impl VersionTable {
             let after = &target[idx + 1..];
             if before.ends_with('@') {
                 // NAME@@VER
-                (
-                    before.strip_suffix('@').unwrap().to_string(),
-                    after.to_string(),
-                    true,
-                )
+                (before.strip_suffix('@').unwrap().to_string(), after.to_string(), true)
             } else {
                 (before.to_string(), after.to_string(), false)
             }
@@ -349,10 +345,7 @@ mod tests {
         assert_eq!(t.defs.len(), 1);
         assert!(t.defs[0].hidden);
         // Hidden lookup uses @@
-        assert_eq!(
-            t.resolve("internal@@MYLIB_1.0"),
-            Some("internal")
-        );
+        assert_eq!(t.resolve("internal@@MYLIB_1.0"), Some("internal"));
     }
 
     #[test]

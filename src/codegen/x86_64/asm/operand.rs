@@ -17,17 +17,17 @@ pub const ASM_REG_ST: u8 = 136;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsmOperand {
     None,
-    Reg(u8, u8),      // (index, size_bits)
+    Reg(u8, u8), // (index, size_bits)
     Mem {
         disp: i32,
         base: u8,
         index: Option<u8>,
         scale: u8,
     },
-    Sym(String),           // Symbol reference
-    SymDisp(String, i32),  // Symbol with displacement
-    Imm(i64),              // Immediate value
-    Seg(u8),               // Segment code
+    Sym(String),          // Symbol reference
+    SymDisp(String, i32), // Symbol with displacement
+    Imm(i64),             // Immediate value
+    Seg(u8),              // Segment code
     SegMem {
         seg: u8,
         disp: i32,
@@ -43,11 +43,11 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
     if s.is_empty() {
         return AsmOperand::None;
     }
-    
+
     // Strip segment prefix: %gs:... / gs:... / %gs / gs (must be before other checks)
     let (s, seg) = strip_asm_seg_prefix(s);
     let s = s.trim();
-    
+
     if s.is_empty() {
         return if let Some(sc) = seg {
             AsmOperand::Seg(sc)
@@ -55,13 +55,13 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
             AsmOperand::None
         };
     }
-    
+
     // Indirect prefix *: jmp *%rax, call *symbol, jmp *(%rax), etc.
     if let Some(rest) = s.strip_prefix('*') {
         let inner = parse_asm_operand_str(rest);
         return wrap_indirect(inner);
     }
-    
+
     // Immediate: $N
     if let Some(rest) = s.strip_prefix('$') {
         let rest = rest.trim();
@@ -75,7 +75,7 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
         // $label (e.g., $1f, $1b) - local label reference
         return AsmOperand::Sym(rest.to_string());
     }
-    
+
     // Register: %reg or bare rax/rbx, etc.
     if s.starts_with('%') {
         if let Some((idx, sz)) = parse_asm_reg(s) {
@@ -83,16 +83,24 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
         }
         return AsmOperand::None;
     }
-    
+
     if let Some((idx, sz)) = parse_asm_reg(&format!("%{}", s)) {
         return AsmOperand::Reg(idx, sz);
     }
-    
+
     // Memory: disp(%base,%idx,scale) or (%reg) or symbol(%rip)
     if s.contains('(') {
         let inner = parse_asm_mem(s);
         return match (seg, inner) {
-            (Some(sc), AsmOperand::Mem { disp, base, index, scale }) => AsmOperand::SegMem {
+            (
+                Some(sc),
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => AsmOperand::SegMem {
                 seg: sc,
                 disp,
                 base,
@@ -102,7 +110,7 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
             (_, other) => other,
         };
     }
-    
+
     // Segment prefix + symbol (e.g., `gs:symbol` which is rare; treat as symbol)
     // Symbol name (global tag reference) + segment prefix → segment prefix follows to emit phase
     let sym = strip_asm_comment(s).trim().to_string();
@@ -115,7 +123,7 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
             scale: 1,
         };
     }
-    
+
     AsmOperand::Sym(sym)
 }
 
@@ -124,13 +132,17 @@ fn strip_asm_seg_prefix(s: &str) -> (&str, Option<u8>) {
     let s = s.trim_start();
     let (head, rest) = if let Some(after) = s.strip_prefix('%') {
         // Find first non-alphabetic character as head/rest split
-        let pos = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        let pos = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
         (&after[..pos], &after[pos..])
     } else {
-        let pos = s.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(s.len());
+        let pos = s
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(s.len());
         (&s[..pos], &s[pos..])
     };
-    
+
     if let Some((code, _pfx)) = parse_asm_seg(head) {
         if let Some(after_colon) = rest.strip_prefix(':') {
             return (after_colon, Some(code));
@@ -140,7 +152,7 @@ fn strip_asm_seg_prefix(s: &str) -> (&str, Option<u8>) {
             return ("", Some(code));
         }
     }
-    
+
     (s, None)
 }
 
@@ -209,21 +221,21 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_XMM))
-        }
+        },
         name if name.starts_with("ymm") => {
             let idx = n[3..].parse::<u8>().ok()?;
             if idx > 15 {
                 return None;
             }
             Some((idx, ASM_REG_YMM))
-        }
+        },
         name if name.starts_with("zmm") => {
             let idx = n[3..].parse::<u8>().ok()?;
             if idx > 31 {
                 return None;
             }
             Some((idx, ASM_REG_ZMM))
-        }
+        },
         // AMX tile registers
         name if name.starts_with("tmm") => {
             let idx = n[3..].parse::<u8>().ok()?;
@@ -231,7 +243,7 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_TMM))
-        }
+        },
         // AVX-512 mask registers
         name if name.starts_with('k') => {
             let idx = n[1..].parse::<u8>().ok()?;
@@ -239,7 +251,7 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_K))
-        }
+        },
         // Control registers
         name if name.starts_with("cr") => {
             let idx = n[2..].parse::<u8>().ok()?;
@@ -247,7 +259,7 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_CR))
-        }
+        },
         // Debug registers
         name if name.starts_with("dr") || name.starts_with("db") => {
             let idx = n[2..].parse::<u8>().ok()?;
@@ -255,7 +267,7 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_DR))
-        }
+        },
         // MMX registers
         name if name.starts_with("mm") => {
             let idx = n[2..].parse::<u8>().ok()?;
@@ -263,7 +275,7 @@ fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
                 return None;
             }
             Some((idx, ASM_REG_MMX))
-        }
+        },
         // x87 FPU stack registers
         "st" | "st(0)" => Some((0, ASM_REG_ST)),
         "st(1)" => Some((1, ASM_REG_ST)),
@@ -283,10 +295,13 @@ fn parse_asm_mem(s: &str) -> AsmOperand {
     let paren_pos = s.find('(').unwrap_or(s.len());
     let disp_str = s[..paren_pos].trim();
     let rest = &s[paren_pos..];
-    
+
     let mut disp: i32 = 0;
     if !disp_str.is_empty() {
-        if let Some(hex) = disp_str.strip_prefix("0x").or_else(|| disp_str.strip_prefix("0X")) {
+        if let Some(hex) = disp_str
+            .strip_prefix("0x")
+            .or_else(|| disp_str.strip_prefix("0X"))
+        {
             disp = i32::from_str_radix(hex, 16).unwrap_or(0);
         } else if disp_str.parse::<i32>().is_err() {
             // Symbol name: convert to SymDisp with symbol name (RIP-relative default)
@@ -295,33 +310,33 @@ fn parse_asm_mem(s: &str) -> AsmOperand {
             disp = disp_str.parse::<i32>().unwrap_or(0);
         }
     }
-    
+
     // Extract content inside parentheses
     let inner = if rest.starts_with('(') && rest.ends_with(')') {
         &rest[1..rest.len() - 1]
     } else {
         return AsmOperand::None;
     };
-    
+
     let parts: Vec<&str> = inner.split(',').collect();
     let base_str = parts.first().map(|s| s.trim()).unwrap_or("");
-    
+
     if base_str == "%rip" || base_str == "rip" {
         // Check for index/scale: disp(%rip,%idx,scale)
         let mut idx: Option<u8> = None;
         let mut scale: u8 = 1;
-        
+
         if parts.len() > 1 {
             let idx_str = parts[1].trim();
             if !idx_str.is_empty() {
                 idx = parse_asm_reg(idx_str).map(|(r, _)| r);
             }
         }
-        
+
         if parts.len() > 2 {
             scale = parts[2].trim().parse::<u8>().unwrap_or(1);
         }
-        
+
         return AsmOperand::Mem {
             disp,
             base: ASM_BASE_RIP,
@@ -329,23 +344,23 @@ fn parse_asm_mem(s: &str) -> AsmOperand {
             scale,
         };
     }
-    
+
     let (base, _bsz) = parse_asm_reg(base_str).unwrap_or((5, 64)); // Default rbp
-    
+
     let mut idx: Option<u8> = None;
     let mut scale: u8 = 1;
-    
+
     if parts.len() > 1 {
         let idx_str = parts[1].trim();
         if !idx_str.is_empty() {
             idx = parse_asm_reg(idx_str).map(|(r, _)| r);
         }
     }
-    
+
     if parts.len() > 2 {
         scale = parts[2].trim().parse::<u8>().unwrap_or(1);
     }
-    
+
     AsmOperand::Mem {
         disp,
         base,
@@ -357,7 +372,7 @@ fn parse_asm_mem(s: &str) -> AsmOperand {
 /// Mark AsmOperand as indirect (jmp/call *x meaning)
 fn wrap_indirect(inner: AsmOperand) -> AsmOperand {
     // Indirect Reg → keep Reg, recognize in emit phase (jmp *%rax = jmp %rax)
-    // Indirect Mem → keep Mem  
+    // Indirect Mem → keep Mem
     // Indirect Sym → mark as SymDisp(sym, 0)表示间接跳转
     match inner {
         AsmOperand::Sym(name) => AsmOperand::SymDisp(name, 0),

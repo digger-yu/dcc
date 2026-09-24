@@ -3,7 +3,7 @@
 // Extracted from mod.rs (Turns 38-39)
 
 use crate::ast::*;
-use crate::codegen::x86_64::{Codegen, const_eval, GlobalVar};
+use crate::codegen::x86_64::{const_eval, Codegen, GlobalVar};
 
 use std::collections::HashMap;
 
@@ -18,11 +18,11 @@ pub fn eval_global_lvalue_offset<'a>(
         Expr::Ident { name, .. } => {
             // Direct reference to global variable
             Some((name.name.clone(), 0))
-        }
+        },
         Expr::AddrOf { e: inner, .. } => {
             // &x - peel off one level
             eval_global_lvalue_offset(inner, globals_raw)
-        }
+        },
         Expr::Cast { e: inner, ty, .. } => {
             // Cast expressions like (T*)&expr
             let base_off = eval_global_lvalue_offset(inner, globals_raw)?;
@@ -31,7 +31,7 @@ pub fn eval_global_lvalue_offset<'a>(
                 _ => 1, // Pointer arithmetic by bytes
             };
             Some((base_off.0, base_off.1 + offset_adjustment as i64))
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             // Array indexing: arr[i]
             if let Some((base_name, base_off)) = eval_global_lvalue_offset(arr, globals_raw) {
@@ -49,8 +49,13 @@ pub fn eval_global_lvalue_offset<'a>(
             } else {
                 None
             }
-        }
-        Expr::Member { expr, field, is_arrow, .. } => {
+        },
+        Expr::Member {
+            expr,
+            field,
+            is_arrow,
+            ..
+        } => {
             // Structure member access: struct.field or ptr->field
             if let Some((base_name, base_off)) = eval_global_lvalue_offset(expr, globals_raw) {
                 // Placeholder for field offset calculation - full extraction from mod.rs needed
@@ -60,12 +65,12 @@ pub fn eval_global_lvalue_offset<'a>(
             } else {
                 None
             }
-        }
+        },
         Expr::Deref { .. } => {
             // &(*ptr) = ptr, but ptr must be a constant address
             // This is rare in global init; skip for now
             None
-        }
+        },
         _ => None,
     }
 }
@@ -84,18 +89,18 @@ pub fn materialize_compound_literal(
     };
     let sz = ty.size().max(1);
     let align = ty.align().max(1);
-    
+
     // Anonymous name: .L.compound_<next_label>
     let anon_name = format!(".L.compound.{}", cg.next_label);
     cg.next_label += 1;
-    
+
     // Allocate rodata space and align
     let section = if use_rodata {
         while !cg.rodata.len().is_multiple_of(align) {
             cg.rodata.push(0);
         }
         let base = cg.rodata.len() as u64;
-        
+
         // Recursively generate initialization data
         let init_data = cg
             .gen_global_init_list(&ty, &inits, Some((base, None)), use_rodata)
@@ -119,9 +124,9 @@ pub fn materialize_compound_literal(
         }
         (base, 5u16)
     };
-    
+
     let vaddr = cg.entry + section.0;
-    
+
     // Register anonymous object
     cg.globals_raw.insert(
         anon_name.clone(),
@@ -135,7 +140,7 @@ pub fn materialize_compound_literal(
             in_data_section: false,
         },
     );
-    
+
     Some((anon_name, vaddr))
 }
 
@@ -156,7 +161,7 @@ pub fn encode_complex_parts_f(re: f64, im: f64, inner: &Type) -> Vec<u8> {
             Type::LongDouble => {
                 b.extend_from_slice(&v.to_bits().to_le_bytes());
                 b.extend_from_slice(&[0u8; 8]);
-            }
+            },
             _ => b.extend_from_slice(&v.to_bits().to_le_bytes()),
         }
     }
@@ -166,12 +171,12 @@ pub fn encode_complex_parts_f(re: f64, im: f64, inner: &Type) -> Vec<u8> {
 /// Extract real and imaginary parts from complex initialization expression.
 pub fn complex_init_parts(e: &Expr) -> Option<(f64, f64)> {
     use crate::codegen::x86_64::const_eval;
-    
+
     match e {
         Expr::ComplexLit { real, imag, .. } => Some((*real, *imag)),
         Expr::Imag { e: inner, .. } => {
             Some((0.0, const_eval::eval_full(inner, false).ok()?.as_float()?))
-        }
+        },
         Expr::Float { v, .. } => Some((*v, 0.0)),
         Expr::Int { v, .. } => Some((*v as f64, 0.0)),
         Expr::Unary { op, e, .. } => {
@@ -181,14 +186,14 @@ pub fn complex_init_parts(e: &Expr) -> Option<(f64, f64)> {
             } else {
                 None
             }
-        }
+        },
         Expr::Binop { op, l, r, .. } => match op {
             BinOp::Add | BinOp::Sub => {
                 let neg = if matches!(op, BinOp::Sub) { -1.0 } else { 1.0 };
                 let (lre, lim) = complex_init_parts(l)?;
                 let (rre, rim) = complex_init_parts(r)?;
                 Some((lre + neg * rre, lim + neg * rim))
-            }
+            },
             _ => None,
         },
         _ => None,
@@ -198,7 +203,7 @@ pub fn complex_init_parts(e: &Expr) -> Option<(f64, f64)> {
 /// Extract integer parts of complex initialization with i128 precision.
 pub fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
     use crate::codegen::x86_64::const_eval;
-    
+
     match e {
         Expr::ComplexLit { real, imag, ty, .. } => {
             let inner = match ty {
@@ -209,7 +214,7 @@ pub fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
                 return None;
             }
             Some((*real as i128, *imag as i128))
-        }
+        },
         Expr::Int { v, .. } => Some((*v, 0)),
         Expr::Float { v, .. } => Some((*v as i128, 0)),
         Expr::Imag { e: inner, .. } => Some((0, const_eval::eval(inner).ok()?)),
@@ -220,14 +225,14 @@ pub fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
             } else {
                 None
             }
-        }
+        },
         Expr::Binop { op, l, r, .. } => match op {
             BinOp::Add | BinOp::Sub => {
                 let neg: i128 = if matches!(op, BinOp::Sub) { -1 } else { 1 };
                 let (lre, lim) = complex_init_parts_i(l)?;
                 let (rre, rim) = complex_init_parts_i(r)?;
                 Some((lre + neg * rre, lim + neg * rim))
-            }
+            },
             _ => None,
         },
         _ => None,
@@ -236,19 +241,14 @@ pub fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
 
 /// Generate global initialization bytes from an expression.
 /// Handles complex numbers, floats, integers, and special cases.
-pub fn global_init_bytes(
-    init: &Expr,
-    sz: usize,
-    is_float: bool,
-    ty: &Type,
-) -> Option<Vec<u8>> {
+pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> Option<Vec<u8>> {
     // Complex constant initialization
     if let Type::Complex(inner) = ty {
         if let Some(bytes) = complex_init_bytes(init, &inner.base) {
             return Some(bytes);
         }
     }
-    
+
     if is_float {
         match const_eval::eval_full(init, false).ok()? {
             const_eval::ConstValue::Float(f) => {
@@ -269,7 +269,7 @@ pub fn global_init_bytes(
                 } else {
                     Some(f.to_bits().to_le_bytes().to_vec())
                 }
-            }
+            },
             const_eval::ConstValue::Int(v) => {
                 if sz == 4 {
                     Some((v as f32).to_bits().to_le_bytes().to_vec())
@@ -286,7 +286,7 @@ pub fn global_init_bytes(
                 } else {
                     Some((v as f64).to_bits().to_le_bytes().to_vec())
                 }
-            }
+            },
             _ => None,
         }
     } else {
@@ -302,7 +302,7 @@ pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
         Type::Float | Type::Double | Type::LongDouble => {
             let (re, im) = complex_init_parts(init)?;
             Some(encode_complex_parts_f(re, im, inner))
-        }
+        },
         _ => {
             // Integer components: prefer i128 exact evaluation
             if let Some((re, im)) = complex_init_parts_i(init) {
@@ -310,6 +310,6 @@ pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
             }
             let (re, im) = complex_init_parts(init)?;
             Some(encode_complex_parts_i(re as i128, im as i128, inner))
-        }
+        },
     }
 }

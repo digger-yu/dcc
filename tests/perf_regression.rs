@@ -30,7 +30,9 @@ fn compile_timed(name: &str, source: &str, limit: Duration) -> Duration {
         .expect("run dcc");
     let elapsed = start.elapsed();
     let _ = fs::remove_file(&src_path);
-    let obj_ok = fs::metadata(&obj_path).map(|m| m.len() > 0).unwrap_or(false);
+    let obj_ok = fs::metadata(&obj_path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
     let _ = fs::remove_file(&obj_path);
     assert!(
         output.status.success(),
@@ -38,10 +40,7 @@ fn compile_timed(name: &str, source: &str, limit: Duration) -> Duration {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(obj_ok, "{name}: object file missing or empty");
-    assert!(
-        elapsed < limit,
-        "{name}: compile took {elapsed:?} (limit {limit:?})"
-    );
+    assert!(elapsed < limit, "{name}: compile took {elapsed:?} (limit {limit:?})");
     elapsed
 }
 

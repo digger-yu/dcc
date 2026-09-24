@@ -42,7 +42,7 @@ pub fn load_imported_modules(
                 if path.len() == 1 {
                     imports.push(path[0].clone());
                 }
-            }
+            },
             CppDecl::Module {
                 name: Some(n),
                 partition,
@@ -54,8 +54,8 @@ pub fn load_imported_modules(
                     module_name = n.clone();
                 }
                 let _ = partition;
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     let mut out: Vec<BmfModule> = Vec::new();

@@ -1,12 +1,11 @@
 // src/codegen/asm_event.rs - Structured AsmEvent logging for -S output
-// 
+//
 // This module provides a structured event log of code generation emit intent,
 // enabling direct AT&T/GAS text formatting without relying on machine-code
 // disassembly. Events track labels, directives, instructions, data sections,
 // and relocations with full semantic information.
 
-use crate::codegen::shared::elf::{ElfRela, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64};
-
+use crate::codegen::shared::elf::{ElfRela, R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32};
 
 // (其余代码保持不变 - 简化处理移除了部分问题字段)
 
@@ -14,39 +13,24 @@ use crate::codegen::shared::elf::{ElfRela, R_X86_64_PC32, R_X86_64_PLT32, R_X86_
 #[derive(Clone, Debug)]
 pub enum AsmEvent {
     /// Section directive: .section name,"flags"
-    Section {
-        name: String,
-        flags: String,
-    },
+    Section { name: String, flags: String },
     /// Global symbol declaration: .globl symname
-    Global {
-        symbol: String,
-    },
+    Global { symbol: String },
     /// Type attribute: .type symname,@function or @object
-    Type {
-        symbol: String,
-        ty: AsmSymbolType,
-    },
+    Type { symbol: String, ty: AsmSymbolType },
     /// Size attribute: .size symname,. -symname
     Size {
         symbol: String,
         offset_expr: Option<String>,
     },
     /// Label definition: .Llabel or function entry point
-    Label {
-        symbol: String,
-    },
+    Label { symbol: String },
     /// Generic directive: raw assembler line (e.g., .cfi_startproc)
-    Directive {
-        text: String,
-    },
+    Directive { text: String },
     /// Instruction with structured operands
     Inst(AsmInst),
     /// Raw bytes for unknown/unsupported instructions
-    Bytes {
-        bytes: Vec<u8>,
-        reason: ByteReason,
-    },
+    Bytes { bytes: Vec<u8>, reason: ByteReason },
     /// Data section content
     Data(AsmData),
 }
@@ -81,8 +65,8 @@ impl AsmSymbolType {
 /// Formatted assembly instruction
 #[derive(Clone, Debug)]
 pub struct AsmInst {
-    pub offset: u64,           // Code offset for debug/assertion
-    pub bytes_len: u8,         // Must match actual emitted bytes length
+    pub offset: u64,   // Code offset for debug/assertion
+    pub bytes_len: u8, // Must match actual emitted bytes length
     pub mnemonic: AsmMnemonic,
     pub operands: Vec<AsmOperand>,
     pub prefixes: AsmPrefixes,
@@ -90,7 +74,12 @@ pub struct AsmInst {
 }
 
 impl AsmInst {
-    pub fn new(offset: u64, bytes_len: u8, mnemonic: AsmMnemonic, operands: Vec<AsmOperand>) -> Self {
+    pub fn new(
+        offset: u64,
+        bytes_len: u8,
+        mnemonic: AsmMnemonic,
+        operands: Vec<AsmOperand>,
+    ) -> Self {
         Self {
             offset,
             bytes_len,
@@ -122,20 +111,98 @@ pub struct AsmPrefixes {
 
 #[derive(Clone, Debug)]
 pub enum AsmMnemonic {
-    Mov, Add, Sub, And, Or, Xor, Cmp, Test,
-    Lea, MovzxB, MovzxW, MovsxB, MovsxW, Movsxd,
-    Push, Pop, Call, Ret, Jmp,
-    Je, Jne, Jl, Jle, Jg, Jge, Jb, Jbe, Ja, Jae,
-    Js, Jns, Jp, Jnp, Jo, Jno,
-    CmovO, CmovNo, CmovB, CmovAe, CmovE, CmovNe, CmovBe, CmovA,
-    CmovS, CmovNs, CmovP, CmovNp, CmovL, CmovGe, CmovLe, CmovG,
-    SetO, SetNo, SetB, SetAe, SetE, SetNe, SetBe, SetA,
-    SetS, SetNs, SetP, SetNp, SetL, SetGe, SetLe, SetG,
-    Xchg, Xadd, Mfence, LockCmpxchg,
-    Nop, Pause, Cltd, Cqo, Cwde, Cdqe,
-    Movd, Movq, Movss, Movsd, Movaps, Movups,
-    Cvtsi2ss, Cvtsi2sd, Cvttss2si, Cvttsd2si, Cvtss2sd, Cvtsd2ss,
-    Pxor, Punpcklqdq, Punpckhqdq,
+    Mov,
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Cmp,
+    Test,
+    Lea,
+    MovzxB,
+    MovzxW,
+    MovsxB,
+    MovsxW,
+    Movsxd,
+    Push,
+    Pop,
+    Call,
+    Ret,
+    Jmp,
+    Je,
+    Jne,
+    Jl,
+    Jle,
+    Jg,
+    Jge,
+    Jb,
+    Jbe,
+    Ja,
+    Jae,
+    Js,
+    Jns,
+    Jp,
+    Jnp,
+    Jo,
+    Jno,
+    CmovO,
+    CmovNo,
+    CmovB,
+    CmovAe,
+    CmovE,
+    CmovNe,
+    CmovBe,
+    CmovA,
+    CmovS,
+    CmovNs,
+    CmovP,
+    CmovNp,
+    CmovL,
+    CmovGe,
+    CmovLe,
+    CmovG,
+    SetO,
+    SetNo,
+    SetB,
+    SetAe,
+    SetE,
+    SetNe,
+    SetBe,
+    SetA,
+    SetS,
+    SetNs,
+    SetP,
+    SetNp,
+    SetL,
+    SetGe,
+    SetLe,
+    SetG,
+    Xchg,
+    Xadd,
+    Mfence,
+    LockCmpxchg,
+    Nop,
+    Pause,
+    Cltd,
+    Cqo,
+    Cwde,
+    Cdqe,
+    Movd,
+    Movq,
+    Movss,
+    Movsd,
+    Movaps,
+    Movups,
+    Cvtsi2ss,
+    Cvtsi2sd,
+    Cvttss2si,
+    Cvttsd2si,
+    Cvtss2sd,
+    Cvtsd2ss,
+    Pxor,
+    Punpcklqdq,
+    Punpckhqdq,
     // Add more as needed...
 }
 
@@ -228,7 +295,7 @@ impl AsmMnemonic {
             AsmMnemonic::Cvtsi2ss => "cvtsi2ss",
             AsmMnemonic::Cvtsi2sd => "cvtsi2sd",
             AsmMnemonic::Cvttss2si => "cvtts2si",
-            
+
             AsmMnemonic::Cvtss2sd => "cvtss2sd",
             AsmMnemonic::Cvtss2sd => "cvtss2sd",
             AsmMnemonic::Cvtsd2ss => "cvtsd2ss",
@@ -243,21 +310,33 @@ impl AsmMnemonic {
 /// AT&T-style operand
 #[derive(Clone, Debug)]
 pub enum AsmOperand {
-    Reg { class: RegClass, index: u8, width: OperandWidth },
-    Imm { value: i64, width: OperandWidth },
+    Reg {
+        class: RegClass,
+        index: u8,
+        width: OperandWidth,
+    },
+    Imm {
+        value: i64,
+        width: OperandWidth,
+    },
     Mem(AsmMem),
-    Symbol { name: String, reloc: Option<RelocKind> },
-    Label { name: String },
+    Symbol {
+        name: String,
+        reloc: Option<RelocKind>,
+    },
+    Label {
+        name: String,
+    },
     Zero, // $0
 }
 
 #[derive(Clone, Debug, Copy)]
 pub enum RegClass {
-    Gp,     // General purpose (rax, rbx, ...)
-    Xmm,    // SSE/XMM
-    Ymm,    // AVX/YMM
-    Zmm,    // AVX-512/ZMM
-    Mmx,    // MMX
+    Gp,      // General purpose (rax, rbx, ...)
+    Xmm,     // SSE/XMM
+    Ymm,     // AVX/YMM
+    Zmm,     // AVX-512/ZMM
+    Mmx,     // MMX
     Segment, // ES, CS, SS, DS, FS, GS
     Control, // CR0-CR15
     Debug,   // DR0-DR7
@@ -337,11 +416,11 @@ impl AsmMem {
 /// Relocation kinds for symbol references
 #[derive(Clone, Debug)]
 pub enum RelocKind {
-    Pc32,      // PC-relative 32-bit
-    Plt32,     // PLT 32-bit (for external calls)
-    Abs64,     // Absolute 64-bit
-    GotPcRel,  // GOT PC-relative
-    Got64,     // GOT absolute 64-bit
+    Pc32,     // PC-relative 32-bit
+    Plt32,    // PLT 32-bit (for external calls)
+    Abs64,    // Absolute 64-bit
+    GotPcRel, // GOT PC-relative
+    Got64,    // GOT absolute 64-bit
 }
 
 impl RelocKind {
@@ -415,53 +494,52 @@ impl AsmFormatter {
                 } else {
                     format!("\t.section {name},\"{flags}\"\n")
                 }
-            }
+            },
             AsmEvent::Global { symbol } => {
                 format!("\t.globl {symbol}\n")
-            }
+            },
             AsmEvent::Type { symbol, ty } => {
                 format!("\t.type {symbol}, {}\n", ty.to_str())
-            }
-            AsmEvent::Size { symbol, offset_expr } => {
-                match offset_expr {
-                    Some(expr) => format!("\t.size {symbol},{expr}\n"),
-                    None => format!("\t.size {symbol},. -{symbol}\n"),
-                }
-            }
+            },
+            AsmEvent::Size {
+                symbol,
+                offset_expr,
+            } => match offset_expr {
+                Some(expr) => format!("\t.size {symbol},{expr}\n"),
+                None => format!("\t.size {symbol},. -{symbol}\n"),
+            },
             AsmEvent::Label { symbol } => {
                 format!("{symbol}:\n")
-            }
+            },
             AsmEvent::Directive { text } => {
                 format!("\t{text}\n")
-            }
-            AsmEvent::Inst(inst) => {
-                format_instruction(inst, &mut self.pc, &self.symbol_addrs)
-            }
+            },
+            AsmEvent::Inst(inst) => format_instruction(inst, &mut self.pc, &self.symbol_addrs),
             AsmEvent::Bytes { bytes, reason } => {
-                let byte_str: Vec<String> = bytes.iter()
-                    .map(|b| format!("0x{:02x}", b))
-                    .collect();
+                let byte_str: Vec<String> = bytes.iter().map(|b| format!("0x{:02x}", b)).collect();
                 match reason {
                     ByteReason::InlineAsmUnsupported => {
                         format!("\t# INLINE_ASM_UNSUPPORTED {}\n", byte_str.join(", "))
-                    }
+                    },
                     ByteReason::BuiltinSequence => {
                         format!("\t# BUILTIN_SEQUENCE {}\n", byte_str.join(", "))
-                    }
+                    },
                     ByteReason::UnknownOpcode => {
                         format!("\t# UNKNOWN_INSTRUCTION {}\n", byte_str.join(", "))
-                    }
+                    },
                 }
-            }
-            AsmEvent::Data(data) => {
-                format_data(data)
-            }
+            },
+            AsmEvent::Data(data) => format_data(data),
         }
     }
 
     /// Format multiple events to full text output
     pub fn format_events(&mut self, events: &[&AsmEvent]) -> String {
-        events.iter().map(|e| self.format_event(e)).collect::<Vec<_>>().join("")
+        events
+            .iter()
+            .map(|e| self.format_event(e))
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 
@@ -472,7 +550,11 @@ impl Default for AsmFormatter {
 }
 
 /// Format an instruction event to AT&T syntax
-fn format_instruction(inst: &AsmInst, pc: &mut u64, symbol_addrs: &std::collections::HashMap<String, u64>) -> String {
+fn format_instruction(
+    inst: &AsmInst,
+    pc: &mut u64,
+    symbol_addrs: &std::collections::HashMap<String, u64>,
+) -> String {
     // Update PC based on instruction length
     *pc += inst.bytes_len as u64;
 
@@ -494,16 +576,36 @@ fn format_instruction(inst: &AsmInst, pc: &mut u64, symbol_addrs: &std::collecti
 
     // Format mnemonic and operands
     let mnemonic = inst.mnemonic.to_str();
-    let ops_str: Vec<String> = inst.operands.iter()
+    let ops_str: Vec<String> = inst
+        .operands
+        .iter()
         .map(|op| format_operand(op, *pc, symbol_addrs))
         .collect();
     let ops_joined = ops_str.join(", ");
 
     // Assemble final line
     let line = if prefix_str.is_empty() {
-        format!("\t{}{}", mnemonic, if ops_joined.is_empty() { String::new() } else { format!(" {}", ops_joined) })
+        format!(
+            "\t{}{}",
+            mnemonic,
+            if ops_joined.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ops_joined)
+            }
+        )
     } else {
-        format!("\t{}{} {}{}", prefix_str, prefix_space, mnemonic, if ops_joined.is_empty() { String::new() } else { format!(" {}", ops_joined) })
+        format!(
+            "\t{}{} {}{}",
+            prefix_str,
+            prefix_space,
+            mnemonic,
+            if ops_joined.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", ops_joined)
+            }
+        )
     };
 
     // Add comment if present
@@ -514,11 +616,17 @@ fn format_instruction(inst: &AsmInst, pc: &mut u64, symbol_addrs: &std::collecti
 }
 
 /// Format a single operand
-fn format_operand(op: &AsmOperand, _pc: u64, symbol_addrs: &std::collections::HashMap<String, u64>) -> String {
+fn format_operand(
+    op: &AsmOperand,
+    _pc: u64,
+    symbol_addrs: &std::collections::HashMap<String, u64>,
+) -> String {
     match op {
-        AsmOperand::Reg { class: c, index, width } => {
-            format_register(*c, *index, *width)
-        }
+        AsmOperand::Reg {
+            class: c,
+            index,
+            width,
+        } => format_register(*c, *index, *width),
         AsmOperand::Imm { value, width: _ } => {
             let imm_str = if *value >= 0 {
                 format!("${}", value)
@@ -527,17 +635,18 @@ fn format_operand(op: &AsmOperand, _pc: u64, symbol_addrs: &std::collections::Ha
             };
             // For AT&T, immediate doesn't have suffix in display
             imm_str
-        }
-        AsmOperand::Mem(mem) => {
-            format_memory(mem, symbol_addrs)
-        }
-        AsmOperand::Symbol { name, reloc: _reloc } => {
+        },
+        AsmOperand::Mem(mem) => format_memory(mem, symbol_addrs),
+        AsmOperand::Symbol {
+            name,
+            reloc: _reloc,
+        } => {
             // Symbol-only reference (like call foo)
             name.clone()
-        }
+        },
         AsmOperand::Label { name } => {
             format!(".L{}", name)
-        }
+        },
         AsmOperand::Zero => "$0".to_string(),
     }
 }
@@ -545,14 +654,12 @@ fn format_operand(op: &AsmOperand, _pc: u64, symbol_addrs: &std::collections::Ha
 /// Format register operand with proper AT&T naming
 fn format_register(class: RegClass, index: u8, width: OperandWidth) -> String {
     let prefix = match class {
-        RegClass::Gp => {
-            match width {
-                OperandWidth::Bit8 => get_gp_name_8bit(index).to_string(),
-                OperandWidth::Bit16 => get_gp_name_16bit(index).to_string(),
-                OperandWidth::Bit32 => get_gp_name_32bit(index).to_string(),
-                OperandWidth::Bit64 => format!("%r{}", get_gp_name_64bit(index)),
-            }
-        }
+        RegClass::Gp => match width {
+            OperandWidth::Bit8 => get_gp_name_8bit(index).to_string(),
+            OperandWidth::Bit16 => get_gp_name_16bit(index).to_string(),
+            OperandWidth::Bit32 => get_gp_name_32bit(index).to_string(),
+            OperandWidth::Bit64 => format!("%r{}", get_gp_name_64bit(index)),
+        },
         RegClass::Xmm => format!("%xmm{}", index),
         RegClass::Ymm => format!("%ymm{}", index),
         RegClass::Zmm => format!("%zmm{}", index),
@@ -566,32 +673,32 @@ fn format_register(class: RegClass, index: u8, width: OperandWidth) -> String {
 
 fn get_gp_name_8bit(idx: u8) -> &'static str {
     const NAMES: [&str; 16] = [
-        "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil",
-        "%r8b", "%r9b", "%r10b", "%r11b", "%r12b", "%r13b", "%r14b", "%r15b"
+        "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b",
+        "%r11b", "%r12b", "%r13b", "%r14b", "%r15b",
     ];
     NAMES[idx as usize % 16]
 }
 
 fn get_gp_name_16bit(idx: u8) -> &'static str {
     const NAMES: [&str; 16] = [
-        "%ax", "%cx", "%dx", "%bx", "%sp", "%bp", "%si", "%di",
-        "%r8w", "%r9w", "%r10w", "%r11w", "%r12w", "%r13w", "%r14w", "%r15w"
+        "%ax", "%cx", "%dx", "%bx", "%sp", "%bp", "%si", "%di", "%r8w", "%r9w", "%r10w", "%r11w",
+        "%r12w", "%r13w", "%r14w", "%r15w",
     ];
     NAMES[idx as usize % 16]
 }
 
 fn get_gp_name_32bit(idx: u8) -> &'static str {
     const NAMES: [&str; 16] = [
-        "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi",
-        "%r8d", "%r9d", "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d"
+        "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi", "%r8d", "%r9d", "%r10d",
+        "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
     ];
     NAMES[idx as usize % 16]
 }
 
 fn get_gp_name_64bit(idx: u8) -> &'static str {
     const NAMES: [&str; 16] = [
-        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
+        "r13", "r14", "r15",
     ];
     NAMES[idx as usize % 16]
 }
@@ -629,7 +736,7 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
 
     // Base register
     if let Some(base) = &mem.base {
-    let base_reg = match base {
+        let base_reg = match base {
             RegClass::Gp => format!("%r{}", get_gp_name_64bit(13)), // Use r13 as r13 convention
             _ => format!("%invalid"),
         };
@@ -639,7 +746,7 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
     }
 
     // Index*scale
-if let Some(_index) = mem.index {
+    if let Some(_index) = mem.index {
         if mem.scale != 1 {
             parts.push(format!("%r{},{}", get_gp_name_64bit(13), mem.scale));
         } else {
@@ -665,7 +772,7 @@ if let Some(_index) = mem.index {
         } else {
             "(".to_string()
         };
-        
+
         let remaining: Vec<String> = parts[1..].iter().map(|p| p.clone()).collect();
         format!("{}{})", disp_part, remaining.join(","))
     }
@@ -677,20 +784,20 @@ fn format_data(data: &AsmData) -> String {
         AsmData::Byte(bytes) => {
             let hex: Vec<String> = bytes.iter().map(|b| format!("0x{:02x}", b)).collect();
             format!("\t.byte {}", hex.join(", "))
-        }
+        },
         AsmData::Word(val) => {
             format!("\t.long {}", val)
-        }
+        },
         AsmData::QWord(val) => {
             format!("\t.quad {}", val)
-        }
+        },
         AsmData::Asciz(string) => {
             // Escape quotes and backslashes
             let escaped = string.replace('\\', "\\\\").replace('"', "\\\"");
             format!("\t.string \"{}\"", escaped)
-        }
+        },
         AsmData::Align(n) => {
             format!("\t.align {}", n)
-        }
+        },
     }
 }

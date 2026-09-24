@@ -45,15 +45,15 @@ impl DependentInfo {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn add_dependent(&mut self, name: String) {
         self.dependent_names.insert(name);
     }
-    
+
     pub fn add_non_dependent(&mut self, name: String) {
         self.non_dependent_names.insert(name);
     }
-    
+
     pub fn is_dependent(&self, name: &str) -> bool {
         self.dependent_names.contains(name)
     }
@@ -101,9 +101,15 @@ pub enum HirCallee {
     /// 函数指针调用
     Indirect(HirExprId),
     /// 构造函数调用
-    Constructor { class: ClassId, variant: CtorVariant },
+    Constructor {
+        class: ClassId,
+        variant: CtorVariant,
+    },
     /// 析构函数调用
-    Destructor { class: ClassId, variant: DtorVariant },
+    Destructor {
+        class: ClassId,
+        variant: DtorVariant,
+    },
 }
 
 /// 构造函数变体
@@ -133,15 +139,9 @@ pub enum HirExprKind {
     /// 全局变量 / 命名空间变量
     Global(SymbolId),
     /// 成员访问（非静态）
-    FieldAccess {
-        object: HirExprId,
-        field: SymbolId,
-    },
+    FieldAccess { object: HirExprId, field: SymbolId },
     /// 方法引用（对象.方法 或 对象->方法），保留对象上下文用于虚调用判定
-    MethodRef {
-        object: HirExprId,
-        method: SymbolId,
-    },
+    MethodRef { object: HirExprId, method: SymbolId },
     /// 基类转换（非虚）
     BaseCast {
         object: HirExprId,
@@ -193,20 +193,11 @@ pub enum HirExprKind {
         rhs: HirExprId,
     },
     /// 一元运算
-    UnaryOp {
-        op: UnaryOp,
-        operand: HirExprId,
-    },
+    UnaryOp { op: UnaryOp, operand: HirExprId },
     /// 下标访问 `array[index]`（数组或指针）
-    Index {
-        array: HirExprId,
-        index: HirExprId,
-    },
+    Index { array: HirExprId, index: HirExprId },
     /// 赋值
-    Assign {
-        lhs: HirExprId,
-        rhs: HirExprId,
-    },
+    Assign { lhs: HirExprId, rhs: HirExprId },
     /// 复合赋值
     CompoundAssign {
         op: BinaryOp,
@@ -246,17 +237,11 @@ pub enum HirExprKind {
         is_array: bool,
     },
     /// delete 表达式
-    Delete {
-        ptr: HirExprId,
-        is_array: bool,
-    },
+    Delete { ptr: HirExprId, is_array: bool },
     /// sizeof 表达式
     SizeOf(CxxType),
     /// 逗号表达式
-    Comma {
-        lhs: HirExprId,
-        rhs: HirExprId,
-    },
+    Comma { lhs: HirExprId, rhs: HirExprId },
     /// 花括号初始化列表 `{a, b, c}`
     InitList {
         elems: Vec<HirExprId>,

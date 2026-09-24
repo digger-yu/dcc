@@ -220,8 +220,7 @@ pub struct Config {
 }
 
 /// -ffp-contract= 模式: FP 收缩 (fma) 策略
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FpContractMode {
     /// -ffp-contract=fast: 允许任意 FP 收缩
     Fast,
@@ -484,18 +483,14 @@ impl TargetTriple {
             "riscv32" => Arch::RiscV32,
             "mips64" => Arch::Mips64,
             "mips" => Arch::Mips,
-            "arm" | "armv7" | "thumbv7m" | "thumbv7em"
-            | "thumbv6m" | "thumbv8m" => Arch::Arm,
+            "arm" | "armv7" | "thumbv7m" | "thumbv7em" | "thumbv6m" | "thumbv8m" => Arch::Arm,
             other => return Err(format!("unknown arch: {}", other)),
         };
         // Determine if this is a 3-part bare-metal triple
         // (arch-vendor-abi, no OS component) vs 4-part standard triple.
         // 3-part detection: last part is an ABI name (eabi/eabihf/elf)
         // and second-to-last is a vendor (none/unknown).
-        let is_3part_bare_metal = parts.len() == 3 && matches!(
-            parts[2],
-            "eabi" | "eabihf" | "elf"
-        );
+        let is_3part_bare_metal = parts.len() == 3 && matches!(parts[2], "eabi" | "eabihf" | "elf");
         let (os, abi, vendor) = if is_3part_bare_metal {
             // 3-part bare-metal: arch-vendor-abi (e.g. arm-none-eabi)
             let vendor = parts[1].to_string();
@@ -514,8 +509,7 @@ impl TargetTriple {
                 other => return Err(format!("unknown os: {}", other)),
             };
             let abi = match parts[parts.len() - 1] {
-                "gnu" | "gnuabi99" | "gnuabi64" | "gnuabin32"
-                | "gnueabi" | "gnueabihf" => Abi::Gnu,
+                "gnu" | "gnuabi99" | "gnuabi64" | "gnuabin32" | "gnueabi" | "gnueabihf" => Abi::Gnu,
                 "musl" => Abi::Musl,
                 "eabi" | "elf" => Abi::Eabi,
                 "eabihf" => Abi::Eabihf,
@@ -656,24 +650,24 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
                             '\\' | '"' => {
                                 arg.push(chars[i + 1]);
                                 i += 2;
-                            }
+                            },
                             'n' => {
                                 arg.push('\n');
                                 i += 2;
-                            }
+                            },
                             't' => {
                                 arg.push('\t');
                                 i += 2;
-                            }
+                            },
                             'r' => {
                                 arg.push('\r');
                                 i += 2;
-                            }
+                            },
                             _ => {
                                 arg.push('\\');
                                 arg.push(chars[i + 1]);
                                 i += 2;
-                            }
+                            },
                         }
                     } else {
                         arg.push(chars[i]);
@@ -699,19 +693,19 @@ fn tokenize_response_content(content: &str) -> Vec<String> {
                     'n' => {
                         arg.push('\n');
                         i += 2;
-                    }
+                    },
                     't' => {
                         arg.push('\t');
                         i += 2;
-                    }
+                    },
                     'r' => {
                         arg.push('\r');
                         i += 2;
-                    }
+                    },
                     _ => {
                         arg.push(chars[i + 1]);
                         i += 2;
-                    }
+                    },
                 }
             } else {
                 arg.push(chars[i]);
@@ -803,62 +797,117 @@ fn is_known_m_option(opt: &str) -> bool {
     // 精确匹配
     if matches!(
         opt,
-        "-mno-red-zone" | "-mred-zone" |
-        "-m64" | "-m32" |
-        "-mno-sse" | "-mno-sse2" | "-mno-sse3" | "-mno-ssse3" |
-        "-mno-sse4" | "-mno-sse4.1" | "-mno-sse4.2" |
-        "-mno-avx" | "-mno-avx2" | "-mno-avx512f" |
-        "-mno-mmx" | "-mno-3dnow" | "-mno-fma" |
-        "-msoft-float" | "-mhard-float" |
-        "-mno-fp-ret-in-387" | "-mfpmath=sse" | "-mfpmath=387" |
-        "-mno-80387" |
-        "-mthumb" | "-marm" |
-        "-mno-unaligned-access" | "-munaligned-access" |
-        "-mno-outline-atomics" | "-moutline-atomics" |
-        "-mno-tls-direct-seg-refs" |
-        "-mno-global-merge" | "-mglobal-merge" |
-        "-mno-omit-leaf-frame-pointer" | "-momit-leaf-frame-pointer" |
-        "-mstack-protector-guard=tls" |
-        "-mstack-protector-guard=global" |
-        "-mstack-protector-guard-reg=sp" |
-        "-mstack-protector-guard-offset=0" |
-        "-mno-vsx" | "-mno-altivec" | "-mno-isa" |
-        "-mno-crypto" | "-mno-htm" |
-        "-mfix-cortex-a53-835769" | "-mno-fix-cortex-a53-835769" |
-        "-mfix-cortex-a53-843419" | "-mno-fix-cortex-a53-843419" |
-        "-mno-sve" | "-mno-sve2" | "-mno-lse" |
-        "-mno-relax" | "-mrelax" |
-        "-mno-strict-align" | "-mstrict-align" |
-        "-mno-branch-protection" | "-mbranch-protection=none" |
-        "-mno-sign-return-address" | "-msign-return-address=none" |
-        "-mno-prefetch" | "-mprefetch" |
-        "-mno-ms-bitfields" | "-mms-bitfields" |
-        "-mno-app-regs" | "-mapp-regs" |
-        "-mno-faster-structs" | "-mfaster-structs" |
-        "-mno-ieee-fp" | "-mieee-fp" |
-        "-mno-long-calls" | "-mlong-calls" |
-        "-mno-short-calls" | "-mshort-calls" |
-        "-mno-tls-direct-seg-refs" |
-        "-maccumulate-outgoing-args" | "-mno-accumulate-outgoing-args" |
-        "-mno-align-stringops" | "-malign-stringops" |
-        "-mno-inline-all-stringops" | "-minline-all-stringops" |
-        "-mno-push-args" | "-mpush-args" |
-        "-mno-stack-arg-probe" | "-mstack-arg-probe" |
-        "-mno-dwarf2-asm" | "-mdwarf2-asm" |
-        "-mno-tune"
+        "-mno-red-zone"
+            | "-mred-zone"
+            | "-m64"
+            | "-m32"
+            | "-mno-sse"
+            | "-mno-sse2"
+            | "-mno-sse3"
+            | "-mno-ssse3"
+            | "-mno-sse4"
+            | "-mno-sse4.1"
+            | "-mno-sse4.2"
+            | "-mno-avx"
+            | "-mno-avx2"
+            | "-mno-avx512f"
+            | "-mno-mmx"
+            | "-mno-3dnow"
+            | "-mno-fma"
+            | "-msoft-float"
+            | "-mhard-float"
+            | "-mno-fp-ret-in-387"
+            | "-mfpmath=sse"
+            | "-mfpmath=387"
+            | "-mno-80387"
+            | "-mthumb"
+            | "-marm"
+            | "-mno-unaligned-access"
+            | "-munaligned-access"
+            | "-mno-outline-atomics"
+            | "-moutline-atomics"
+            | "-mno-tls-direct-seg-refs"
+            | "-mno-global-merge"
+            | "-mglobal-merge"
+            | "-mno-omit-leaf-frame-pointer"
+            | "-momit-leaf-frame-pointer"
+            | "-mstack-protector-guard=tls"
+            | "-mstack-protector-guard=global"
+            | "-mstack-protector-guard-reg=sp"
+            | "-mstack-protector-guard-offset=0"
+            | "-mno-vsx"
+            | "-mno-altivec"
+            | "-mno-isa"
+            | "-mno-crypto"
+            | "-mno-htm"
+            | "-mfix-cortex-a53-835769"
+            | "-mno-fix-cortex-a53-835769"
+            | "-mfix-cortex-a53-843419"
+            | "-mno-fix-cortex-a53-843419"
+            | "-mno-sve"
+            | "-mno-sve2"
+            | "-mno-lse"
+            | "-mno-relax"
+            | "-mrelax"
+            | "-mno-strict-align"
+            | "-mstrict-align"
+            | "-mno-branch-protection"
+            | "-mbranch-protection=none"
+            | "-mno-sign-return-address"
+            | "-msign-return-address=none"
+            | "-mno-prefetch"
+            | "-mprefetch"
+            | "-mno-ms-bitfields"
+            | "-mms-bitfields"
+            | "-mno-app-regs"
+            | "-mapp-regs"
+            | "-mno-faster-structs"
+            | "-mfaster-structs"
+            | "-mno-ieee-fp"
+            | "-mieee-fp"
+            | "-mno-long-calls"
+            | "-mlong-calls"
+            | "-mno-short-calls"
+            | "-mshort-calls"
+            | "-mno-tls-direct-seg-refs"
+            | "-maccumulate-outgoing-args"
+            | "-mno-accumulate-outgoing-args"
+            | "-mno-align-stringops"
+            | "-malign-stringops"
+            | "-mno-inline-all-stringops"
+            | "-minline-all-stringops"
+            | "-mno-push-args"
+            | "-mpush-args"
+            | "-mno-stack-arg-probe"
+            | "-mstack-arg-probe"
+            | "-mno-dwarf2-asm"
+            | "-mdwarf2-asm"
+            | "-mno-tune"
     ) {
         return true;
     }
     // 前缀匹配: -march=, -mcpu=, -mtune=, -mcmodel=, -mabi=, -mfpu= 等
     let known_prefixes = [
-        "-march=", "-mcpu=", "-mtune=", "-mcmodel=", "-mabi=",
-        "-mfpu=", "-mfloat-abi=", "-mmmu=", "-mpid=",
-        "-msmall-data-limit=", "-mbranch-cost=",
-        "-mstack-protector-guard=", "-mstack-protector-guard-reg=",
+        "-march=",
+        "-mcpu=",
+        "-mtune=",
+        "-mcmodel=",
+        "-mabi=",
+        "-mfpu=",
+        "-mfloat-abi=",
+        "-mmmu=",
+        "-mpid=",
+        "-msmall-data-limit=",
+        "-mbranch-cost=",
+        "-mstack-protector-guard=",
+        "-mstack-protector-guard-reg=",
         "-mstack-protector-guard-offset=",
-        "-mbranch-protection=", "-msign-return-address=",
-        "-msve-vector-bits=", "-moverride=",
-        "-mtrace=", "-mfix-cortex-a53=",
+        "-mbranch-protection=",
+        "-msign-return-address=",
+        "-msve-vector-bits=",
+        "-moverride=",
+        "-mtrace=",
+        "-mfix-cortex-a53=",
         "-mgeneral-regs-only",
     ];
     known_prefixes.iter().any(|p| opt.starts_with(p))
@@ -1146,44 +1195,68 @@ fn is_known_f_option(opt: &str) -> bool {
     }
     // 前缀匹配
     let known_prefixes = [
-        "-falign-loops=", "-falign-jumps=", "-falign-functions=",
-        "-falign-labels=", "-fmax-errors=",
-        "-fdbg-cnt=", "-fira-algorithm=",
-        "-fira-region=", "-floop-parallelize-all=",
-        "-ftracer", "-fno-tracer",
-        "-fconserve-stack", "-fno-conserve-stack",
+        "-falign-loops=",
+        "-falign-jumps=",
+        "-falign-functions=",
+        "-falign-labels=",
+        "-fmax-errors=",
+        "-fdbg-cnt=",
+        "-fira-algorithm=",
+        "-fira-region=",
+        "-floop-parallelize-all=",
+        "-ftracer",
+        "-fno-tracer",
+        "-fconserve-stack",
+        "-fno-conserve-stack",
         "-fno-tree-switch-conversion",
         "-ftree-switch-conversion",
-        "-fno-tree-tail-merge", "-ftree-tail-merge",
-        "-fno-tree-bit-ccp", "-ftree-bit-ccp",
-        "-fno-tree-ccp", "-ftree-ccp",
-        "-fno-ipa-cp-alien", "-fipa-cp-alien",
-        "-fipa-cp-clone", "-fno-ipa-cp-clone",
-        "-fno-ipa-icf-functions", "-fipa-icf-functions",
-        "-fno-ipa-icf-variables", "-fipa-icf-variables",
+        "-fno-tree-tail-merge",
+        "-ftree-tail-merge",
+        "-fno-tree-bit-ccp",
+        "-ftree-bit-ccp",
+        "-fno-tree-ccp",
+        "-ftree-ccp",
+        "-fno-ipa-cp-alien",
+        "-fipa-cp-alien",
+        "-fipa-cp-clone",
+        "-fno-ipa-cp-clone",
+        "-fno-ipa-icf-functions",
+        "-fipa-icf-functions",
+        "-fno-ipa-icf-variables",
+        "-fipa-icf-variables",
         "-fno-ipa-pure-const-discover",
         "-fstack-protector-guard=",
         "-fstack-protector-guard-reg=",
         "-fstack-protector-guard-offset=",
-        "-fno-sanitize=", "-fsanitize=",
-        "-fno-sanitize-recover=", "-fsanitize-recover=",
-        "-fno-sanitize-address=", "-fsanitize-address=",
+        "-fno-sanitize=",
+        "-fsanitize=",
+        "-fno-sanitize-recover=",
+        "-fsanitize-recover=",
+        "-fno-sanitize-address=",
+        "-fsanitize-address=",
         "-fno-sanitize-coverage=",
         "-fno-sanitize-memory=",
         "-fno-sanitize-thread=",
         "-fno-builtin-",
-        "-fno-cfi-", "-fcfi-",
-        "-fno-kasan-", "-fkasan-",
-        "-fno-ubsan-", "-fubsan-",
+        "-fno-cfi-",
+        "-fcfi-",
+        "-fno-kasan-",
+        "-fkasan-",
+        "-fno-ubsan-",
+        "-fubsan-",
         "-fno-orchestrate-",
-        "-fmodules", "-fno-modules",
-        "-fmodule-", "-fno-module-",
+        "-fmodules",
+        "-fno-modules",
+        "-fmodule-",
+        "-fno-module-",
         "-fexperimental-library",
         "-fno-experimental-library",
-        "-fvisibility=", "-fno-visibility=",
+        "-fvisibility=",
+        "-fno-visibility=",
         "-fno-visibility-inlines-hidden",
         "-fvisibility-inlines-hidden",
-        "-fno-rtti-data", "-frtti-data",
+        "-fno-rtti-data",
+        "-frtti-data",
         "-fno-objc-runtime=",
         "-fobjc-runtime=",
         "-fobjc-call-cxx-cdtors",
@@ -1215,7 +1288,9 @@ fn is_known_f_option(opt: &str) -> bool {
         "-fmodule-map-file=",
         "-fno-module-map-file=",
     ];
-    known_prefixes.iter().any(|p| !p.is_empty() && opt.starts_with(p))
+    known_prefixes
+        .iter()
+        .any(|p| !p.is_empty() && opt.starts_with(p))
 }
 
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
@@ -1302,7 +1377,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut link_libs: Vec<String> = Vec::new();
     let mut whole_archive_libs: Vec<String> = Vec::new();
     let mut in_whole_archive = false;
-        let mut lib_search_paths: Vec<PathBuf> = Vec::new();
+    let mut lib_search_paths: Vec<PathBuf> = Vec::new();
     let mut trapv = false;
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
@@ -2800,9 +2875,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     }
 
     if link_mode && (emit_asm || preprocess_only || syntax_only || dump_ast) {
-        return Err(CliError::new(
-            "link mode (-r) cannot combine with -S/-E/-fsyntax-only",
-        ));
+        return Err(CliError::new("link mode (-r) cannot combine with -S/-E/-fsyntax-only"));
     }
 
     if !link_mode && inputs.len() > 1 {
@@ -2821,14 +2894,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             )
         };
         let all_sources = inputs.iter().all(is_source);
-        let all_objects = inputs
-            .iter()
-            .all(|p| {
-                matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("o") | Some("a") | Some("obj")
-                )
-            });
+        let all_objects = inputs.iter().all(|p| {
+            matches!(p.extension().and_then(|e| e.to_str()), Some("o") | Some("a") | Some("obj"))
+        });
         if all_sources && (relocatable || emit_asm || preprocess_only || syntax_only) {
             // Multi-file -c/-S/-E/-fsyntax-only: allowed, each file
             // compiled independently. -o is forbidden with multiple inputs.
@@ -3018,7 +3086,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             link_opts: all_link_opts,
             link_libs: link_libs.clone(),
             whole_archive_libs: whole_archive_libs.clone(),
-                        lib_search_paths: lib_search_paths.clone(),
+            lib_search_paths: lib_search_paths.clone(),
             gc_sections_root: gc_sections_root.clone(),
             no_semantic_interposition,
             semantic_interposition,
@@ -3146,7 +3214,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             link_opts: crate::link::link_opts::LinkOpts::from_env(),
             link_libs: Vec::new(),
             whole_archive_libs: Vec::new(),
-                        lib_search_paths: Vec::new(),
+            lib_search_paths: Vec::new(),
             gc_sections_root: Vec::new(),
             no_semantic_interposition: false,
             semantic_interposition: false,
@@ -3363,10 +3431,7 @@ mod tests {
         assert_eq!(cfg.include_paths, vec![PathBuf::from("include")]);
         assert_eq!(cfg.system_paths, vec![PathBuf::from("sysroot/include")]);
         assert_eq!(cfg.force_includes, vec!["forced.h".to_string()]);
-        assert_eq!(
-            cfg.defines,
-            vec![("VALUE".to_string(), Some("7".to_string()))]
-        );
+        assert_eq!(cfg.defines, vec![("VALUE".to_string(), Some("7".to_string()))]);
     }
 
     #[test]
@@ -3686,8 +3751,7 @@ mod tests {
 
     #[test]
     fn bare_metal_arm_none_eabihf() {
-        let t =
-            TargetTriple::parse("arm-none-eabihf").expect("arm-none-eabihf must parse");
+        let t = TargetTriple::parse("arm-none-eabihf").expect("arm-none-eabihf must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.vendor, "none");
         assert_eq!(t.os, super::Os::Freestanding);
@@ -3696,8 +3760,7 @@ mod tests {
 
     #[test]
     fn bare_metal_riscv32_unknown_elf() {
-        let t = TargetTriple::parse("riscv32-unknown-elf")
-            .expect("riscv32-unknown-elf must parse");
+        let t = TargetTriple::parse("riscv32-unknown-elf").expect("riscv32-unknown-elf must parse");
         assert_eq!(t.arch, Arch::RiscV32);
         assert_eq!(t.vendor, "unknown");
         assert_eq!(t.os, super::Os::Freestanding);
@@ -3706,8 +3769,7 @@ mod tests {
 
     #[test]
     fn bare_metal_thumbv7m_none_eabi() {
-        let t = TargetTriple::parse("thumbv7m-none-eabi")
-            .expect("thumbv7m-none-eabi must parse");
+        let t = TargetTriple::parse("thumbv7m-none-eabi").expect("thumbv7m-none-eabi must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.vendor, "none");
         assert_eq!(t.os, super::Os::Freestanding);
@@ -3716,8 +3778,8 @@ mod tests {
 
     #[test]
     fn bare_metal_thumbv7em_none_eabihf() {
-        let t = TargetTriple::parse("thumbv7em-none-eabihf")
-            .expect("thumbv7em-none-eabihf must parse");
+        let t =
+            TargetTriple::parse("thumbv7em-none-eabihf").expect("thumbv7em-none-eabihf must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.os, super::Os::Freestanding);
         assert_eq!(t.abi, super::Abi::Eabihf);
@@ -3795,37 +3857,25 @@ mod tests {
     #[test]
     fn musl_loader_path_x86_64() {
         let t = TargetTriple::parse("x86_64-linux-musl").unwrap();
-        assert_eq!(
-            t.musl_loader_path().as_deref(),
-            Some("lib/ld-musl-x86_64.so.1")
-        );
+        assert_eq!(t.musl_loader_path().as_deref(), Some("lib/ld-musl-x86_64.so.1"));
     }
 
     #[test]
     fn musl_loader_path_aarch64() {
         let t = TargetTriple::parse("aarch64-linux-musl").unwrap();
-        assert_eq!(
-            t.musl_loader_path().as_deref(),
-            Some("lib/ld-musl-aarch64.so.1")
-        );
+        assert_eq!(t.musl_loader_path().as_deref(), Some("lib/ld-musl-aarch64.so.1"));
     }
 
     #[test]
     fn musl_loader_path_riscv64() {
         let t = TargetTriple::parse("riscv64-linux-musl").unwrap();
-        assert_eq!(
-            t.musl_loader_path().as_deref(),
-            Some("lib/ld-musl-riscv64.so.1")
-        );
+        assert_eq!(t.musl_loader_path().as_deref(), Some("lib/ld-musl-riscv64.so.1"));
     }
 
     #[test]
     fn musl_loader_path_arm() {
         let t = TargetTriple::parse("arm-linux-musl").unwrap();
-        assert_eq!(
-            t.musl_loader_path().as_deref(),
-            Some("lib/ld-musl-armhf.so.1")
-        );
+        assert_eq!(t.musl_loader_path().as_deref(), Some("lib/ld-musl-armhf.so.1"));
     }
 
     #[test]
@@ -3849,10 +3899,7 @@ mod tests {
             "foo.c".to_string(),
         ];
         let cfg = parse(&args).expect("--sysroot must parse at cli level");
-        assert_eq!(
-            cfg.sysroot.as_ref().unwrap().to_str().unwrap(),
-            "/opt/musl-sysroot"
-        );
+        assert_eq!(cfg.sysroot.as_ref().unwrap().to_str().unwrap(), "/opt/musl-sysroot");
     }
 
     // --- Response file (@file) tests ---
@@ -3989,8 +4036,10 @@ mod tests {
     fn tokenize_response_line_continuation_unix() {
         use super::tokenize_response_content;
         // `\` + `\n` joins lines: "-O2\\\n-c" becomes "-O2-c"
-        let tokens = tokenize_response_content("-O2\\
--c");
+        let tokens = tokenize_response_content(
+            "-O2\\
+-c",
+        );
         assert_eq!(tokens, vec!["-O2-c"]);
     }
 
@@ -3998,8 +4047,10 @@ mod tests {
     fn tokenize_response_line_continuation_mid_arg() {
         use super::tokenize_response_content;
         // Line continuation within a single argument
-        let tokens = tokenize_response_content("-DFOO=\\
-BAR");
+        let tokens = tokenize_response_content(
+            "-DFOO=\\
+BAR",
+        );
         assert_eq!(tokens, vec!["-DFOO=BAR"]);
     }
 
@@ -4090,7 +4141,11 @@ BAR");
 
     #[test]
     fn mthumb_sets_thumb_mode() {
-        let args = vec!["-c".to_string(), "-mthumb".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-mthumb".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-mthumb should parse");
         assert_eq!(cfg.arm_instruction_mode, super::ArmInstructionMode::Thumb);
     }
@@ -4113,21 +4168,33 @@ BAR");
 
     #[test]
     fn mfloat_abi_soft() {
-        let args = vec!["-c".to_string(), "-mfloat-abi=soft".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-mfloat-abi=soft".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-mfloat-abi=soft should parse");
         assert_eq!(cfg.float_abi, super::FloatAbi::Soft);
     }
 
     #[test]
     fn mfloat_abi_softfp() {
-        let args = vec!["-c".to_string(), "-mfloat-abi=softfp".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-mfloat-abi=softfp".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-mfloat-abi=softfp should parse");
         assert_eq!(cfg.float_abi, super::FloatAbi::SoftFp);
     }
 
     #[test]
     fn mfloat_abi_hard() {
-        let args = vec!["-c".to_string(), "-mfloat-abi=hard".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-mfloat-abi=hard".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-mfloat-abi=hard should parse");
         assert_eq!(cfg.float_abi, super::FloatAbi::Hard);
     }
@@ -4143,21 +4210,34 @@ BAR");
 
     #[test]
     fn fdata_sections_enables_data_sections() {
-        let args = vec!["-c".to_string(), "-fdata-sections".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-fdata-sections".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-fdata-sections should parse");
         assert!(cfg.data_sections);
     }
 
     #[test]
     fn fno_data_sections_disables_data_sections() {
-        let args = vec!["-c".to_string(), "-fdata-sections".to_string(), "-fno-data-sections".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-fdata-sections".to_string(),
+            "-fno-data-sections".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-fno-data-sections should parse");
         assert!(!cfg.data_sections);
     }
 
     #[test]
     fn specs_nano_specs_parsed() {
-        let args = vec!["-c".to_string(), "-specs=nano.specs".to_string(), "test.c".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "-specs=nano.specs".to_string(),
+            "test.c".to_string(),
+        ];
         let cfg = parse(&args).expect("-specs=nano.specs should parse");
         assert_eq!(cfg.specs.as_deref(), Some("nano.specs"));
     }

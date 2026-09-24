@@ -62,7 +62,7 @@ pub(crate) fn classify_hfa(
     };
     for f in flds.iter() {
         match (&f.ty, first_bits) {
-            (Type::Float, 32) | (Type::Double, 64) => {}
+            (Type::Float, 32) | (Type::Double, 64) => {},
             _ => return None,
         }
     }

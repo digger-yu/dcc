@@ -16,7 +16,7 @@ impl Aarch64Codegen {
                 // AND W0, W0, #3
                 self.emit(&0x12000003u32.to_le_bytes());
                 // W0 已包含舍入模式, 直接返回 (不设 0)
-            }
+            },
             // fesetround(mode): 设置 FPCR 舍入位, 返回 0
             "fesetround" => {
                 if args.is_empty() {
@@ -43,7 +43,7 @@ impl Aarch64Codegen {
                 // MSR FPCR, X2
                 self.emit(&(0xD51B4400u32 | 2).to_le_bytes());
                 self.mov_w0_imm(0);
-            }
+            },
             // feclearexcept(excepts): 清除 FPSR 异常标志, 返回 0
             "feclearexcept" => {
                 if args.is_empty() {
@@ -60,7 +60,7 @@ impl Aarch64Codegen {
                 // MSR FPSR, X1
                 self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
                 self.mov_w0_imm(0);
-            }
+            },
             // feraiseexcept(excepts): 置位 FPSR 异常标志, 返回 0
             "feraiseexcept" => {
                 if args.is_empty() {
@@ -76,7 +76,7 @@ impl Aarch64Codegen {
                 // MSR FPSR, X1
                 self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
                 self.mov_w0_imm(0);
-            }
+            },
             // fetestexcept(excepts): 返回 FPSR 中选中的异常标志位与
             "fetestexcept" => {
                 if args.is_empty() {
@@ -89,7 +89,7 @@ impl Aarch64Codegen {
                 self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
                 // AND W0, W1, W0 (返回选中的标志)
                 self.emit(&0x0A000020u32.to_le_bytes());
-            }
+            },
             // fegetenv(envp): 保存 FPCR+FPSR 到 [envp]
             "fegetenv" | "feholdexcept" => {
                 if args.is_empty() {
@@ -110,7 +110,7 @@ impl Aarch64Codegen {
                     self.emit(&0xD51B443Fu32.to_le_bytes());
                 }
                 self.mov_w0_imm(0);
-            }
+            },
             // fesetenv(envp): 从 [envp] 恢复 FPCR+FPSR
             "fesetenv" | "feupdateenv" => {
                 if args.is_empty() {
@@ -127,10 +127,10 @@ impl Aarch64Codegen {
                 self.emit(&0xF9400141u32.to_le_bytes() /* LDR X1, [X10, #8] */);
                 self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
                 self.mov_w0_imm(0);
-            }
+            },
             _ => {
                 self.mov_w0_imm(0);
-            }
+            },
         }
     }
 

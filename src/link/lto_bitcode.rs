@@ -122,20 +122,20 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
             let n = name.as_bytes();
             out.extend_from_slice(&(n.len() as u32).to_le_bytes());
             out.extend_from_slice(n);
-        }
+        },
         ExprKind::Binary(op) => {
             out.push(op_to_tag(*op));
-        }
+        },
         ExprKind::Unary(op) => {
             out.push(unop_to_tag(*op));
-        }
+        },
         ExprKind::VaArg { ap, ref arg_ty } => {
             let n = ap.as_bytes();
             out.extend_from_slice(&(n.len() as u32).to_le_bytes());
             out.extend_from_slice(n);
             encode_type(out, arg_ty);
-        }
-        _ => {}
+        },
+        _ => {},
     }
     encode_type(out, &e.ty);
     // literal
@@ -143,14 +143,14 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
         Some(ExprLiteral::Int(i)) => {
             out.push(0u8);
             out.extend_from_slice(&i.to_le_bytes());
-        }
+        },
         Some(ExprLiteral::Float(f)) => {
             out.push(1u8);
             out.extend_from_slice(&f.to_le_bytes());
-        }
+        },
         None => {
             out.push(0xffu8);
-        }
+        },
     }
     // children
     out.extend_from_slice(&(e.children.len() as u32).to_le_bytes());
@@ -232,20 +232,20 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
     match t {
         ValueType::Void => {
             out.push(0);
-        }
+        },
         ValueType::Integer { bits, signed } => {
             out.push(1);
             out.extend_from_slice(&bits.to_le_bytes());
             out.push(if *signed { 1 } else { 0 });
-        }
+        },
         ValueType::Float { bits } => {
             out.push(2);
             out.extend_from_slice(&bits.to_le_bytes());
-        }
+        },
         ValueType::Pointer(inner) => {
             out.push(3);
             encode_type(out, inner);
-        }
+        },
         ValueType::Array(inner, len) => {
             out.push(4);
             encode_type(out, inner);
@@ -253,12 +253,12 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
                 Some(n) => {
                     out.push(1);
                     out.extend_from_slice(&(*n as u64).to_le_bytes());
-                }
+                },
                 None => {
                     out.push(0);
-                }
+                },
             }
-        }
+        },
         ValueType::Aggregate {
             name,
             size,
@@ -270,7 +270,7 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
             out.extend_from_slice(n);
             out.extend_from_slice(&(*size as u64).to_le_bytes());
             out.push(if *is_union { 1 } else { 0 });
-        }
+        },
         ValueType::Function { ret, params } => {
             out.push(6);
             encode_type(out, ret);
@@ -278,20 +278,20 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
             for p in params {
                 encode_type(out, p);
             }
-        }
+        },
         ValueType::Vector(inner, n) => {
             out.push(7);
             encode_type(out, inner);
             out.extend_from_slice(&(*n as u64).to_le_bytes());
-        }
+        },
         ValueType::Complex(inner) => {
             out.push(8);
             encode_type(out, inner);
-        }
+        },
         ValueType::Imaginary(inner) => {
             out.push(9);
             encode_type(out, inner);
-        }
+        },
     }
 }
 
@@ -304,10 +304,10 @@ fn serialize_global(out: &mut Vec<u8>, g: &Global) {
         Some(expr) => {
             out.push(1);
             serialize_expr(out, expr);
-        }
+        },
         None => {
             out.push(0);
-        }
+        },
     }
 }
 
@@ -408,17 +408,17 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                 .to_string();
             *cur += n;
             ExprKind::Local(name)
-        }
+        },
         2 => {
             let tag = data.get(*cur).copied().ok_or_else(|| "eof".to_string())?;
             *cur += 1;
             ExprKind::Binary(tag_to_op(tag).ok_or_else(|| "bad op".to_string())?)
-        }
+        },
         3 => {
             let tag = data.get(*cur).copied().ok_or_else(|| "eof".to_string())?;
             *cur += 1;
             ExprKind::Unary(tag_to_unop(tag).ok_or_else(|| "bad unop".to_string())?)
-        }
+        },
         4 => ExprKind::Assign,
         5 => ExprKind::Cast,
         6 => ExprKind::Address,
@@ -431,7 +431,7 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                 .to_string();
             *cur += n;
             ExprKind::Member(name)
-        }
+        },
         10 => ExprKind::Call,
         11 => ExprKind::Conditional,
         12 => ExprKind::Aggregate,
@@ -444,8 +444,11 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                 .map_err(|e| e.to_string())?
                 .to_string();
             *cur += n;
-            ExprKind::VaArg { ap, arg_ty: decode_type(data, cur)? }
-        }
+            ExprKind::VaArg {
+                ap,
+                arg_ty: decode_type(data, cur)?,
+            }
+        },
         _ => return Err(format!("bad expr kind {}", kind_tag)),
     };
     let ty = decode_type(data, cur)?;
@@ -456,12 +459,12 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
             let v = i128::from_le_bytes(data[*cur..*cur + 16].try_into().unwrap());
             *cur += 16;
             Some(ExprLiteral::Int(v))
-        }
+        },
         1 => {
             let v = f64::from_le_bytes(data[*cur..*cur + 8].try_into().unwrap());
             *cur += 8;
             Some(ExprLiteral::Float(v))
-        }
+        },
         _ => None,
     };
     let nc = read_u32(data, cur)? as usize;
@@ -493,16 +496,16 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
                 bits,
                 signed: s != 0,
             })
-        }
+        },
         2 => {
             let bits = u16::from_le_bytes(data[*cur..*cur + 2].try_into().unwrap());
             *cur += 2;
             Ok(ValueType::Float { bits })
-        }
+        },
         3 => {
             let inner = decode_type(data, cur)?;
             Ok(ValueType::Pointer(Box::new(inner)))
-        }
+        },
         4 => {
             let inner = decode_type(data, cur)?;
             let has_len = data[*cur];
@@ -515,7 +518,7 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
                 None
             };
             Ok(ValueType::Array(Box::new(inner), len))
-        }
+        },
         5 => {
             let n = read_u32(data, cur)? as usize;
             let name = std::str::from_utf8(&data[*cur..*cur + n])
@@ -531,7 +534,7 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
                 size,
                 is_union: u != 0,
             })
-        }
+        },
         6 => {
             let ret = decode_type(data, cur)?;
             let np = read_u32(data, cur)? as usize;
@@ -543,21 +546,21 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
                 ret: Box::new(ret),
                 params,
             })
-        }
+        },
         7 => {
             let inner = decode_type(data, cur)?;
             let n = u64::from_le_bytes(data[*cur..*cur + 8].try_into().unwrap()) as usize;
             *cur += 8;
             Ok(ValueType::Vector(Box::new(inner), n))
-        }
+        },
         8 => {
             let inner = decode_type(data, cur)?;
             Ok(ValueType::Complex(Box::new(inner)))
-        }
+        },
         9 => {
             let inner = decode_type(data, cur)?;
             Ok(ValueType::Imaginary(Box::new(inner)))
-        }
+        },
         _ => Err(format!("bad type tag {}", tag)),
     }
 }
@@ -924,8 +927,7 @@ impl InlineCtx {
     /// 判断函数是否是内联候选
     fn is_inline_candidate(&self, func: &Function) -> bool {
         // 内部函数优先（.L 或 __dcc_local_ 前缀）
-        let is_internal = func.name.starts_with('.')
-            || func.name.starts_with("__dcc_local_");
+        let is_internal = func.name.starts_with('.') || func.name.starts_with("__dcc_local_");
 
         // 检查函数体大小
         if func.body.len() > self.max_body_size {
@@ -1271,21 +1273,20 @@ impl ConstPropagationCtx {
                         }
                     }
                 }
-            }
-            ExprKind::Unary(op)
-                if expr.children.len() == 1 => {
-                    let operand = &expr.children[0];
-                    if let Some(val) = operand.literal {
-                        if let Some(result) = fold_unary_op(*op, val) {
-                            let mut folded = expr.clone();
-                            folded.kind = ExprKind::Constant;
-                            folded.literal = Some(result);
-                            folded.children.clear();
-                            return Some(folded);
-                        }
+            },
+            ExprKind::Unary(op) if expr.children.len() == 1 => {
+                let operand = &expr.children[0];
+                if let Some(val) = operand.literal {
+                    if let Some(result) = fold_unary_op(*op, val) {
+                        let mut folded = expr.clone();
+                        folded.kind = ExprKind::Constant;
+                        folded.literal = Some(result);
+                        folded.children.clear();
+                        return Some(folded);
                     }
                 }
-            _ => {}
+            },
+            _ => {},
         }
         None
     }
@@ -1298,7 +1299,10 @@ fn is_likely_const_name(name: &str) -> bool {
         return true;
     }
     // 全大写字母（C 宏常量约定）
-    if name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+    {
         return !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     }
     // 以 const_ 开头
@@ -1309,7 +1313,11 @@ fn is_likely_const_name(name: &str) -> bool {
 }
 
 /// 折叠二元运算
-fn fold_binary_op(op: crate::ast::BinOp, lhs: ExprLiteral, rhs: ExprLiteral) -> Option<ExprLiteral> {
+fn fold_binary_op(
+    op: crate::ast::BinOp,
+    lhs: ExprLiteral,
+    rhs: ExprLiteral,
+) -> Option<ExprLiteral> {
     use crate::ast::BinOp;
     match (lhs, rhs) {
         (ExprLiteral::Int(l), ExprLiteral::Int(r)) => {
@@ -1322,13 +1330,13 @@ fn fold_binary_op(op: crate::ast::BinOp, lhs: ExprLiteral, rhs: ExprLiteral) -> 
                         return None;
                     }
                     l.checked_div(r)?
-                }
+                },
                 BinOp::Mod => {
                     if r == 0 {
                         return None;
                     }
                     l.checked_rem(r)?
-                }
+                },
                 BinOp::And => l & r,
                 BinOp::Or => l | r,
                 BinOp::Xor => l ^ r,
@@ -1343,7 +1351,7 @@ fn fold_binary_op(op: crate::ast::BinOp, lhs: ExprLiteral, rhs: ExprLiteral) -> 
                 _ => return None,
             };
             Some(ExprLiteral::Int(result))
-        }
+        },
         (ExprLiteral::Float(l), ExprLiteral::Float(r)) => {
             // Handle arithmetic operations
             let arith_result = match op {
@@ -1368,7 +1376,7 @@ fn fold_binary_op(op: crate::ast::BinOp, lhs: ExprLiteral, rhs: ExprLiteral) -> 
                 _ => return None,
             };
             Some(ExprLiteral::Int(cmp_result))
-        }
+        },
         _ => None,
     }
 }
@@ -1410,15 +1418,15 @@ fn collect_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
     match &e.kind {
         ExprKind::Local(name) | ExprKind::Member(name) => {
             refs.insert(name.clone());
-        }
+        },
         ExprKind::Call => {
             if let Some(c) = e.children.first() {
                 if let ExprKind::Local(name) = &c.kind {
                     refs.insert(name.clone());
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
     for c in &e.children {
         collect_refs_in_expr(c, refs);
@@ -1594,10 +1602,9 @@ pub fn merge_modules(modules: &[BitcodeModule]) -> MergedModule {
 /// 2. 有函数体的优先于空声明
 /// 3. 第一个定义的优先于后续的（避免不确定性）
 fn should_replace_function(existing: &Function, new: &Function) -> bool {
-    let existing_is_internal = existing.name.starts_with('.')
-        || existing.name.starts_with("__dcc_local_");
-    let new_is_internal = new.name.starts_with('.')
-        || new.name.starts_with("__dcc_local_");
+    let existing_is_internal =
+        existing.name.starts_with('.') || existing.name.starts_with("__dcc_local_");
+    let new_is_internal = new.name.starts_with('.') || new.name.starts_with("__dcc_local_");
 
     // 新的是公开的，旧的是内部的 -> 替换
     if !new_is_internal && existing_is_internal {
@@ -1642,8 +1649,8 @@ pub fn merged_to_bitcode(merged: &MergedModule) -> BitcodeModule {
 #[cfg(test)]
 mod merge_tests {
     use super::*;
-    use crate::ir::{ExprKind, TypedExpr, ValueType};
     use crate::diagnostics::Span;
+    use crate::ir::{ExprKind, TypedExpr, ValueType};
 
     fn make_test_function(name: &str) -> Function {
         Function {
@@ -1658,10 +1665,16 @@ mod merge_tests {
     fn make_test_global(name: &str, has_init: bool) -> Global {
         Global {
             name: name.to_string(),
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             initializer: if has_init {
                 Some(TypedExpr {
-                    ty: ValueType::Integer { bits: 32, signed: true },
+                    ty: ValueType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
                     kind: ExprKind::Constant,
                     children: vec![],
                     span: Span::point("", 0, 0),
@@ -1818,7 +1831,10 @@ mod const_prop_tests {
 
     fn make_const_expr(val: i128) -> TypedExpr {
         TypedExpr {
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             kind: ExprKind::Constant,
             children: vec![],
             span: Span::point("", 0, 0),
@@ -1829,7 +1845,10 @@ mod const_prop_tests {
 
     fn make_local_expr(name: &str) -> TypedExpr {
         TypedExpr {
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             kind: ExprKind::Local(name.to_string()),
             children: vec![],
             span: Span::point("", 0, 0),
@@ -1840,7 +1859,10 @@ mod const_prop_tests {
 
     fn make_binary_expr(op: BinOp, lhs: TypedExpr, rhs: TypedExpr) -> TypedExpr {
         TypedExpr {
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             kind: ExprKind::Binary(op),
             children: vec![lhs, rhs],
             span: Span::point("", 0, 0),
@@ -1863,7 +1885,10 @@ mod const_prop_tests {
             functions: vec![],
             globals: vec![Global {
                 name: ".const.MAX_SIZE".to_string(),
-                ty: ValueType::Integer { bits: 32, signed: true },
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
                 initializer: Some(make_const_expr(1024)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
@@ -1876,10 +1901,7 @@ mod const_prop_tests {
         let mut ctx = ConstPropagationCtx::new();
         ctx.collect_from_modules(&[module]);
         assert_eq!(ctx.known_constants.len(), 1);
-        assert_eq!(
-            ctx.known_constants.get(".const.MAX_SIZE"),
-            Some(&ExprLiteral::Int(1024))
-        );
+        assert_eq!(ctx.known_constants.get(".const.MAX_SIZE"), Some(&ExprLiteral::Int(1024)));
     }
 
     #[test]
@@ -1889,7 +1911,10 @@ mod const_prop_tests {
             functions: vec![],
             globals: vec![Global {
                 name: "mutable_var".to_string(),
-                ty: ValueType::Integer { bits: 32, signed: true },
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
                 initializer: Some(make_const_expr(42)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
@@ -1923,7 +1948,10 @@ mod const_prop_tests {
             functions: vec![func],
             globals: vec![Global {
                 name: ".const.SIZE".to_string(),
-                ty: ValueType::Integer { bits: 32, signed: true },
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
                 initializer: Some(make_const_expr(256)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
@@ -1945,7 +1973,10 @@ mod const_prop_tests {
     #[test]
     fn const_prop_skips_address_taken() {
         let addr_expr = TypedExpr {
-            ty: ValueType::Pointer(Box::new(ValueType::Integer { bits: 32, signed: true })),
+            ty: ValueType::Pointer(Box::new(ValueType::Integer {
+                bits: 32,
+                signed: true,
+            })),
             kind: ExprKind::Address,
             children: vec![make_local_expr(".const.FLAG")],
             span: Span::point("", 0, 0),
@@ -1968,7 +1999,10 @@ mod const_prop_tests {
             functions: vec![func],
             globals: vec![Global {
                 name: ".const.FLAG".to_string(),
-                ty: ValueType::Integer { bits: 32, signed: true },
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
                 initializer: Some(make_const_expr(1)),
                 span: Span::point("", 0, 0),
                 is_tls: false,
@@ -2297,7 +2331,7 @@ impl DeadStoreCtx {
             ExprKind::Dereference => {
                 // 指针解引用的存储，目标不明确
                 None
-            }
+            },
             _ => None,
         }
     }
@@ -2388,11 +2422,17 @@ mod dse_tests {
 
     fn make_assign_expr(target: &str, value: i128) -> TypedExpr {
         TypedExpr {
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             kind: ExprKind::Assign,
             children: vec![
                 TypedExpr {
-                    ty: ValueType::Integer { bits: 32, signed: true },
+                    ty: ValueType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
                     kind: ExprKind::Local(target.to_string()),
                     children: vec![],
                     span: Span::point("", 0, 0),
@@ -2400,7 +2440,10 @@ mod dse_tests {
                     quals: crate::ast::QualifierFlags::NONE,
                 },
                 TypedExpr {
-                    ty: ValueType::Integer { bits: 32, signed: true },
+                    ty: ValueType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
                     kind: ExprKind::Constant,
                     children: vec![],
                     span: Span::point("", 0, 0),
@@ -2416,7 +2459,10 @@ mod dse_tests {
 
     fn make_read_expr(name: &str) -> TypedExpr {
         TypedExpr {
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             kind: ExprKind::Local(name.to_string()),
             children: vec![],
             span: Span::point("", 0, 0),
@@ -2724,12 +2770,12 @@ impl AliasCtx {
                 } else {
                     AliasResult::NoAlias
                 }
-            }
+            },
             // 一个指针有已知集合，另一个没有
             (Some(_), None) | (None, Some(_)) => {
                 // 保守估计：可能别名
                 AliasResult::MayAlias
-            }
+            },
             // 两个指针都没有已知集合
             (None, None) => {
                 // 如果都是指针变量，保守估计
@@ -2738,7 +2784,7 @@ impl AliasCtx {
                 } else {
                     AliasResult::NoAlias
                 }
-            }
+            },
         }
     }
 
@@ -2863,7 +2909,9 @@ mod alias_tests {
         };
         let (ctx, _stats) = run_cross_tu_alias_analysis(&[module]);
         // 全局变量本身不会被视为 address_taken，除非有 Address 表达式
-        assert!(ctx.address_taken_globals.is_empty() || ctx.address_taken_globals.contains(".g_data"));
+        assert!(
+            ctx.address_taken_globals.is_empty() || ctx.address_taken_globals.contains(".g_data")
+        );
     }
 
     #[test]

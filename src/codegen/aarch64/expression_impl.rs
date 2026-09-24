@@ -34,7 +34,7 @@ impl Aarch64Codegen {
                                 } else {
                                     None
                                 }
-                            }
+                            },
                             _ => None,
                         };
                         let bf = sn.as_ref().and_then(|n| {
@@ -78,11 +78,11 @@ impl Aarch64Codegen {
                                 1 => {
                                     self.emit_str_x(0, 31, 0, 1); /* placeholder */
                                     self.store_x_at_sp(off, 0, 1);
-                                }
+                                },
                                 2 => {
                                     self.emit_str_x(0, 31, 0, 1);
                                     self.store_x_at_sp(off, 0, 2);
-                                }
+                                },
                                 4 => self.store_w0(off),
                                 _ => {
                                     // 8 bytes or aggregate
@@ -93,7 +93,7 @@ impl Aarch64Codegen {
                                         self.mov_x0_sp_off(off); // x0 = dst addr
                                         self.aggregate_store_loop(14, 0, 8, sz);
                                     }
-                                }
+                                },
                             }
                         } else if self.global_rodata.contains_key(name) {
                             self.load_global_addr_w0(name); // x0 = global addr
@@ -101,7 +101,7 @@ impl Aarch64Codegen {
                             let sz = value_type_size(&lhs.ty).max(1);
                             self.emit_store_sz(14, 0, 0, sz);
                         }
-                    }
+                    },
                     _ => {
                         self.gen_lvalue_addr(lhs); // x0 = addr
                         self.emit_mov_x_reg(12, 0); // x12 = addr
@@ -112,7 +112,7 @@ impl Aarch64Codegen {
                         } else {
                             self.aggregate_store_loop(14, 12, 0, sz);
                         }
-                    }
+                    },
                 }
                 // Result of assignment is the rhs value
                 self.emit_ldr_x(0, 31, save_off as u32, 8);
@@ -144,7 +144,7 @@ impl Aarch64Codegen {
                     return true;
                 }
                 self.mov_w0_imm(0);
-            }
+            },
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_w0(off);
@@ -157,7 +157,7 @@ impl Aarch64Codegen {
                     return true;
                 }
                 self.mov_w0_imm(0);
-            }
+            },
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 // Float comparison: children are float, result is integer
                 if is_float_ty(&expr.children[0].ty)
@@ -194,23 +194,20 @@ impl Aarch64Codegen {
                 self.mov_w0_w14();
                 self.binop_w0_w1(
                     *op,
-                    matches!(
-                        &expr.children[0].ty,
-                        ValueType::Integer { signed: true, .. }
-                    ),
+                    matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }),
                 );
                 return true;
-            }
+            },
             ExprKind::Unary(op) if !expr.children.is_empty() => {
                 self.gen_expr(&expr.children[0]);
                 match op {
                     UnOp::Neg => self.neg_w0(),
-                    UnOp::Plus => {}
+                    UnOp::Plus => {},
                     UnOp::Not => self.cmp_w0_zero(),
                     UnOp::BitNot => self.mvn_w0(),
                 }
                 return true;
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if is_vector_ty(&child.ty) {
@@ -230,7 +227,7 @@ impl Aarch64Codegen {
                                 // FCVTZS W0, S0: 0x1E180000
                                 self.emit(&0x1E180000u32.to_le_bytes());
                             }
-                        }
+                        },
                         ValueType::Float { bits: 64 } => {
                             if is_unsigned {
                                 // FCVTZU W0, D0: 0x9E190000
@@ -239,8 +236,8 @@ impl Aarch64Codegen {
                                 // FCVTZS W0, D0: 0x9E180000
                                 self.emit(&0x9E180000u32.to_le_bytes());
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                     self.truncate_w0_to(&expr.ty);
                 } else {
@@ -248,7 +245,7 @@ impl Aarch64Codegen {
                     self.truncate_w0_to(&expr.ty);
                 }
                 return true;
-            }
+            },
             ExprKind::VaArg { ap, ref arg_ty, .. } => {
                 // M25: __builtin_va_arg(ap, T)
                 // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
@@ -258,11 +255,11 @@ impl Aarch64Codegen {
                     self.gen_va_arg_int(ap);
                 }
                 return true;
-            }
+            },
             ExprKind::Call => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 // csel 无分支三元: cond ? true_val : false_val
                 self.gen_expr(&expr.children[0]);
@@ -275,7 +272,7 @@ impl Aarch64Codegen {
                 self.cmp_w15_zero();
                 self.csel_w0_w0_w1_ne();
                 return true;
-            }
+            },
             ExprKind::Index if expr.children.len() >= 2 && is_vector_ty(&expr.children[0].ty) => {
                 self.gen_vector_expr(&expr.children[0]);
                 let idx = expr.children[1]
@@ -287,7 +284,7 @@ impl Aarch64Codegen {
                     .unwrap_or(0);
                 self.extract_vector_lane_w0(idx);
                 return true;
-            }
+            },
             ExprKind::Address if !expr.children.is_empty() => {
                 // Extended: support &member, &deref, &index via gen_lvalue_addr
                 match &expr.children[0].kind {
@@ -300,15 +297,15 @@ impl Aarch64Codegen {
                             self.load_global_addr_w0(name);
                             return true;
                         }
-                    }
+                    },
                     _ => {
                         self.gen_lvalue_addr(&expr.children[0]);
                         return true;
-                    }
+                    },
                 }
                 self.mov_w0_imm(0);
                 return true;
-            }
+            },
             ExprKind::Dereference if !expr.children.is_empty() => {
                 // *ptr: evaluate pointer, load value
                 self.gen_expr(&expr.children[0]);
@@ -322,7 +319,7 @@ impl Aarch64Codegen {
                     self.emit_ldr_x(0, 0, 0, 8);
                 }
                 return true;
-            }
+            },
             ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
                 // Compute base address
                 let child = &expr.children[0];
@@ -343,7 +340,7 @@ impl Aarch64Codegen {
                         } else {
                             None
                         }
-                    }
+                    },
                     _ => None,
                 };
                 let field_info = struct_name.as_ref().and_then(|name| {
@@ -408,7 +405,7 @@ impl Aarch64Codegen {
                     self.emit_ldr_x(0, 0, 0, 8);
                 }
                 return true;
-            }
+            },
             ExprKind::Index if expr.children.len() >= 2 => {
                 let arr = &expr.children[0];
                 let idx = &expr.children[1];
@@ -416,10 +413,10 @@ impl Aarch64Codegen {
                 match &arr.ty {
                     ValueType::Array(_, _) => {
                         self.gen_lvalue_addr(arr);
-                    }
+                    },
                     _ => {
                         self.gen_expr(arr);
-                    }
+                    },
                 }
                 // x0 = base address
                 self.emit_mov_x_reg(12, 0); // x12 = base
@@ -432,20 +429,20 @@ impl Aarch64Codegen {
                     match elem_sz {
                         2 => {
                             self.emit(&[0x09, 0x01, 0x00, 0xd3]);
-                        } // lsl x9, x9, #1
+                        }, // lsl x9, x9, #1
                         4 => {
                             self.emit(&[0x09, 0x02, 0x00, 0xd3]);
-                        } // lsl x9, x9, #2
+                        }, // lsl x9, x9, #2
                         8 => {
                             self.emit(&[0x09, 0x03, 0x00, 0xd3]);
-                        } // lsl x9, x9, #3
+                        }, // lsl x9, x9, #3
                         16 => {
                             self.emit(&[0x09, 0x04, 0x00, 0xd3]);
-                        } // lsl x9, x9, #4
+                        }, // lsl x9, x9, #4
                         _ => {
                             self.mov_x_reg_imm(10, elem_sz as u64);
                             self.emit_mul_x(9, 9, 10); // x9 = idx * elem_sz
-                        }
+                        },
                     }
                 } else {
                     self.emit_mov_x_reg(9, 0); // x9 = index (no scaling)
@@ -461,20 +458,20 @@ impl Aarch64Codegen {
                     self.emit_ldr_x(0, 0, 0, 8);
                 }
                 return true;
-            }
+            },
             ExprKind::Opaque => {
                 // Opaque represents inline asm or label addresses that cannot be
                 // represented in the typed IR. These should be handled at the AST
                 // level via gen_expr_from_ast. For now, return 0 as a placeholder.
                 self.mov_w0_imm(0);
                 return true;
-            }
+            },
             ExprKind::Aggregate => {
                 // Aggregate expressions (struct/array values) are not yet fully
                 // supported in the aarch64 backend. Return 0 as a placeholder.
                 self.mov_w0_imm(0);
                 return true;
-            }
+            },
             _ => {
                 // Unhandled IR expression: emit diagnostic instead of
                 // silently producing wrong code (mov w0, #0).
@@ -487,7 +484,7 @@ impl Aarch64Codegen {
                 diag.hint = Some("add handling in gen_expr or lower in SSA pass".to_string());
                 self.diagnostics.push(diag);
                 self.mov_w0_imm(0);
-            }
+            },
         }
         false
     }
@@ -504,7 +501,7 @@ impl Aarch64Codegen {
                 } else {
                     self.mov_w0_imm(0);
                 }
-            }
+            },
             ExprKind::Member(ref field_name) => {
                 let child = &expr.children[0];
                 if let ExprKind::Dereference = &child.kind {
@@ -523,7 +520,7 @@ impl Aarch64Codegen {
                         } else {
                             None
                         }
-                    }
+                    },
                     _ => None,
                 };
                 let off = struct_name
@@ -537,16 +534,16 @@ impl Aarch64Codegen {
                     self.emit_mov_x_reg(12, 0);
                     self.emit_add_imm_x(0, 12, off as u32);
                 }
-            }
+            },
             ExprKind::Index if expr.children.len() >= 2 => {
                 let arr = &expr.children[0];
                 match &arr.ty {
                     ValueType::Array(_, _) => {
                         self.gen_lvalue_addr(arr);
-                    }
+                    },
                     _ => {
                         self.gen_expr(arr);
-                    }
+                    },
                 }
                 // x0 = base address
                 self.emit_mov_x_reg(12, 0); // x12 = base
@@ -557,37 +554,37 @@ impl Aarch64Codegen {
                     match elem_sz {
                         2 => {
                             self.emit(&[0x09, 0x01, 0x00, 0xd3]);
-                        }
+                        },
                         4 => {
                             self.emit(&[0x09, 0x02, 0x00, 0xd3]);
-                        }
+                        },
                         8 => {
                             self.emit(&[0x09, 0x03, 0x00, 0xd3]);
-                        }
+                        },
                         16 => {
                             self.emit(&[0x09, 0x04, 0x00, 0xd3]);
-                        }
+                        },
                         _ => {
                             self.mov_x_reg_imm(10, elem_sz as u64);
                             self.emit_mul_x(9, 9, 10);
-                        }
+                        },
                     }
                 }
                 self.emit_add_x_reg(0, 12, 9); // x0 = base + scaled_idx
-            }
+            },
             ExprKind::Dereference if !expr.children.is_empty() => {
                 self.gen_expr(&expr.children[0]);
                 // x0 = pointer value = address
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 self.gen_lvalue_addr(&expr.children[0]);
-            }
+            },
             ExprKind::Address if !expr.children.is_empty() => {
                 self.gen_lvalue_addr(&expr.children[0]);
-            }
+            },
             _ => {
                 self.mov_w0_imm(0);
-            }
+            },
         }
     }
 }

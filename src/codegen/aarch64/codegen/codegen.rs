@@ -98,14 +98,14 @@ impl Aarch64Codegen {
                         self.asm_label_map
                             .insert(f.name.name.clone(), label.clone());
                     }
-                }
+                },
                 Decl::Var(v) => {
                     if let Some(ref label) = v.asm_label {
                         self.asm_label_map
                             .insert(v.name.name.clone(), label.clone());
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -119,22 +119,19 @@ impl Aarch64Codegen {
         {
             Ok(bytes) => {
                 self.code.extend_from_slice(&bytes);
-            }
+            },
             Err(unrecognized) => {
                 for mnem in &unrecognized {
                     let span = crate::diagnostics::Span::point(span_file, span_line, 1);
                     let mut diag = crate::diagnostics::Diagnostic::err(
                         "E0311",
-                        format!(
-                            "unsupported inline asm instruction '{}' on aarch64 target",
-                            mnem
-                        ),
+                        format!("unsupported inline asm instruction '{}' on aarch64 target", mnem),
                         span,
                     );
                     diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
                     self.diagnostics.push(diag);
                 }
-            }
+            },
         }
     }
 
@@ -201,12 +198,12 @@ impl Aarch64Codegen {
                 Decl::StructDef(s) => {
                     self.aggregate_fields
                         .insert(s.name.name.clone(), (Arc::new(s.fields.clone()), false));
-                }
+                },
                 Decl::UnionDef(u) => {
                     self.aggregate_fields
                         .insert(u.name.name.clone(), (Arc::new(u.fields.clone()), true));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -272,13 +269,13 @@ impl Aarch64Codegen {
             Some(ExprLiteral::Int(v)) => {
                 let bytes = (v as i64).to_le_bytes();
                 self.rodata[start..start + size.min(8)].copy_from_slice(&bytes[..size.min(8)]);
-            }
+            },
             Some(ExprLiteral::Float(v)) => {
                 let bits = (v as f32).to_bits();
                 self.rodata[start..start + 4.min(size)]
                     .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -517,17 +514,15 @@ impl Aarch64Codegen {
         match self._target.ftrace_mode {
             crate::cli::FtraceMode::MCount => {
                 self.ensure_sym("mcount");
-            }
+            },
             crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
                 self.ensure_sym("__fentry__");
-            }
-            crate::cli::FtraceMode::None => {}
+            },
+            crate::cli::FtraceMode::None => {},
         }
         // -mrecord-mcount: generate __mcount_loc section with call site addresses
-        if matches!(
-            self._target.ftrace_mode,
-            crate::cli::FtraceMode::RecordMCount
-        ) && !self.mcount_loc_entries.is_empty()
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
         {
             let mut mcount_data = Vec::with_capacity(self.mcount_loc_entries.len() * 8);
             for &(call_pos, _) in &self.mcount_loc_entries {

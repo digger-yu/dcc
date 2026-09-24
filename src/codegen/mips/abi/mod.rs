@@ -138,7 +138,7 @@ impl MipsAbi {
                 if let Some(gpr) = MipsGpr::from_index(reg_idx) {
                     info.reg = Some(MipsArgReg::Gpr(gpr));
                 }
-            }
+            },
             ArgCategory::Float | ArgCategory::Double => {
                 // Float args in $f12, $f14 for O32 hard-float
                 // O32 uses even-numbered regs: f12, f14, f16, ...
@@ -148,13 +148,13 @@ impl MipsAbi {
                         info.reg = Some(MipsArgReg::Fpr(fpr));
                     }
                 }
-            }
+            },
             _ => {
                 // Aggregates passed via memory pointer
                 // Pointer goes in $a0
                 info.stack_offset = Some(-4); // Hidden parameter on stack
                 info.reg = Some(MipsArgReg::Gpr(MipsGpr::A0));
-            }
+            },
         }
 
         Some(info)
@@ -163,11 +163,8 @@ impl MipsAbi {
     /// Classify argument type
     fn classify_arg_type(ty_kind: &str) -> ArgCategory {
         match ty_kind {
-            "int" | "uint" | "byte" | "short" | "ushort" | "long" | "ulong" 
-            | "char" | "uchar" | "bool" | "ptr" | "enum" | "void_ptr"
-            | "u64" | "i64" => {
-                ArgCategory::Integer
-            }
+            "int" | "uint" | "byte" | "short" | "ushort" | "long" | "ulong" | "char" | "uchar"
+            | "bool" | "ptr" | "enum" | "void_ptr" | "u64" | "i64" => ArgCategory::Integer,
             "float" => ArgCategory::Float,
             "double" | "complex_f64" => ArgCategory::Double,
             _ => ArgCategory::Aggregate,
@@ -246,11 +243,7 @@ impl MipsAbi {
     }
 
     /// Calculate stack frame layout for O32 ABI
-    pub fn calculate_frame(
-        locals_count: usize,
-        needs_canary: bool,
-        variadic: bool,
-    ) -> FrameLayout {
+    pub fn calculate_frame(locals_count: usize, needs_canary: bool, variadic: bool) -> FrameLayout {
         let abi = Self::new(MipsAbiType::O32);
         let mut frame = FrameLayout::new();
 
@@ -261,7 +254,7 @@ impl MipsAbi {
         // Alignment padding
         let total = local_bytes + 4; // Space for return address, etc.
         let aligned_total = ((total + STACK_ALIGNMENT_O32 as i32 - 1) / STACK_ALIGNMENT_O32 as i32)
-                            * STACK_ALIGNMENT_O32 as i32;
+            * STACK_ALIGNMENT_O32 as i32;
         frame.total_size = aligned_total.max(FRAME_MIN_SIZE);
 
         // Variadic function save area
@@ -335,11 +328,11 @@ impl MipsAbi {
 
         // Restore return address and return
         instructions.push("lw $ra, 0($sp)".to_string());
-        
+
         if needs_fp {
             instructions.push("move $sp, $fp".to_string());
         }
-        
+
         instructions.push("jr $ra".to_string());
         instructions.push("nop".to_string()); // Delay slot fill
 
@@ -365,13 +358,13 @@ impl MipsAbi {
         // Simplified dependency check
         // In real implementation, analyze register usage
         let dep_indicators = ["$v0", "$v1", "$at", "$zero"];
-        
+
         for indicator in &dep_indicators {
             if branch.contains(indicator) && instr.contains(indicator) {
                 return true;
             }
         }
-        
+
         false
     }
 }
@@ -392,10 +385,10 @@ pub struct ReturnInfo {
 /// Return mechanism type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnKind {
-    SimpleInt,           // $v0 (1-4 bytes)
-    Int64TwoRegs,        // $v0+$v1 (8 bytes)
-    Double,              // $f0 or $f0+$f1 (8 bytes)
-    ViaMemory,           // Hidden pointer in $a0
+    SimpleInt,    // $v0 (1-4 bytes)
+    Int64TwoRegs, // $v0+$v1 (8 bytes)
+    Double,       // $f0 or $f0+$f1 (8 bytes)
+    ViaMemory,    // Hidden pointer in $a0
 }
 
 /// Stack frame layout information
@@ -438,7 +431,7 @@ mod mips_abi_tests {
     #[test]
     fn test_argument_allocation_o32() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        
+
         // First 4 integers in $a0-$a3
         for i in 0..4 {
             let arg = MipsAbi::arg_info("int", i).unwrap();
@@ -453,14 +446,14 @@ mod mips_abi_tests {
     #[test]
     fn test_float_arguments_hardfloat() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        
+
         // Float args in $f12, $f14
         let arg0 = MipsAbi::arg_info("float", 0).unwrap();
         assert!(arg0.reg.is_some());
         if let Some(MipsArgReg::Fpr(f)) = arg0.reg {
             assert_eq!(f.index(), 12);
         }
-        
+
         let arg1 = MipsAbi::arg_info("float", 1).unwrap();
         assert!(arg1.reg.is_some());
         if let Some(MipsArgReg::Fpr(f)) = arg1.reg {
@@ -471,7 +464,7 @@ mod mips_abi_tests {
     #[test]
     fn test_return_value_rules() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        
+
         // Integer in $v0
         let ret = MipsAbi::return_info("int");
         assert!(ret.via_reg);
@@ -494,7 +487,7 @@ mod mips_abi_tests {
     fn test_frame_layout() {
         let abi = MipsAbi::new(MipsAbiType::O32);
         let layout = MipsAbi::calculate_frame(8, false, false);
-        
+
         assert!(layout.local_bytes > 0);
         assert_eq!(layout.total_size % 8, 0);
         assert!(layout.total_size >= FRAME_MIN_SIZE);
@@ -504,7 +497,7 @@ mod mips_abi_tests {
     fn test_prologue_generation() {
         let abi = MipsAbi::new(MipsAbiType::O32);
         let prologue = MipsAbi::generate_prologue(32, &[MipsGpr::S0, MipsGpr::S1], true);
-        
+
         assert!(prologue.iter().any(|s| s.contains("sw")));
         assert!(prologue.iter().any(|s| s.contains("$ra")));
         assert!(prologue.iter().any(|s| s.contains("$sp")));
@@ -514,7 +507,7 @@ mod mips_abi_tests {
     fn test_epilogue_generation() {
         let abi = MipsAbi::new(MipsAbiType::O32);
         let epilogue = MipsAbi::generate_epilogue(32, &[MipsGpr::S0, MipsGpr::S1], true);
-        
+
         assert!(epilogue.iter().any(|s| s.contains("lw")));
         // jr $ra 后必须紧跟延迟槽指令 nop, 因此 jr 不是最后一行
         let jr_pos = epilogue
@@ -527,7 +520,7 @@ mod mips_abi_tests {
     #[test]
     fn test_delay_slot_strategy() {
         let abi = MipsAbi::new(MipsAbiType::O32);
-        
+
         let result = MipsAbi::fill_delay_slot("beq $t0, $t1, label", &Some("nop".to_string()));
         assert_eq!(result, "nop");
     }

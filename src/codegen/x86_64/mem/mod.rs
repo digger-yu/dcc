@@ -3,8 +3,8 @@
 // Load/store operations, RIP-relative addressing, global variable access
 
 pub mod addr;
-pub mod load_store;
 pub mod global;
+pub mod load_store;
 
 // 不再在这里 `pub use` 重新导出: 已验证的调用方均直接走 `mem::addr::…` /
 // `self.…` 路径，重新导出层无人消费 (属搬桩时留下的空壳外表)。

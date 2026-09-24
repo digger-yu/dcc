@@ -49,10 +49,7 @@ fn inline_trace_enabled() -> bool {
 /// Format: `dcc-inline: <decision> <callee> [reason]`
 fn trace_inline_decision(callee: &str, decision: &str, reason: &str) {
     if inline_trace_enabled() {
-        eprintln!(
-            "dcc-inline: {} {} ({})",
-            decision, callee, reason,
-        );
+        eprintln!("dcc-inline: {} {} ({})", decision, callee, reason,);
     }
 }
 
@@ -86,12 +83,7 @@ pub fn optimize(module: &mut Module, level: u8) {
 ///
 /// `has_vnni`: 目标是否支持 VNNI 指令
 /// `vec_bits`: 向量寄存器位宽 (256/512)
-pub fn optimize_with_target(
-    module: &mut Module,
-    level: u8,
-    has_vnni: bool,
-    vec_bits: u32,
-) {
+pub fn optimize_with_target(module: &mut Module, level: u8, has_vnni: bool, vec_bits: u32) {
     // Default: strict_aliasing=true (C standard semantics)
     optimize_with_full_target(module, level, has_vnni, vec_bits, true);
 }
@@ -181,10 +173,7 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
 }
 
 /// Returns true if the function references any volatile global variable.
-fn func_refs_volatile(
-    f: &FuncDecl,
-    volatile_globals: &std::collections::HashSet<String>,
-) -> bool {
+fn func_refs_volatile(f: &FuncDecl, volatile_globals: &std::collections::HashSet<String>) -> bool {
     if let Some(body) = &f.body {
         for item in &body.items {
             if block_item_refs_volatile(item, volatile_globals) {
@@ -195,10 +184,7 @@ fn func_refs_volatile(
     false
 }
 
-fn block_item_refs_volatile(
-    item: &BlockItem,
-    vol: &std::collections::HashSet<String>,
-) -> bool {
+fn block_item_refs_volatile(item: &BlockItem, vol: &std::collections::HashSet<String>) -> bool {
     match item {
         BlockItem::Stmt(s) => stmt_refs_volatile(s, vol),
         BlockItem::Decl(Decl::Var(v)) => {
@@ -207,34 +193,46 @@ fn block_item_refs_volatile(
             } else {
                 false
             }
-        }
+        },
         _ => false,
     }
 }
 
 fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool {
     match s {
-        Stmt::Return { val: Some(e), .. }
-        | Stmt::Expr { e, .. } => expr_refs_volatile(e, vol),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => expr_refs_volatile(e, vol),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             expr_refs_volatile(cond, vol)
                 || stmt_refs_volatile(then_, vol)
                 || else_.as_ref().is_some_and(|e| stmt_refs_volatile(e, vol))
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             expr_refs_volatile(cond, vol) || stmt_refs_volatile(body, vol)
-        }
-        Stmt::For { init, cond, step, body, .. } => {
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             init.as_ref().is_some_and(|i| stmt_refs_volatile(i, vol))
                 || cond.as_ref().is_some_and(|c| expr_refs_volatile(c, vol))
                 || step.as_ref().is_some_and(|s| expr_refs_volatile(s, vol))
                 || stmt_refs_volatile(body, vol)
-        }
+        },
         Stmt::Block { b, .. } => b.items.iter().any(|i| block_item_refs_volatile(i, vol)),
         Stmt::Switch { expr, cases, .. } => {
             expr_refs_volatile(expr, vol)
-                || cases.iter().any(|c| c.body.items.iter().any(|i| block_item_refs_volatile(i, vol)))
-        }
+                || cases.iter().any(|c| {
+                    c.body
+                        .items
+                        .iter()
+                        .any(|i| block_item_refs_volatile(i, vol))
+                })
+        },
         _ => false,
     }
 }
@@ -244,34 +242,40 @@ fn expr_refs_volatile(e: &Expr, vol: &std::collections::HashSet<String>) -> bool
         Expr::Ident { name, .. } => vol.contains(&name.name),
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             expr_refs_volatile(l, vol) || expr_refs_volatile(r, vol)
-        }
-        Expr::Unary { e, .. } | Expr::Cast { e, .. } | Expr::AddrOf { e, .. }
-        | Expr::Deref { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
-            expr_refs_volatile(e, vol)
-        }
+        },
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. } => expr_refs_volatile(e, vol),
         Expr::Call { callee, args, .. } => {
             expr_refs_volatile(callee, vol) || args.iter().any(|a| expr_refs_volatile(a, vol))
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             expr_refs_volatile(arr, vol) || expr_refs_volatile(idx, vol)
-        }
+        },
         Expr::Member { expr, .. } => expr_refs_volatile(expr, vol),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             expr_refs_volatile(cond, vol)
                 || expr_refs_volatile(then_, vol)
                 || expr_refs_volatile(else_, vol)
-        }
-        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        },
+        Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. } => expr_refs_volatile(e, vol),
         Expr::StmtExpr { block, .. } => {
             block.items.iter().any(|i| block_item_refs_volatile(i, vol))
-        }
+        },
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             inits.iter().any(|init| match init {
                 crate::ast::InitItem::Expr(e) => expr_refs_volatile(e, vol),
                 crate::ast::InitItem::Designated { value, .. } => expr_refs_volatile(value, vol),
             })
-        }
+        },
         _ => false,
     }
 }
@@ -311,10 +315,7 @@ fn qualifier_aware_optimization(module: &mut Module) {
 }
 
 /// Check for stores to const global variables and emit warnings.
-fn check_stores_to_const_globals(
-    block: &Block,
-    const_globals: &std::collections::HashSet<String>,
-) {
+fn check_stores_to_const_globals(block: &Block, const_globals: &std::collections::HashSet<String>) {
     for item in &block.items {
         match item {
             BlockItem::Stmt(s) => check_stmt_for_const_stores(s, const_globals),
@@ -322,31 +323,36 @@ fn check_stores_to_const_globals(
                 if let Some(init) = &v.init {
                     check_expr_for_const_stores(init, const_globals);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
 
-fn check_stmt_for_const_stores(
-    stmt: &Stmt,
-    const_globals: &std::collections::HashSet<String>,
-) {
+fn check_stmt_for_const_stores(stmt: &Stmt, const_globals: &std::collections::HashSet<String>) {
     match stmt {
         Stmt::Expr { e, .. } => check_expr_for_const_stores(e, const_globals),
         Stmt::Return { val: Some(e), .. } => check_expr_for_const_stores(e, const_globals),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             check_expr_for_const_stores(cond, const_globals);
             check_stmt_for_const_stores(then_, const_globals);
             if let Some(e) = else_ {
                 check_stmt_for_const_stores(e, const_globals);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             check_expr_for_const_stores(cond, const_globals);
             check_stmt_for_const_stores(body, const_globals);
-        }
-        Stmt::For { init, cond, step, body, .. } => {
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(init_stmt) = init {
                 check_stmt_for_const_stores(init_stmt, const_globals);
             }
@@ -357,22 +363,19 @@ fn check_stmt_for_const_stores(
                 check_expr_for_const_stores(step_expr, const_globals);
             }
             check_stmt_for_const_stores(body, const_globals);
-        }
+        },
         Stmt::Block { b, .. } => check_stores_to_const_globals(b, const_globals),
         Stmt::Switch { expr, cases, .. } => {
             check_expr_for_const_stores(expr, const_globals);
             for case in cases {
                 check_stores_to_const_globals(&case.body, const_globals);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
-fn check_expr_for_const_stores(
-    expr: &Expr,
-    const_globals: &std::collections::HashSet<String>,
-) {
+fn check_expr_for_const_stores(expr: &Expr, const_globals: &std::collections::HashSet<String>) {
     match expr {
         Expr::Assign { l, .. } => {
             // Check if assigning to a const global
@@ -384,32 +387,40 @@ fn check_expr_for_const_stores(
                     // if diagnostic infrastructure was integrated here
                 }
             }
-        }
+        },
         Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
             check_expr_for_const_stores(l, const_globals);
             check_expr_for_const_stores(r, const_globals);
-        }
-        Expr::Unary { e, .. } | Expr::Cast { e, .. } | Expr::AddrOf { e, .. }
-        | Expr::Deref { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+        },
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. } => {
             check_expr_for_const_stores(e, const_globals);
-        }
+        },
         Expr::Call { callee, args, .. } => {
             check_expr_for_const_stores(callee, const_globals);
             for arg in args {
                 check_expr_for_const_stores(arg, const_globals);
             }
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             check_expr_for_const_stores(arr, const_globals);
             check_expr_for_const_stores(idx, const_globals);
-        }
+        },
         Expr::Member { expr, .. } => check_expr_for_const_stores(expr, const_globals),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             check_expr_for_const_stores(cond, const_globals);
             check_expr_for_const_stores(then_, const_globals);
             check_expr_for_const_stores(else_, const_globals);
-        }
-        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        },
+        Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. } => {
             // Increment/decrement on const global is also an error
             if let Expr::Ident { name, .. } = e.as_ref() {
@@ -418,7 +429,7 @@ fn check_expr_for_const_stores(
                 }
             }
             check_expr_for_const_stores(e, const_globals);
-        }
+        },
         Expr::StmtExpr { block, .. } => check_stores_to_const_globals(block, const_globals),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             for init in inits {
@@ -426,11 +437,11 @@ fn check_expr_for_const_stores(
                     crate::ast::InitItem::Expr(e) => check_expr_for_const_stores(e, const_globals),
                     crate::ast::InitItem::Designated { value, .. } => {
                         check_expr_for_const_stores(value, const_globals)
-                    }
+                    },
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -454,7 +465,7 @@ fn stmt_has_loop(s: &Stmt) -> bool {
         Stmt::Block { b, .. } => block_has_loop(b),
         Stmt::If { then_, else_, .. } => {
             stmt_has_loop(then_) || else_.as_ref().is_some_and(|e| stmt_has_loop(e))
-        }
+        },
         _ => false,
     }
 }
@@ -477,7 +488,7 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
                 && v.init.as_ref().is_some())
             // static 局部变量跨调用持久, SSA 无法正确建模
             || v.is_static
-        }
+        },
         BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
         _ => false,
     })
@@ -487,30 +498,20 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
     match s {
         // asm goto 包含无法 SSA 化的非结构化控制流
         Stmt::AsmGoto { .. } => true,
-        Stmt::If {
-            then_, else_, ..
-        } => {
+        Stmt::If { then_, else_, .. } => {
             stmt_has_unsafe_ssa_pattern(then_)
                 || else_
                     .as_ref()
                     .is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
-        }
+        },
         Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b),
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            stmt_has_unsafe_ssa_pattern(body)
-        }
-        Stmt::For {
-            init,
-            body,
-            ..
-        } => {
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_unsafe_ssa_pattern(body),
+        Stmt::For { init, body, .. } => {
             init.as_ref()
                 .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
                 || stmt_has_unsafe_ssa_pattern(body)
-        }
-        Stmt::Switch { cases, .. } => {
-            cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body))
-        }
+        },
+        Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body)),
         _ => false,
     }
 }
@@ -529,7 +530,7 @@ fn cross_function_dce(module: &mut Module) {
                     collect_global_func_roots(init, &mut extra_roots);
                 }
                 others.push(Decl::Var(v));
-            }
+            },
             Decl::GlobalAsm {
                 ref outputs,
                 ref inputs,
@@ -539,7 +540,7 @@ fn cross_function_dce(module: &mut Module) {
                     collect_global_func_roots(e, &mut extra_roots);
                 }
                 others.push(d);
-            }
+            },
             other => others.push(other),
         }
     }
@@ -557,7 +558,7 @@ fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
             if matches!(ty, crate::ast::Type::Func(_, _)) {
                 out.push(name.name.clone());
             }
-        }
+        },
         Expr::AddrOf { e, .. } => collect_global_func_roots(e, out),
         Expr::Cast { e, .. }
         | Expr::Unary { e, .. }
@@ -574,18 +575,18 @@ fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             collect_global_func_roots(l, out);
             collect_global_func_roots(r, out);
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             collect_global_func_roots(cond, out);
             collect_global_func_roots(then_, out);
             collect_global_func_roots(else_, out);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             collect_global_func_roots(arr, out);
             collect_global_func_roots(idx, out);
-        }
+        },
         Expr::Member { expr, .. } => collect_global_func_roots(expr, out),
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             for init in inits {
@@ -593,18 +594,18 @@ fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
                     crate::ast::InitItem::Expr(e) => collect_global_func_roots(e, out),
                     crate::ast::InitItem::Designated { value, .. } => {
                         collect_global_func_roots(value, out)
-                    }
+                    },
                 }
             }
-        }
+        },
         Expr::AsmExpr {
             outputs, inputs, ..
         } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 collect_global_func_roots(e, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -634,8 +635,8 @@ fn fold_block(items: &mut [BlockItem], fenv_access: bool) {
                 if let Some(init) = &mut v.init {
                     *init = fold_expr(init.clone(), fenv_access);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -650,11 +651,11 @@ fn fold_stmt(s: &mut Stmt, fenv_access: bool) {
             if let Some(e) = else_ {
                 fold_stmt(e, fenv_access);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             *cond = fold_expr(cond.clone(), fenv_access);
             fold_stmt(body, fenv_access);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -672,13 +673,13 @@ fn fold_stmt(s: &mut Stmt, fenv_access: bool) {
                 fold_stmt(i, fenv_access);
             }
             fold_stmt(body, fenv_access);
-        }
+        },
         Stmt::Return { val: Some(e), .. } => {
             *e = fold_expr(e.clone(), fenv_access);
-        }
+        },
         Stmt::Expr { e, .. } => *e = fold_expr(e.clone(), fenv_access),
         Stmt::Block { b, .. } => fold_block(&mut b.items, fenv_access),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -691,7 +692,11 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
             // 无符号类型宽度和溢出语义).
             if let (Expr::Int { .. }, Expr::Int { .. }) = (l.as_ref(), r.as_ref()) {
                 let binop_expr = Expr::Binop {
-                    op, l: l.clone(), r: r.clone(), span: span.clone(), ty: ty.clone(),
+                    op,
+                    l: l.clone(),
+                    r: r.clone(),
+                    span: span.clone(),
+                    ty: ty.clone(),
                 };
                 if let Ok(v) = const_eval::eval_full(&binop_expr, fenv_access) {
                     if let Some(iv) = v.as_int() {
@@ -717,14 +722,17 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 }
             }
             Expr::Binop { op, l, r, span, ty }
-        }
+        },
         Expr::Unary { op, e, span, ty } => {
             let e = Box::new(fold_expr(*e, fenv_access));
             // 整数一元运算折叠: 使用 const_eval (类型感知, 正确处理
             // BitNot 的类型宽度掩码).
             if let Expr::Int { .. } = e.as_ref() {
                 let unary_expr = Expr::Unary {
-                    op, e: e.clone(), span: span.clone(), ty: ty.clone(),
+                    op,
+                    e: e.clone(),
+                    span: span.clone(),
+                    ty: ty.clone(),
                 };
                 if let Ok(v) = const_eval::eval_full(&unary_expr, fenv_access) {
                     if let Some(iv) = v.as_int() {
@@ -733,7 +741,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 }
             }
             Expr::Unary { op, e, span, ty }
-        }
+        },
         Expr::Call {
             callee,
             args,
@@ -758,7 +766,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                 span,
                 ty,
             }
-        }
+        },
         other => other,
     };
     if let Ok(v) = const_eval::eval(&e) {
@@ -784,14 +792,14 @@ fn eval_binop(op: BinOp, l: i128, r: i128) -> Option<i128> {
             } else {
                 l / r
             }
-        }
+        },
         BinOp::Mod => {
             if r == 0 {
                 return None;
             } else {
                 l % r
             }
-        }
+        },
         BinOp::And => l & r,
         BinOp::Or => l | r,
         BinOp::Xor => l ^ r,
@@ -810,7 +818,7 @@ fn eval_unary(op: crate::ast::UnOp, v: i128) -> Option<i128> {
             } else {
                 0
             }
-        }
+        },
         crate::ast::UnOp::BitNot => !v,
         _ => return None,
     })
@@ -827,7 +835,7 @@ fn eval_float_binop(op: BinOp, l: f64, r: f64) -> Option<f64> {
             } else {
                 l / r
             }
-        }
+        },
         BinOp::Mod => {
             if r == 0.0 {
                 return None;
@@ -836,7 +844,7 @@ fn eval_float_binop(op: BinOp, l: f64, r: f64) -> Option<f64> {
                 // Rust f64 % f64 matches C fmod()
                 l % r
             }
-        }
+        },
         _ => return None,
     })
 }
@@ -863,8 +871,8 @@ fn prune_block(items: &mut Vec<BlockItem>) {
                 if let Some(body) = &mut f.body {
                     prune_block(&mut body.items);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -876,16 +884,16 @@ fn prune_stmt(s: &mut Stmt) {
             if let Some(e) = else_ {
                 prune_stmt(e);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => prune_stmt(body),
         Stmt::For { init, body, .. } => {
             if let Some(i) = init {
                 prune_stmt(i);
             }
             prune_stmt(body);
-        }
+        },
         Stmt::Block { b, .. } => prune_block(&mut b.items),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -910,10 +918,10 @@ fn stmt_has_label(s: &Stmt) -> bool {
         Stmt::Block { b, .. } => block_has_label(b),
         Stmt::If { then_, else_, .. } => {
             stmt_has_label(then_) || else_.as_ref().map(|e| stmt_has_label(e)).unwrap_or(false)
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
             stmt_has_label(body)
-        }
+        },
         Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_label(&c.body)),
         _ => false,
     }
@@ -987,7 +995,7 @@ fn fold_branches_block(items: &mut Vec<BlockItem>, fenv_access: bool) {
                             items.insert(i, it);
                         }
                         continue;
-                    }
+                    },
                     other => items.insert(i, BlockItem::Stmt(other)),
                 }
             }
@@ -1008,7 +1016,7 @@ fn fold_branches_stmt(s: &mut Stmt, fenv_access: bool) {
             if let Some(e) = else_ {
                 fold_branches_stmt(e, fenv_access);
             }
-        }
+        },
         Stmt::While {
             cond, body, span, ..
         } => {
@@ -1026,7 +1034,7 @@ fn fold_branches_stmt(s: &mut Stmt, fenv_access: bool) {
                 }
             }
             fold_branches_stmt(body, fenv_access);
-        }
+        },
         Stmt::Block { b, .. } => fold_branches_block(&mut b.items, fenv_access),
         Stmt::For {
             init,
@@ -1061,8 +1069,8 @@ fn fold_branches_stmt(s: &mut Stmt, fenv_access: bool) {
                 fold_branches_stmt(i, fenv_access);
             }
             fold_branches_stmt(body, fenv_access);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1134,12 +1142,12 @@ fn dce_stmt(s: &mut Stmt) {
             if let Some(e) = else_ {
                 dce_block_in_stmt(e);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
             dce_block_in_stmt(body);
-        }
+        },
         Stmt::Block { b, .. } => dce_block(&mut b.items),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1177,14 +1185,18 @@ fn function_inline(module: &mut Module, level: u8) {
             let caller_is_hot = f.is_hot;
             if let Some(body) = &mut f.body {
                 inline_calls_in_block(
-                    body, &funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, 0,
+                    body,
+                    &funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    0,
                 );
             }
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Inline cost model
@@ -1231,64 +1243,59 @@ fn expr_node_count(e: &Expr) -> usize {
         Expr::Binop { l, r, .. }
         | Expr::Assign { l, r, .. }
         | Expr::Index { arr: l, idx: r, .. }
-        | Expr::Comma { l, r, .. } => {
-            1 + expr_node_count(l) + expr_node_count(r)
-        }
+        | Expr::Comma { l, r, .. } => 1 + expr_node_count(l) + expr_node_count(r),
         Expr::Cond {
             cond, then_, else_, ..
         } => 1 + expr_node_count(cond) + expr_node_count(then_) + expr_node_count(else_),
         Expr::Call { callee, args, .. } => {
-            1 + expr_node_count(callee)
-                + args.iter().map(expr_node_count).sum::<usize>()
-        }
+            1 + expr_node_count(callee) + args.iter().map(expr_node_count).sum::<usize>()
+        },
         Expr::Member { expr, .. } => 1 + expr_node_count(expr),
         Expr::VaArg { ap, .. } => 1 + expr_node_count(ap),
-        Expr::StmtExpr { block, .. } => {
-            1 + block.items.iter().map(item_node_count).sum::<usize>()
-        }
+        Expr::StmtExpr { block, .. } => 1 + block.items.iter().map(item_node_count).sum::<usize>(),
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             1 + inits.iter().map(init_node_count).sum::<usize>()
-        }
+        },
         Expr::AsmExpr {
-            outputs,
-            inputs,
-            ..
+            outputs, inputs, ..
         } => {
-            1 + outputs.iter().chain(inputs.iter()).map(expr_node_count).sum::<usize>()
-        }
+            1 + outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(expr_node_count)
+                .sum::<usize>()
+        },
     }
 }
 
 fn item_node_count(item: &BlockItem) -> usize {
     match item {
         BlockItem::Stmt(s) => stmt_node_count(s),
-        BlockItem::Decl(Decl::Var(v)) => {
-            1 + v.init.as_ref().map_or(0, expr_node_count)
-        }
+        BlockItem::Decl(Decl::Var(v)) => 1 + v.init.as_ref().map_or(0, expr_node_count),
         BlockItem::Decl(Decl::Func(f)) => {
-            1 + f.body.as_ref().map_or(0, |b| {
-                b.items.iter().map(item_node_count).sum::<usize>()
-            })
-        }
+            1 + f
+                .body
+                .as_ref()
+                .map_or(0, |b| b.items.iter().map(item_node_count).sum::<usize>())
+        },
         _ => 1,
     }
 }
 
 fn stmt_node_count(s: &Stmt) -> usize {
     match s {
-        Stmt::Return { val, .. } => {
-            1 + val.as_ref().map_or(0, expr_node_count)
-        }
+        Stmt::Return { val, .. } => 1 + val.as_ref().map_or(0, expr_node_count),
         Stmt::Expr { e, .. } => 1 + expr_node_count(e),
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            1 + expr_node_count(cond) + stmt_node_count(then_)
+            1 + expr_node_count(cond)
+                + stmt_node_count(then_)
                 + else_.as_ref().map_or(0, |e| stmt_node_count(e))
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             1 + expr_node_count(cond) + stmt_node_count(body)
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -1300,23 +1307,15 @@ fn stmt_node_count(s: &Stmt) -> usize {
                 + cond.as_ref().map_or(0, expr_node_count)
                 + step.as_ref().map_or(0, expr_node_count)
                 + stmt_node_count(body)
-        }
-        Stmt::Block { b, .. } => {
-            1 + b.items.iter().map(item_node_count).sum::<usize>()
-        }
+        },
+        Stmt::Block { b, .. } => 1 + b.items.iter().map(item_node_count).sum::<usize>(),
         Stmt::Switch { expr, cases, .. } => {
             1 + expr_node_count(expr)
                 + cases
                     .iter()
-                    .map(|c| {
-                        c.body
-                            .items
-                            .iter()
-                            .map(item_node_count)
-                            .sum::<usize>()
-                    })
+                    .map(|c| c.body.items.iter().map(item_node_count).sum::<usize>())
                     .sum::<usize>()
-        }
+        },
         _ => 1,
     }
 }
@@ -1357,18 +1356,28 @@ fn inline_calls_in_block(
     for item in &mut body.items {
         match item {
             BlockItem::Stmt(s) => inline_calls_in_stmt(
-                s, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                s,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             ),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
                     inline_calls_in_block(
-                        b, funcs, level, caller_flatten, caller_is_hot,
-                        fenv_access, depth,
+                        b,
+                        funcs,
+                        level,
+                        caller_flatten,
+                        caller_is_hot,
+                        fenv_access,
+                        depth,
                     );
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -1390,46 +1399,77 @@ fn inline_calls_in_stmt(
     match s {
         Stmt::Return { val: Some(e), .. } => {
             *e = inline_expr(
-                e.clone(), funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                e.clone(),
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             );
-        }
+        },
         Stmt::Expr { e, .. } => {
             *e = inline_expr(
-                e.clone(), funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                e.clone(),
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )
-        }
+        },
         Stmt::If {
             cond, then_, else_, ..
         } => {
             *cond = inline_expr(
-                cond.clone(), funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                cond.clone(),
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             );
             inline_calls_in_stmt(
-                then_, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                then_,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             );
             if let Some(e) = else_ {
                 inline_calls_in_stmt(
-                    e, funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, depth,
+                    e,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
                 );
             }
-        }
-        Stmt::Block { b, .. } => {
-            inline_calls_in_block(
-                b, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
-            )
-        }
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            inline_calls_in_stmt(
-                body, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
-            )
-        }
+        },
+        Stmt::Block { b, .. } => inline_calls_in_block(
+            b,
+            funcs,
+            level,
+            caller_flatten,
+            caller_is_hot,
+            fenv_access,
+            depth,
+        ),
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => inline_calls_in_stmt(
+            body,
+            funcs,
+            level,
+            caller_flatten,
+            caller_is_hot,
+            fenv_access,
+            depth,
+        ),
         Stmt::For {
             init,
             cond,
@@ -1439,28 +1479,48 @@ fn inline_calls_in_stmt(
         } => {
             if let Some(c) = cond {
                 *c = inline_expr(
-                    c.clone(), funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, depth,
+                    c.clone(),
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
                 );
             }
             if let Some(st) = step {
                 *st = inline_expr(
-                    st.clone(), funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, depth,
+                    st.clone(),
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
                 );
             }
             if let Some(i) = init {
                 inline_calls_in_stmt(
-                    i, funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, depth,
+                    i,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
                 );
             }
             inline_calls_in_stmt(
-                body, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                body,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             );
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1489,7 +1549,7 @@ fn extract_inline_return(body: &Block) -> Option<&Expr> {
             } else {
                 None
             }
-        }
+        },
         _ => None,
     }
 }
@@ -1505,7 +1565,7 @@ fn type_has_vla_dim(t: &crate::ast::Type) -> bool {
         crate::ast::Type::Ptr(p) => type_has_vla_dim(&p.base),
         crate::ast::Type::Struct(_, fields, _, _) | crate::ast::Type::Union(_, fields, _, _) => {
             fields.iter().any(|f| type_has_vla_dim(&f.ty))
-        }
+        },
         _ => false,
     }
 }
@@ -1518,11 +1578,11 @@ fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
             if let Some(new) = map.get(&name.name) {
                 name.name = new.clone();
             }
-        }
+        },
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } => {
             rename_idents_in_expr(l, map);
             rename_idents_in_expr(r, map);
-        }
+        },
         Expr::Unary { e: x, .. }
         | Expr::Real { e: x, .. }
         | Expr::Imag { e: x, .. }
@@ -1538,29 +1598,29 @@ fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
             for a in args {
                 rename_idents_in_expr(a, map);
             }
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             rename_idents_in_expr(cond, map);
             rename_idents_in_expr(then_, map);
             rename_idents_in_expr(else_, map);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             rename_idents_in_expr(arr, map);
             rename_idents_in_expr(idx, map);
-        }
+        },
         Expr::Member { expr, .. } => rename_idents_in_expr(expr, map),
         Expr::Comma { l, r, .. } => {
             rename_idents_in_expr(l, map);
             rename_idents_in_expr(r, map);
-        }
+        },
         Expr::VaArg { ap, .. } => rename_idents_in_expr(ap, map),
         Expr::Offsetof { indices, .. } => {
             for i in indices {
                 rename_idents_in_expr(i, map);
             }
-        }
+        },
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             for it in inits {
                 match it {
@@ -1570,10 +1630,10 @@ fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
                             rename_idents_in_expr(idx, map);
                         }
                         rename_idents_in_expr(value, map);
-                    }
+                    },
                 }
             }
-        }
+        },
         Expr::AsmExpr {
             outputs, inputs, ..
         } => {
@@ -1583,12 +1643,12 @@ fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
             for i in inputs {
                 rename_idents_in_expr(i, map);
             }
-        }
+        },
         Expr::StmtExpr { block, .. } => {
             rename_idents_in_items(&mut block.items, map);
-        }
+        },
         // 字面量/sizeof/alignof/&&label: 不含可重命名的运行时标识符
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1598,7 +1658,7 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
             if let Some(e) = val {
                 rename_idents_in_expr(e, map);
             }
-        }
+        },
         Stmt::Expr { e, .. } => rename_idents_in_expr(e, map),
         Stmt::If {
             cond, then_, else_, ..
@@ -1608,11 +1668,11 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
             if let Some(el) = else_ {
                 rename_idents_in_stmt(el, map);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             rename_idents_in_expr(cond, map);
             rename_idents_in_stmt(body, map);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -1630,9 +1690,9 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
                 rename_idents_in_expr(st, map);
             }
             rename_idents_in_stmt(body, map);
-        }
+        },
         Stmt::Block { b, .. } => rename_idents_in_items(&mut b.items, map),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1644,13 +1704,13 @@ fn rename_idents_in_items(items: &mut Vec<BlockItem>, map: &HashMap<String, Stri
                 if let Some(init) = &mut v.init {
                     rename_idents_in_expr(init, map);
                 }
-            }
+            },
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
                     rename_idents_in_items(&mut b.items, map);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -1704,22 +1764,17 @@ fn try_stmt_inline_call(
     // 提取调用点 (return f(...) 或表达式语句 f(...))
     let (callee_name, args, in_return) = match s {
         Stmt::Expr { e, .. } => match e {
-            Expr::Call {
-                callee,
-                args,
-                ..
-            } => match callee.as_ref() {
+            Expr::Call { callee, args, .. } => match callee.as_ref() {
                 Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
                 _ => return false,
             },
             _ => return false,
         },
-        Stmt::Return { val: Some(e), span: _rspan } => match e {
-            Expr::Call {
-                callee,
-                args,
-                ..
-            } => match callee.as_ref() {
+        Stmt::Return {
+            val: Some(e),
+            span: _rspan,
+        } => match e {
+            Expr::Call { callee, args, .. } => match callee.as_ref() {
                 Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
                 _ => return false,
             },
@@ -1750,10 +1805,7 @@ fn try_stmt_inline_call(
         None => return false,
     };
     // 单 return 表达式体交给表达式级替换 (避免生成不必要的临时变量)
-    if matches!(
-        body.items.as_slice(),
-        [BlockItem::Stmt(Stmt::Return { .. })]
-    ) {
+    if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return { .. })]) {
         return false;
     }
 
@@ -1778,16 +1830,16 @@ fn try_stmt_inline_call(
                     return false;
                 }
                 decls.push(v.clone());
-            }
+            },
             // 类型定义无运行时副作用, 保留在展开块中
             BlockItem::Decl(Decl::Typedef { .. })
             | BlockItem::Decl(Decl::StructDef(_))
             | BlockItem::Decl(Decl::UnionDef(_))
-            | BlockItem::Decl(Decl::EnumDef(_)) => {}
+            | BlockItem::Decl(Decl::EnumDef(_)) => {},
             BlockItem::Stmt(st @ Stmt::Expr { .. }) => mid.push(st.clone()),
             BlockItem::Stmt(Stmt::Return { val, .. }) if i + 1 == body.items.len() => {
                 ret_val = Some(val.clone());
-            }
+            },
             // 非 return 结尾/中间 return/其他语句形态: 不展开
             _ => return false,
         }
@@ -1798,7 +1850,7 @@ fn try_stmt_inline_call(
         None => {
             trace_inline_decision(&callee_name, "REJECT", "stmt-inline: no trailing return");
             return false;
-        }
+        },
     };
     let rspan = match s {
         Stmt::Return { span, .. } | Stmt::Expr { span, .. } => span.clone(),
@@ -1851,9 +1903,12 @@ fn try_stmt_inline_call(
                     span: rspan.clone(),
                 }
             } else {
-                Stmt::Expr { e, span: rspan.clone() }
+                Stmt::Expr {
+                    e,
+                    span: rspan.clone(),
+                }
             }));
-        }
+        },
         None => {
             if in_return {
                 items.push(BlockItem::Stmt(Stmt::Return {
@@ -1862,7 +1917,7 @@ fn try_stmt_inline_call(
                 }));
             }
             // void 返回且调用点是表达式语句: 无需返回语句
-        }
+        },
     }
     trace_inline_decision(&callee_name, "INLINE", "always_inline (statement expansion)");
     *s = Stmt::Block {
@@ -1874,15 +1929,7 @@ fn try_stmt_inline_call(
     };
     // 展开块内仍可能有嵌套调用 (如 callee 调用另一个 always_inline)
     if let Stmt::Block { b, .. } = s {
-        inline_calls_in_block(
-            b,
-            funcs,
-            0,
-            caller_flatten,
-            false,
-            false,
-            depth + 1,
-        );
+        inline_calls_in_block(b, funcs, 0, caller_flatten, false, false, depth + 1);
     }
     true
 }
@@ -1892,7 +1939,7 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
         Expr::Call { callee, args, .. } => {
             let direct = matches!(callee.as_ref(), Expr::Ident { name: n, .. } if n.name == name);
             direct || args.iter().any(|a| expr_calls_name(a, name))
-        }
+        },
         Expr::Binop { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
         Expr::Unary { e, .. } => expr_calls_name(e, name),
         Expr::Cast { e, .. } => expr_calls_name(e, name),
@@ -1902,7 +1949,7 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
             expr_calls_name(cond, name)
                 || expr_calls_name(then_, name)
                 || expr_calls_name(else_, name)
-        }
+        },
         Expr::Comma { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
         _ => false,
     }
@@ -1916,7 +1963,7 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
             } else {
                 Expr::Ident { name, span, ty }
             }
-        }
+        },
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
             l: Box::new(substitute_params(*l, params)),
@@ -2040,10 +2087,7 @@ fn try_inline_call(
 
     // --- 深度限制: 防止嵌套内联爆炸 ---
     if depth >= INLINE_MAX_DEPTH {
-        trace_inline_decision(
-            name, "REJECT",
-            &format!("depth {} >= {}", depth, INLINE_MAX_DEPTH),
-        );
+        trace_inline_decision(name, "REJECT", &format!("depth {} >= {}", depth, INLINE_MAX_DEPTH));
         return None;
     }
 
@@ -2057,15 +2101,16 @@ fn try_inline_call(
     let heuristic_ok = if profile_relaxed {
         cost <= INLINE_COST_THRESHOLD * 2
     } else {
-        f.is_static && f.params.is_empty() && level >= 3
-            && cost <= INLINE_COST_THRESHOLD
+        f.is_static && f.params.is_empty() && level >= 3 && cost <= INLINE_COST_THRESHOLD
     };
     if !heuristic_ok {
         trace_inline_decision(
-            name, "REJECT",
+            name,
+            "REJECT",
             &format!(
                 "cost {} > {} or not O3-static{}",
-                cost, INLINE_COST_THRESHOLD,
+                cost,
+                INLINE_COST_THRESHOLD,
                 if profile_relaxed { " (profile-relaxed)" } else { "" },
             ),
         );
@@ -2078,7 +2123,8 @@ fn try_inline_call(
         return None; // 直接递归保护
     }
     trace_inline_decision(
-        name, "INLINE",
+        name,
+        "INLINE",
         &format!(
             "O3 heuristic, cost={}{}",
             cost,
@@ -2120,43 +2166,73 @@ fn inline_expr(
         } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if let Some(inlined) = try_inline_call(
-                    &name.name, &args, funcs, level, caller_flatten,
-                    caller_is_hot, depth,
+                    &name.name,
+                    &args,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    depth,
                 ) {
                     // 内联后继续递归内联替换结果中的嵌套调用
                     return inline_expr(
-                        inlined, funcs, level, caller_flatten, caller_is_hot,
-                        fenv_access, depth + 1,
+                        inlined,
+                        funcs,
+                        level,
+                        caller_flatten,
+                        caller_is_hot,
+                        fenv_access,
+                        depth + 1,
                     );
                 }
             }
             Expr::Call {
                 callee: Box::new(inline_expr(
-                    *callee, funcs, level, caller_flatten, caller_is_hot,
-                    fenv_access, depth,
+                    *callee,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
                 )),
                 args: args
                     .into_iter()
                     .map(|a| {
                         inline_expr(
-                            a, funcs, level, caller_flatten, caller_is_hot,
-                            fenv_access, depth,
+                            a,
+                            funcs,
+                            level,
+                            caller_flatten,
+                            caller_is_hot,
+                            fenv_access,
+                            depth,
                         )
                     })
                     .collect(),
                 span,
                 ty,
             }
-        }
+        },
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
             l: Box::new(inline_expr(
-                *l, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *l,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             r: Box::new(inline_expr(
-                *r, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *r,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             span,
             ty,
@@ -2164,8 +2240,13 @@ fn inline_expr(
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
             e: Box::new(inline_expr(
-                *e, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *e,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             span,
             ty,
@@ -2178,16 +2259,31 @@ fn inline_expr(
             ty,
         } => Expr::Cond {
             cond: Box::new(inline_expr(
-                *cond, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *cond,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             then_: Box::new(inline_expr(
-                *then_, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *then_,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             else_: Box::new(inline_expr(
-                *else_, funcs, level, caller_flatten, caller_is_hot,
-                fenv_access, depth,
+                *else_,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
             )),
             span,
             ty,
@@ -2298,7 +2394,7 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_old_style: false,
                 format_kind: None,
                 format_string_idx: None,
@@ -2319,22 +2415,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -2458,7 +2554,7 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_old_style: false,
                 format_kind: None,
                 format_string_idx: None,
@@ -2479,22 +2575,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -2535,7 +2631,7 @@ mod tests {
                 span: span.clone(),
             },
             params: vec![crate::ast::Param {
-                    quals: crate::ast::QualifierFlags::NONE,
+                quals: crate::ast::QualifierFlags::NONE,
                 ty: int.clone(),
                 name: Some(Ident {
                     name: "x".into(),
@@ -2611,7 +2707,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -2661,7 +2757,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,
@@ -2697,7 +2793,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         });
         let prog = Program {
             decls: vec![sq, main_fn],
@@ -2715,7 +2811,7 @@ mod tests {
             BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int { v: 25, .. }),
                 ..
-            }) => {}
+            }) => {},
             other => panic!("expected inlined constant 25, got {other:?}"),
         }
     }
@@ -2784,7 +2880,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,
@@ -2820,7 +2916,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         });
         let prog = Program {
             decls: vec![func],
@@ -2849,8 +2945,13 @@ mod tests {
     /// Helper: parse source, lower, optimize at given level, return Program.
     fn optimize_src(src: &[u8], level: u8) -> Program {
         let (prog, diags) = crate::parser::parse(src, "inline-test.c");
-        assert!(diags.iter().all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
-            "parse errors: {:?}", diags);
+        assert!(
+            diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "parse errors: {:?}",
+            diags
+        );
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, level);
         module.source().clone()
@@ -2881,10 +2982,13 @@ mod tests {
         match s {
             Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => expr_has_call(e),
             Stmt::Block { b, .. } => block_has_call(b),
-            Stmt::If { cond, then_, else_, .. } => {
-                expr_has_call(cond) || stmt_has_call(then_)
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
+                expr_has_call(cond)
+                    || stmt_has_call(then_)
                     || else_.as_ref().is_some_and(|e| stmt_has_call(e))
-            }
+            },
             _ => false,
         }
     }
@@ -2894,9 +2998,9 @@ mod tests {
             Expr::Call { .. } => true,
             Expr::Binop { l, r, .. } => expr_has_call(l) || expr_has_call(r),
             Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_call(e),
-            Expr::Cond { cond, then_, else_, .. } => {
-                expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_)
-            }
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_),
             _ => false,
         }
     }
@@ -2924,8 +3028,10 @@ mod tests {
               int main(void) { return big(0); }\n",
             0,
         );
-        assert!(!main_has_call(&prog),
-            "always_inline must be inlined at O0 regardless of body size");
+        assert!(
+            !main_has_call(&prog),
+            "always_inline must be inlined at O0 regardless of body size"
+        );
     }
 
     #[test]
@@ -2938,8 +3044,7 @@ mod tests {
               int main(void) { return f(3); }\n",
             1,
         );
-        assert!(!main_has_call(&prog),
-            "always_inline should win over noinline");
+        assert!(!main_has_call(&prog), "always_inline should win over noinline");
     }
 
     #[test]
@@ -2950,8 +3055,7 @@ mod tests {
               int main(void) { return f(5); }\n",
             0,
         );
-        assert!(main_has_call(&prog),
-            "regular static inline should not be inlined at O0");
+        assert!(main_has_call(&prog), "regular static inline should not be inlined at O0");
     }
 
     #[test]
@@ -2959,8 +3063,16 @@ mod tests {
         // 5 + 3 => Binop(5, 3) = 3 nodes
         let e = Expr::Binop {
             op: BinOp::Add,
-            l: Box::new(Expr::Int { v: 5, span: Span::point("t", 1, 1), ty: int_ty() }),
-            r: Box::new(Expr::Int { v: 3, span: Span::point("t", 1, 1), ty: int_ty() }),
+            l: Box::new(Expr::Int {
+                v: 5,
+                span: Span::point("t", 1, 1),
+                ty: int_ty(),
+            }),
+            r: Box::new(Expr::Int {
+                v: 3,
+                span: Span::point("t", 1, 1),
+                ty: int_ty(),
+            }),
             span: Span::point("t", 1, 1),
             ty: int_ty(),
         };
@@ -2970,7 +3082,10 @@ mod tests {
     #[test]
     fn expr_node_count_ident() {
         let e = Expr::Ident {
-            name: Ident { name: "x".into(), span: Span::point("t", 1, 1) },
+            name: Ident {
+                name: "x".into(),
+                span: Span::point("t", 1, 1),
+            },
             span: Span::point("t", 1, 1),
             ty: int_ty(),
         };
@@ -2980,10 +3095,8 @@ mod tests {
     #[test]
     fn estimate_inline_cost_small_func() {
         // A simple return x+1 function should have low cost
-        let (prog, _) = crate::parser::parse(
-            b"static int f(int x) { return x + 1; }\n",
-            "cost-test.c",
-        );
+        let (prog, _) =
+            crate::parser::parse(b"static int f(int x) { return x + 1; }\n", "cost-test.c");
         if let Decl::Func(f) = &prog.decls[0] {
             let body = f.body.as_ref().unwrap();
             let args = vec![Expr::Int {
@@ -2992,8 +3105,12 @@ mod tests {
                 ty: int_ty(),
             }];
             let cost = estimate_inline_cost(f, body, &args);
-            assert!(cost <= INLINE_COST_THRESHOLD,
-                "small function cost {} should be <= {}", cost, INLINE_COST_THRESHOLD);
+            assert!(
+                cost <= INLINE_COST_THRESHOLD,
+                "small function cost {} should be <= {}",
+                cost,
+                INLINE_COST_THRESHOLD
+            );
         } else {
             panic!("expected FuncDecl");
         }
@@ -3007,18 +3124,27 @@ mod tests {
         // callee: non-static, 2 params, body cost = 3 (return x+y)
         let callee = FuncDecl {
             ret_ty: int_ty(),
-            name: Ident { name: "add".into(), span: sp.clone() },
+            name: Ident {
+                name: "add".into(),
+                span: sp.clone(),
+            },
             params: vec![
                 crate::ast::Param {
                     quals: crate::ast::QualifierFlags::NONE,
-                    name: Some(Ident { name: "x".into(), span: sp.clone() }),
+                    name: Some(Ident {
+                        name: "x".into(),
+                        span: sp.clone(),
+                    }),
                     ty: int_ty(),
                     span: sp.clone(),
                     vla_dim: None,
                 },
                 crate::ast::Param {
                     quals: crate::ast::QualifierFlags::NONE,
-                    name: Some(Ident { name: "y".into(), span: sp.clone() }),
+                    name: Some(Ident {
+                        name: "y".into(),
+                        span: sp.clone(),
+                    }),
                     ty: int_ty(),
                     span: sp.clone(),
                     vla_dim: None,
@@ -3029,12 +3155,18 @@ mod tests {
                     val: Some(Expr::Binop {
                         op: BinOp::Add,
                         l: Box::new(Expr::Ident {
-                            name: Ident { name: "x".into(), span: sp.clone() },
+                            name: Ident {
+                                name: "x".into(),
+                                span: sp.clone(),
+                            },
                             span: sp.clone(),
                             ty: int_ty(),
                         }),
                         r: Box::new(Expr::Ident {
-                            name: Ident { name: "y".into(), span: sp.clone() },
+                            name: Ident {
+                                name: "y".into(),
+                                span: sp.clone(),
+                            },
                             span: sp.clone(),
                             ty: int_ty(),
                         }),
@@ -3063,7 +3195,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,
@@ -3099,29 +3231,33 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         };
 
         let mut funcs = HashMap::new();
         funcs.insert("add".into(), callee.clone());
         let args = vec![
-            Expr::Int { v: 1, span: sp.clone(), ty: int_ty() },
-            Expr::Int { v: 2, span: sp.clone(), ty: int_ty() },
+            Expr::Int {
+                v: 1,
+                span: sp.clone(),
+                ty: int_ty(),
+            },
+            Expr::Int {
+                v: 2,
+                span: sp.clone(),
+                ty: int_ty(),
+            },
         ];
 
         // O2 + caller_is_hot=false: non-static with params should REJECT
-        let result_cold = try_inline_call(
-            "add", &args, &funcs, 2, false, false, 0,
-        );
+        let result_cold = try_inline_call("add", &args, &funcs, 2, false, false, 0);
         assert!(
             result_cold.is_none(),
             "O2 cold caller should reject non-static callee with params"
         );
 
         // O2 + caller_is_hot=true: profile-relaxed should ACCEPT
-        let result_hot = try_inline_call(
-            "add", &args, &funcs, 2, false, true, 0,
-        );
+        let result_hot = try_inline_call("add", &args, &funcs, 2, false, true, 0);
         assert!(
             result_hot.is_some(),
             "O2 hot caller should inline non-static callee (profile-relaxed)"

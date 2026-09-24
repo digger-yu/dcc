@@ -88,9 +88,10 @@ impl StaticLocalMap {
     pub fn mark_runtime_init(&mut self, func_name: &str, source_name: &str) {
         // 更新 StaticLocalInfo
         if let Some(info) = self.by_mangled.get_mut(
-            &self.resolve(func_name, source_name)
+            &self
+                .resolve(func_name, source_name)
                 .unwrap_or("")
-                .to_string()
+                .to_string(),
         ) {
             info.needs_runtime_init = true;
         }
@@ -175,20 +176,15 @@ fn collect_from_block(
                     .entry(func_name.to_string())
                     .or_default()
                     .push((v.name.name.clone(), mangled));
-            }
-            BlockItem::Decl(_) => {}
+            },
+            BlockItem::Decl(_) => {},
             BlockItem::Stmt(s) => collect_from_stmt(map, func_name, s, counter),
         }
     }
 }
 
 /// 递归扫描语句, 收集 static local.
-fn collect_from_stmt(
-    map: &mut StaticLocalMap,
-    func_name: &str,
-    s: &Stmt,
-    counter: &mut u32,
-) {
+fn collect_from_stmt(map: &mut StaticLocalMap, func_name: &str, s: &Stmt, counter: &mut u32) {
     match s {
         Stmt::Block { b, .. } => collect_from_block(map, func_name, &b.items, counter),
         Stmt::If { then_, else_, .. } => {
@@ -196,22 +192,22 @@ fn collect_from_stmt(
             if let Some(e) = else_ {
                 collect_from_stmt(map, func_name, e, counter);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
             collect_from_stmt(map, func_name, body, counter);
-        }
+        },
         Stmt::For { init, body, .. } => {
             if let Some(init_stmt) = init {
                 collect_from_stmt(map, func_name, init_stmt, counter);
             }
             collect_from_stmt(map, func_name, body, counter);
-        }
+        },
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 collect_from_block(map, func_name, &case.body.items, counter);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => collect_from_stmt(map, func_name, stmt, counter),
-        _ => {}
+        _ => {},
     }
 }

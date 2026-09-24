@@ -44,8 +44,7 @@ fn arm_pop_encoding() {
 
 #[test]
 fn arm_gen_simple_return() {
-    let target =
-        Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap());
+    let target = Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap());
     let mut cg = ArmCodegen::new(target, true);
     let func = Function {
         name: "f".to_string(),
@@ -68,9 +67,7 @@ fn arm_gen_simple_return() {
 #[test]
 fn arm_va_arg_int_reads_sequentially_from_save_area() {
     let mut cg = ArmCodegen::new(
-        Target::resolve(
-            &crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap(),
-        ),
+        Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap()),
         true,
     );
     cg.is_current_func_variadic = true;
@@ -92,10 +89,7 @@ fn arm_va_arg_int_reads_sequentially_from_save_area() {
             (inst & 0xFFFFF000) == 0xE59B0000
         })
         .count();
-    assert_eq!(
-        ldr_count, 3,
-        "expected 3 ldr r0, [fp, #off] instructions, got {ldr_count}"
-    );
+    assert_eq!(ldr_count, 3, "expected 3 ldr r0, [fp, #off] instructions, got {ldr_count}");
     // 验证 va_gp_offs 推进
     assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
 }

@@ -2,8 +2,8 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Stmt};
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, stmt_has_call};
-use crate::ir::{Function};
+use crate::codegen::riscv64::codegen::{stmt_has_call, Riscv64Codegen};
+use crate::ir::Function;
 
 impl Riscv64Codegen {
     pub(crate) fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
@@ -15,7 +15,7 @@ impl Riscv64Codegen {
                     match item {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                             self.gen_naked_asm_expr(e);
-                        }
+                        },
                         BlockItem::Stmt(Stmt::AsmGoto {
                             asm_str,
                             outputs,
@@ -32,18 +32,11 @@ impl Riscv64Codegen {
                             let mut resolved = asm_str.clone();
                             let label_base = outputs.len();
                             for (i, label) in goto_labels.iter().enumerate().rev() {
-                                resolved = resolved.replace(
-                                    &format!("%l{}", i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l{}", label_base + i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l[{}]", label.name),
-                                    &label.name,
-                                );
+                                resolved = resolved.replace(&format!("%l{}", i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l{}", label_base + i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l[{}]", label.name), &label.name);
                             }
                             for line in resolved.split('\n') {
                                 let line = line.trim();
@@ -51,8 +44,8 @@ impl Riscv64Codegen {
                                     self.emit_asm_line_naked(line, span);
                                 }
                             }
-                        }
-                        _ => {} // naked 函数忽略非 asm 语句
+                        },
+                        _ => {}, // naked 函数忽略非 asm 语句
                     }
                 }
             }
@@ -94,7 +87,8 @@ impl Riscv64Codegen {
                 ftrace_pos = Some(1); // Will be overwritten
             }
         }
-        let is_leaf = ftrace_pos.is_none() && !func.body.iter().any(stmt_has_call)
+        let is_leaf = ftrace_pos.is_none()
+            && !func.body.iter().any(stmt_has_call)
             && !(self._target.stack_protector && self.canary_slot_off > 0);
         self.ret_addr_off = if is_leaf {
             -1
@@ -128,12 +122,12 @@ impl Riscv64Codegen {
                 let pos = self.pos();
                 self.emit_jal_to("__fentry__");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::MCount => {
                 let pos = self.pos();
                 self.emit_jal_to("mcount");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::None => None,
         };
         // -mrecord-mcount: record call site for __mcount_loc section
@@ -193,7 +187,7 @@ impl Riscv64Codegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
             Expr::StmtExpr { block, .. } => {
                 for item in &block.items {
@@ -201,17 +195,13 @@ impl Riscv64Codegen {
                         self.gen_naked_asm_expr(inner);
                     }
                 }
-            }
-            _ => {} // 忽略非 asm 表达式
+            },
+            _ => {}, // 忽略非 asm 表达式
         }
     }
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
-    pub(crate) fn emit_asm_line_naked(
-        &mut self,
-        line: &str,
-        span: &crate::diagnostics::Span,
-    ) {
+    pub(crate) fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
         if self.asm_text_mode {
             self.raw_func_asm_lines
                 .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
@@ -242,5 +232,4 @@ impl Riscv64Codegen {
             }
         }
     }
-
 }

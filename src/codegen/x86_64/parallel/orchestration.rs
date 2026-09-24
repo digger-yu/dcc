@@ -15,7 +15,6 @@ use crate::codegen::shared::elf;
 
 use crate::codegen::x86_64::{
     Codegen, FuncEmitChunk, GlobalVar, ParallelEmitCtx, ParallelGlobalSnap,
-
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,7 +105,11 @@ impl Codegen {
         cg
     }
 
-    pub(in crate::codegen::x86_64) fn emit_func_chunk(ctx: ParallelEmitCtx, f: FuncDecl, prog: &Program) -> FuncEmitChunk {
+    pub(in crate::codegen::x86_64) fn emit_func_chunk(
+        ctx: ParallelEmitCtx,
+        f: FuncDecl,
+        prog: &Program,
+    ) -> FuncEmitChunk {
         let rodata_base = ctx.rodata.len() as u64;
         let mut cg = Self::codegen_from_parallel(ctx);
         cg.compile_func(&f, prog);
@@ -143,7 +146,11 @@ impl Codegen {
         }
     }
 
-    pub(in crate::codegen::x86_64) fn merge_func_chunk(&mut self, chunk: FuncEmitChunk, func_align: usize) {
+    pub(in crate::codegen::x86_64) fn merge_func_chunk(
+        &mut self,
+        chunk: FuncEmitChunk,
+        func_align: usize,
+    ) {
         while !self.code.len().is_multiple_of(func_align) {
             self.code.push(0x90);
         }
@@ -247,7 +254,11 @@ impl Codegen {
     }
 
     /// 函数级并行 emit：`-O2+` 多函数 TU 在 worker 线程中分块生成后按序合并。
-    pub(in crate::codegen::x86_64) fn emit_functions_parallel(&mut self, top_funcs: &[FuncDecl], prog: &Program) {
+    pub(in crate::codegen::x86_64) fn emit_functions_parallel(
+        &mut self,
+        top_funcs: &[FuncDecl],
+        prog: &Program,
+    ) {
         let ctx = Arc::new(self.parallel_emit_ctx());
         let n = top_funcs.len();
         let degree = Self::parallel_worker_count(n);

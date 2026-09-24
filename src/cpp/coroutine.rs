@@ -59,16 +59,16 @@ fn stmt_has_coro(s: &CppStmt) -> bool {
         CppStmt::CoAwait(_) | CppStmt::CoYield(_) | CppStmt::CoReturn(_) => true,
         CppStmt::If { then, els, .. } => {
             body_has_coro(then) || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
-        }
+        },
         CppStmt::IfConstexpr { then, els, .. } => {
             body_has_coro(then) || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
-        }
+        },
         CppStmt::While { body, .. } => body_has_coro(body),
         CppStmt::For { body, .. } => body_has_coro(body),
         CppStmt::Block(b) => body_has_coro(b),
         CppStmt::Try { body, catches } => {
             body_has_coro(body) || catches.iter().any(|c| body_has_coro(&c.body))
-        }
+        },
         CppStmt::ThisMember(_, inner) => stmt_has_coro(inner),
         _ => false,
     }
@@ -116,21 +116,9 @@ pub fn coro_suspend(fn_name: &str, ret_c: &str, n: i64, expr: &str) -> String {
     let st = coro_state_var(fn_name);
     let val = coro_value_var(fn_name);
     let body = if ret_c == "void" {
-        format!(
-            "    {} = {};\n    (void)({});\n    return;\n",
-            st,
-            n + 1,
-            expr
-        )
+        format!("    {} = {};\n    (void)({});\n    return;\n", st, n + 1, expr)
     } else {
-        format!(
-            "    {} = {};\n    {} = ({});\n    return {};\n",
-            st,
-            n + 1,
-            val,
-            expr,
-            val
-        )
+        format!("    {} = {};\n    {} = ({});\n    return {};\n", st, n + 1, val, expr, val)
     };
     format!("{}\n    case {}:\n", body, n + 1)
 }
@@ -168,7 +156,10 @@ mod tests {
     use crate::cpp::parser::{CppBody, CppExpr, CppStmt};
 
     fn body(stmts: Vec<CppStmt>) -> CppBody {
-        CppBody { stmts, is_decl: false }
+        CppBody {
+            stmts,
+            is_decl: false,
+        }
     }
 
     #[test]

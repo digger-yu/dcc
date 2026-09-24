@@ -127,27 +127,27 @@ pub fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::
                 is_target = was_target;
                 is_source = was_source;
                 continue;
-            }
+            },
             b' ' | b'\t' => {
                 p = &p[1..];
                 continue;
-            }
+            },
             b'\\' if p.starts_with("\\\n") => {
                 p = &p[2..];
                 continue;
-            }
+            },
             b'\n' => {
                 p = &p[1..];
                 is_target = true;
                 continue;
-            }
+            },
             b':' => {
                 p = &p[1..];
                 is_target = false;
                 is_source = true;
                 continue;
-            }
-            _ => {}
+            },
+            _ => {},
         }
 
         let mut q = 0;
@@ -241,10 +241,7 @@ mod tests {
 
     #[test]
     fn unescape_no_escapes() {
-        assert_eq!(
-            unescape_dep_path("/usr/include/stdio.h"),
-            "/usr/include/stdio.h"
-        );
+        assert_eq!(unescape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
     }
 
     #[test]

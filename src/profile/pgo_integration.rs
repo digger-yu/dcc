@@ -402,7 +402,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,
@@ -438,7 +438,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         }));
         let names = collect_func_names(&prog);
         assert_eq!(names, vec!["foo"]);

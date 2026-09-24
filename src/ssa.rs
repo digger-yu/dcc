@@ -169,7 +169,12 @@ pub enum Terminator {
     Branch { cond: Operand, t: String, f: String },
     /// 跳转表: switch(idx) { case values[0] -> targets[0], ..., default -> default }
     /// 用于密集 case 值的 switch 语句优化
-    SwitchTable { idx: Operand, values: Vec<i128>, targets: Vec<String>, default: String },
+    SwitchTable {
+        idx: Operand,
+        values: Vec<i128>,
+        targets: Vec<String>,
+        default: String,
+    },
     /// 不可达
     Unreachable,
 }
@@ -213,13 +218,19 @@ impl std::fmt::Debug for OrderedNameSet {
 
 impl Clone for OrderedNameSet {
     fn clone(&self) -> Self {
-        Self { names: self.names.clone(), seen: self.seen.clone() }
+        Self {
+            names: self.names.clone(),
+            seen: self.seen.clone(),
+        }
     }
 }
 
 impl Default for OrderedNameSet {
     fn default() -> Self {
-        Self { names: Vec::new(), seen: HashSet::new() }
+        Self {
+            names: Vec::new(),
+            seen: HashSet::new(),
+        }
     }
 }
 
@@ -356,13 +367,15 @@ fn term_succs<'a>(term: &'a Terminator) -> Vec<&'a str> {
     match term {
         Terminator::Jump(t) => vec![t.as_str()],
         Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-        Terminator::SwitchTable { targets, default, .. } => {
+        Terminator::SwitchTable {
+            targets, default, ..
+        } => {
             let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
             if !s.contains(&default.as_str()) {
                 s.push(default.as_str());
             }
             s
-        }
+        },
         _ => vec![],
     }
 }
@@ -373,7 +386,10 @@ fn collect_all_preds(func: &Function) -> HashMap<String, Vec<String>> {
     let mut preds: HashMap<String, Vec<String>> = HashMap::new();
     for (from_name, bb) in &func.blocks {
         for t in term_succs(&bb.term) {
-            preds.entry(t.to_string()).or_default().push(from_name.clone());
+            preds
+                .entry(t.to_string())
+                .or_default()
+                .push(from_name.clone());
         }
     }
     preds
@@ -481,7 +497,7 @@ fn is_structured_stmt(s: &Stmt) -> bool {
         | Stmt::Switch { .. } => false,
         Stmt::If { then_, else_, .. } => {
             is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => is_structured_stmt(body),
         Stmt::For { body, .. } => is_structured_stmt(body),
         Stmt::Block { b, .. } => is_structured(b),
@@ -621,7 +637,7 @@ impl Builder {
                     return Operand::Var(t);
                 }
                 Operand::Int(*v)
-            }
+            },
             Expr::Float { v, ty, .. } => {
                 if let Some(t) = target {
                     self.emit(Inst {
@@ -637,14 +653,10 @@ impl Builder {
                     return Operand::Var(t);
                 }
                 Operand::Float(*v, ty.clone())
-            }
+            },
             Expr::String { data, .. } => Operand::Str(data.clone()),
             Expr::Char { v, .. } => Operand::Int(*v),
-            Expr::Ident {
-                name,
-                span,
-                ty,
-            } => {
+            Expr::Ident { name, span, ty } => {
                 if let Some(v) = self.lookup(&name.name) {
                     // volatile 局部变量: 必须从内存加载, 不能复用 SSA 值
                     let is_volatile = self
@@ -658,12 +670,18 @@ impl Builder {
                         // 复合类型 (数组/结构体/联合体) 直接返回 SSA 变量:
                         // 它们的子访问 (IndexLoad/MemberLoad) 已带 is_volatile 标志
                         match ty {
-                            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                            Type::Array(_, _)
+                            | Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _) => {
                                 return Operand::Var(v);
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
-                        let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+                        let addr = self.fresh(
+                            "vaddr",
+                            Type::Ptr(Box::new(QualType::new(ty.clone()))),
+                            span,
+                        );
                         self.emit(Inst {
                             dest: Some(addr.clone()),
                             kind: InstKind::AddrOf {
@@ -693,7 +711,7 @@ impl Builder {
                 }
                 // 未定义变量: 视为全局 (codegen fallback)
                 Operand::SymAddr(name.name.clone(), Type::Ptr(Box::new(QualType::new(Type::Void))))
-            }
+            },
             Expr::Binop { op, l, r, span, ty } => {
                 let lo = self.lower_expr(l);
                 let ro = self.lower_expr(r);
@@ -709,7 +727,7 @@ impl Builder {
                 });
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::Unary {
                 op,
                 e: inner,
@@ -725,7 +743,7 @@ impl Builder {
                 });
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::Assign {
                 op: _,
                 l,
@@ -750,10 +768,17 @@ impl Builder {
                         // 标量类型 volatile 局部变量: 强制走 Store 路径, 不直接 SSA define
                         // 复合类型 (数组/结构体/联合体) 走正常 SSA 路径:
                         // 它们的子访问 (IndexStore/MemberStore) 已带 is_volatile 标志
-                        let is_scalar = !matches!(var_ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
+                        let is_scalar = !matches!(
+                            var_ty,
+                            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+                        );
                         if is_scalar {
                             let ro = self.lower_expr(r);
-                            let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(var_ty.clone()))), span);
+                            let addr = self.fresh(
+                                "vaddr",
+                                Type::Ptr(Box::new(QualType::new(var_ty.clone()))),
+                                span,
+                            );
                             self.emit(Inst {
                                 dest: Some(addr.clone()),
                                 kind: InstKind::AddrOf {
@@ -797,7 +822,7 @@ impl Builder {
                     return Operand::Var(dest_var);
                 }
                 ro
-            }
+            },
             Expr::Cast { ty, e: inner, span } => {
                 let o = self.lower_expr(inner);
                 let dest = target.unwrap_or_else(|| self.fresh("cast", ty.clone(), span));
@@ -811,7 +836,7 @@ impl Builder {
                 });
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::Cond {
                 cond,
                 then_,
@@ -833,14 +858,14 @@ impl Builder {
                     span: span.clone(),
                 });
                 Operand::Var(dest)
-            }
+            },
             Expr::Comma { l: _, r, span, ty } => {
                 // 丢弃 lhs (在 SSA 化中已通过指令序列完成)
                 let _ = span;
                 let o = self.lower_expr(r);
                 let _ = ty;
                 o
-            }
+            },
             Expr::Call {
                 callee,
                 args,
@@ -871,21 +896,26 @@ impl Builder {
                     Some(v) => Operand::Var(v),
                     None => Operand::Void,
                 }
-            }
+            },
             Expr::Index { arr, idx, span, ty } => {
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
                 let dest = target.unwrap_or_else(|| self.fresh("idx", ty.clone(), span));
                 // 数组元素访问的 volatile: 取 arr 类型 (Array(Ptr(QT))) 中 QT 的 volatile.
-                let is_volatile = matches!(&arr.ty(), Type::Array(elem_qt, _) if elem_qt.is_volatile());
+                let is_volatile =
+                    matches!(&arr.ty(), Type::Array(elem_qt, _) if elem_qt.is_volatile());
                 self.emit(Inst {
                     dest: Some(dest.clone()),
-                    kind: InstKind::IndexLoad { arr: a, idx: i, is_volatile },
+                    kind: InstKind::IndexLoad {
+                        arr: a,
+                        idx: i,
+                        is_volatile,
+                    },
                     span: span.clone(),
                 });
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::Member {
                 expr,
                 field,
@@ -899,13 +929,12 @@ impl Builder {
                 // 结构体字段访问: 若对象本身带 volatile, 则访问沿用.
                 let obj_is_volatile = match (&obj_ty, expr.as_ref()) {
                     (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
-                    (_, Expr::Ident { name, .. }) if !*is_arrow => {
-                        self.func
-                            .local_quals
-                            .get(name.name.as_str())
-                            .map(|q| q.is_volatile())
-                            .unwrap_or(false)
-                    }
+                    (_, Expr::Ident { name, .. }) if !*is_arrow => self
+                        .func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false),
                     _ => false,
                 };
                 if *is_arrow {
@@ -914,7 +943,8 @@ impl Builder {
                         Type::Ptr(inner) => inner.base.clone(),
                         other => other.clone(),
                     };
-                    let inner = self.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+                    let inner =
+                        self.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
                     self.emit(Inst {
                         dest: Some(inner.clone()),
                         kind: InstKind::Load {
@@ -952,7 +982,7 @@ impl Builder {
                 }
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::Deref { e, span, ty } => {
                 let o = self.lower_expr(e);
                 let dest = target.unwrap_or_else(|| self.fresh("deref", ty.clone(), span));
@@ -972,7 +1002,7 @@ impl Builder {
                 });
                 self.define(dest.clone());
                 Operand::Var(dest)
-            }
+            },
             Expr::AddrOf { e, span, ty: _ } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     let dest = target.unwrap_or_else(|| {
@@ -989,11 +1019,27 @@ impl Builder {
                     return Operand::Var(dest);
                 }
                 Operand::Void
+            },
+            Expr::PostInc {
+                e: operand,
+                span,
+                ty: _,
             }
-            Expr::PostInc { e: operand, span, ty: _ }
-            | Expr::PreInc { e: operand, span, ty: _ }
-            | Expr::PostDec { e: operand, span, ty: _ }
-            | Expr::PreDec { e: operand, span, ty: _ } => {
+            | Expr::PreInc {
+                e: operand,
+                span,
+                ty: _,
+            }
+            | Expr::PostDec {
+                e: operand,
+                span,
+                ty: _,
+            }
+            | Expr::PreDec {
+                e: operand,
+                span,
+                ty: _,
+            } => {
                 // 注意: 这里必须对外层表达式 `e` 取 inc/dec 属性。原实现写成了
                 // `matches!(&**e, ...)` 而 `e` 已被模式绑定为操作数 (通常是
                 // Expr::Ident), 于是 is_inc 恒为 false —— `x++` 实际被降级成
@@ -1012,7 +1058,11 @@ impl Builder {
                         .unwrap_or(false);
                     // volatile 局部变量: 从内存 Load 当前值, 不走 SSA 版本
                     let (cur_op, addr_op) = if is_volatile {
-                        let addr = self.fresh("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+                        let addr = self.fresh(
+                            "vaddr",
+                            Type::Ptr(Box::new(QualType::new(ty.clone()))),
+                            span,
+                        );
                         self.emit(Inst {
                             dest: Some(addr.clone()),
                             kind: InstKind::AddrOf {
@@ -1128,7 +1178,7 @@ impl Builder {
                     return Operand::Var(v);
                 }
                 Operand::Int(one)
-            }
+            },
             Expr::SizeofTy { ty, .. } => Operand::Int(ty.size() as i128),
             Expr::SizeofExpr { e, .. } => match e.as_ref() {
                 // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
@@ -1139,7 +1189,7 @@ impl Builder {
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
             Expr::Offsetof { ty, member, .. } => {
                 Operand::Int(crate::const_eval::eval_offsetof(ty, member) as i128)
-            }
+            },
             Expr::AsmExpr {
                 asm_str,
                 outputs,
@@ -1199,7 +1249,7 @@ impl Builder {
                 } else {
                     Operand::Void
                 }
-            }
+            },
             _ => Operand::Void, // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
         }
     }
@@ -1208,14 +1258,14 @@ impl Builder {
         match s {
             Stmt::Expr { e, .. } => {
                 let _ = self.lower_expr(e);
-            }
+            },
             Stmt::Return { val, span: _ } => {
                 let v = val.as_ref().map(|e| self.lower_expr(e));
                 self.set_term(Terminator::Ret { val: v });
                 // 返回后所有后续代码在 unreachable BB
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 let _ = dead;
-            }
+            },
             Stmt::If {
                 cond,
                 then_,
@@ -1265,7 +1315,7 @@ impl Builder {
                     mbb.preds.dedup();
                 }
                 self.cur = merge_bb;
-            }
+            },
             Stmt::While {
                 cond,
                 body,
@@ -1314,7 +1364,7 @@ impl Builder {
                     cb.preds.dedup();
                 }
                 self.cur = end_bb;
-            }
+            },
             Stmt::Do {
                 body,
                 cond,
@@ -1362,7 +1412,7 @@ impl Builder {
                     eb.preds.push(self.cur.clone());
                 }
                 self.cur = end_bb;
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -1453,10 +1503,10 @@ impl Builder {
                     }
                 }
                 self.cur = end_bb;
-            }
+            },
             Stmt::Block { b, .. } => {
                 self.lower_block(b);
-            }
+            },
             Stmt::Break { .. } => {
                 if let Some(t) = self.break_stack.last().cloned() {
                     self.set_term(Terminator::Jump(t.clone()));
@@ -1466,7 +1516,7 @@ impl Builder {
                     let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                     self.cur = dead;
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 if let Some(t) = self.continue_stack.last().cloned() {
                     self.set_term(Terminator::Jump(t.clone()));
@@ -1476,16 +1526,19 @@ impl Builder {
                     let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                     self.cur = dead;
                 }
-            }
+            },
             // P0-4 Phase 2: goto/label 支持
             Stmt::Label { name, stmt, .. } => {
                 let label_name = name.name.clone();
                 // 创建 label BB (如果尚未创建)
-                let label_bb = self.label_bbs.entry(label_name.clone())
+                let label_bb = self
+                    .label_bbs
+                    .entry(label_name.clone())
                     .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
                     .clone();
                 // 保存当前变量版本快照 (用于 phi 插入)
-                self.label_var_snapshots.insert(label_name, self.current.clone());
+                self.label_var_snapshots
+                    .insert(label_name, self.current.clone());
                 // 从当前 BB 跳转到 label BB
                 if let Some(b) = self.func.blocks.get_mut(&self.cur) {
                     if matches!(b.term, Terminator::Unreachable) {
@@ -1500,11 +1553,13 @@ impl Builder {
                 self.cur = label_bb;
                 // 继续处理 label 后面的语句
                 self.lower_stmt(stmt);
-            }
+            },
             Stmt::Goto { target, .. } => {
                 let label_name = target.name.clone();
                 // 确保目标 label BB 存在
-                let target_bb = self.label_bbs.entry(label_name.clone())
+                let target_bb = self
+                    .label_bbs
+                    .entry(label_name.clone())
                     .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
                     .clone();
                 // 记录待解析的 goto
@@ -1521,7 +1576,7 @@ impl Builder {
                 // goto 后的代码在 unreachable BB
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
-            }
+            },
             Stmt::GotoIndirect { expr, .. } => {
                 // computed goto: 保守处理，跳转到所有已知 label BB
                 let _ = self.lower_expr(expr);
@@ -1538,12 +1593,12 @@ impl Builder {
                 self.set_term(Terminator::Unreachable);
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
-            }
+            },
             Stmt::Switch { expr, cases, span } => {
                 // 密集 case 值走 SwitchTable 终结符
                 self.lower_switch(expr, cases, span);
-            }
-            _ => {} // 其他: 已通过 is_structured 过滤
+            },
+            _ => {}, // 其他: 已通过 is_structured 过滤
         }
     }
 
@@ -1692,8 +1747,8 @@ impl Builder {
                         };
                         self.define(v_0);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -1734,7 +1789,7 @@ fn lower_lvalue(
                     },
                     span: span.clone(),
                 });
-            }
+            },
             _ => {
                 // Source is a constant - emit as immediate assignment
                 b.emit(Inst {
@@ -1746,7 +1801,7 @@ fn lower_lvalue(
                     },
                     span: span.clone(),
                 });
-            }
+            },
         }
         b.define(v.clone());
         return Some(v);
@@ -1800,13 +1855,12 @@ fn lower_lvalue(
         let obj = b.lower_expr(expr);
         let member_volatile = match (&obj_ty, expr.as_ref()) {
             (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
-            (_, Expr::Ident { name, .. }) if !*is_arrow => {
-                b.func
-                    .local_quals
-                    .get(name.name.as_str())
-                    .map(|q| q.is_volatile())
-                    .unwrap_or(false)
-            }
+            (_, Expr::Ident { name, .. }) if !*is_arrow => b
+                .func
+                .local_quals
+                .get(name.name.as_str())
+                .map(|q| q.is_volatile())
+                .unwrap_or(false),
             _ => false,
         };
         if *is_arrow {
@@ -1872,9 +1926,9 @@ fn collect_local_decls(
                     types.insert(v.name.name.clone(), v.ty.clone());
                     quals.insert(v.name.name.clone(), v.quals);
                 }
-            }
+            },
             BlockItem::Stmt(s) => collect_local_decls_stmt(s, out, types, quals),
-            _ => {}
+            _ => {},
         }
     }
 }
@@ -1892,19 +1946,19 @@ fn collect_local_decls_stmt(
             if let Some(e) = else_ {
                 collect_local_decls_stmt(e, out, types, quals);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
             collect_local_decls_stmt(body, out, types, quals);
-        }
+        },
         Stmt::Switch { cases, .. } => {
             for c in cases {
                 collect_local_decls(&c.body.items, out, types, quals);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => {
             collect_local_decls_stmt(stmt, out, types, quals);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1924,8 +1978,8 @@ pub fn insert_loop_phis(func: &mut Function) {
     // A back edge is an edge A→B where B dominates A.
     let doms = compute_dominators(func);
     let mut back_edges: Vec<(String, String)> = Vec::new(); // (latch, header)
-    // 必须用 `ordered_block_names` 而非 `&func.blocks`: back_edges 的处理顺序
-    // 决定同一 header 上 phi 的排列序, 而 phi 序会经 rebuild 影响产物字节。
+                                                            // 必须用 `ordered_block_names` 而非 `&func.blocks`: back_edges 的处理顺序
+                                                            // 决定同一 header 上 phi 的排列序, 而 phi 序会经 rebuild 影响产物字节。
     for bb_name in ordered_block_names(func) {
         let Some(bb) = func.blocks.get(&bb_name) else {
             continue;
@@ -1933,11 +1987,15 @@ pub fn insert_loop_phis(func: &mut Function) {
         let successors = match &bb.term {
             Terminator::Jump(t) => vec![t.clone()],
             Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
-            Terminator::SwitchTable { targets, default, .. } => {
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
                 let mut s = targets.clone();
-                if !s.contains(default) { s.push(default.clone()); }
+                if !s.contains(default) {
+                    s.push(default.clone());
+                }
                 s
-            }
+            },
             _ => vec![],
         };
         let from_doms = match doms.get(&bb_name) {
@@ -2093,17 +2151,20 @@ fn insert_label_phis(
             };
             for base in &needs_phi {
                 // 找到最高版本号 + 1 作为 phi 目标版本
-                let max_version = pred_vars.iter()
+                let max_version = pred_vars
+                    .iter()
                     .filter_map(|(_, vars)| vars.get(base))
                     .map(|v| v.version)
                     .max()
                     .unwrap_or(0);
-                let ty = pred_vars.iter()
+                let ty = pred_vars
+                    .iter()
                     .filter_map(|(_, vars)| vars.get(base))
                     .next()
                     .map(|v| v.ty.clone())
                     .unwrap_or(Type::Int);
-                let span = pred_vars.iter()
+                let span = pred_vars
+                    .iter()
                     .filter_map(|(_, vars)| vars.get(base))
                     .next()
                     .map(|v| v.span.clone())
@@ -2114,7 +2175,8 @@ fn insert_label_phis(
                     ty,
                     span,
                 };
-                let incoming: Vec<(SsaVar, String)> = pred_vars.iter()
+                let incoming: Vec<(SsaVar, String)> = pred_vars
+                    .iter()
                     .filter_map(|(pred_name, vars)| {
                         vars.get(base).map(|v| (v.clone(), pred_name.clone()))
                     })
@@ -2169,38 +2231,38 @@ fn collect_var_uses_inst(kind: &InstKind, out: &mut HashMap<String, SsaVar>) {
         InstKind::Bin { l, r, .. } => {
             collect_var_uses_op(l, out);
             collect_var_uses_op(r, out);
-        }
+        },
         InstKind::Un { e, .. } | InstKind::Cast { e, .. } | InstKind::Load { e, .. } => {
             collect_var_uses_op(e, out);
-        }
+        },
         InstKind::Store { e, src, .. } => {
             collect_var_uses_op(e, out);
             collect_var_uses_op(src, out);
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } | InstKind::IndexStore { arr, idx, .. } => {
             collect_var_uses_op(arr, out);
             collect_var_uses_op(idx, out);
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             collect_var_uses_op(callee, out);
             for a in args {
                 collect_var_uses_op(a, out);
             }
-        }
+        },
         InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
             collect_var_uses_op(obj, out);
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             collect_var_uses_op(cond, out);
             collect_var_uses_op(then_, out);
             collect_var_uses_op(else_, out);
-        }
+        },
         InstKind::InlineAsm { inputs, .. } => {
             for input in inputs {
                 collect_var_uses_op(input, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2244,7 +2306,7 @@ fn lower_switches_in_block(block: &mut Block) -> bool {
                 }
                 // 递归处理嵌套 block
                 lower_switches_in_stmt(s);
-            }
+            },
             BlockItem::Decl(d) => {
                 if let Decl::Func(f) = d {
                     if let Some(body) = &mut f.body {
@@ -2253,7 +2315,7 @@ fn lower_switches_in_block(block: &mut Block) -> bool {
                         }
                     }
                 }
-            }
+            },
         }
         new_items.push(item);
     }
@@ -2269,27 +2331,32 @@ fn lower_switches_in_stmt(s: &mut Stmt) {
             if let Some(e) = else_ {
                 lower_switches_in_stmt(e);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
             lower_switches_in_stmt(body);
-        }
+        },
         Stmt::For { body, .. } => {
             lower_switches_in_stmt(body);
-        }
+        },
         Stmt::Block { b, .. } => {
             lower_switches_in_block(b);
-        }
+        },
         Stmt::Label { stmt, .. } => {
             lower_switches_in_stmt(stmt);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
 /// 将单个 switch 语句转换为 if-else 链.
 /// 密集 case 值的 switch 不转换 (返回 None), 留给 SSA Builder 生成 SwitchTable.
 fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
-    let Stmt::Switch { expr, cases, span: _ } = s else {
+    let Stmt::Switch {
+        expr,
+        cases,
+        span: _,
+    } = s
+    else {
         return None;
     };
     if cases.is_empty() {
@@ -2311,10 +2378,12 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
 
     // 从后向前构建 if-else 链
     // 最后是 default (如果有)
-    let mut current_else: Option<Box<Stmt>> = default_case.map(|def| Box::new(Stmt::Block {
+    let mut current_else: Option<Box<Stmt>> = default_case.map(|def| {
+        Box::new(Stmt::Block {
             b: def.body.clone(),
             span: def.span.clone(),
-        }));
+        })
+    });
 
     // 从后向前遍历普通 case，构建嵌套 if-else
     for case in normal_cases.iter().rev() {
@@ -2392,8 +2461,10 @@ fn expr_ty(e: &Expr) -> Type {
         Expr::Offsetof { result_ty, .. } => result_ty.clone(),
         Expr::AlignofTy { .. } => Type::ULong,
         Expr::AlignofExpr { .. } => Type::ULong,
-        Expr::PostInc { ty, .. } | Expr::PostDec { ty, .. }
-        | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. } => ty.clone(),
+        Expr::PostInc { ty, .. }
+        | Expr::PostDec { ty, .. }
+        | Expr::PreInc { ty, .. }
+        | Expr::PreDec { ty, .. } => ty.clone(),
         Expr::AsmExpr { ty, .. } => ty.clone(),
         Expr::LabelAddr { ty, .. } => ty.clone(),
         _ => Type::Int,
@@ -2410,7 +2481,12 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     func.is_hot = f.is_hot;
     func.is_noreturn = f.is_noreturn;
     // Collect original local variable names, types, and qualifiers for rebuild_block
-    collect_local_decls(&body.items, &mut func.original_locals, &mut func.local_types, &mut func.local_quals);
+    collect_local_decls(
+        &body.items,
+        &mut func.original_locals,
+        &mut func.local_types,
+        &mut func.local_quals,
+    );
     let mut builder = Builder::new(func);
     for p in &f.params {
         if let Some(n) = &p.name {
@@ -2633,7 +2709,7 @@ pub fn rebuild_block(func: &Function) -> Block {
             Terminator::Ret { val: Some(o) } => collect_op_uses_op(o, &mut used_ssa),
             Terminator::Branch { cond, .. } => collect_op_uses_op(cond, &mut used_ssa),
             Terminator::SwitchTable { idx, .. } => collect_op_uses_op(idx, &mut used_ssa),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -2653,14 +2729,14 @@ pub fn rebuild_block(func: &Function) -> Block {
                             match &b.term {
                                 Terminator::Ret { val: Some(o) } => {
                                     count += op_count_in_op(o, &ssa_name);
-                                }
+                                },
                                 Terminator::Branch { cond, .. } => {
                                     count += op_count_in_op(cond, &ssa_name);
-                                }
+                                },
                                 Terminator::SwitchTable { idx, .. } => {
                                     count += op_count_in_op(idx, &ssa_name);
-                                }
-                                _ => {}
+                                },
+                                _ => {},
                             }
                         }
                         count
@@ -2704,9 +2780,9 @@ fn phi_name(v: &SsaVar) -> String {
 /// 它们需要被保留为符号引用, 供 codegen 把热/冷函数放入不同 section.
 fn is_pass_hint_inst(kind: &InstKind) -> bool {
     if let InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                ..
-            } = kind
+        e: Operand::SymAddr(name, _),
+        ..
+    } = kind
     {
         name.starts_with("__dcc_") && !name.starts_with("__dcc_section_")
     } else {
@@ -2723,9 +2799,9 @@ fn inst_has_side_effect(kind: &InstKind) -> bool {
         | InstKind::IndexStore { .. }
         | InstKind::MemberStore { .. } => true,
         // volatile asm 始终保留；非 volatile asm 带输出也保留
-        InstKind::InlineAsm { volatile, outputs, .. } => {
-            *volatile || !outputs.is_empty()
-        }
+        InstKind::InlineAsm {
+            volatile, outputs, ..
+        } => *volatile || !outputs.is_empty(),
         _ => false,
     }
 }
@@ -2835,7 +2911,7 @@ fn rebuild_bb(
                 val: e,
                 span: func.span.clone(),
             }));
-        }
+        },
         Terminator::Jump(t) => {
             if let Some((lh, body_set)) = loop_ctx {
                 if t == lh {
@@ -2852,7 +2928,7 @@ fn rebuild_bb(
             } else {
                 rebuild_bb(t, func, out, visited, env, subst, doms, loop_ctx);
             }
-        }
+        },
         Terminator::Branch { cond, t, f } => {
             let cond_e = resolve_operand(cond, env, subst, func);
             let mut then_items: Vec<BlockItem> = Vec::new();
@@ -2863,12 +2939,12 @@ fn rebuild_bb(
                     then_items.push(BlockItem::Stmt(Stmt::Continue {
                         span: func.span.clone(),
                     }));
-                }
+                },
                 Some((_, body_set)) if !body_set.contains(t) => {
                     then_items.push(BlockItem::Stmt(Stmt::Break {
                         span: func.span.clone(),
                     }));
-                }
+                },
                 _ => {
                     rebuild_bb(
                         t,
@@ -2880,7 +2956,7 @@ fn rebuild_bb(
                         doms,
                         loop_ctx,
                     );
-                }
+                },
             }
             let mut else_items: Vec<BlockItem> = Vec::new();
             let mut else_env = env.clone();
@@ -2890,12 +2966,12 @@ fn rebuild_bb(
                     else_items.push(BlockItem::Stmt(Stmt::Continue {
                         span: func.span.clone(),
                     }));
-                }
+                },
                 Some((_, body_set)) if !body_set.contains(f) => {
                     else_items.push(BlockItem::Stmt(Stmt::Break {
                         span: func.span.clone(),
                     }));
-                }
+                },
                 _ => {
                     rebuild_bb(
                         f,
@@ -2907,7 +2983,7 @@ fn rebuild_bb(
                         doms,
                         loop_ctx,
                     );
-                }
+                },
             }
             out.push(BlockItem::Stmt(Stmt::If {
                 cond: cond_e,
@@ -2931,9 +3007,14 @@ fn rebuild_bb(
                 },
                 span: func.span.clone(),
             }));
-        }
-        Terminator::Unreachable => {}
-        Terminator::SwitchTable { idx, values, targets, default } => {
+        },
+        Terminator::Unreachable => {},
+        Terminator::SwitchTable {
+            idx,
+            values,
+            targets,
+            default,
+        } => {
             let idx_e = resolve_operand(idx, env, subst, func);
             let mut cases = Vec::new();
             // Each case branch rebuilds its path independently with its own
@@ -2998,16 +3079,12 @@ fn rebuild_bb(
                 cases,
                 span: func.span.clone(),
             }));
-        }
+        },
     }
 }
 
 /// Check if a block is the target of a back edge (cycle entry).
-fn is_cycle_entry(
-    bb_name: &str,
-    func: &Function,
-    doms: &HashMap<String, HashSet<String>>,
-) -> bool {
+fn is_cycle_entry(bb_name: &str, func: &Function, doms: &HashMap<String, HashSet<String>>) -> bool {
     for (name, bb) in &func.blocks {
         if !is_back_edge(name, bb_name, doms) {
             continue;
@@ -3015,11 +3092,15 @@ fn is_cycle_entry(
         let succs = match &bb.term {
             Terminator::Jump(t) => vec![t.as_str()],
             Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-            Terminator::SwitchTable { targets, default, .. } => {
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
                 let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
-                if !s.contains(&default.as_str()) { s.push(default.as_str()); }
+                if !s.contains(&default.as_str()) {
+                    s.push(default.as_str());
+                }
                 s
-            }
+            },
             _ => vec![],
         };
         if succs.contains(&bb_name) {
@@ -3065,11 +3146,15 @@ fn rebuild_cycle(
         let succs: Vec<&str> = match &bb.term {
             Terminator::Jump(t) => vec![t.as_str()],
             Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-            Terminator::SwitchTable { targets, default, .. } => {
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
                 let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
-                if !s.contains(&default.as_str()) { s.push(default.as_str()); }
+                if !s.contains(&default.as_str()) {
+                    s.push(default.as_str());
+                }
                 s
-            }
+            },
             _ => vec![],
         };
         if succs.contains(&header) {
@@ -3082,9 +3167,10 @@ fn rebuild_cycle(
         return;
     }
     // Pick the last latch in block_order as the primary latch
-    let latch = latches.into_iter().max_by_key(|l| {
-        func.block_order.iter().position(|b| b == l).unwrap_or(0)
-    }).unwrap();
+    let latch = latches
+        .into_iter()
+        .max_by_key(|l| func.block_order.iter().position(|b| b == l).unwrap_or(0))
+        .unwrap();
 
     // Collect loop body blocks via reverse DFS from latch (excluding header).
     let body_bbs_set: HashSet<String> = find_loop_body(func, header, &latch)
@@ -3128,7 +3214,7 @@ fn rebuild_cycle(
             } else {
                 None
             }
-        }
+        },
         _ => None, // infinite loop or non-branch header (e.g. do-while)
     };
 
@@ -3145,37 +3231,51 @@ fn rebuild_cycle(
             let f_in_body = body_bbs_set.contains(f);
             let t_back = is_back_edge(header, t, doms);
             let f_back = is_back_edge(header, f, doms);
-            if t_in_body && !t_back { body_entries.push(t.clone()); }
-            if f_in_body && !f_back { body_entries.push(f.clone()); }
+            if t_in_body && !t_back {
+                body_entries.push(t.clone());
+            }
+            if f_in_body && !f_back {
+                body_entries.push(f.clone());
+            }
             if !t_in_body && !t_back {
-                if seen_exit.insert(t.clone()) { exit_blocks.push(t.clone()); }
+                if seen_exit.insert(t.clone()) {
+                    exit_blocks.push(t.clone());
+                }
             }
             if !f_in_body && !f_back {
-                if seen_exit.insert(f.clone()) { exit_blocks.push(f.clone()); }
+                if seen_exit.insert(f.clone()) {
+                    exit_blocks.push(f.clone());
+                }
             }
-        }
+        },
         Terminator::Jump(t) => {
             if body_bbs_set.contains(t) && !is_back_edge(header, t, doms) {
                 body_entries.push(t.clone());
             } else if !is_back_edge(header, t, doms) {
                 exit_blocks.push(t.clone());
             }
-        }
-        Terminator::SwitchTable { targets, default, .. } => {
+        },
+        Terminator::SwitchTable {
+            targets, default, ..
+        } => {
             for t in targets {
                 if body_bbs_set.contains(t) && !is_back_edge(header, t, doms) {
                     body_entries.push(t.clone());
                 } else if !is_back_edge(header, t, doms) {
-                    if seen_exit.insert(t.clone()) { exit_blocks.push(t.clone()); }
+                    if seen_exit.insert(t.clone()) {
+                        exit_blocks.push(t.clone());
+                    }
                 }
             }
             if body_bbs_set.contains(default) && !is_back_edge(header, default, doms) {
                 body_entries.push(default.clone());
             } else if !is_back_edge(header, default, doms) {
-                if seen_exit.insert(default.clone()) { exit_blocks.push(default.clone()); }
+                if seen_exit.insert(default.clone()) {
+                    exit_blocks.push(default.clone());
+                }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
     // Also scan all body blocks for exit successors (for break, etc.)
     for bb_name in body_bbs_set.iter() {
@@ -3186,17 +3286,27 @@ fn rebuild_cycle(
         let succs: Vec<&str> = match &bb.term {
             Terminator::Jump(t) => vec![t.as_str()],
             Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-            Terminator::SwitchTable { targets, default, .. } => {
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
                 let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
-                if !s.contains(&default.as_str()) { s.push(default.as_str()); }
+                if !s.contains(&default.as_str()) {
+                    s.push(default.as_str());
+                }
                 s
-            }
+            },
             _ => vec![],
         };
         for s in succs {
-            if s == header { continue; }
-            if body_bbs_set.contains(s) { continue; }
-            if is_back_edge(bb_name, s, doms) { continue; }
+            if s == header {
+                continue;
+            }
+            if body_bbs_set.contains(s) {
+                continue;
+            }
+            if is_back_edge(bb_name, s, doms) {
+                continue;
+            }
             if seen_exit.insert(s.to_string()) {
                 exit_blocks.push(s.to_string());
             }
@@ -3212,7 +3322,9 @@ fn rebuild_cycle(
     let mut body_items: Vec<BlockItem> = Vec::new();
     if cond_expr.is_none() {
         for inst in &header_bb.insts {
-            if is_pass_hint_inst(&inst.kind) { continue; }
+            if is_pass_hint_inst(&inst.kind) {
+                continue;
+            }
             emit_rebuild_inst(inst, &mut body_items, env, subst, func);
         }
     }
@@ -3254,11 +3366,7 @@ fn rebuild_cycle(
 }
 
 /// Check if edge from→to is a back edge (to dominates from).
-fn is_back_edge(
-    from: &str,
-    to: &str,
-    doms: &HashMap<String, HashSet<String>>,
-) -> bool {
+fn is_back_edge(from: &str, to: &str, doms: &HashMap<String, HashSet<String>>) -> bool {
     doms.get(from).map(|d| d.contains(to)).unwrap_or(false)
 }
 
@@ -3342,7 +3450,7 @@ fn resolve_operand(
                     ty: v.ty.clone(),
                 }
             }
-        }
+        },
         _ => operand_to_expr(o, env, func),
     }
 }
@@ -3355,11 +3463,11 @@ fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
     match expr {
         Expr::Ident { ty, .. } => {
             *ty = desired_ty.clone();
-        }
+        },
         Expr::Deref { ty, .. } => {
             *ty = desired_ty.clone();
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -3413,7 +3521,7 @@ fn inst_to_expr_resolved(
                 span: sp.clone(),
                 ty: binop_ty,
             }
-        }
+        },
         InstKind::Un { op, e } => {
             let inner = resolve_operand(e, &fake_env, subst, func);
             // 向量 UnOp: 结果类型同内部表达式 (Neg/BitNot 在向量上逐元素)
@@ -3428,7 +3536,7 @@ fn inst_to_expr_resolved(
                 span: sp.clone(),
                 ty,
             }
-        }
+        },
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
             e: Box::new(resolve_operand(e, &fake_env, subst, func)),
@@ -3518,7 +3626,7 @@ fn inst_to_expr_resolved(
                 ty: ty.clone(),
                 is_arrow: *is_arrow,
             }
-        }
+        },
         InstKind::MemberStore {
             obj,
             obj_ty,
@@ -3549,7 +3657,7 @@ fn inst_to_expr_resolved(
                 span: sp.clone(),
                 ty: Type::Void,
             }
-        }
+        },
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
             cond: Box::new(resolve_operand(cond, &fake_env, subst, func)),
             then_: Box::new(resolve_operand(then_, &fake_env, subst, func)),
@@ -3605,11 +3713,15 @@ fn inst_to_expr_resolved(
                 span: sp.clone(),
                 ty: ty.clone(),
             }
-        }
+        },
         InstKind::PreservedDecl { .. } => {
             // Handled before inst_to_expr_resolved is called
-            Expr::Int { v: 0, span: sp.clone(), ty: Type::Int }
-        }
+            Expr::Int {
+                v: 0,
+                span: sp.clone(),
+                ty: Type::Int,
+            }
+        },
     }
 }
 
@@ -3619,45 +3731,45 @@ fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
         InstKind::Bin { l, r, .. } => {
             collect_op_uses_op(l, out);
             collect_op_uses_op(r, out);
-        }
+        },
         InstKind::Un { e, .. } => collect_op_uses_op(e, out),
         InstKind::Cast { e, .. } => collect_op_uses_op(e, out),
         InstKind::Load { e, .. } => collect_op_uses_op(e, out),
         InstKind::Store { e, src, .. } => {
             collect_op_uses_op(e, out);
             collect_op_uses_op(src, out);
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } => {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
-        }
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
             collect_op_uses_op(src, out);
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             collect_op_uses_op(callee, out);
             for a in args {
                 collect_op_uses_op(a, out);
             }
-        }
+        },
         InstKind::MemberLoad { obj, .. } => collect_op_uses_op(obj, out),
         InstKind::MemberStore { obj, src, .. } => {
             collect_op_uses_op(obj, out);
             collect_op_uses_op(src, out);
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             collect_op_uses_op(cond, out);
             collect_op_uses_op(then_, out);
             collect_op_uses_op(else_, out);
-        }
+        },
         InstKind::InlineAsm { inputs, .. } => {
             for input in inputs {
                 collect_op_uses_op(input, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -3674,45 +3786,45 @@ fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
         InstKind::Bin { l, r, .. } => {
             count += op_count_in_op(l, name);
             count += op_count_in_op(r, name);
-        }
+        },
         InstKind::Un { e, .. } => count += op_count_in_op(e, name),
         InstKind::Cast { e, .. } => count += op_count_in_op(e, name),
         InstKind::Load { e, .. } => count += op_count_in_op(e, name),
         InstKind::Store { e, src, .. } => {
             count += op_count_in_op(e, name);
             count += op_count_in_op(src, name);
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } => {
             count += op_count_in_op(arr, name);
             count += op_count_in_op(idx, name);
-        }
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             count += op_count_in_op(arr, name);
             count += op_count_in_op(idx, name);
             count += op_count_in_op(src, name);
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             count += op_count_in_op(callee, name);
             for a in args {
                 count += op_count_in_op(a, name);
             }
-        }
+        },
         InstKind::MemberLoad { obj, .. } => count += op_count_in_op(obj, name),
         InstKind::MemberStore { obj, src, .. } => {
             count += op_count_in_op(obj, name);
             count += op_count_in_op(src, name);
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             count += op_count_in_op(cond, name);
             count += op_count_in_op(then_, name);
             count += op_count_in_op(else_, name);
-        }
+        },
         InstKind::InlineAsm { inputs, .. } => {
             for input in inputs {
                 count += op_count_in_op(input, name);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
     count
 }
@@ -3748,7 +3860,7 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function)
                     ty: v.ty.clone(),
                 }
             }
-        }
+        },
         Operand::Int(v) => Expr::Int {
             v: *v,
             span: Span::point("ssa", 0, 0),
@@ -3762,27 +3874,26 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function)
         Operand::Str(d) => Expr::String {
             data: d.clone(),
             span: Span::point("ssa", 0, 0),
-            ty: Type::Array(Box::new(QualType::new(Type::Char)), crate::ast::ArraySize::Const(d.len())),
+            ty: Type::Array(
+                Box::new(QualType::new(Type::Char)),
+                crate::ast::ArraySize::Const(d.len()),
+            ),
         },
-        Operand::SymAddr(n, ty) => {
-            Expr::Ident {
-                name: crate::ast::Ident {
-                    name: n.clone(),
-                    span: Span::point("ssa", 0, 0),
-                },
+        Operand::SymAddr(n, ty) => Expr::Ident {
+            name: crate::ast::Ident {
+                name: n.clone(),
                 span: Span::point("ssa", 0, 0),
-                ty: ty.clone(),
-            }
+            },
+            span: Span::point("ssa", 0, 0),
+            ty: ty.clone(),
         },
-        Operand::FnAddr(n, ty) => {
-            Expr::Ident {
-                name: crate::ast::Ident {
-                    name: n.clone(),
-                    span: Span::point("ssa", 0, 0),
-                },
+        Operand::FnAddr(n, ty) => Expr::Ident {
+            name: crate::ast::Ident {
+                name: n.clone(),
                 span: Span::point("ssa", 0, 0),
-                ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
-            }
+            },
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
         },
         Operand::Void => Expr::Int {
             v: 0,
@@ -3817,7 +3928,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 span: sp.clone(),
                 ty: binop_ty,
             }
-        }
+        },
         InstKind::Un { op, e } => Expr::Unary {
             op: *op,
             e: Box::new(operand_to_expr(e, env, func)),
@@ -3909,7 +4020,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 ty: ty.clone(),
                 is_arrow: *is_arrow,
             }
-        }
+        },
         InstKind::MemberStore {
             obj,
             obj_ty,
@@ -3940,7 +4051,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 span: sp.clone(),
                 ty: Type::Void,
             }
-        }
+        },
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
             cond: Box::new(operand_to_expr(cond, env, func)),
             then_: Box::new(operand_to_expr(then_, env, func)),
@@ -3979,8 +4090,12 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
         },
         InstKind::PreservedDecl { .. } => {
             // Handled separately in rebuild; should not reach here
-            Expr::Int { v: 0, span: sp.clone(), ty: Type::Int }
-        }
+            Expr::Int {
+                v: 0,
+                span: sp.clone(),
+                ty: Type::Int,
+            }
+        },
     }
 }
 
@@ -3993,16 +4108,9 @@ pub fn dump_function(func: &Function) -> String {
     s.push_str(&format!("fn {}: {{\n", func.name));
     for b in &func.block_order {
         if let Some(bb) = func.blocks.get(b) {
-            s.push_str(&format!(
-                "  {}: preds={:?} succs={:?}\n",
-                bb.name, bb.preds, bb.succs
-            ));
+            s.push_str(&format!("  {}: preds={:?} succs={:?}\n", bb.name, bb.preds, bb.succs));
             for phi in &bb.phis {
-                s.push_str(&format!(
-                    "    phi {} <- {:?}\n",
-                    phi.dest.name(),
-                    phi.incoming
-                ));
+                s.push_str(&format!("    phi {} <- {:?}\n", phi.dest.name(), phi.incoming));
             }
             for inst in &bb.insts {
                 let dst = inst
@@ -4066,7 +4174,7 @@ mod tests {
                         quals: crate::ast::QualifierFlags::NONE,
                         addr_space: crate::ast::AddrSpace::None,
                         tls_model: None,
-                    asm_label: None,
+                        asm_label: None,
                     })),
                     BlockItem::Stmt(Stmt::Return {
                         val: Some(Expr::Ident {
@@ -4094,7 +4202,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -4136,7 +4244,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("entry"));
@@ -4192,7 +4300,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -4234,7 +4342,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("if.then"));
@@ -4274,7 +4382,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -4316,7 +4424,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         };
         assert!(build_from_func(&f).is_none());
     }

@@ -241,11 +241,7 @@ mod tests {
         ];
         let mut seen = HashSet::new();
         for f in &all {
-            assert!(
-                seen.insert(f.name()),
-                "duplicate feature name: {}",
-                f.name()
-            );
+            assert!(seen.insert(f.name()), "duplicate feature name: {}", f.name());
         }
     }
 

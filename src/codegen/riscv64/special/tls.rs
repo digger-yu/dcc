@@ -1,7 +1,7 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 use crate::codegen::shared::elf::{self, ElfRela};
 
 impl Riscv64Codegen {
@@ -141,5 +141,4 @@ impl Riscv64Codegen {
         let insn_add = ((4u32 << 20) | (10u32 << 15)) | (10u32 << 7) | 0x33;
         self.emit(&insn_add.to_le_bytes());
     }
-
 }

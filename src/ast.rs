@@ -1042,14 +1042,14 @@ pub enum Type {
     Double,
     LongDouble,
     Fract,
-    Accum,              // 定点数: _Fract (1.31格式), _Accum (16.16格式)
-    Complex(Box<QualType>),    // _Complex float/double: (real, imag) 两部分
-    Imaginary(Box<QualType>),  // _Imaginary float/double: 仅虚部, 大小同内型
+    Accum,                    // 定点数: _Fract (1.31格式), _Accum (16.16格式)
+    Complex(Box<QualType>),   // _Complex float/double: (real, imag) 两部分
+    Imaginary(Box<QualType>), // _Imaginary float/double: 仅虚部, 大小同内型
     Ptr(Box<QualType>),
     Array(Box<QualType>, ArraySize),
     Vector(Box<QualType>, usize), // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Arc<Vec<Field>>, usize, bool), // (name, fields, align, reverse_sso)
-    Union(String, Arc<Vec<Field>>, usize, bool),   // (name, fields, align, reverse_sso)
+    Union(String, Arc<Vec<Field>>, usize, bool), // (name, fields, align, reverse_sso)
     Enum(String, Arc<Vec<(String, i64)>>, Option<Box<QualType>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
     Func(Box<QualType>, Vec<QualType>),
     Named(String),
@@ -1128,7 +1128,12 @@ impl Type {
         if packed {
             return 1;
         }
-        let max_field = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+        let max_field = fields
+            .iter()
+            .map(|f| f.ty.align())
+            .max()
+            .unwrap_or(1)
+            .max(1);
         match pack {
             Some(n) if n < max_field => n,
             _ => max_field,
@@ -1158,7 +1163,7 @@ impl Type {
                 let elem_sz = elem.size();
                 // 防止超大数组大小导致内存分配失败 (如 [100000000000000001][3])
                 elem_sz.saturating_mul(*n)
-            }
+            },
             Type::Array(_, ArraySize::Var(_)) => 8, // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,
@@ -1168,7 +1173,8 @@ impl Type {
             Type::Struct(_, fields, align, _) => {
                 // 计算结构体大小: 考虑所有字段 (包括零宽度位域的位置)
                 // 零宽度位域不贡献存储, 但其位置决定结构体最小大小
-                let size = fields.iter()
+                let size = fields
+                    .iter()
                     .map(|f| {
                         if f.bit_width == Some(0) {
                             // 零宽度位域: 其偏移量决定结构体最小大小
@@ -1188,7 +1194,7 @@ impl Type {
                 } else {
                     size
                 }
-            }
+            },
             Type::Union(_, fields, align, _) => {
                 let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
                 if *align > 1 {
@@ -1196,7 +1202,7 @@ impl Type {
                 } else {
                     size
                 }
-            }
+            },
             _ => 8,
         }
     }
@@ -1255,7 +1261,7 @@ impl Type {
             Type::Array(elem, ArraySize::Const(_)) => elem.base.has_vla(),
             Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
                 fields.iter().any(|f| f.ty.has_vla())
-            }
+            },
             _ => false,
         }
     }
@@ -1352,12 +1358,18 @@ impl Type {
                     // 但如果字段有 field_packed, 允许跨容器边界连续排列.
                     // 同样, 如果新容器更小且当前容器能放下, 也继续当前排列 (GCC 行为).
                     if container_bits == 0 || container_ty_bits != container_bits {
-                        if f.field_packed && container_bits > 0 && bit_pos + field_bits <= container_ty_bits.max(container_bits) {
+                        if f.field_packed
+                            && container_bits > 0
+                            && bit_pos + field_bits <= container_ty_bits.max(container_bits)
+                        {
                             // packed 位域: 继续当前排列, 不强制新存储单元
                             if container_ty_bits > container_bits {
                                 container_bits = container_ty_bits;
                             }
-                        } else if container_bits > 0 && container_ty_bits < container_bits && bit_pos + field_bits <= container_bits {
+                        } else if container_bits > 0
+                            && container_ty_bits < container_bits
+                            && bit_pos + field_bits <= container_bits
+                        {
                             // 更小类型的位域能放入当前容器的剩余空间: 继续当前排列
                             // (GCC 行为: 位域可以共享存储单元, 即使类型不同)
                         } else {
@@ -1495,12 +1507,9 @@ impl std::fmt::Display for Type {
                 ArraySize::Const(n) => write!(f, "{}[{}]", inner, n),
                 ArraySize::Var(_) => write!(f, "{}[]", inner),
             },
-            Type::Vector(inner, n) => write!(
-                f,
-                "__attribute__((vector_size({}))){}",
-                n * inner.size() * 8,
-                inner
-            ),
+            Type::Vector(inner, n) => {
+                write!(f, "__attribute__((vector_size({}))){}", n * inner.size() * 8, inner)
+            },
             Type::Struct(name, _, _, _) => write!(f, "struct {}", name),
             Type::Union(name, _, _, _) => write!(f, "union {}", name),
             Type::Enum(name, _, _) => write!(f, "enum {}", name),
@@ -1513,7 +1522,7 @@ impl std::fmt::Display for Type {
                     write!(f, "{}", p)?;
                 }
                 write!(f, ") -> {}", ret)
-            }
+            },
             Type::Named(name) => write!(f, "{}", name),
             Type::Atomic(inner) => write!(f, "_Atomic({})", inner),
         }
@@ -1597,15 +1606,22 @@ impl Expr {
 /// Used by optimization passes to protect volatile accesses from elimination.
 pub fn type_has_volatile(ty: &Type) -> bool {
     match ty {
-        Type::Ptr(inner) | Type::Array(inner, _) | Type::Atomic(inner)
-        | Type::Complex(inner) | Type::Imaginary(inner) | Type::Vector(inner, _) => {
-            inner.quals.is_volatile() || type_has_volatile(&inner.base)
-        }
+        Type::Ptr(inner)
+        | Type::Array(inner, _)
+        | Type::Atomic(inner)
+        | Type::Complex(inner)
+        | Type::Imaginary(inner)
+        | Type::Vector(inner, _) => inner.quals.is_volatile() || type_has_volatile(&inner.base),
         Type::Func(ret, params) => {
-            ret.quals.is_volatile() || type_has_volatile(&ret.base)
-                || params.iter().any(|p| p.quals.is_volatile() || type_has_volatile(&p.base))
-        }
-        Type::Enum(_, _, Some(inner)) => inner.quals.is_volatile() || type_has_volatile(&inner.base),
+            ret.quals.is_volatile()
+                || type_has_volatile(&ret.base)
+                || params
+                    .iter()
+                    .any(|p| p.quals.is_volatile() || type_has_volatile(&p.base))
+        },
+        Type::Enum(_, _, Some(inner)) => {
+            inner.quals.is_volatile() || type_has_volatile(&inner.base)
+        },
         _ => false,
     }
 }

@@ -9,8 +9,7 @@
 /// 每个字段对应一个 CPUID 可检测的硬件特性.
 /// `detect()` 在 x86_64 上通过 CPUID 指令填充;
 /// 非 x86 平台全部为 false.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CpuFeatures {
     // --- CPUID leaf 1, ECX ---
     pub sse3: bool,
@@ -54,21 +53,21 @@ pub struct CpuFeatures {
     pub avx512_4fmaps: bool,
 
     // --- CET (Control-flow Enforcement Technology) ---
-    pub cet_ss: bool,     // CPUID leaf 7, ECX[bit 7]: CET_SS
-    pub cet_ibt: bool,    // CPUID leaf 7, EDX[bit 20]: CET_IBT
+    pub cet_ss: bool,  // CPUID leaf 7, ECX[bit 7]: CET_SS
+    pub cet_ibt: bool, // CPUID leaf 7, EDX[bit 20]: CET_IBT
 
     // --- AVX10 (CPUID leaf 7 sub-leaf 1) ---
-    pub avx10_1: bool,    // AVX10.1 support: leaf 7 sub-1 EDX[bit 19]
-    pub avx10_256: bool,  // AVX10.1-256: leaf 7 sub-1 EBX[bit 17]
-    pub avx10_512: bool,  // AVX10.1-512: leaf 7 sub-1 EBX[bit 18]
+    pub avx10_1: bool,   // AVX10.1 support: leaf 7 sub-1 EDX[bit 19]
+    pub avx10_256: bool, // AVX10.1-256: leaf 7 sub-1 EBX[bit 17]
+    pub avx10_512: bool, // AVX10.1-512: leaf 7 sub-1 EBX[bit 18]
 
     // --- APX Foundation ---
-    pub apx_f: bool,      // CPUID leaf 7 sub-1 EDX[bit 21]
+    pub apx_f: bool, // CPUID leaf 7 sub-1 EDX[bit 21]
 
     // --- 其他 ---
-    pub movbe: bool,      // CPUID leaf 1, ECX[bit 22]
-    pub xsave: bool,      // CPUID leaf 1, ECX[bit 26]
-    pub osxsave: bool,    // CPUID leaf 1, ECX[bit 27]
+    pub movbe: bool,   // CPUID leaf 1, ECX[bit 22]
+    pub xsave: bool,   // CPUID leaf 1, ECX[bit 26]
+    pub osxsave: bool, // CPUID leaf 1, ECX[bit 27]
 }
 
 /// CLI 显式指定的 CPU 特性覆盖.
@@ -104,17 +103,11 @@ impl CpuFeatures {
     /// (通过 XCR0 寄存器), 否则即使 CPU 支持也不能使用.
     #[allow(clippy::let_and_return)]
     pub fn detect() -> Self {
-        #[cfg(all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            not(miri)
-        ))]
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
         {
             detect_x86()
         }
-        #[cfg(not(all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            not(miri)
-        )))]
+        #[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri))))]
         {
             Self::default()
         }
@@ -171,43 +164,117 @@ impl CpuFeatures {
     /// 用于诊断输出或传递给后端.
     pub fn to_feature_strings(&self) -> Vec<&'static str> {
         let mut feats = Vec::new();
-        if self.sse3 { feats.push("sse3"); }
-        if self.pclmulqdq { feats.push("pclmul"); }
-        if self.ssse3 { feats.push("ssse3"); }
-        if self.sse4_1 { feats.push("sse4.1"); }
-        if self.sse4_2 { feats.push("sse4.2"); }
-        if self.popcnt { feats.push("popcnt"); }
-        if self.aes { feats.push("aes"); }
-        if self.avx { feats.push("avx"); }
-        if self.f16c { feats.push("f16c"); }
-        if self.fma { feats.push("fma"); }
-        if self.bmi1 { feats.push("bmi1"); }
-        if self.avx2 { feats.push("avx2"); }
-        if self.bmi2 { feats.push("bmi2"); }
-        if self.erms { feats.push("erms"); }
-        if self.avx512f { feats.push("avx512f"); }
-        if self.avx512dq { feats.push("avx512dq"); }
-        if self.avx512_ifma { feats.push("avx512ifma"); }
-        if self.avx512pf { feats.push("avx512pf"); }
-        if self.avx512er { feats.push("avx512er"); }
-        if self.avx512cd { feats.push("avx512cd"); }
-        if self.avx512bw { feats.push("avx512bw"); }
-        if self.avx512vl { feats.push("avx512vl"); }
-        if self.avx512_vbmi { feats.push("avx512vbmi"); }
-        if self.avx512_vbmi2 { feats.push("avx512vbmi2"); }
-        if self.avx512_vnni { feats.push("avx512vnni"); }
-        if self.avx_vnni { feats.push("avxvnni"); }
-        if self.avx512_bitalg { feats.push("avx512bitalg"); }
-        if self.avx512_vpopcntdq { feats.push("avx512vpopcntdq"); }
-        if self.avx512_4vnniw { feats.push("avx5124vnniw"); }
-        if self.avx512_4fmaps { feats.push("avx5124fmaps"); }
-        if self.cet_ss { feats.push("cet-ss"); }
-        if self.cet_ibt { feats.push("ibt"); }
-        if self.avx10_1 { feats.push("avx10.1"); }
-        if self.avx10_256 { feats.push("avx10.1-256"); }
-        if self.avx10_512 { feats.push("avx10.1-512"); }
-        if self.apx_f { feats.push("apxf"); }
-        if self.movbe { feats.push("movbe"); }
+        if self.sse3 {
+            feats.push("sse3");
+        }
+        if self.pclmulqdq {
+            feats.push("pclmul");
+        }
+        if self.ssse3 {
+            feats.push("ssse3");
+        }
+        if self.sse4_1 {
+            feats.push("sse4.1");
+        }
+        if self.sse4_2 {
+            feats.push("sse4.2");
+        }
+        if self.popcnt {
+            feats.push("popcnt");
+        }
+        if self.aes {
+            feats.push("aes");
+        }
+        if self.avx {
+            feats.push("avx");
+        }
+        if self.f16c {
+            feats.push("f16c");
+        }
+        if self.fma {
+            feats.push("fma");
+        }
+        if self.bmi1 {
+            feats.push("bmi1");
+        }
+        if self.avx2 {
+            feats.push("avx2");
+        }
+        if self.bmi2 {
+            feats.push("bmi2");
+        }
+        if self.erms {
+            feats.push("erms");
+        }
+        if self.avx512f {
+            feats.push("avx512f");
+        }
+        if self.avx512dq {
+            feats.push("avx512dq");
+        }
+        if self.avx512_ifma {
+            feats.push("avx512ifma");
+        }
+        if self.avx512pf {
+            feats.push("avx512pf");
+        }
+        if self.avx512er {
+            feats.push("avx512er");
+        }
+        if self.avx512cd {
+            feats.push("avx512cd");
+        }
+        if self.avx512bw {
+            feats.push("avx512bw");
+        }
+        if self.avx512vl {
+            feats.push("avx512vl");
+        }
+        if self.avx512_vbmi {
+            feats.push("avx512vbmi");
+        }
+        if self.avx512_vbmi2 {
+            feats.push("avx512vbmi2");
+        }
+        if self.avx512_vnni {
+            feats.push("avx512vnni");
+        }
+        if self.avx_vnni {
+            feats.push("avxvnni");
+        }
+        if self.avx512_bitalg {
+            feats.push("avx512bitalg");
+        }
+        if self.avx512_vpopcntdq {
+            feats.push("avx512vpopcntdq");
+        }
+        if self.avx512_4vnniw {
+            feats.push("avx5124vnniw");
+        }
+        if self.avx512_4fmaps {
+            feats.push("avx5124fmaps");
+        }
+        if self.cet_ss {
+            feats.push("cet-ss");
+        }
+        if self.cet_ibt {
+            feats.push("ibt");
+        }
+        if self.avx10_1 {
+            feats.push("avx10.1");
+        }
+        if self.avx10_256 {
+            feats.push("avx10.1-256");
+        }
+        if self.avx10_512 {
+            feats.push("avx10.1-512");
+        }
+        if self.apx_f {
+            feats.push("apxf");
+        }
+        if self.movbe {
+            feats.push("movbe");
+        }
         feats
     }
 
@@ -311,8 +378,7 @@ fn detect_x86() -> CpuFeatures {
             // AVX10.1-256: EBX[bit 17], requires AVX2
             feats.avx10_256 = bit(ebx7_1, 17) && feats.avx10_1 && feats.avx2;
             // AVX10.1-512: EBX[bit 18], requires AVX-512F
-            feats.avx10_512 =
-                bit(ebx7_1, 18) && feats.avx10_1 && feats.avx512f;
+            feats.avx10_512 = bit(ebx7_1, 18) && feats.avx10_1 && feats.avx512f;
 
             // APX Foundation: EDX[bit 21]
             feats.apx_f = bit(edx7_1, 21);
@@ -513,7 +579,7 @@ fn detect_riscv() -> NonX86Features {
                         'v' => f.rv_v = true,
                         // 遇到大写 Z 或 x 表示自定义/标准扩展, 停止基本扫描
                         'Z' | 'z' | 'x' | 'X' | 'S' | 's' => break,
-                        _ => {}
+                        _ => {},
                     }
                 }
                 // 检测 B 扩展 (可能以 Zba/Zbb/Zbc 形式出现)
@@ -548,9 +614,9 @@ fn detect_mips() -> NonX86Features {
                 let ases = line.split(':').nth(1).unwrap_or("");
                 let ase_list: Vec<&str> = ases.split_whitespace().collect();
                 f.msa = ase_list.iter().any(|a| a.eq_ignore_ascii_case("msa"));
-                f.mips_dsp = ase_list.iter().any(|a| {
-                    a.eq_ignore_ascii_case("dsp") || a.eq_ignore_ascii_case("dspr2")
-                });
+                f.mips_dsp = ase_list
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case("dsp") || a.eq_ignore_ascii_case("dspr2"));
                 break;
             }
         }
@@ -639,14 +705,12 @@ mod tests {
 
     #[test]
     fn avx_vnni_override() {
-        let mut t = crate::target::Target::resolve(
-            &crate::cli::TargetTriple {
-                arch: crate::cli::Arch::X86_64,
-                vendor: "unknown".into(),
-                os: crate::cli::Os::Linux,
-                abi: crate::cli::Abi::Gnu,
-            },
-        );
+        let mut t = crate::target::Target::resolve(&crate::cli::TargetTriple {
+            arch: crate::cli::Arch::X86_64,
+            vendor: "unknown".into(),
+            os: crate::cli::Os::Linux,
+            abi: crate::cli::Abi::Gnu,
+        });
         let overrides = CpuFeatureOverrides {
             avx: Some(true),
             avx_vnni: Some(true),
@@ -674,14 +738,12 @@ mod tests {
 
     #[test]
     fn avx10_override() {
-        let mut t = crate::target::Target::resolve(
-            &crate::cli::TargetTriple {
-                arch: crate::cli::Arch::X86_64,
-                vendor: "unknown".into(),
-                os: crate::cli::Os::Linux,
-                abi: crate::cli::Abi::Gnu,
-            },
-        );
+        let mut t = crate::target::Target::resolve(&crate::cli::TargetTriple {
+            arch: crate::cli::Arch::X86_64,
+            vendor: "unknown".into(),
+            os: crate::cli::Os::Linux,
+            abi: crate::cli::Abi::Gnu,
+        });
         let overrides = CpuFeatureOverrides {
             avx: Some(true),
             avx10_1: Some(true),
@@ -700,8 +762,7 @@ mod tests {
         eprintln!(
             "CPU features: sse3={} ssse3={} sse4.1={} sse4.2={} \
              avx={} avx2={} avx512f={} cet_ss={} cet_ibt={}",
-            f.sse3, f.ssse3, f.sse4_1, f.sse4_2,
-            f.avx, f.avx2, f.avx512f, f.cet_ss, f.cet_ibt
+            f.sse3, f.ssse3, f.sse4_1, f.sse4_2, f.avx, f.avx2, f.avx512f, f.cet_ss, f.cet_ibt
         );
     }
 }

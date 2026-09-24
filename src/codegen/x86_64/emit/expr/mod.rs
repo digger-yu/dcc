@@ -5,15 +5,15 @@
 // `pub fn gen_expr(cg, e, dst)` 及 `unimplemented!()` 存根自由函数在
 // batch 4 逐 arm 搬迁过程中已彻底无引用，一并作废删除。
 
-pub mod lvalue;
 pub mod binary;
 pub mod dispatch;
+pub mod lvalue;
 
-pub mod cast;
 pub mod call;
-pub mod unary;
-pub mod literal;
-pub mod init;
+pub mod cast;
 pub mod compound;
-pub mod va_arg;
 pub mod increment;
+pub mod init;
+pub mod literal;
+pub mod unary;
+pub mod va_arg;

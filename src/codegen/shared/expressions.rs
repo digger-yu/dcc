@@ -4,7 +4,7 @@
 // 第一性原理：表达式求值逻辑在所有 ISA 后端中是相同的
 // 目标：提取通用表达式处理逻辑
 
-use crate::ast::{Expr, Type, BinOp, UnOp};
+use crate::ast::{BinOp, Expr, Type, UnOp};
 use crate::codegen::shared::types::TypeCoercionEngine;
 
 /// Result type for expression operations
@@ -46,7 +46,7 @@ fn struct_field_offset(ty: &Type, name: &str) -> usize {
             crate::ast::find_field(fields, name)
                 .map(|(field, nested_off)| nested_off + field.offset)
                 .unwrap_or(0)
-        }
+        },
         _ => 0,
     }
 }
@@ -112,12 +112,7 @@ pub trait ExpressionExecutor: Send + Sync {
     ) -> ExprResult<()>;
 
     /// Store register to memory address
-    fn store_to_register(
-        &self,
-        src_reg: u8,
-        addr_reg: u8,
-        size: usize,
-    ) -> ExprResult<()>;
+    fn store_to_register(&self, src_reg: u8, addr_reg: u8, size: usize) -> ExprResult<()>;
 
     /// Allocate a general-purpose register
     fn allocate_gpr(&mut self, ty: &Type) -> ExprResult<u8>;
@@ -132,7 +127,8 @@ pub trait ExpressionExecutor: Send + Sync {
     fn load_immediate_constant(&mut self, value: u64, dest_reg: u8, ty: &Type) -> ExprResult<()>;
 
     /// Load from symbol address
-    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type) -> ExprResult<()>;
+    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type)
+        -> ExprResult<()>;
 
     /// Shift left operation
     fn shift_left(&mut self, src_reg: u8, dest_reg: u8, count: u8) -> ExprResult<()>;
@@ -156,7 +152,12 @@ pub trait ExpressionExecutor: Send + Sync {
     fn store_address(&mut self, dest_reg: u8, symbol: &str) -> ExprResult<()>;
 
     /// Emit function call
-    fn emit_call(&mut self, func: &crate::ast::Expr, args: &[Expr], result_reg: u8) -> ExprResult<()>;
+    fn emit_call(
+        &mut self,
+        func: &crate::ast::Expr,
+        args: &[Expr],
+        result_reg: u8,
+    ) -> ExprResult<()>;
 
     /// Create a fresh temporary label with the given purpose prefix.
     fn create_temp_label(&mut self, purpose: &str) -> ExprResult<String>;
@@ -204,19 +205,14 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
     }
 
     /// Evaluate binary operation
-    pub fn gen_binop(
-        &mut self,
-        op: &BinOp,
-        lhs: &Expr,
-        rhs: &Expr,
-    ) -> ExprResult<RegValue> {
+    pub fn gen_binop(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> ExprResult<RegValue> {
         // Step 1: Determine operand types
         let lhs_ty = lhs.ty();
         let rhs_ty = rhs.ty();
 
         // Step 2: Apply usual arithmetic conversions
         let (coerced_lhs, coerced_rhs) = self.type_coercion.coerce_binary_op(&lhs_ty, &rhs_ty);
-        
+
         // Result type after coercion
         let result_ty = if coerced_lhs == coerced_rhs {
             coerced_lhs.clone()
@@ -234,7 +230,8 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
         self.load_operand(rhs, rhs_reg, &coerced_rhs)?;
 
         // Step 5: Dispatch to ISA-specific executor
-        self.executor.emit_binary_op(op, &result_ty, lhs_reg, rhs_reg, dest_reg)?;
+        self.executor
+            .emit_binary_op(op, &result_ty, lhs_reg, rhs_reg, dest_reg)?;
 
         Ok(RegValue {
             is_floating: is_floating_point(&result_ty),
@@ -245,23 +242,14 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
 
     /// Evaluate binary operation without storing result (for side effects only)
     #[inline]
-    pub fn gen_binop_discard(
-        &mut self,
-        op: &BinOp,
-        lhs: &Expr,
-        rhs: &Expr,
-    ) -> ExprResult<()> {
+    pub fn gen_binop_discard(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> ExprResult<()> {
         // Same as gen_binop but discard the result register allocation
         let _ = self.gen_binop(op, lhs, rhs).map(|_| ())?;
         Ok(())
     }
 
     /// Evaluate unary operation
-    pub fn gen_unary(
-        &mut self,
-        op: &UnOp,
-        operand: &Expr,
-    ) -> ExprResult<RegValue> {
+    pub fn gen_unary(&mut self, op: &UnOp, operand: &Expr) -> ExprResult<RegValue> {
         let operand_ty = operand.ty();
         let src_reg = self.executor.allocate_gpr(&operand_ty)?;
         let dest_reg = self.executor.allocate_gpr(&operand_ty)?;
@@ -271,16 +259,19 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
         match op {
             UnOp::Neg => {
                 // Two's complement negation: -x = ~x + 1 OR sub x, zero
-                self.executor.emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
-            }
+                self.executor
+                    .emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
+            },
             UnOp::Not => {
                 // Bitwise NOT: ~x
-                self.executor.emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
-            }
+                self.executor
+                    .emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
+            },
             _ => {
                 // Default: just move value
-                self.executor.emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
-            }
+                self.executor
+                    .emit_unary_op(op, src_reg, dest_reg, &operand_ty)?;
+            },
         }
 
         Ok(RegValue {
@@ -305,13 +296,16 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
             if src_bits < dst_bits {
                 // Expand width
                 if is_signed_int(&source_ty) {
-                    self.executor.sign_extend(src_reg, dest_reg, src_bits, dst_bits)?;
+                    self.executor
+                        .sign_extend(src_reg, dest_reg, src_bits, dst_bits)?;
                 } else {
-                    self.executor.zero_extend(src_reg, dest_reg, src_bits, dst_bits)?;
+                    self.executor
+                        .zero_extend(src_reg, dest_reg, src_bits, dst_bits)?;
                 }
             } else if src_bits > dst_bits {
                 // Truncate (already done by destination register allocation in most cases)
-                self.executor.zero_extend(src_reg, dest_reg, src_bits, dst_bits)?;
+                self.executor
+                    .zero_extend(src_reg, dest_reg, src_bits, dst_bits)?;
             }
         } else if is_integer(&source_ty) && is_floating_point(target_ty) {
             self.executor.convert_int_to_float(src_reg, dest_reg)?;
@@ -334,15 +328,15 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
             Expr::Int { v, .. } => {
                 // Load immediate integer constant
                 self.executor.load_immediate_constant(*v as u64, reg, ty)?;
-            }
+            },
             Expr::Float { v, .. } => {
                 // Floating point constants go through rodata
                 let symbol = format!(".const_float_{v}");
                 self.executor.load_from_symbol_address(&symbol, reg, ty)?;
-            }
+            },
             Expr::Char { v, .. } => {
                 self.executor.load_immediate_constant(*v as u64, reg, ty)?;
-            }
+            },
 
             // Identifiers and global variables
             Expr::Ident { name, .. } => {
@@ -355,7 +349,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                     let symbol = name.name.clone();
                     self.executor.load_from_symbol_address(&symbol, reg, ty)?;
                 }
-            }
+            },
 
             // Array subscripting (arr[idx])
             Expr::Index { arr, idx, .. } => {
@@ -377,7 +371,8 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                 if elem_size != 0 && elem_size.is_power_of_two() {
                     // Optimization: shift instead of multiply for power-of-2 sizes
                     let shift_log2 = elem_size.trailing_zeros();
-                    self.executor.shift_left(idx_reg, idx_reg, shift_log2 as u8)?;
+                    self.executor
+                        .shift_left(idx_reg, idx_reg, shift_log2 as u8)?;
                 } else {
                     // General case: multiply
                     self.executor.imul_imm(idx_reg, idx_reg, elem_size as u64)?;
@@ -391,13 +386,11 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                 // Load from computed address
                 self.executor
                     .load_from_register(addr_reg, reg, ty.size(), is_signed_int(ty))?;
-            }
+            },
 
             // Struct member access (obj.member)
             Expr::Member {
-                expr: obj,
-                field,
-                ..
+                expr: obj, field, ..
             } => {
                 // Get offset of member in struct
                 let obj_agg_ty = obj.ty();
@@ -420,7 +413,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                     self.executor
                         .load_from_register(obj_reg, reg, ty.size(), is_signed_int(ty))?;
                 }
-            }
+            },
 
             // Pointer dereference (*ptr)
             Expr::Deref { e, .. } => {
@@ -430,7 +423,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                 self.load_operand(e, ptr_reg, &ptr_ty)?;
                 self.executor
                     .load_from_register(ptr_reg, reg, ty.size(), is_signed_int(ty))?;
-            }
+            },
 
             // Address-of operator (&expr)
             Expr::AddrOf { e, .. } => {
@@ -440,18 +433,16 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                         // Global/local variable addresses
                         let symbol = name.name.clone();
                         self.executor.store_address(reg, &symbol)?;
-                    }
+                    },
                     Expr::Member {
-                        expr: obj,
-                        field,
-                        ..
+                        expr: obj, field, ..
                     } => {
                         // Struct member address
                         let obj_reg = self.temp_reg_counter;
                         self.temp_reg_counter += 1;
                         let obj_ty = obj.ty();
                         self.load_operand(obj, obj_reg, &obj_ty)?;
-                        
+
                         let offset = struct_field_offset(&obj_ty, &field.name);
                         if offset != 0 {
                             self.executor.add_imm(obj_reg, offset as i64, reg)?;
@@ -460,7 +451,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                                 self.executor.mov_reg_to_reg(obj_reg, reg, 8)?; // 64-bit pointer
                             }
                         }
-                    }
+                    },
                     Expr::Index { arr, idx, .. } => {
                         // Array element address (compute without loading value)
                         // For arrays named by an identifier, take the base
@@ -469,16 +460,15 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                         if let Expr::Ident { name, .. } = arr.as_ref() {
                             self.executor.store_address(reg, &name.name)?;
                         }
-                    }
+                    },
                     _ => {
                         return Err("Cannot take address of this expression type".to_string());
-                    }
+                    },
                 }
-            }
+            },
 
             // Compound literals (struct initialization)
-            Expr::CompoundLit { ty: _, inits, .. } |
-            Expr::InitList { inits, .. } => {
+            Expr::CompoundLit { ty: _, inits, .. } | Expr::InitList { inits, .. } => {
                 // Materialize to temporary location then copy to register
                 let temp_slot = self.temp_reg_counter;
                 self.temp_reg_counter += 1;
@@ -489,10 +479,14 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
 
                 // Copy from temp to destination
                 if temp_slot != reg {
-                    self.executor
-                        .load_from_register(temp_slot, reg, ty.size(), is_signed_int(ty))?;
+                    self.executor.load_from_register(
+                        temp_slot,
+                        reg,
+                        ty.size(),
+                        is_signed_int(ty),
+                    )?;
                 }
-            }
+            },
 
             // Function calls
             Expr::Call { callee, args, .. } => {
@@ -500,7 +494,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                 // Call function, result already in designated return register
                 // Defer to backend's call instruction emitter
                 self.executor.emit_call(callee, args, reg)?;
-            }
+            },
 
             // Type casts (already handled by gen_cast, but support here too)
             Expr::Cast { e, ty: cast_ty, .. } => {
@@ -517,15 +511,21 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                     if is_integer(&src_e_ty) && is_integer(cast_ty) {
                         if src_bits < dst_bits {
                             if is_signed_int(&src_e_ty) {
-                                self.executor.sign_extend(src_reg, reg, src_bits, dst_bits)?;
+                                self.executor
+                                    .sign_extend(src_reg, reg, src_bits, dst_bits)?;
                             } else {
-                                self.executor.zero_extend(src_reg, reg, src_bits, dst_bits)?;
+                                self.executor
+                                    .zero_extend(src_reg, reg, src_bits, dst_bits)?;
                             }
                         } else {
                             // Truncate
                             let size = cast_ty.size();
-                            self.executor
-                                .load_from_register(src_reg, reg, size, is_signed_int(cast_ty))?;
+                            self.executor.load_from_register(
+                                src_reg,
+                                reg,
+                                size,
+                                is_signed_int(cast_ty),
+                            )?;
                         }
                     } else if is_floating_point(&src_e_ty) && is_integer(cast_ty) {
                         self.executor.convert_float_to_int(
@@ -542,14 +542,11 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                         self.executor.mov_reg_to_reg(src_reg, reg, size)?;
                     }
                 }
-            }
+            },
 
             // Conditional expressions (?:)
             Expr::Cond {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => {
                 let dest_reg = reg;
                 let then_label = self.executor.create_temp_label("then")?;
@@ -576,64 +573,63 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
 
                 // End label
                 self.executor.define_label(&end_label)?;
-            }
-            
+            },
+
             // Pre/post increment/decrement
-            Expr::PreInc { e, .. } | Expr::PreDec { e, .. } |
-            Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+            Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. }
+            | Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. } => {
                 let incr = matches!(expr, Expr::PreInc { .. } | Expr::PostInc { .. });
-                
+
                 let expr_reg = self.temp_reg_counter;
                 self.temp_reg_counter += 1;
                 let e_ty = e.ty();
                 self.load_operand(e, expr_reg, &e_ty)?;
-                
+
                 let one_const = self.temp_reg_counter;
                 self.temp_reg_counter += 1;
-                self.executor.load_immediate_constant(1, one_const, &Type::Int)?;
-                
+                self.executor
+                    .load_immediate_constant(1, one_const, &Type::Int)?;
+
                 if incr {
                     self.executor.add_regs(expr_reg, one_const, expr_reg)?;
                 } else {
                     self.executor.sub_regs(expr_reg, one_const, expr_reg)?;
                 }
-                
+
                 // For post-increment, also save original value before modification
                 if matches!(expr, Expr::PostInc { .. } | Expr::PostDec { .. }) {
                     // Need to return original value - simplified here
                     // Full implementation would require saving old value
                     let _ = (one_const, expr_reg);
                 }
-                
+
                 // Store result back to destination
                 if expr_reg != reg {
                     let size = ty.size();
                     self.executor.mov_reg_to_reg(expr_reg, reg, size)?;
                 }
-            }
-            
+            },
+
             // Default: everything else falls back to constant evaluation or error
             _ => {
                 // Try compile-time constant first
                 if let Ok(cv) = crate::const_eval::eval_full(expr, false) {
                     if let Some(val) = cv.as_int() {
-                        self.executor
-                            .load_immediate_constant(val as u64, reg, ty)?;
+                        self.executor.load_immediate_constant(val as u64, reg, ty)?;
                         return Ok(());
                     }
                 }
-                
+
                 // If we reach here, we can't handle this expression type
-                return Err(format!(
-                    "Cannot load operand of expression type {:?}",
-                    expr.ty()
-                ));
-            }
+                return Err(format!("Cannot load operand of expression type {:?}", expr.ty()));
+            },
         }
-        
+
         Ok(())
     }
-    
+
     /// Generate temporary register number
     pub fn alloc_temp_reg(&mut self) -> u8 {
         let reg = self.temp_reg_counter;
@@ -656,7 +652,7 @@ impl StackFrameUtils {
     /// Determine if parameter should be passed in register or on stack
     pub fn param_passing_mode(ty: &Type, reg_size: usize) -> ParamPassingMode {
         let size = ty.size();
-        
+
         if size <= reg_size {
             ParamPassingMode::Register
         } else {
@@ -683,7 +679,7 @@ mod tests {
     #[test]
     fn test_is_constant_expr() {
         use crate::diagnostics::Span;
-        
+
         let int_expr = Expr::Int {
             v: 42,
             span: Span::point("", 1, 1),

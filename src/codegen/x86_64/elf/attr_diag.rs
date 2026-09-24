@@ -16,13 +16,13 @@ impl Codegen {
             match item {
                 crate::ast::BlockItem::Stmt(s) => {
                     Self::check_attr_diagnostics_stmt(s, diag_fns, _caller)
-                }
+                },
                 crate::ast::BlockItem::Decl(Decl::Func(f)) => {
                     if let Some(body) = &f.body {
                         Self::check_attr_diagnostics(&body.items, diag_fns, _caller);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -35,7 +35,7 @@ impl Codegen {
         match s {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::check_attr_diagnostics_expr(e, diag_fns, _caller);
-            }
+            },
             Stmt::If {
                 cond, then_, else_, ..
             } => {
@@ -44,11 +44,11 @@ impl Codegen {
                 if let Some(e) = else_ {
                     Self::check_attr_diagnostics_stmt(e, diag_fns, _caller);
                 }
-            }
+            },
             Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
                 Self::check_attr_diagnostics_expr(cond, diag_fns, _caller);
                 Self::check_attr_diagnostics_stmt(body, diag_fns, _caller);
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -66,9 +66,9 @@ impl Codegen {
                     Self::check_attr_diagnostics_expr(st, diag_fns, _caller);
                 }
                 Self::check_attr_diagnostics_stmt(body, diag_fns, _caller);
-            }
+            },
             Stmt::Block { b, .. } => Self::check_attr_diagnostics(&b.items, diag_fns, _caller),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -107,29 +107,29 @@ impl Codegen {
                 Expr::Binop { l, r, .. } => {
                     Self::check_attr_diagnostics_expr(l, diag_fns, _caller);
                     Self::check_attr_diagnostics_expr(r, diag_fns, _caller);
-                }
+                },
                 Expr::Unary { e: inner, .. }
                 | Expr::Cast { e: inner, .. }
                 | Expr::AddrOf { e: inner, .. }
                 | Expr::Deref { e: inner, .. } => {
                     Self::check_attr_diagnostics_expr(inner, diag_fns, _caller);
-                }
+                },
                 Expr::Assign { l, r, .. } => {
                     Self::check_attr_diagnostics_expr(l, diag_fns, _caller);
                     Self::check_attr_diagnostics_expr(r, diag_fns, _caller);
-                }
+                },
                 Expr::Cond {
                     cond, then_, else_, ..
                 } => {
                     Self::check_attr_diagnostics_expr(cond, diag_fns, _caller);
                     Self::check_attr_diagnostics_expr(then_, diag_fns, _caller);
                     Self::check_attr_diagnostics_expr(else_, diag_fns, _caller);
-                }
+                },
                 Expr::Index { arr, idx, .. } => {
                     Self::check_attr_diagnostics_expr(arr, diag_fns, _caller);
                     Self::check_attr_diagnostics_expr(idx, diag_fns, _caller);
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }

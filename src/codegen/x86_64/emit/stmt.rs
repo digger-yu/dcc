@@ -24,8 +24,7 @@ impl Codegen {
                     // A1: 内存返回 (sret) — 聚合/长双精度整体写入 rdi 指向的缓冲区.
                     // 函数声明返回 long double 时, 即使表达式类型是 int/double
                     // (隐式转换), 也必须走 sret 写回 (调用方从 sret 槽读值).
-                    let func_ret_is_ld =
-                        matches!(self.current_func_ret_ty, Type::LongDouble);
+                    let func_ret_is_ld = matches!(self.current_func_ret_ty, Type::LongDouble);
                     if (Self::needs_memory_return(&ret_ty) || func_ret_is_ld)
                         && self.current_sret_offset.is_some()
                     {
@@ -77,66 +76,82 @@ impl Codegen {
                                     if in_disp8 {
                                         self.emit(&[0x45, off_bytes[0]]);
                                     } else {
-                                        self.emit(&[0x85, off_bytes[0], off_bytes[1], off_bytes[2], off_bytes[3]]);
+                                        self.emit(&[
+                                            0x85,
+                                            off_bytes[0],
+                                            off_bytes[1],
+                                            off_bytes[2],
+                                            off_bytes[3],
+                                        ]);
                                     }
                                 } else {
-                                // struct 返回: 加载到 rax[:rdx]
-                                if let Expr::Ident { name, .. } = &e {
-                                    if self.is_global_not_local(&name.name) {
-                                        // 全局结构体变量: 用 RIP-relative 寻址加载
-                                        self.emit_global_addr(0, &name.name); // rax = 全局变量地址
-                                        if ret_sz <= 8 {
-                                            match ret_sz {
-                                                8 => self.emit(&[0x48, 0x8B, 0x00]), // mov rax, [rax]
-                                                4 => { self.emit(&[0x8B, 0x00]); self.emit(&[0x48, 0x0F, 0xB7, 0xC0]); } // movzx
-                                                2 => { self.emit(&[0x66, 0x8B, 0x00]); self.emit(&[0x48, 0x0F, 0xB7, 0xC0]); }
-                                                1 => self.emit(&[0x0F, 0xB6, 0x00]), // movzx al, [rax]
-                                                _ => {}
+                                    // struct 返回: 加载到 rax[:rdx]
+                                    if let Expr::Ident { name, .. } = &e {
+                                        if self.is_global_not_local(&name.name) {
+                                            // 全局结构体变量: 用 RIP-relative 寻址加载
+                                            self.emit_global_addr(0, &name.name); // rax = 全局变量地址
+                                            if ret_sz <= 8 {
+                                                match ret_sz {
+                                                    8 => self.emit(&[0x48, 0x8B, 0x00]), // mov rax, [rax]
+                                                    4 => {
+                                                        self.emit(&[0x8B, 0x00]);
+                                                        self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
+                                                    }, // movzx
+                                                    2 => {
+                                                        self.emit(&[0x66, 0x8B, 0x00]);
+                                                        self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
+                                                    },
+                                                    1 => self.emit(&[0x0F, 0xB6, 0x00]), // movzx al, [rax]
+                                                    _ => {},
+                                                }
+                                            } else {
+                                                // >8 字节: 先用地址取高 8 字节, 再取低 8 字节
+                                                self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
+                                                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
                                             }
                                         } else {
-                                            // >8 字节: 先用地址取高 8 字节, 再取低 8 字节
-                                            self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
-                                            self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                                            let off = self.var_offset(&name.name);
+                                            self.load_stack(0, off); // rax = 前 8 字节
+                                            if ret_sz > 8 {
+                                                self.load_stack(2, off + 8); // rdx = 后 8 字节
+                                            }
                                         }
                                     } else {
-                                        let off = self.var_offset(&name.name);
-                                        self.load_stack(0, off); // rax = 前 8 字节
-                                        if ret_sz > 8 {
-                                            self.load_stack(2, off + 8); // rdx = 后 8 字节
+                                        // CompoundLit/InitList 等: gen_expr 返回地址 (CompoundLit)
+                                        // 或垃圾值 (InitList). 需要物化后加载到 rax/rdx.
+                                        if matches!(
+                                            e,
+                                            Expr::CompoundLit { .. } | Expr::InitList { .. }
+                                        ) {
+                                            // 使用帧底部临时区 (-frame_size+8)
+                                            let temp_off = -self.frame_size + 8;
+                                            let inits = match e {
+                                                Expr::CompoundLit { inits, .. } => Some(inits),
+                                                Expr::InitList { inits, .. } => Some(inits),
+                                                _ => None,
+                                            };
+                                            if let Some(inits) = inits {
+                                                self.gen_init_list_at(temp_off, &ret_ty, inits);
+                                            }
+                                            self.load_stack(0, temp_off); // rax = 前 8 字节
+                                            if ret_sz > 8 {
+                                                self.load_stack(2, temp_off + 8);
+                                                // rdx = 后 8 字节
+                                            }
+                                        } else {
+                                            self.gen_expr(e, 0);
                                         }
                                     }
-                                } else {
-                                    // CompoundLit/InitList 等: gen_expr 返回地址 (CompoundLit)
-                                    // 或垃圾值 (InitList). 需要物化后加载到 rax/rdx.
-                                    if matches!(e, Expr::CompoundLit { .. } | Expr::InitList { .. }) {
-                                        // 使用帧底部临时区 (-frame_size+8)
-                                        let temp_off = -self.frame_size + 8;
-                                        let inits = match e {
-                                            Expr::CompoundLit { inits, .. } => Some(inits),
-                                            Expr::InitList { inits, .. } => Some(inits),
-                                            _ => None,
-                                        };
-                                        if let Some(inits) = inits {
-                                            self.gen_init_list_at(temp_off, &ret_ty, inits);
+                                    // SysV: SSE/SSEUP 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
+                                    // 如 struct {double,double}. _Complex float/double 已由
+                                    // gen_complex_sse_return 直接填充返回寄存器。
+                                    let ret_classes = Self::abi_classes(&ret_ty);
+                                    for (c, cls) in ret_classes.iter().enumerate() {
+                                        if matches!(cls, AbiClass::Sse | AbiClass::SseUp) {
+                                            let src = if c == 0 { 0u8 } else { 2u8 };
+                                            self.emit_movq_gp_to_xmm(c as u8, src);
                                         }
-                                        self.load_stack(0, temp_off); // rax = 前 8 字节
-                                        if ret_sz > 8 {
-                                            self.load_stack(2, temp_off + 8); // rdx = 后 8 字节
-                                        }
-                                    } else {
-                                        self.gen_expr(e, 0);
                                     }
-                                }
-                                // SysV: SSE/SSEUP 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
-                                // 如 struct {double,double}. _Complex float/double 已由
-                                // gen_complex_sse_return 直接填充返回寄存器。
-                                let ret_classes = Self::abi_classes(&ret_ty);
-                                for (c, cls) in ret_classes.iter().enumerate() {
-                                    if matches!(cls, AbiClass::Sse | AbiClass::SseUp) {
-                                        let src = if c == 0 { 0u8 } else { 2u8 };
-                                        self.emit_movq_gp_to_xmm(c as u8, src);
-                                    }
-                                }
                                 } // end else (non-Vector agg return)
                             }
                         } else {
@@ -159,9 +174,15 @@ impl Codegen {
                                 && !matches!(e.ty(), Type::Int128 | Type::UInt128)
                             {
                                 if matches!(func_ret_ty_for_128, Type::UInt128)
-                                    || matches!(e.ty(),
-                                        Type::Bool | Type::UChar | Type::UShort
-                                        | Type::UInt | Type::ULong | Type::ULongLong)
+                                    || matches!(
+                                        e.ty(),
+                                        Type::Bool
+                                            | Type::UChar
+                                            | Type::UShort
+                                            | Type::UInt
+                                            | Type::ULong
+                                            | Type::ULongLong
+                                    )
                                 {
                                     self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
                                 } else {
@@ -180,7 +201,7 @@ impl Codegen {
                                     2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]), // movzwq (%rax),%rax
                                     4 => self.emit(&[0x8B, 0x00]),             // mov (%rax),%eax
                                     8 => self.emit(&[0x48, 0x8B, 0x00]),       // mov (%rax),%rax
-                                    _ => {}
+                                    _ => {},
                                 }
                             }
                             // Integer → float return conversion:
@@ -200,13 +221,11 @@ impl Codegen {
                             // in a function returning double needs
                             // cvtss2sd.
                             if matches!(&expr_ty, Type::Float)
-                                && matches!(&func_ret_ty,
-                                    Type::Double | Type::LongDouble)
+                                && matches!(&func_ret_ty, Type::Double | Type::LongDouble)
                             {
                                 // cvtss2sd xmm0, xmm0
                                 self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
-                            } else if matches!(&expr_ty,
-                                    Type::Double | Type::LongDouble)
+                            } else if matches!(&expr_ty, Type::Double | Type::LongDouble)
                                 && matches!(&func_ret_ty, Type::Float)
                             {
                                 // cvtsd2ss xmm0, xmm0
@@ -214,52 +233,30 @@ impl Codegen {
                             }
                             // Float/double -> integer return:
                             // convert xmm0 to integer in rax.
-                            if matches!(&expr_ty,
-                                    Type::Float | Type::Double
-                                    | Type::LongDouble)
+                            if matches!(&expr_ty, Type::Float | Type::Double | Type::LongDouble)
                                 && func_ret_ty.is_int()
                             {
-                                let wide = matches!(
-                                    &func_ret_ty,
-                                    Type::Long
-                                    | Type::LongLong);
+                                let wide = matches!(&func_ret_ty, Type::Long | Type::LongLong);
                                 match &expr_ty {
                                     Type::Float => {
                                         // cvttss2si rax, xmm0
-                                        let rex = 0x48
-                                            | if wide { 0x08 }
-                                              else { 0 };
-                                        self.emit(&[
-                                            0xF3, rex, 0x0F,
-                                            0x2C, 0xC0,
-                                        ]);
-                                    }
+                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
+                                        self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0]);
+                                    },
                                     Type::Double => {
                                         // cvttsd2si rax, xmm0
-                                        let rex = 0x48
-                                            | if wide { 0x08 }
-                                              else { 0 };
-                                        self.emit(&[
-                                            0xF2, rex, 0x0F,
-                                            0x2C, 0xC0,
-                                        ]);
-                                    }
+                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
+                                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0]);
+                                    },
                                     Type::LongDouble => {
                                         // long double 内部为 double, 已在 xmm0
-                                        let rex = 0x48
-                                            | if wide { 0x08 }
-                                              else { 0 };
-                                        self.emit(&[
-                                            0xF2, rex, 0x0F,
-                                            0x2C, 0xC0,
-                                        ]);
-                                    }
-                                    _ => {}
+                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
+                                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0]);
+                                    },
+                                    _ => {},
                                 }
                                 // Saturate out-of-range results
-                                self.emit_float_to_int_saturate(
-                                    0, &expr_ty, wide,
-                                );
+                                self.emit_float_to_int_saturate(0, &expr_ty, wide);
                             }
                             // Truncate return value to the function's
                             // declared return type width. For types smaller
@@ -272,28 +269,28 @@ impl Codegen {
                                     8 if is_signed => {
                                         // movsbq %al, %rax (sign-extend to 64-bit)
                                         self.emit(&[0x48, 0x0F, 0xBE, 0xC0]);
-                                    }
+                                    },
                                     8 => {
                                         // movzbq %al, %rax (zero-extend to 64-bit)
                                         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
-                                    }
+                                    },
                                     16 if is_signed => {
                                         // movswq %ax, %rax (sign-extend to 64-bit)
                                         self.emit(&[0x48, 0x0F, 0xBF, 0xC0]);
-                                    }
+                                    },
                                     16 => {
                                         // movzwq %ax, %rax (zero-extend to 64-bit)
                                         self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
-                                    }
+                                    },
                                     32 if is_signed => {
                                         // movsxd %eax, %rax (sign-extend to 64-bit)
                                         self.emit(&[0x48, 0x63, 0xC0]);
-                                    }
+                                    },
                                     32 => {
                                         // mov %eax, %eax (zero-extend to 64-bit)
                                         self.emit(&[0x89, 0xC0]);
-                                    }
-                                    _ => {}
+                                    },
+                                    _ => {},
                                 }
                             }
                         }
@@ -318,12 +315,12 @@ impl Codegen {
                     self.emit_instrument_func_exit();
                 }
                 self.emit_func_epilogue();
-            }
+            },
             Stmt::Expr { e, .. } => {
                 if !self.gen_unknown_builtin_stmt(e) {
                     self.gen_expr(e, 0);
                 }
-            }
+            },
             Stmt::If {
                 cond, then_, else_, ..
             } => {
@@ -365,7 +362,7 @@ impl Codegen {
                     }
                     self.label(&lend);
                 }
-            }
+            },
             Stmt::While { cond, body, .. } => {
                 let ls = self.fresh_label();
                 let le = self.fresh_label();
@@ -384,7 +381,7 @@ impl Codegen {
                 self.loop_continue = sc;
                 self.loop_break = sb;
                 self.break_targets.pop();
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -419,7 +416,7 @@ impl Codegen {
                 self.loop_continue = sc;
                 self.loop_break = sb;
                 self.break_targets.pop();
-            }
+            },
             Stmt::Do { body, cond, .. } => {
                 let ls = self.fresh_label();
                 let le = self.fresh_label();
@@ -437,7 +434,7 @@ impl Codegen {
                 self.loop_continue = sc;
                 self.loop_break = sb;
                 self.break_targets.pop();
-            }
+            },
             Stmt::Block { b, .. } => {
                 let cleanup_base = self.cleanup_vars.len();
                 self.gen_block_items(&b.items);
@@ -455,7 +452,7 @@ impl Codegen {
                 if Self::block_contains_vla(&b.items) {
                     self.emit_vla_restore();
                 }
-            }
+            },
             Stmt::Break { .. } => {
                 // break 跳到最近封闭的 switch / 循环出口。switch 的
                 // 出口标签 l_break 会统一弹出 switch 值 (add rsp, 8),
@@ -464,14 +461,14 @@ impl Codegen {
                 if let Some((l, _)) = self.break_targets.last().cloned() {
                     self.jmp_rel32(&l, JumpKind::Jmp);
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 // 回跳前恢复动态栈基: continue 丢弃本轮迭代内的 VLA
                 self.emit_vla_restore();
                 if let Some(l) = self.loop_continue.clone() {
                     self.jmp_rel32(&l, JumpKind::Jmp);
                 }
-            }
+            },
             Stmt::Goto { target, .. } => {
                 // goto 可能跳出含 VLA 的块或回跳到声明前, 跳转前统一
                 // 恢复动态栈基, 防止回跳循环累积泄漏 (栈耗尽段错误)
@@ -479,8 +476,8 @@ impl Codegen {
                 // Non-local goto: 嵌套函数 goto 到父函数中的标签.
                 // 标签不在当前函数体内定义 → 需要恢复父帧指针.
                 // r10 (静态链) 指向父帧, 将其加载到 r13 (帧指针).
-                let is_nonlocal = self.current_func_is_nested
-                    && !self.local_labels.contains(&target.name);
+                let is_nonlocal =
+                    self.current_func_is_nested && !self.local_labels.contains(&target.name);
                 if is_nonlocal {
                     // mov r13, r10  (恢复父帧指针)
                     // 编码: 4D 89 D5
@@ -493,12 +490,12 @@ impl Codegen {
                 }
                 let lbl = Self::c_label_to_asm(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
-            }
+            },
             Stmt::Label { name, stmt, .. } => {
                 let lbl = Self::c_label_to_asm(&name.name);
                 self.label(&lbl);
                 self.gen_stmt(stmt);
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 // switch: 计算表达式, 比较链跳转到对应 case 体.
                 // 布局: 所有比较集中在开头 (相等跳 l_case_i), 无匹配
@@ -545,27 +542,19 @@ impl Codegen {
                             self.gen_expr(val, 2); // rdx = low
                             self.store_stack(2, sw_lo_slot);
                             self.gen_expr(hi, 8); // r8 = high
-                            // Bug fix: gen_expr 可能将 rcx 用作临时寄存器,
-                            // 每次比较前从帧内槽重新加载 switch 值到 rcx.
+                                                  // Bug fix: gen_expr 可能将 rcx 用作临时寄存器,
+                                                  // 每次比较前从帧内槽重新加载 switch 值到 rcx.
                             self.load_stack(1, sw_slot); // rcx = switch 值
                             self.load_stack(2, sw_lo_slot); // rdx = low
                             self.emit(&[0x48, 0x39, 0xD1]); // cmp rcx, rdx
-                            // 有符号用 jl (skip if < low), 无符号用 jb
-                            let jk_lo = if switch_is_signed {
-                                JumpKind::Jl
-                            } else {
-                                JumpKind::Jb
-                            };
+                                                            // 有符号用 jl (skip if < low), 无符号用 jb
+                            let jk_lo = if switch_is_signed { JumpKind::Jl } else { JumpKind::Jb };
                             self.jmp_rel32(&l_next, jk_lo);
                             // 重新加载 switch 值 (gen_expr(hi) 可能覆写 rcx)
                             self.load_stack(1, sw_slot); // rcx = switch 值
                             self.emit(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
-                            // 有符号用 jg (skip if > high), 无符号用 ja
-                            let jk_hi = if switch_is_signed {
-                                JumpKind::Jg
-                            } else {
-                                JumpKind::Ja
-                            };
+                                                            // 有符号用 jg (skip if > high), 无符号用 ja
+                            let jk_hi = if switch_is_signed { JumpKind::Jg } else { JumpKind::Ja };
                             self.jmp_rel32(&l_next, jk_hi);
                             self.jmp_rel32(&l_case, JumpKind::Jmp);
                             self.label(&l_next);
@@ -648,13 +637,13 @@ impl Codegen {
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_end);
                 self.break_targets.pop();
-            }
+            },
             Stmt::GotoIndirect { expr, .. } => {
                 // goto *expr: 计算目标地址并跳转
                 self.gen_expr(expr, 0); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
-            }
-            Stmt::Fallthrough { .. } => {}
+            },
+            Stmt::Fallthrough { .. } => {},
             Stmt::AsmGoto {
                 asm_str,
                 outputs,
@@ -680,16 +669,14 @@ impl Codegen {
                     resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                     resolved_asm =
                         Self::asm_replace_label_idx(&resolved_asm, label_base + i, &prefixed);
-                    resolved_asm =
-                        resolved_asm.replace(&format!("%l[{}]", label.name), &prefixed);
+                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &prefixed);
                     // %c[label]: strip immediate prefix, resolve to label
-                    resolved_asm =
-                        resolved_asm.replace(&format!("%c[{}]", label.name), &prefixed);
+                    resolved_asm = resolved_asm.replace(&format!("%c[{}]", label.name), &prefixed);
                     // Also replace literal label definitions in asm text:
                     // "labelname:" -> ".Ll_labelname:" so they match the
                     // prefixed label names used by the codegen.
-                    resolved_asm =
-                        resolved_asm.replace(&format!("{}:", label.name), &format!("{}:", prefixed));
+                    resolved_asm = resolved_asm
+                        .replace(&format!("{}:", label.name), &format!("{}:", prefixed));
                 }
                 // 跨函数标签地址 + asm goto 混用警告:
                 // &&label 产生的地址仅在当前函数内有效; 若作为输入操作数
@@ -715,7 +702,7 @@ impl Codegen {
                     input_constraints,
                     clobbers,
                 );
-            }
+            },
         }
     }
     /// gen_expr 语句表达式分支 (batch F5 逐字搬迁: Expr::StmtExpr arm)。
@@ -745,9 +732,9 @@ impl Codegen {
                                     // rsi 已 = 源地址 (gen_lvalue_addr 放到 dst=6 即 rsi)
                                     let temp_off = self.alloc_sret_slot(sz);
                                     self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
-                                    self.mov_imm(1, sz as i128);    // rcx = size
-                                    self.emit(&[0xFC]);               // cld
-                                    self.emit(&[0xF3, 0xA4]);        // rep movsb
+                                    self.mov_imm(1, sz as i128); // rcx = size
+                                    self.emit(&[0xFC]); // cld
+                                    self.emit(&[0xF3, 0xA4]); // rep movsb
                                     self.emit_lea_r13(dst, temp_off);
                                 } else if Self::needs_memory_return(&e_ty) {
                                     // Call + >16B: SysV ABI sret, rax 已是返回地址
@@ -770,22 +757,28 @@ impl Codegen {
                             } else {
                                 self.gen_expr(e, dst);
                             }
-                        }
+                        },
                         BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
                             self.gen_expr(e, dst);
-                        }
+                        },
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
                             // static 局部变量已在全局数据段分配
                             if v.is_static
-                                && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name)
-                                && !self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                                && self
+                                    .static_local_map
+                                    .is_static_local(&self.current_func_name, &v.name.name)
+                                && !self
+                                    .static_local_map
+                                    .needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
                                 continue;
                             }
                             // static local 需要运行时初始化
                             if v.is_static
-                                && self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                                && self
+                                    .static_local_map
+                                    .needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
                                 if let Some(init) = &v.init {
                                     self.gen_expr(init, 0);
@@ -819,28 +812,27 @@ impl Codegen {
                                     if matches!(
                                         &init_ty,
                                         Type::Float | Type::Double | Type::LongDouble
-                                    ) && Self::is_integer_type(&v.ty) {
-                                        self.emit_implicit_float_to_int(
-                                            0, &init_ty, &v.ty,
-                                        );
+                                    ) && Self::is_integer_type(&v.ty)
+                                    {
+                                        self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                                     }
                                     self.mov_to_stack(0, &v.name.name);
                                 }
                             }
-                        }
+                        },
                         BlockItem::Decl(Decl::StructDef(sd)) => {
                             // 局部类型声明: 重新绑定 VM struct 大小槽
                             // (与 gen_block_items 同一语义)
                             self.gen_vm_struct_bind(sd, false);
-                        }
+                        },
                         BlockItem::Decl(Decl::UnionDef(sd)) => {
                             self.gen_vm_struct_bind(sd, true);
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -856,8 +848,12 @@ impl Codegen {
                     // static 局部变量已在全局数据段分配,
                     // 跳过栈分配 (与函数顶层遍历 L6970 一致)
                     if v.is_static
-                        && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name)
-                        && !self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                        && self
+                            .static_local_map
+                            .is_static_local(&self.current_func_name, &v.name.name)
+                        && !self
+                            .static_local_map
+                            .needs_runtime_init(&self.current_func_name, &v.name.name)
                     {
                         continue;
                     }
@@ -879,7 +875,9 @@ impl Codegen {
                     }
                     // static local 需要运行时初始化: 发射初始化代码到全局地址
                     if v.is_static
-                        && self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name)
+                        && self
+                            .static_local_map
+                            .needs_runtime_init(&self.current_func_name, &v.name.name)
                     {
                         if let Some(init) = &v.init {
                             self.gen_expr(init, 0);
@@ -920,30 +918,27 @@ impl Codegen {
                                 self.gen_expr(init, 0);
                                 // Implicit float→int conversion
                                 let init_ty = init.ty();
-                                if matches!(
-                                    &init_ty,
-                                    Type::Float | Type::Double | Type::LongDouble
-                                ) && Self::is_integer_type(&v.ty) {
-                                    self.emit_implicit_float_to_int(
-                                        0, &init_ty, &v.ty,
-                                    );
+                                if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
+                                    && Self::is_integer_type(&v.ty)
+                                {
+                                    self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                                 }
                                 self.mov_to_stack(0, &v.name.name);
                             }
                         }
                     }
-                }
+                },
                 // 局部 struct/union 定义声明: 含 VLA 字段时在声明点
                 // 求值总大小存入绑定槽 (C11 6.2.4p7), 供 sizeof(类型)
                 // 读槽 (20041218-2: 声明后 n++ 不影响 sizeof)。
                 // 静态类型 (重)声明则清除残留绑定。
                 BlockItem::Decl(Decl::StructDef(sd)) => {
                     self.gen_vm_struct_bind(sd, false);
-                }
+                },
                 BlockItem::Decl(Decl::UnionDef(sd)) => {
                     self.gen_vm_struct_bind(sd, true);
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }

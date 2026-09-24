@@ -71,10 +71,11 @@ pub enum SfinaeError {
 /// 判断错误是否属于 SFINAE 类别（用于 overload resolution 过滤）
 /// SFINAE 错误不是硬错误，而是表示该候选在重载集中不可行（non-viable）
 pub fn is_sfinae_failure(err: &SfinaeError) -> bool {
-    matches!(err, 
-        SfinaeError::EnableIfFalse |
-        SfinaeError::MissingTypeMember |
-        SfinaeError::SubstitutionFailed
+    matches!(
+        err,
+        SfinaeError::EnableIfFalse
+            | SfinaeError::MissingTypeMember
+            | SfinaeError::SubstitutionFailed
     )
 }
 
@@ -334,8 +335,8 @@ pub fn expand_concepts(cond: &str, concepts: &std::collections::HashMap<String, 
                             end = i;
                             break;
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
             if end > 0 {
@@ -374,18 +375,18 @@ fn find_top_level(s: &str, pat: &str) -> Option<usize> {
                 } else {
                     depth += 1;
                 }
-            }
+            },
             b'>' => {
                 if bytes.get(i + 1) == Some(&b'=') {
                     i += 1;
                 } else {
                     depth -= 1;
                 }
-            }
+            },
             b'(' => depth += 1,
             b')' => depth -= 1,
             _ if depth == 0 && s[i..].starts_with(pat) => return Some(i),
-            _ => {}
+            _ => {},
         }
         i += 1;
     }
@@ -441,7 +442,7 @@ fn split_cond_with(rest: &str) -> Option<(String, String)> {
                 } else {
                     depth += 1;
                 }
-            }
+            },
             b'>' => {
                 if bytes.get(i + 1) == Some(&b'=') {
                     i += 1;
@@ -451,11 +452,11 @@ fn split_cond_with(rest: &str) -> Option<(String, String)> {
                 } else {
                     depth -= 1;
                 }
-            }
+            },
             b',' if depth == 0 && comma_idx.is_none() => {
                 comma_idx = Some(i);
-            }
-            _ => {}
+            },
+            _ => {},
         }
         i += 1;
     }
@@ -480,7 +481,7 @@ fn split_cond(rest: &str) -> Option<String> {
                 } else {
                     depth += 1;
                 }
-            }
+            },
             b'>' => {
                 if bytes.get(i + 1) == Some(&b'=') {
                     i += 1;
@@ -489,9 +490,9 @@ fn split_cond(rest: &str) -> Option<String> {
                 } else {
                     depth -= 1;
                 }
-            }
+            },
             b',' if depth == 0 => return Some(rest[..i].trim().to_string()),
-            _ => {}
+            _ => {},
         }
         i += 1;
     }
@@ -524,7 +525,7 @@ fn find_trait_close(rest: &str) -> Option<usize> {
             b'<' => depth += 1,
             b'>' if depth == 0 => return Some(i),
             b'>' => depth -= 1,
-            _ => {}
+            _ => {},
         }
     }
     None
@@ -712,7 +713,7 @@ impl Concept {
                 } else {
                     name == "value_type" || name == "value"
                 }
-            }
+            },
             Concept::SizeLe { ty, n } => {
                 let resolved = if let Some(arg) = ctx.lookup(ty) {
                     arg
@@ -722,7 +723,7 @@ impl Concept {
                 // 启发式大小估算 (M10 简化)
                 let size = type_size_hint(&resolved);
                 size <= *n
-            }
+            },
             Concept::SizeGe { ty, n } => {
                 let resolved = if let Some(arg) = ctx.lookup(ty) {
                     arg
@@ -731,19 +732,19 @@ impl Concept {
                 };
                 let size = type_size_hint(&resolved);
                 size >= *n
-            }
+            },
             Concept::SameAs(a, b) => {
                 let ra = if let Some(x) = ctx.lookup(a) { x } else { a.clone() };
                 let rb = if let Some(x) = ctx.lookup(b) { x } else { b.clone() };
                 ra == rb
-            }
+            },
             Concept::DerivedFrom(a, b) => {
                 let ra = if let Some(x) = ctx.lookup(a) { x } else { a.clone() };
                 let rb = if let Some(x) = ctx.lookup(b) { x } else { b.clone() };
                 // M10 简化: 字符串包含关系 / 前缀关系
                 ra.starts_with(&rb) || ra.contains(&format!("::{}", rb)) || ra.contains(&rb)
                 // 名字含 base (如 MyBase 含 Base)
-            }
+            },
             Concept::Expression => true, // M10 简化
         }
     }
@@ -779,65 +780,88 @@ fn is_convertible(from: &MangleType, to: &MangleType) -> bool {
     if from == to {
         return true;
     }
-    
+
     // Pointer conversions (recursive on pointee)
     if let (MangleType::Pointer(inner_from), MangleType::Pointer(inner_to)) = (from, to) {
         return is_convertible(inner_from, inner_to);
     }
-    
-    // Reference conversions (recursive on referent)  
+
+    // Reference conversions (recursive on referent)
     if let (MangleType::Reference(inner_from), MangleType::Reference(inner_to)) = (from, to) {
         return is_convertible(inner_from, inner_to);
     }
-    
+
     // Any type can convert to void
     if matches!(to, MangleType::Void) {
         return true;
     }
-    
+
     // Built-in numeric promotions:
     // Small integral types to larger ones:
     // bool, char, signed char, unsigned char -> short/unsigned short -> int/uint -> long/ulong -> long long/ulong long
     match (from, to) {
         // Character types to any integral type
-        (MangleType::Char | MangleType::Schar | MangleType::Uchar, 
-         MangleType::Short | MangleType::Ushort | MangleType::Int | MangleType::Uint | 
-         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+        (
+            MangleType::Char | MangleType::Schar | MangleType::Uchar,
+            MangleType::Short
+            | MangleType::Ushort
+            | MangleType::Int
+            | MangleType::Uint
+            | MangleType::Long
+            | MangleType::Ulong
+            | MangleType::LongLong
+            | MangleType::UlongLong,
+        ) => {
             return true;
-        }
+        },
         // Bool to any integral type
-        (MangleType::Bool, 
-         MangleType::Short | MangleType::Ushort | MangleType::Int | MangleType::Uint | 
-         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+        (
+            MangleType::Bool,
+            MangleType::Short
+            | MangleType::Ushort
+            | MangleType::Int
+            | MangleType::Uint
+            | MangleType::Long
+            | MangleType::Ulong
+            | MangleType::LongLong
+            | MangleType::UlongLong,
+        ) => {
             return true;
-        }
+        },
         // Short/Ushort to larger integral types
-        (MangleType::Short | MangleType::Ushort,
-         MangleType::Int | MangleType::Uint | MangleType::Long | MangleType::Ulong | 
-         MangleType::LongLong | MangleType::UlongLong) => {
+        (
+            MangleType::Short | MangleType::Ushort,
+            MangleType::Int
+            | MangleType::Uint
+            | MangleType::Long
+            | MangleType::Ulong
+            | MangleType::LongLong
+            | MangleType::UlongLong,
+        ) => {
             return true;
-        }
+        },
         // Int/Uint to larger integral types
-        (MangleType::Int | MangleType::Uint,
-         MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong) => {
+        (
+            MangleType::Int | MangleType::Uint,
+            MangleType::Long | MangleType::Ulong | MangleType::LongLong | MangleType::UlongLong,
+        ) => {
             return true;
-        }
+        },
         // Long/Ulong to long long
-        (MangleType::Long | MangleType::Ulong,
-         MangleType::LongLong | MangleType::UlongLong) => {
+        (MangleType::Long | MangleType::Ulong, MangleType::LongLong | MangleType::UlongLong) => {
             return true;
-        }
+        },
         // Float to double
         (MangleType::Float, MangleType::Double | MangleType::LongDouble) => {
             return true;
-        }
+        },
         // Double to long double
         (MangleType::Double, MangleType::LongDouble) => {
             return true;
-        }
-        _ => {}
+        },
+        _ => {},
     }
-    
+
     false
 }
 
@@ -852,8 +876,8 @@ pub fn evaluate_gcc_type_trait(trait_name: &str, types: &[MangleType]) -> Option
             } else {
                 None
             }
-        }
-        
+        },
+
         // __is_convertible<A,B>: A 是否可以隐式转换为 B
         "__is_convertible" => {
             if types.len() >= 2 {
@@ -861,8 +885,8 @@ pub fn evaluate_gcc_type_trait(trait_name: &str, types: &[MangleType]) -> Option
             } else {
                 None
             }
-        }
-        
+        },
+
         // __is_constructible<T, Args...>: 是否可以用 Args 构造 T
         // Simplified M10: check if any argument type matches the target type directly
         "__is_constructible" => {
@@ -874,8 +898,8 @@ pub fn evaluate_gcc_type_trait(trait_name: &str, types: &[MangleType]) -> Option
             } else {
                 None
             }
-        }
-        
+        },
+
         // __is_assignable<T, U>: T 是否可以赋值 U
         // Simplified M10: identical or convertible means assignable
         "__is_assignable" => {
@@ -891,8 +915,8 @@ pub fn evaluate_gcc_type_trait(trait_name: &str, types: &[MangleType]) -> Option
             } else {
                 None
             }
-        }
-        
+        },
+
         // Other GCC traits can be added here
         _ => None,
     }
@@ -1029,17 +1053,11 @@ impl CoroutinePromiseType {
     pub fn infer(return_type: &str, _param_types: &[String]) -> Self {
         // M23 简化: 根据返回类型推断常见协程模式
         let (promise_name, has_return_value) = if return_type.contains("generator") {
-            (
-                format!("std::generator<{}>::promise_type", return_type),
-                true,
-            )
+            (format!("std::generator<{}>::promise_type", return_type), true)
         } else if return_type.contains("task") {
             (format!("std::task<{}>::promise_type", return_type), false)
         } else {
-            (
-                format!("std::coroutine_traits<{}>::promise_type", return_type),
-                false,
-            )
+            (format!("std::coroutine_traits<{}>::promise_type", return_type), false)
         };
         Self {
             promise_name,
@@ -1305,10 +1323,7 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         assert_eq!(try_substitute("T*", &ctx).unwrap(), "int*");
-        assert_eq!(
-            try_substitute("std::vector<T>", &ctx).unwrap(),
-            "std::vector<int>"
-        );
+        assert_eq!(try_substitute("std::vector<T>", &ctx).unwrap(), "std::vector<int>");
     }
 
     #[test]
@@ -1521,24 +1536,15 @@ mod tests {
         ctx.bind("T".to_string(), "int".to_string());
         ctx.bind("U".to_string(), "MyClass".to_string());
         let out = ctx.substitute_all(&["T*".to_string(), "std::vector<U>".to_string()]);
-        assert_eq!(
-            out,
-            vec!["int*".to_string(), "std::vector<MyClass>".to_string()]
-        );
+        assert_eq!(out, vec!["int*".to_string(), "std::vector<MyClass>".to_string()]);
     }
 
     #[test]
     fn sfinae_trait_is_same() {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
-        assert_eq!(
-            evaluate_trait_condition("std::is_same<T, int>::value", &ctx),
-            Some(true)
-        );
-        assert_eq!(
-            evaluate_trait_condition("is_same<T, long>::value", &ctx),
-            Some(false)
-        );
+        assert_eq!(evaluate_trait_condition("std::is_same<T, int>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_same<T, long>::value", &ctx), Some(false));
     }
 
     #[test]
@@ -1546,10 +1552,7 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         assert_eq!(evaluate_trait_condition("sizeof(T) <= 4", &ctx), Some(true));
-        assert_eq!(
-            evaluate_trait_condition("sizeof(T) >= 8", &ctx),
-            Some(false)
-        );
+        assert_eq!(evaluate_trait_condition("sizeof(T) >= 8", &ctx), Some(false));
         assert_eq!(evaluate_trait_condition("sizeof(T) == 4", &ctx), Some(true));
     }
 
@@ -1559,26 +1562,11 @@ mod tests {
         ctx.bind("T".to_string(), "int".to_string());
         ctx.bind("P".to_string(), "char*".to_string());
         ctx.bind("F".to_string(), "double".to_string());
-        assert_eq!(
-            evaluate_trait_condition("is_integral<T>::value", &ctx),
-            Some(true)
-        );
-        assert_eq!(
-            evaluate_trait_condition("is_pointer<P>::value", &ctx),
-            Some(true)
-        );
-        assert_eq!(
-            evaluate_trait_condition("is_pointer<T>::value", &ctx),
-            Some(false)
-        );
-        assert_eq!(
-            evaluate_trait_condition("is_class<F>::value", &ctx),
-            Some(false)
-        );
-        assert_eq!(
-            evaluate_trait_condition("is_floating_point<F>::value", &ctx),
-            Some(true)
-        );
+        assert_eq!(evaluate_trait_condition("is_integral<T>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<P>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<T>::value", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("is_class<F>::value", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("is_floating_point<F>::value", &ctx), Some(true));
     }
 
     #[test]
@@ -1593,10 +1581,7 @@ mod tests {
             evaluate_trait_condition("is_pointer<T>::value || sizeof(T) == 4", &ctx),
             Some(true)
         );
-        assert_eq!(
-            evaluate_trait_condition("!is_pointer<T>::value", &ctx),
-            Some(true)
-        );
+        assert_eq!(evaluate_trait_condition("!is_pointer<T>::value", &ctx), Some(true));
         assert_eq!(
             evaluate_trait_condition("is_pointer<T>::value && is_integral<T>::value", &ctx),
             Some(false)
@@ -1616,18 +1601,9 @@ mod tests {
     fn sfinae_enable_if_true_and_false() {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
-        assert!(evaluate_enable_if(
-            "enable_if_t<is_integral<T>::value, int>",
-            &ctx
-        ));
-        assert!(!evaluate_enable_if(
-            "enable_if_t<is_pointer<T>::value, int>",
-            &ctx
-        ));
-        assert!(evaluate_enable_if(
-            "std::enable_if<sizeof(T) <= 4>::type",
-            &ctx
-        ));
+        assert!(evaluate_enable_if("enable_if_t<is_integral<T>::value, int>", &ctx));
+        assert!(!evaluate_enable_if("enable_if_t<is_pointer<T>::value, int>", &ctx));
+        assert!(evaluate_enable_if("std::enable_if<sizeof(T) <= 4>::type", &ctx));
         // 提取失败时保守返回 true
         assert!(evaluate_enable_if("some_other_default", &ctx));
     }
@@ -1639,10 +1615,7 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         // std::void_t<T>::value should work when T is valid
-        assert_eq!(
-            evaluate_trait_condition("std::void_t<int>::value", &ctx),
-            Some(true)
-        );
+        assert_eq!(evaluate_trait_condition("std::void_t<int>::value", &ctx), Some(true));
     }
 
     #[test]
@@ -1650,15 +1623,9 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         // enable_if<C, T>::type exists when C is true
-        assert!(evaluate_enable_if(
-            "std::enable_if<is_integral<T>::value, int>::type",
-            &ctx
-        ));
+        assert!(evaluate_enable_if("std::enable_if<is_integral<T>::value, int>::type", &ctx));
         // When condition fails, ::type doesn't exist
-        assert!(!evaluate_enable_if(
-            "std::enable_if<is_pointer<T>::value, int>::type",
-            &ctx
-        ));
+        assert!(!evaluate_enable_if("std::enable_if<is_pointer<T>::value, int>::type", &ctx));
     }
 
     #[test]
@@ -1667,33 +1634,33 @@ mod tests {
         // Verify new error types exist
         let err = SfinaeError::EnableIfFalse;
         assert!(matches!(err, SfinaeError::EnableIfFalse));
-        
+
         let err = SfinaeError::MissingTypeMember;
         assert!(matches!(err, SfinaeError::MissingTypeMember));
-        
+
         let err = SfinaeError::SubstitutionFailed;
         assert!(matches!(err, SfinaeError::SubstitutionFailed));
     }
 
     #[test]
     fn sfinae_is_rejection_helper() {
-        use super::{is_sfinae_failure, is_sfinae_candidate_rejection, SfinaeError};
-        
+        use super::{is_sfinae_candidate_rejection, is_sfinae_failure, SfinaeError};
+
         // Test EnableIfFalse - should be rejected as non-viable
         assert!(is_sfinae_failure(&SfinaeError::EnableIfFalse));
         assert!(is_sfinae_candidate_rejection::<&str>(&Err(SfinaeError::EnableIfFalse)));
-        
+
         // Test MissingTypeMember - should be rejected as non-viable
         assert!(is_sfinae_failure(&SfinaeError::MissingTypeMember));
-        
+
         // Test SubstitutionFailed - should be rejected as non-viable
         assert!(is_sfinae_failure(&SfinaeError::SubstitutionFailed));
-        
+
         // Test regular errors - should NOT be rejected
         assert!(!is_sfinae_failure(&SfinaeError::UnboundParam("x".to_string())));
         assert!(!is_sfinae_failure(&SfinaeError::TypeError("bad".to_string())));
         assert!(!is_sfinae_failure(&SfinaeError::Disabled("x".to_string())));
-        
+
         // Successful results are never rejections
         assert!(!is_sfinae_candidate_rejection::<i32>(&Ok(42)));
     }
@@ -1704,18 +1671,12 @@ mod tests {
     fn gcc_trait_is_same_identical_types() {
         use super::MangleType;
         // __is_same<int, int> should be true
-        let types = vec![
-            MangleType::Int,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Int, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_same<double, double> should be true
-        let types = vec![
-            MangleType::Double,
-            MangleType::Double,
-        ];
+        let types = vec![MangleType::Double, MangleType::Double];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(true));
     }
@@ -1724,26 +1685,17 @@ mod tests {
     fn gcc_trait_is_same_different_types() {
         use super::MangleType;
         // __is_same<int, long> should be false
-        let types = vec![
-            MangleType::Int,
-            MangleType::Long,
-        ];
+        let types = vec![MangleType::Int, MangleType::Long];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(false));
-        
+
         // __is_same<float, double> should be false
-        let types = vec![
-            MangleType::Float,
-            MangleType::Double,
-        ];
+        let types = vec![MangleType::Float, MangleType::Double];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(false));
-        
+
         // __is_same<bool, char> should be false
-        let types = vec![
-            MangleType::Bool,
-            MangleType::Char,
-        ];
+        let types = vec![MangleType::Bool, MangleType::Char];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(false));
     }
@@ -1758,7 +1710,7 @@ mod tests {
         ];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_same<int*, long*> should be false
         let types = vec![
             MangleType::Pointer(Box::new(MangleType::Int)),
@@ -1772,10 +1724,7 @@ mod tests {
     fn gcc_trait_is_convertible_identity() {
         use super::MangleType;
         // __is_convertible<int, int> should be true (identity)
-        let types = vec![
-            MangleType::Int,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Int, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
     }
@@ -1784,50 +1733,32 @@ mod tests {
     fn gcc_trait_is_convertible_numeric_promotions() {
         use super::MangleType;
         // __is_convertible<char, int> should be true
-        let types = vec![
-            MangleType::Char,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Char, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<bool, int> should be true
-        let types = vec![
-            MangleType::Bool,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Bool, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<short, long> should be true
-        let types = vec![
-            MangleType::Short,
-            MangleType::Long,
-        ];
+        let types = vec![MangleType::Short, MangleType::Long];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<int, long long> should be true
-        let types = vec![
-            MangleType::Int,
-            MangleType::LongLong,
-        ];
+        let types = vec![MangleType::Int, MangleType::LongLong];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<float, double> should be true
-        let types = vec![
-            MangleType::Float,
-            MangleType::Double,
-        ];
+        let types = vec![MangleType::Float, MangleType::Double];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<double, long double> should be true
-        let types = vec![
-            MangleType::Double,
-            MangleType::LongDouble,
-        ];
+        let types = vec![MangleType::Double, MangleType::LongDouble];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
     }
@@ -1836,17 +1767,11 @@ mod tests {
     fn gcc_trait_is_convertible_to_void() {
         use super::MangleType;
         // Any type can convert to void
-        let types = vec![
-            MangleType::Int,
-            MangleType::Void,
-        ];
+        let types = vec![MangleType::Int, MangleType::Void];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
-        let types = vec![
-            MangleType::Class("Foo".to_string()),
-            MangleType::Void,
-        ];
+
+        let types = vec![MangleType::Class("Foo".to_string()), MangleType::Void];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
     }
@@ -1861,7 +1786,7 @@ mod tests {
         ];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_convertible<char*, void*> via pointee conversion (char -> any integral)
         let types = vec![
             MangleType::Pointer(Box::new(MangleType::Char)),
@@ -1875,18 +1800,12 @@ mod tests {
     fn gcc_trait_is_convertible_not_convertible() {
         use super::MangleType;
         // __is_convertible<long, int> should be false (no reverse promotion)
-        let types = vec![
-            MangleType::Long,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Long, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(false));
-        
+
         // __is_convertible<double, float> should be false (no downcast)
-        let types = vec![
-            MangleType::Double,
-            MangleType::Float,
-        ];
+        let types = vec![MangleType::Double, MangleType::Float];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, Some(false));
     }
@@ -1895,13 +1814,10 @@ mod tests {
     fn gcc_trait_is_constructible_direct_match() {
         use super::MangleType;
         // __is_constructible<int, int> should be true
-        let types = vec![
-            MangleType::Int,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Int, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_constructible<Foo, Foo> should be true
         let types = vec![
             MangleType::Class("Foo".to_string()),
@@ -1915,14 +1831,10 @@ mod tests {
     fn gcc_trait_is_constructible_multiple_args() {
         use super::MangleType;
         // __is_constructible<int, int, long> - int matches one arg
-        let types = vec![
-            MangleType::Int,
-            MangleType::Int,
-            MangleType::Long,
-        ];
+        let types = vec![MangleType::Int, MangleType::Int, MangleType::Long];
         let result = super::evaluate_gcc_type_trait("__is_constructible", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_constructible<Foo, int, double> - no match
         let types = vec![
             MangleType::Class("Foo".to_string()),
@@ -1937,13 +1849,10 @@ mod tests {
     fn gcc_trait_is_assignable_identical() {
         use super::MangleType;
         // __is_assignable<int, int> should be true (identical)
-        let types = vec![
-            MangleType::Int,
-            MangleType::Int,
-        ];
+        let types = vec![MangleType::Int, MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_assignable<Foo, Foo> should be true (identical)
         let types = vec![
             MangleType::Class("Foo".to_string()),
@@ -1957,21 +1866,15 @@ mod tests {
     fn gcc_trait_is_assignable_convertible() {
         use super::MangleType;
         // __is_assignable<long, short> should be true (short can convert to long)
-        let types = vec![
-            MangleType::Long,
-            MangleType::Short,
-        ];
+        let types = vec![MangleType::Long, MangleType::Short];
         let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_assignable<double, float> should be true (float can convert to double)
-        let types = vec![
-            MangleType::Double,
-            MangleType::Float,
-        ];
+        let types = vec![MangleType::Double, MangleType::Float];
         let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
         assert_eq!(result, Some(true));
-        
+
         // __is_assignable<void*, char*> should be true (via pointee: char -> int)
         let types = vec![
             MangleType::Pointer(Box::new(MangleType::Void)),
@@ -1985,18 +1888,12 @@ mod tests {
     fn gcc_trait_is_assignable_not_assignable() {
         use super::MangleType;
         // __is_assignable<int, long> should be false (long cannot convert to int)
-        let types = vec![
-            MangleType::Int,
-            MangleType::Long,
-        ];
+        let types = vec![MangleType::Int, MangleType::Long];
         let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
         assert_eq!(result, Some(false));
-        
+
         // __is_assignable<float, double> should be false (double cannot convert to float)
-        let types = vec![
-            MangleType::Float,
-            MangleType::Double,
-        ];
+        let types = vec![MangleType::Float, MangleType::Double];
         let result = super::evaluate_gcc_type_trait("__is_assignable", &types);
         assert_eq!(result, Some(false));
     }
@@ -2008,12 +1905,12 @@ mod tests {
         let types = vec![MangleType::Int];
         let result = super::evaluate_gcc_type_trait("__is_same", &types);
         assert_eq!(result, None);
-        
+
         // __is_convertible with 0 args should return None
         let types: Vec<MangleType> = vec![];
         let result = super::evaluate_gcc_type_trait("__is_convertible", &types);
         assert_eq!(result, None);
-        
+
         // Unknown trait should return None
         let types = vec![MangleType::Int, MangleType::Long];
         let result = super::evaluate_gcc_type_trait("__unknown_trait", &types);

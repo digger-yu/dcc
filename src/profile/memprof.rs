@@ -242,7 +242,7 @@ impl MemProfData {
                 AllocClass::Hot => hot_sites += 1,
                 AllocClass::Cold => cold_sites += 1,
                 AllocClass::Ephemeral => ephemeral_sites += 1,
-                AllocClass::Normal => {}
+                AllocClass::Normal => {},
             }
         }
         MemProfSummary {
@@ -346,10 +346,7 @@ impl MemProfData {
     /// 从 dcc 二进制格式解析
     pub fn read_binary(data: &[u8]) -> io::Result<Self> {
         if data.len() < 12 || &data[0..8] != MEMPROF_BINARY_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad memprofdata magic",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad memprofdata magic"));
         }
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
         if version != MEMPROF_FORMAT_VERSION {
@@ -413,10 +410,7 @@ impl MemProfInstrumentor {
     /// `__dcc_memprof_alloc_record(size, return_addr)` 内部调用 libc
     /// malloc 并返回指针, 因此插桩直接把 `malloc(x)` 改写为该调用。
     pub fn alloc_record_call(size_expr: &str, return_addr_expr: &str) -> String {
-        format!(
-            "__dcc_memprof_alloc_record({}, {})",
-            size_expr, return_addr_expr
-        )
+        format!("__dcc_memprof_alloc_record({}, {})", size_expr, return_addr_expr)
     }
 
     /// 返回替换 free 调用的调用。
@@ -424,10 +418,7 @@ impl MemProfInstrumentor {
     /// 与 lifetime 后自行调用 libc free, 因此插桩直接把 `free(p)`
     /// 改写为该调用。
     pub fn free_record_call(ptr_expr: &str, return_addr_expr: &str) -> String {
-        format!(
-            "__dcc_memprof_free_record({}, {})",
-            ptr_expr, return_addr_expr
-        )
+        format!("__dcc_memprof_free_record({}, {})", ptr_expr, return_addr_expr)
     }
 
     /// 返回需要链接的 runtime 函数列表
@@ -788,10 +779,7 @@ fn read_u64(data: &[u8], off: &mut usize) -> io::Result<u64> {
 fn read_string(data: &[u8], off: &mut usize) -> io::Result<String> {
     let len = read_u32(data, off)? as usize;
     if *off + len > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated string",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated string"));
     }
     let s = std::str::from_utf8(&data[*off..*off + len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -844,10 +832,7 @@ mod tests {
         d.alloc_counts.insert(vec!["normal_alloc".into()], 50);
         d.alloc_counts.insert(vec!["cold_alloc".into()], 2);
         assert_eq!(d.classify(&["hot_alloc".into()], 5, 100), AllocClass::Hot);
-        assert_eq!(
-            d.classify(&["normal_alloc".into()], 5, 100),
-            AllocClass::Normal
-        );
+        assert_eq!(d.classify(&["normal_alloc".into()], 5, 100), AllocClass::Normal);
         assert_eq!(d.classify(&["cold_alloc".into()], 5, 100), AllocClass::Cold);
     }
 
@@ -899,10 +884,8 @@ mod tests {
             .insert(vec!["main".into(), "malloc".into()], 100);
         d.alloc_bytes
             .insert(vec!["main".into(), "malloc".into()], 4096);
-        d.lifetime.insert(
-            (vec!["main".into(), "malloc".into()], vec!["free".into()]),
-            4096,
-        );
+        d.lifetime
+            .insert((vec!["main".into(), "malloc".into()], vec!["free".into()]), 4096);
         d.dealloc_counts.insert(vec!["free".into()], 50);
         let text = d.serialize();
         let d2 = MemProfData::parse_text(&text).unwrap();
@@ -915,11 +898,8 @@ mod tests {
     #[test]
     fn read_from_file() {
         let tmp = std::env::temp_dir().join("dcc-memprof-test-v1.txt");
-        std::fs::write(
-            &tmp,
-            b"alloc main -> foo -> malloc = 100 4096\ndealloc free = 50\n",
-        )
-        .unwrap();
+        std::fs::write(&tmp, b"alloc main -> foo -> malloc = 100 4096\ndealloc free = 50\n")
+            .unwrap();
         let d = MemProfData::read(&tmp).unwrap();
         assert_eq!(
             d.alloc_counts
@@ -957,10 +937,8 @@ mod tests {
             .insert(vec!["main".into(), "malloc".into()], 100);
         d.alloc_bytes
             .insert(vec!["main".into(), "malloc".into()], 4096);
-        d.lifetime.insert(
-            (vec!["main".into(), "malloc".into()], vec!["free".into()]),
-            4096,
-        );
+        d.lifetime
+            .insert((vec!["main".into(), "malloc".into()], vec!["free".into()]), 4096);
         d.dealloc_counts.insert(vec!["free".into()], 50);
 
         let tmp = std::env::temp_dir().join("dcc-memprof-bin.memprofdata");

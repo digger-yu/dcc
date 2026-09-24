@@ -2,11 +2,11 @@
 // ET_EXEC symbol table collection.
 
 use crate::ast::*;
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::shared::elf::{
     ElfSym, SHN_UNDEF, STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE,
     STT_OBJECT, STT_SECTION, STT_TLS, STV_DEFAULT,
 };
+use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
     pub fn collect_exec_symbols(&mut self, prog: &Program) {
@@ -119,7 +119,8 @@ impl Codegen {
         }
         // Static 局部变量符号: 在 self.globals_raw 中但不在 prog.decls 中
         // 收集已处理的变量名, 避免重复
-        let mut emitted_var_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut emitted_var_syms: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
                 emitted_var_syms.insert(self.resolve_asm_label(&v.name.name).to_string());

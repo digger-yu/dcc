@@ -145,11 +145,7 @@ fn gcov_end_to_end_counter_gate() {
     // 3) 解析 .gcda, 校验真实 counter 值
     let data = std::fs::read(dir.join("loop_sum.gcda")).expect("应产出 .gcda");
     assert!(data.len() > 24, ".gcda 太短");
-    assert_eq!(
-        &data[0..4],
-        &[0x61, 0x64, 0x63, 0x67],
-        ".gcda magic 应为 'gcda'"
-    );
+    assert_eq!(&data[0..4], &[0x61, 0x64, 0x63, 0x67], ".gcda magic 应为 'gcda'");
 
     // 布局: magic/version/stamp(12) + runs/sums(8) + source(pascal)
     let mut p = 20usize;
@@ -203,10 +199,7 @@ fn gcov_end_to_end_counter_gate() {
         .get("main")
         .unwrap_or_else(|| panic!(".gcda 缺少 main: {counters:?}"));
     assert_eq!(main.len(), 4, "main 应有 4 个 counter: {main:?}");
-    assert!(
-        main.iter().all(|&c| c == 1),
-        "main 各块应执行 1 次: {main:?}"
-    );
+    assert!(main.iter().all(|&c| c == 1), "main 各块应执行 1 次: {main:?}");
 
     // 4) 生成并校验行覆盖率报告。这里使用 .gcda 中的函数计数器
     //    生成与 gcov 风格一致的摘要，确保报告只接受真实运行数据。
@@ -247,11 +240,8 @@ fn cli_autofdo_text_profile_accepted() {
 
     // 写一个 dcc 简化文本格式的 AutoFDO profile
     let profile = dir.join("profile.afdo");
-    std::fs::write(
-        &profile,
-        b"# dcc autofdo v1\nfunc main 100\nfunc hot_fn 80\nfunc cold_fn 1\n",
-    )
-    .unwrap();
+    std::fs::write(&profile, b"# dcc autofdo v1\nfunc main 100\nfunc hot_fn 80\nfunc cold_fn 1\n")
+        .unwrap();
 
     let status = dcc()
         .args(["-std=gnu23", "-fsyntax-only"])
@@ -322,11 +312,8 @@ fn cli_lbr_profile_text_accepted() {
 
     // 写一个 brstack 格式的 LBR profile
     let profile = dir.join("profile.lbr");
-    std::fs::write(
-        &profile,
-        b"main 0x1000 hot_fn 0x2000 5\nhot_fn 0x2010 main 0x1020 3\n",
-    )
-    .unwrap();
+    std::fs::write(&profile, b"main 0x1000 hot_fn 0x2000 5\nhot_fn 0x2010 main 0x1020 3\n")
+        .unwrap();
 
     let status = dcc()
         .args(["-std=gnu23", "-fsyntax-only"])
@@ -423,10 +410,7 @@ fn cli_topdown_with_pgo_accepted() {
         .arg(profile_src())
         .status()
         .expect("运行 dcc");
-    assert!(
-        status.success(),
-        "-ftopdownmetrics 与 -fprofile-generate 组合应被接受"
-    );
+    assert!(status.success(), "-ftopdownmetrics 与 -fprofile-generate 组合应被接受");
 }
 
 /// AutoFDO 权重影响: 用 -fauto-profile + -O2 编译, 验证 hot 函数
@@ -449,11 +433,8 @@ fn autofdo_weight_influences_section_layout() {
 
     // AutoFDO 文本 profile: hot_fn 样本多, cold_fn 样本极少
     let profile = dir.join("profile.afdo");
-    std::fs::write(
-        &profile,
-        b"# dcc autofdo v1\nfunc main 10\nfunc hot_fn 100\nfunc cold_fn 1\n",
-    )
-    .expect("写 profile");
+    std::fs::write(&profile, b"# dcc autofdo v1\nfunc main 10\nfunc hot_fn 100\nfunc cold_fn 1\n")
+        .expect("写 profile");
 
     // 用 -fauto-profile + -O2 编译
     let out = dcc()
@@ -514,11 +495,8 @@ fn lbr_weight_influences_section_layout() {
 
     // LBR brstack 格式 profile: hot_fn 分支多
     let profile = dir.join("profile.lbr");
-    std::fs::write(
-        &profile,
-        b"main 0x1000 hot_fn 0x2000 100\nhot_fn 0x2010 main 0x1020 50\n",
-    )
-    .expect("写 profile");
+    std::fs::write(&profile, b"main 0x1000 hot_fn 0x2000 100\nhot_fn 0x2010 main 0x1020 50\n")
+        .expect("写 profile");
 
     // 用 -flbr-profile + -O2 编译
     let out = dcc()
@@ -796,21 +774,9 @@ fn offload_driver_link_host_flags_include_rpath() {
     let has_lib = result.host_link_flags.iter().any(|f| f.starts_with("-L"));
     let has_libcudart = result.host_link_flags.iter().any(|f| f == "-lcudart");
     let has_rpath = result.host_link_flags.iter().any(|f| f.contains("rpath"));
-    assert!(
-        has_lib,
-        "host flags 应包含 -L 搜索路径: {:?}",
-        result.host_link_flags
-    );
-    assert!(
-        has_libcudart,
-        "host flags 应包含 -lcudart: {:?}",
-        result.host_link_flags
-    );
-    assert!(
-        has_rpath,
-        "host flags 应包含 rpath: {:?}",
-        result.host_link_flags
-    );
+    assert!(has_lib, "host flags 应包含 -L 搜索路径: {:?}", result.host_link_flags);
+    assert!(has_libcudart, "host flags 应包含 -lcudart: {:?}", result.host_link_flags);
+    assert!(has_rpath, "host flags 应包含 rpath: {:?}", result.host_link_flags);
 }
 
 /// OffloadDriverLinker: device-link 命令生成正确的 nvcc/clang++ 命令.
@@ -1011,9 +977,9 @@ fn offload_runtime_kernel_launch_returns_not_available_without_driver() {
     match result {
         KernelLaunchResult::RuntimeNotAvailable(triple) => {
             assert_eq!(triple, "nvptx64-nvidia-cuda");
-        }
+        },
         // 如果驱动恰好可用 (CI 环境可能有 GPU), 也会到达 Failed 路径
-        KernelLaunchResult::Failed(_) => { /* 可接受: 驱动可用但无 device code */ }
+        KernelLaunchResult::Failed(_) => { /* 可接受: 驱动可用但无 device code */ },
         _ => panic!("expected RuntimeNotAvailable or Failed, got {:?}", result),
     }
 }
@@ -1026,11 +992,7 @@ fn offload_runtime_rocm_probe_returns_not_available_without_driver() {
     let mut diags = Vec::new();
     let status = probe_rocm_runtime("amdgcn-amd-amdhsa", &mut diags);
     // 锁定当前行为: 无 ROCm 驱动时返回 NotFound 或 InitFailed
-    assert!(
-        !status.is_available(),
-        "ROCm 在无驱动环境下应不可用: {:?}",
-        status
-    );
+    assert!(!status.is_available(), "ROCm 在无驱动环境下应不可用: {:?}", status);
 }
 
 /// Offload runtime: CUDA probe 返回非 Available 状态 (无驱动环境).
@@ -1041,11 +1003,7 @@ fn offload_cuda_probe_returns_not_available_without_driver() {
     let mut diags = Vec::new();
     let status = probe_cuda_runtime("nvptx64-nvidia-cuda", &mut diags);
     // 锁定当前行为: 无 CUDA 驱动时返回 NotFound 或 InitFailed
-    assert!(
-        !status.is_available(),
-        "CUDA 在无驱动环境下应不可用: {:?}",
-        status
-    );
+    assert!(!status.is_available(), "CUDA 在无驱动环境下应不可用: {:?}", status);
 }
 
 /// Offload runtime: set_runtime_status 注入 Available 后无 device code
@@ -1079,11 +1037,8 @@ fn offload_runtime_launch_without_device_code_fails_fast() {
     // 锁定当前行为: 无 device code 应快速失败
     match result {
         KernelLaunchResult::Failed(msg) => {
-            assert!(
-                msg.contains("no device code"),
-                "错误消息应提及缺少 device code: {msg}"
-            );
-        }
+            assert!(msg.contains("no device code"), "错误消息应提及缺少 device code: {msg}");
+        },
         _ => panic!("expected Failed, got {:?}", result),
     }
 }
@@ -1102,7 +1057,7 @@ fn offload_runtime_kernel_not_found_returns_correct_error() {
     match result {
         KernelLaunchResult::KernelNotFound(name) => {
             assert_eq!(name, "nonexistent_kernel");
-        }
+        },
         _ => panic!("expected KernelNotFound, got {:?}", result),
     }
 }
@@ -1270,10 +1225,7 @@ fn memprof_runtime_end_to_end_gate() {
             found_alloc = true;
         }
     }
-    assert!(
-        found_alloc,
-        "同一 callstack 两次分配应合并: count=2 bytes=1088"
-    );
+    assert!(found_alloc, "同一 callstack 两次分配应合并: count=2 bytes=1088");
 
     let n_life = rd32(&mut p);
     assert!(n_life >= 1, "应有 lifetime 记录");
@@ -1474,14 +1426,8 @@ fn cli_fopenmp_targets_bad_triple_rejects_with_value() {
         .expect("运行 dcc");
     assert!(!out.status.success(), "非法 triple 应被拒绝");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("foo-bar-baz"),
-        "错误消息应含非法值: {stderr}"
-    );
-    assert!(
-        stderr.contains("nvptx64-nvidia-cuda"),
-        "应提示已知 triple: {stderr}"
-    );
+    assert!(stderr.contains("foo-bar-baz"), "错误消息应含非法值: {stderr}");
+    assert!(stderr.contains("nvptx64-nvidia-cuda"), "应提示已知 triple: {stderr}");
 }
 
 #[test]
@@ -1522,16 +1468,9 @@ fn cli_offload_arch_bad_value_rejects_with_value() {
 #[test]
 fn offload_openmp_emits_section_with_pragma_locations() {
     let src = offload_fixture("offload_omp.c");
-    let (out, obj) = compile_to_object(
-        "omp",
-        &src,
-        &["-fopenmp", "-fopenmp-targets=nvptx64-nvidia-cuda"],
-    );
-    assert!(
-        out.status.success(),
-        "编译应成功: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let (out, obj) =
+        compile_to_object("omp", &src, &["-fopenmp", "-fopenmp-targets=nvptx64-nvidia-cuda"]);
+    assert!(out.status.success(), "编译应成功: {}", String::from_utf8_lossy(&out.stderr));
     let bytes = std::fs::read(&obj).expect("读取 .o");
     let entries = parse_offload_section(&bytes).expect("应存在 .dcc.offload 节");
     assert_eq!(entries.len(), 3, "target/target simd/simd 共 3 条");
@@ -1553,20 +1492,11 @@ fn offload_openmp_emits_section_with_pragma_locations() {
     // 不支持构造 (parallel) 与函数外 pragma (teams / target) 应给出带位置的警告
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("W0312"), "parallel 应警告: {stderr}");
-    assert!(
-        stderr.contains("offload_omp.c:25:1"),
-        "W0312 位置应指向 pragma 行: {stderr}"
-    );
+    assert!(stderr.contains("offload_omp.c:25:1"), "W0312 位置应指向 pragma 行: {stderr}");
     assert!(stderr.contains("W0313"), "函数外 teams 应警告: {stderr}");
-    assert!(
-        stderr.contains("offload_omp.c:33:1"),
-        "W0313 位置应指向 pragma 行: {stderr}"
-    );
+    assert!(stderr.contains("offload_omp.c:33:1"), "W0313 位置应指向 pragma 行: {stderr}");
     assert!(stderr.contains("W0311"), "函数外 target 应警告: {stderr}");
-    assert!(
-        stderr.contains("offload_omp.c:38:1"),
-        "W0311 位置应指向 pragma 行: {stderr}"
-    );
+    assert!(stderr.contains("offload_omp.c:38:1"), "W0311 位置应指向 pragma 行: {stderr}");
     let _ = std::fs::remove_file(obj);
 }
 
@@ -1574,11 +1504,7 @@ fn offload_openmp_emits_section_with_pragma_locations() {
 fn offload_cuda_emits_section_with_func_locations() {
     let src = offload_fixture("offload_cuda.c");
     let (out, obj) = compile_to_object("cuda", &src, &["-fcuda"]);
-    assert!(
-        out.status.success(),
-        "编译应成功: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "编译应成功: {}", String::from_utf8_lossy(&out.stderr));
     let bytes = std::fs::read(&obj).expect("读取 .o");
     let entries = parse_offload_section(&bytes).expect("应存在 .dcc.offload 节");
     assert_eq!(entries.len(), 2, "vec_add + square, 纯 __host__ 不计入");
@@ -1602,11 +1528,7 @@ fn offload_cuda_emits_section_with_func_locations() {
 fn offload_arch_recorded_in_entry() {
     let src = offload_fixture("offload_cuda.c");
     let (out, obj) = compile_to_object("cuda-arch", &src, &["-fcuda", "--offload-arch=sm_80"]);
-    assert!(
-        out.status.success(),
-        "编译应成功: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "编译应成功: {}", String::from_utf8_lossy(&out.stderr));
     let bytes = std::fs::read(&obj).expect("读取 .o");
     let entries = parse_offload_section(&bytes).expect("应存在 .dcc.offload 节");
     assert!(!entries.is_empty());
@@ -1655,11 +1577,7 @@ fn offload_global_host_mixed_rejects_with_location() {
 fn offload_hip_emits_section_with_amd_triple() {
     let src = offload_fixture("offload_cuda.c");
     let (out, obj) = compile_to_object("hip", &src, &["-fhip", "--offload-arch=gfx906"]);
-    assert!(
-        out.status.success(),
-        "HIP 编译应成功: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "HIP 编译应成功: {}", String::from_utf8_lossy(&out.stderr));
     let bytes = std::fs::read(&obj).expect("读取 .o");
     let entries = parse_offload_section(&bytes).expect("应存在 .dcc.offload 节");
     assert!(!entries.is_empty());
@@ -1710,10 +1628,7 @@ fn pgo_profile_values_generates_runtime_histogram_gate() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(dir.join("pgo_values.o").exists(), "应产出 .o");
-    assert!(
-        dir.join("pgo_values.pgort.c").exists(),
-        "应自动产出 PGO runtime C"
-    );
+    assert!(dir.join("pgo_values.pgort.c").exists(), "应自动产出 PGO runtime C");
 
     let cc_ok = Command::new("cc")
         .arg("--version")
@@ -1912,10 +1827,7 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
     // 按 instrument_program 的插入顺序: hot_fn(0), warm_fn(1), cold_fn(2), main(3)
     let runtime_src = dir.join("pgo_rt.c");
     let runtime_code = pgo_runtime_template()
-        .replace(
-            "__PGO_SITE_FUNCS__",
-            "{\"hot_fn\",\"warm_fn\",\"cold_fn\",\"main\"}",
-        )
+        .replace("__PGO_SITE_FUNCS__", "{\"hot_fn\",\"warm_fn\",\"cold_fn\",\"main\"}")
         .replace(
             "__PGO_SITE_FILES__",
             "{\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\"}",
@@ -2262,10 +2174,7 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
         if out.status.success() {
             let sections = String::from_utf8_lossy(&out.stdout);
             // 验证 .text.hot 节存在 (hot_fn 被归入)
-            assert!(
-                sections.contains(".text.hot"),
-                "PGO 权重下发应产出 .text.hot 节: {sections}"
-            );
+            assert!(sections.contains(".text.hot"), "PGO 权重下发应产出 .text.hot 节: {sections}");
             // 验证 .text.unlikely 节存在 (cold_fn 被归入)
             assert!(
                 sections.contains(".text.unlikely"),
@@ -2298,10 +2207,7 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
     if let Ok(ref out) = readelf_s {
         if out.status.success() {
             let sections = String::from_utf8_lossy(&out.stdout);
-            assert!(
-                sections.contains(".text.hot"),
-                "section 头部应包含 .text.hot: {sections}"
-            );
+            assert!(sections.contains(".text.hot"), "section 头部应包含 .text.hot: {sections}");
             assert!(
                 sections.contains(".text.unlikely"),
                 "section 头部应包含 .text.unlikely: {sections}"
@@ -2321,13 +2227,9 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
 #[test]
 fn offload_device_codegen_pipeline_verbose_output() {
     let src = offload_fixture("offload_cuda.c");
-    let (out, obj) =
-        compile_to_object("dcg-pipe", &src, &["-fcuda", "--offload-arch=sm_80", "-v"]);
+    let (out, obj) = compile_to_object("dcg-pipe", &src, &["-fcuda", "--offload-arch=sm_80", "-v"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "device codegen 流水线编译应成功: {stderr}"
-    );
+    assert!(out.status.success(), "device codegen 流水线编译应成功: {stderr}");
     // verbose 模式应输出设备代码生成信息
     assert!(
         stderr.contains("offload device codegen"),
@@ -2366,8 +2268,7 @@ fn offload_device_codegen_unsupported_triple_error() {
 /// without requiring -fprofile-generate.
 #[test]
 fn profile_values_standalone_compilation() {
-    let dir = std::env::temp_dir()
-        .join(format!("dcc-pv-standalone-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("dcc-pv-standalone-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -2387,16 +2288,10 @@ fn profile_values_standalone_compilation() {
         .output()
         .expect("运行 dcc");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "-fprofile-values 单独使用应编译成功: {stderr}"
-    );
+    assert!(out.status.success(), "-fprofile-values 单独使用应编译成功: {stderr}");
     assert!(dir.join("pv.o").exists(), "应产出 .o");
     // -fprofile-values 应自动生成 .pgort.c runtime
-    assert!(
-        dir.join("pv.pgort.c").exists(),
-        "-fprofile-values 应自动生成 .pgort.c"
-    );
+    assert!(dir.join("pv.pgort.c").exists(), "-fprofile-values 应自动生成 .pgort.c");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

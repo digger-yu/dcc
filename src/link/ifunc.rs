@@ -135,13 +135,7 @@ pub fn collect_from_bundle(
 pub fn gen_irelative_relas(table: &IfuncTable) -> Vec<OutputRela> {
     let mut out = Vec::new();
     for (name, &resolver_vaddr) in &table.resolvers {
-        out.push(OutputRela::new(
-            0,
-            0,
-            0,
-            R_X86_64_IRELATIVE,
-            resolver_vaddr as i64,
-        ));
+        out.push(OutputRela::new(0, 0, 0, R_X86_64_IRELATIVE, resolver_vaddr as i64));
         if let Some(last) = out.last_mut() {
             last._name = format!("__ifunc_reloc_{}", name);
         }
@@ -194,14 +188,8 @@ mod tests {
         let data = encode_ifunc_section(&entries);
         let parsed = parse_dcc_ifunc_section(&data);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(
-            parsed[0],
-            ("memcpy".to_string(), "resolve_memcpy".to_string())
-        );
-        assert_eq!(
-            parsed[1],
-            ("strlen".to_string(), "resolve_strlen".to_string())
-        );
+        assert_eq!(parsed[0], ("memcpy".to_string(), "resolve_memcpy".to_string()));
+        assert_eq!(parsed[1], ("strlen".to_string(), "resolve_strlen".to_string()));
     }
 
     #[test]

@@ -174,22 +174,22 @@ impl PerfRecord {
                     if !name.is_empty() {
                         *r.events.entry(name).or_insert(0) += count;
                     }
-                }
+                },
                 Some("topdown") => {
                     let slot_str = it.next().unwrap_or("");
                     let count: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
                     if let Some(slot) = TopdownL1::from_name(slot_str) {
                         *r.topdown_l1.entry(slot).or_insert(0) += count;
                     }
-                }
+                },
                 Some("topdown_l2") => {
                     let slot_str = it.next().unwrap_or("");
                     let count: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
                     if let Some(slot) = TopdownL2::from_name(slot_str) {
                         *r.topdown_l2.entry(slot).or_insert(0) += count;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         Ok(r)
@@ -330,10 +330,7 @@ mod tests {
 
     #[test]
     fn l2_parent_mapping() {
-        assert_eq!(
-            TopdownL2::branch_mispredict.parent(),
-            TopdownL1::BadSpeculation
-        );
+        assert_eq!(TopdownL2::branch_mispredict.parent(), TopdownL1::BadSpeculation);
         assert_eq!(TopdownL2::memory_bound.parent(), TopdownL1::BackendBound);
         assert_eq!(TopdownL2::fetch_latency.parent(), TopdownL1::FrontendBound);
         assert_eq!(TopdownL2::retiring_base.parent(), TopdownL1::Retiring);
@@ -420,18 +417,9 @@ mod tests {
 
     #[test]
     fn topdown_from_str_aliases() {
-        assert_eq!(
-            TopdownL1::from_name("badspec"),
-            Some(TopdownL1::BadSpeculation)
-        );
-        assert_eq!(
-            TopdownL1::from_name("frontend"),
-            Some(TopdownL1::FrontendBound)
-        );
-        assert_eq!(
-            TopdownL1::from_name("backend"),
-            Some(TopdownL1::BackendBound)
-        );
+        assert_eq!(TopdownL1::from_name("badspec"), Some(TopdownL1::BadSpeculation));
+        assert_eq!(TopdownL1::from_name("frontend"), Some(TopdownL1::FrontendBound));
+        assert_eq!(TopdownL1::from_name("backend"), Some(TopdownL1::BackendBound));
         assert_eq!(TopdownL1::from_name("unknown"), None);
     }
 }

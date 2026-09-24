@@ -24,7 +24,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, QualType, Stmt, Type, UnOp};
+use crate::ast::{
+    BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, QualType, Stmt, Type, UnOp,
+};
 use crate::diagnostics::Span;
 use crate::ssa::{ordered_block_names, Function, Inst, InstKind, Operand, SsaVar, Terminator};
 
@@ -81,14 +83,14 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
         match &b.term {
             Terminator::Ret { val: Some(v) } => {
                 used.extend(operand_uses_op(v));
-            }
+            },
             Terminator::Branch { cond, .. } => {
                 used.extend(operand_uses_op(cond));
-            }
+            },
             Terminator::SwitchTable { idx, .. } => {
                 used.extend(operand_uses_op(idx));
-            }
-            _ => {}
+            },
+            _ => {},
         }
         for p in &b.phis {
             for (v, _) in &p.incoming {
@@ -110,14 +112,20 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
                 } else {
                     true
                 }
-            }
+            },
             // inline asm DCE rules (matching GCC behavior):
             // - volatile asm: always preserved
             // - asm with outputs: preserved if results are used
             // - asm with memory clobber: preserved (side effect)
             // - pure asm (no outputs, no memory clobber, non-volatile):
             //   can be eliminated when results are unused
-            InstKind::InlineAsm { volatile, outputs, output_vars, clobbers, .. } => {
+            InstKind::InlineAsm {
+                volatile,
+                outputs,
+                output_vars,
+                clobbers,
+                ..
+            } => {
                 if *volatile {
                     true
                 } else if !output_vars.is_empty() || !outputs.is_empty() {
@@ -135,7 +143,7 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
                     // safe to eliminate when unused
                     false
                 }
-            }
+            },
             _ => true,
         });
         if b.insts.len() != before {
@@ -191,7 +199,7 @@ pub fn strength_reduction(func: &mut Function) -> bool {
                             } else {
                                 None
                             }
-                        }
+                        },
                         _ => None,
                     };
                     if let Some(no) = new_op {
@@ -378,12 +386,17 @@ pub fn alias_analysis_with_strict(
         set_entries.sort_by(|a, b| a.0.cmp(b.0));
         for (name, &set_id) in set_entries {
             if let Some(ty) = type_map.get(name) {
-                type_class.entry(set_id).or_default().push((name.clone(), ty.clone()));
+                type_class
+                    .entry(set_id)
+                    .or_default()
+                    .push((name.clone(), ty.clone()));
             }
         }
         let mut next_set = sets.values().copied().max().unwrap_or(0) + 1;
         for members in type_class.values() {
-            if members.len() <= 1 { continue; }
+            if members.len() <= 1 {
+                continue;
+            }
             // 按类型分组
             let mut groups: Vec<(crate::ast::Type, Vec<String>)> = Vec::new();
             for (name, ty) in members {
@@ -419,16 +432,16 @@ pub fn alias_analysis_with_strict(
 /// - 相同类型当然别名
 fn types_alias_compatible(a: &crate::ast::Type, b: &crate::ast::Type) -> bool {
     use crate::ast::Type;
-    if a == b { return true; }
+    if a == b {
+        return true;
+    }
     // char* / void* 可以别名任何类型
     match (a, b) {
-        (Type::Ptr(aq), Type::Ptr(bq)) => {
-            match (&aq.base, &bq.base) {
-                (Type::Void, _) | (_, Type::Void) => true,
-                (Type::Char, _) | (_, Type::Char) => true,
-                _ => aq.base == bq.base,
-            }
-        }
+        (Type::Ptr(aq), Type::Ptr(bq)) => match (&aq.base, &bq.base) {
+            (Type::Void, _) | (_, Type::Void) => true,
+            (Type::Char, _) | (_, Type::Char) => true,
+            _ => aq.base == bq.base,
+        },
         _ => true, // 非指针类型不区分
     }
 }
@@ -491,7 +504,7 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
                             sets.insert(d.name(), id);
                         }
                     }
-                }
+                },
                 InstKind::Load { e, .. } => {
                     if let Some(d) = &inst.dest {
                         if let Some(s) = set_of(e, &sets) {
@@ -501,7 +514,7 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
                             }
                         }
                     }
-                }
+                },
                 InstKind::Store {
                     e: Operand::Var(v),
                     src,
@@ -512,7 +525,7 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
                         let src_set = set_of(src, &sets).unwrap_or(0);
                         union_into(&mut sets, &mut parents, &v.name(), src_set);
                     }
-                }
+                },
                 InstKind::Call { args, .. } => {
                     if let Some(d) = &inst.dest {
                         for a in args {
@@ -527,8 +540,8 @@ fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
                             sets.insert(d.name(), id);
                         }
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -809,11 +822,16 @@ fn inst_is_side_effecting(kind: &InstKind) -> bool {
         | InstKind::IndexLoad { is_volatile, .. }
         | InstKind::MemberLoad { is_volatile, .. } => *is_volatile,
         // 只有 volatile asm 或带 memory clobber 的 asm 才有副作用
-        InstKind::InlineAsm { volatile, clobbers, output_constraints, .. } => {
+        InstKind::InlineAsm {
+            volatile,
+            clobbers,
+            output_constraints,
+            ..
+        } => {
             *volatile
                 || asm_has_memory_clobber(clobbers)
                 || asm_constraints_touch_memory(output_constraints)
-        }
+        },
         _ => false,
     }
 }
@@ -836,7 +854,7 @@ fn inst_is_memory_ordered(kind: &InstKind) -> bool {
             asm_has_memory_clobber(clobbers)
                 || asm_constraints_touch_memory(input_constraints)
                 || asm_constraints_touch_memory(output_constraints)
-        }
+        },
         _ => false,
     }
 }
@@ -896,7 +914,10 @@ pub fn pgo(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_hot_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                            e: Operand::SymAddr(
+                                "__dcc_hot_hint".to_string(),
+                                Type::Ptr(Box::new(QualType::new(Type::Void))),
+                            ),
                             src: Operand::Int(*count as i128),
                             is_volatile: false,
                         },
@@ -912,7 +933,10 @@ pub fn pgo(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_cold_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                            e: Operand::SymAddr(
+                                "__dcc_cold_hint".to_string(),
+                                Type::Ptr(Box::new(QualType::new(Type::Void))),
+                            ),
                             src: Operand::Int(*count as i128),
                             is_volatile: false,
                         },
@@ -971,7 +995,10 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
                     Inst {
                         dest: None,
                         kind: InstKind::Store {
-                            e: Operand::SymAddr("__dcc_parallel_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                            e: Operand::SymAddr(
+                                "__dcc_parallel_hint".to_string(),
+                                Type::Ptr(Box::new(QualType::new(Type::Void))),
+                            ),
                             src: Operand::Int(1),
                             is_volatile: false,
                         },
@@ -1072,17 +1099,20 @@ pub fn loop_interchange(func: &mut Function) -> bool {
         // 在 entry 插入 hint
         if let Some(entry) = func.blocks.get_mut(&func.entry) {
             entry.insts.insert(
-            0,
-            Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_loop_interchanged".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
-                    src: Operand::Int(1),
-                    is_volatile: false,
+                0,
+                Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::SymAddr(
+                            "__dcc_loop_interchanged".to_string(),
+                            Type::Ptr(Box::new(QualType::new(Type::Void))),
+                        ),
+                        src: Operand::Int(1),
+                        is_volatile: false,
+                    },
+                    span: func.span.clone(),
                 },
-                span: func.span.clone(),
-            },
-        );
+            );
         }
     }
     changed
@@ -1166,7 +1196,10 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_section_cold".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                    e: Operand::SymAddr(
+                        "__dcc_section_cold".to_string(),
+                        Type::Ptr(Box::new(QualType::new(Type::Void))),
+                    ),
                     src: Operand::Int(1),
                     is_volatile: false,
                 },
@@ -1181,7 +1214,10 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_section_hot".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                    e: Operand::SymAddr(
+                        "__dcc_section_hot".to_string(),
+                        Type::Ptr(Box::new(QualType::new(Type::Void))),
+                    ),
                     src: Operand::Int(1),
                     is_volatile: false,
                 },
@@ -1196,7 +1232,10 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_noreturn_hint".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                    e: Operand::SymAddr(
+                        "__dcc_noreturn_hint".to_string(),
+                        Type::Ptr(Box::new(QualType::new(Type::Void))),
+                    ),
                     src: Operand::Int(1),
                     is_volatile: false,
                 },
@@ -1432,7 +1471,10 @@ pub fn register_allocation(func: &mut Function) -> bool {
             Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_regalloc_done".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                    e: Operand::SymAddr(
+                        "__dcc_regalloc_done".to_string(),
+                        Type::Ptr(Box::new(QualType::new(Type::Void))),
+                    ),
                     src: Operand::Int(total_pressure as i128),
                     is_volatile: false,
                 },
@@ -1445,11 +1487,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
 }
 
 /// 记录指令操作数的使用位置。
-fn record_operand_use(
-    kind: &InstKind,
-    pos: u32,
-    last_use: &mut HashMap<String, u32>,
-) {
+fn record_operand_use(kind: &InstKind, pos: u32, last_use: &mut HashMap<String, u32>) {
     let mut record = |name: &str| {
         let entry = last_use.entry(name.to_string()).or_insert(0);
         if pos > *entry {
@@ -1464,14 +1502,16 @@ fn record_operand_use(
             if let Operand::Var(v) = r {
                 record(&v.name());
             }
-        }
+        },
         InstKind::Un { e, .. } | InstKind::Cast { e, .. } => {
             if let Operand::Var(v) = e {
                 record(&v.name());
             }
-        }
+        },
         InstKind::AddrOf { base } => record(base),
-        InstKind::Load { e: Operand::Var(v), .. } => record(&v.name()),
+        InstKind::Load {
+            e: Operand::Var(v), ..
+        } => record(&v.name()),
         InstKind::Store { e, src, .. } => {
             if let Operand::Var(v) = e {
                 record(&v.name());
@@ -1479,7 +1519,7 @@ fn record_operand_use(
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } => {
             if let Operand::Var(v) = arr {
                 record(&v.name());
@@ -1487,7 +1527,7 @@ fn record_operand_use(
             if let Operand::Var(v) = idx {
                 record(&v.name());
             }
-        }
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             if let Operand::Var(v) = arr {
                 record(&v.name());
@@ -1498,7 +1538,7 @@ fn record_operand_use(
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             if let Operand::Var(v) = callee {
                 record(&v.name());
@@ -1508,8 +1548,11 @@ fn record_operand_use(
                     record(&v.name());
                 }
             }
-        }
-        InstKind::MemberLoad { obj: Operand::Var(v), .. } => record(&v.name()),
+        },
+        InstKind::MemberLoad {
+            obj: Operand::Var(v),
+            ..
+        } => record(&v.name()),
         InstKind::MemberStore { obj, src, .. } => {
             if let Operand::Var(v) = obj {
                 record(&v.name());
@@ -1517,7 +1560,7 @@ fn record_operand_use(
             if let Operand::Var(v) = src {
                 record(&v.name());
             }
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             if let Operand::Var(v) = cond {
                 record(&v.name());
@@ -1528,17 +1571,13 @@ fn record_operand_use(
             if let Operand::Var(v) = else_ {
                 record(&v.name());
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
 /// 记录 terminator 操作数的使用位置。
-fn record_term_use(
-    term: &Terminator,
-    pos: u32,
-    last_use: &mut HashMap<String, u32>,
-) {
+fn record_term_use(term: &Terminator, pos: u32, last_use: &mut HashMap<String, u32>) {
     let mut record = |name: &str| {
         let entry = last_use.entry(name.to_string()).or_insert(0);
         if pos > *entry {
@@ -1546,10 +1585,18 @@ fn record_term_use(
         }
     };
     match term {
-        Terminator::Ret { val: Some(Operand::Var(v)) } => record(&v.name()),
-        Terminator::Branch { cond: Operand::Var(v), .. } => record(&v.name()),
-        Terminator::SwitchTable { idx: Operand::Var(v), .. } => record(&v.name()),
-        _ => {}
+        Terminator::Ret {
+            val: Some(Operand::Var(v)),
+        } => record(&v.name()),
+        Terminator::Branch {
+            cond: Operand::Var(v),
+            ..
+        } => record(&v.name()),
+        Terminator::SwitchTable {
+            idx: Operand::Var(v),
+            ..
+        } => record(&v.name()),
+        _ => {},
     }
 }
 
@@ -1605,7 +1652,13 @@ pub fn ubsan_ir_instrument(func: &mut Function) -> bool {
 fn is_signed_int_ty(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128
+        Type::Char
+            | Type::SChar
+            | Type::Short
+            | Type::Int
+            | Type::Long
+            | Type::LongLong
+            | Type::Int128
     )
 }
 
@@ -1622,14 +1675,14 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                         return None; // 编译期已知非零, 无需检查
                     }
                     Some("divrem_overflow")
-                }
+                },
                 // 移位: 移位量 < 0 或 >= 位宽
                 BinOp::Shl | BinOp::Shr => {
                     if is_const_valid_shift(r) {
                         return None;
                     }
                     Some("shift_out_of_bounds")
-                }
+                },
                 // 有符号加法/减法/乘法: 溢出 (无符号回绕是定义行为, 不检查)
                 BinOp::Add if dest_signed => Some("add_overflow"),
                 BinOp::Sub if dest_signed => Some("sub_overflow"),
@@ -1642,7 +1695,10 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                 return Some(Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::SymAddr(format!("__dcc_ubsan_{}", kind_str), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                        e: Operand::SymAddr(
+                            format!("__dcc_ubsan_{}", kind_str),
+                            Type::Ptr(Box::new(QualType::new(Type::Void))),
+                        ),
                         src: Operand::Int(kind_hash),
                         is_volatile: false,
                     },
@@ -1650,14 +1706,17 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                 });
             }
             None
-        }
+        },
         InstKind::Un { op, e: _ } => {
             // 取反: 仅对有符号整数, INT_MIN 取反溢出
             if matches!(op, UnOp::Neg) && dest_signed {
                 return Some(Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_ubsan_negate_overflow".to_string(), Type::Ptr(Box::new(QualType::new(Type::Void)))),
+                        e: Operand::SymAddr(
+                            "__dcc_ubsan_negate_overflow".to_string(),
+                            Type::Ptr(Box::new(QualType::new(Type::Void))),
+                        ),
                         src: Operand::Int(ubsan_kind_hash("negate_overflow")),
                         is_volatile: false,
                     },
@@ -1665,7 +1724,7 @@ fn gen_ubsan_guard(kind: &InstKind, dest: &SsaVar, span: &Span) -> Option<Inst> 
                 });
             }
             None
-        }
+        },
         _ => None,
     }
 }
@@ -1722,7 +1781,7 @@ pub fn alias_classify(a: &str, b: &str, sets: &HashMap<String, usize>) -> &'stat
             } else {
                 "disjoint"
             }
-        }
+        },
         _ => "overlap", // 未知指针保守视为可能别名
     }
 }
@@ -1744,11 +1803,7 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         // 则不能安全地重排序 (会破坏数据依赖)。
         let has_side = b.insts.iter().any(|i| {
             // volatile Load 也有外部可见副作用, 不可被投机重排
-            inst_is_side_effecting(&i.kind)
-                || matches!(
-                    i.kind,
-                    InstKind::InlineAsm { .. }
-                )
+            inst_is_side_effecting(&i.kind) || matches!(i.kind, InstKind::InlineAsm { .. })
         });
         if has_side {
             // 保守: 有副作用指令时不做重排, 避免破坏 Call→use 依赖
@@ -1822,7 +1877,11 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                                     let bits = type_bits(&d.ty);
                                     if let Some(bits) = bits {
                                         if bits < 128 {
-                                            let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                            let mask = if bits == 64 {
+                                                u64::MAX as i128
+                                            } else {
+                                                (1i128 << bits) - 1
+                                            };
                                             let a = a & mask;
                                             let b = b & mask;
                                             eval_binop(*op, a, b)
@@ -1835,13 +1894,13 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                                 } else {
                                     eval_binop(*op, a, b)
                                 }
-                            }
+                            },
                             _ => None,
                         }
-                    }
+                    },
                     InstKind::Un { op, e } => {
                         operand_int(e, &consts).and_then(|v| eval_unop(*op, v))
-                    }
+                    },
                     InstKind::Cast { e, .. } => operand_int(e, &consts),
                     _ => None,
                 };
@@ -1885,14 +1944,22 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
         }
         replace_op_in_term(&mut b.term, &consts);
         // SwitchTable 常量解析: 如果 idx 是已知常量, 替换为 Jump
-        if let Terminator::SwitchTable { idx, values, targets, default } = &b.term {
+        if let Terminator::SwitchTable {
+            idx,
+            values,
+            targets,
+            default,
+        } = &b.term
+        {
             let idx_val = match idx {
                 Operand::Int(v) => Some(*v),
                 Operand::Var(sv) => consts.get(&sv.name()).copied(),
                 _ => None,
             };
             if let Some(v) = idx_val {
-                let target = values.iter().position(|&cv| cv == v)
+                let target = values
+                    .iter()
+                    .position(|&cv| cv == v)
                     .map(|i| targets[i].clone())
                     .unwrap_or_else(|| default.clone());
                 b.succs = vec![target.clone()];
@@ -1914,18 +1981,18 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                 for u in operand_uses_op(o) {
                     used.insert(u);
                 }
-            }
+            },
             Terminator::Branch { cond, .. } => {
                 for u in operand_uses_op(cond) {
                     used.insert(u);
                 }
-            }
+            },
             Terminator::SwitchTable { idx, .. } => {
                 for u in operand_uses_op(idx) {
                     used.insert(u);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         for p in &b.phis {
             for (v, _) in &p.incoming {
@@ -1964,45 +2031,45 @@ fn replace_op_in_inst(k: &mut InstKind, consts: &HashMap<String, i128>) {
         InstKind::Bin { l, r, .. } => {
             replace_op(l, consts);
             replace_op(r, consts);
-        }
+        },
         InstKind::Un { e, .. } => replace_op(e, consts),
         InstKind::Cast { e, .. } => replace_op(e, consts),
         InstKind::Load { e, .. } => replace_op(e, consts),
         InstKind::Store { e, src, .. } => {
             replace_op(e, consts);
             replace_op(src, consts);
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } => {
             replace_op(arr, consts);
             replace_op(idx, consts);
-        }
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             replace_op(arr, consts);
             replace_op(idx, consts);
             replace_op(src, consts);
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             replace_op(callee, consts);
             for a in args {
                 replace_op(a, consts);
             }
-        }
+        },
         InstKind::MemberLoad { obj, .. } => replace_op(obj, consts),
         InstKind::MemberStore { obj, src, .. } => {
             replace_op(obj, consts);
             replace_op(src, consts);
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             replace_op(cond, consts);
             replace_op(then_, consts);
             replace_op(else_, consts);
-        }
+        },
         InstKind::InlineAsm { inputs, .. } => {
             for input in inputs {
                 replace_op(input, consts);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2011,7 +2078,7 @@ fn replace_op_in_term(t: &mut Terminator, consts: &HashMap<String, i128>) {
         Terminator::Ret { val: Some(v) } => replace_op(v, consts),
         Terminator::Branch { cond, .. } => replace_op(cond, consts),
         Terminator::SwitchTable { idx, .. } => replace_op(idx, consts),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -2052,8 +2119,13 @@ fn mask_to_type(v: i128, ty: &Type) -> i128 {
     let truncated = v & mask;
     let is_signed = matches!(
         ty,
-        Type::Char | Type::SChar | Type::Short | Type::Int
-            | Type::Long | Type::LongLong | Type::Int128
+        Type::Char
+            | Type::SChar
+            | Type::Short
+            | Type::Int
+            | Type::Long
+            | Type::LongLong
+            | Type::Int128
     );
     if is_signed {
         let sign_bit = 1i128 << (bits - 1);
@@ -2078,14 +2150,14 @@ fn eval_binop(op: BinOp, a: i128, b: i128) -> Option<i128> {
             } else {
                 a / b
             }
-        }
+        },
         BinOp::Mod => {
             if b == 0 {
                 return None;
             } else {
                 a % b
             }
-        }
+        },
         BinOp::And => a & b,
         BinOp::Or => a | b,
         BinOp::Xor => a ^ b,
@@ -2104,7 +2176,7 @@ fn eval_unop(op: UnOp, v: i128) -> Option<i128> {
             } else {
                 0
             }
-        }
+        },
         UnOp::BitNot => !v,
         UnOp::Plus => v,
     })
@@ -2182,7 +2254,10 @@ pub fn cross_function_dce_with_roots(
     funcs.len() != before
 }
 
-pub fn collect_func_refs(f: &FuncDecl, func_names: &HashSet<String>) -> (Vec<String>, HashSet<String>) {
+pub fn collect_func_refs(
+    f: &FuncDecl,
+    func_names: &HashSet<String>,
+) -> (Vec<String>, HashSet<String>) {
     let body = match &f.body {
         Some(b) => b,
         None => return (Vec::new(), HashSet::new()),
@@ -2207,13 +2282,13 @@ fn walk_block_refs(
                 if let Some(b2) = &f.body {
                     walk_block_refs(b2, func_names, calls, address_taken);
                 }
-            }
+            },
             BlockItem::Decl(Decl::Var(v)) => {
                 if let Some(init) = &v.init {
                     walk_expr_refs(init, func_names, calls, address_taken);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -2226,7 +2301,7 @@ fn walk_stmt_refs(
 ) {
     match s {
         Stmt::Return { val: Some(e), .. } => walk_expr_refs(e, func_names, calls, address_taken),
-        Stmt::Return { val: None, .. } => {}
+        Stmt::Return { val: None, .. } => {},
         Stmt::Expr { e, .. } => walk_expr_refs(e, func_names, calls, address_taken),
         Stmt::If {
             cond, then_, else_, ..
@@ -2236,11 +2311,11 @@ fn walk_stmt_refs(
             if let Some(e) = else_ {
                 walk_stmt_refs(e, func_names, calls, address_taken);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             walk_expr_refs(cond, func_names, calls, address_taken);
             walk_stmt_refs(body, func_names, calls, address_taken);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -2258,28 +2333,28 @@ fn walk_stmt_refs(
                 walk_expr_refs(s, func_names, calls, address_taken);
             }
             walk_stmt_refs(body, func_names, calls, address_taken);
-        }
+        },
         Stmt::Block { b, .. } => walk_block_refs(b, func_names, calls, address_taken),
         Stmt::Switch { expr, cases, .. } => {
             walk_expr_refs(expr, func_names, calls, address_taken);
             for c in cases {
                 walk_block_refs(&c.body, func_names, calls, address_taken);
             }
-        }
+        },
         Stmt::AsmGoto {
             outputs, inputs, ..
         } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr_refs(e, func_names, calls, address_taken);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => {
             walk_stmt_refs(stmt, func_names, calls, address_taken);
-        }
+        },
         Stmt::GotoIndirect { expr, .. } => {
             walk_expr_refs(expr, func_names, calls, address_taken);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2294,7 +2369,7 @@ fn walk_init_refs(
         crate::ast::InitItem::Designated { designator, value } => {
             walk_designator_refs(designator, func_names, calls, address_taken);
             walk_expr_refs(value, func_names, calls, address_taken);
-        }
+        },
     }
 }
 
@@ -2309,13 +2384,13 @@ fn walk_designator_refs(
         crate::ast::Designator::Range(l, r) => {
             walk_expr_refs(l, func_names, calls, address_taken);
             walk_expr_refs(r, func_names, calls, address_taken);
-        }
+        },
         crate::ast::Designator::Chain(items) => {
             for item in items {
                 walk_designator_refs(item, func_names, calls, address_taken);
             }
-        }
-        crate::ast::Designator::Field(_) => {}
+        },
+        crate::ast::Designator::Field(_) => {},
     }
 }
 
@@ -2331,7 +2406,7 @@ fn walk_expr_refs(
             if func_names.contains(&name.name) {
                 address_taken.insert(name.name.clone());
             }
-        }
+        },
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 calls.push(name.name.clone());
@@ -2341,11 +2416,11 @@ fn walk_expr_refs(
             for a in args {
                 walk_expr_refs(a, func_names, calls, address_taken);
             }
-        }
+        },
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             walk_expr_refs(l, func_names, calls, address_taken);
             walk_expr_refs(r, func_names, calls, address_taken);
-        }
+        },
         Expr::Unary { e, .. }
         | Expr::Cast { e, .. }
         | Expr::SizeofExpr { e, .. }
@@ -2365,26 +2440,26 @@ fn walk_expr_refs(
             walk_expr_refs(cond, func_names, calls, address_taken);
             walk_expr_refs(then_, func_names, calls, address_taken);
             walk_expr_refs(else_, func_names, calls, address_taken);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             walk_expr_refs(arr, func_names, calls, address_taken);
             walk_expr_refs(idx, func_names, calls, address_taken);
-        }
+        },
         Expr::Member { expr, .. } => walk_expr_refs(expr, func_names, calls, address_taken),
         Expr::StmtExpr { block, .. } => walk_block_refs(block, func_names, calls, address_taken),
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             for init in inits {
                 walk_init_refs(init, func_names, calls, address_taken);
             }
-        }
+        },
         Expr::AsmExpr {
             outputs, inputs, ..
         } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr_refs(e, func_names, calls, address_taken);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2409,39 +2484,39 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
         InstKind::Bin { l, r, .. } => {
             add_op(l, out);
             add_op(r, out);
-        }
+        },
         InstKind::Un { e, .. } => add_op(e, out),
         InstKind::Cast { e, .. } => add_op(e, out),
         InstKind::Load { e, .. } => add_op(e, out),
         InstKind::Store { e, src, .. } => {
             add_op(e, out);
             add_op(src, out);
-        }
+        },
         InstKind::IndexLoad { arr, idx, .. } => {
             add_op(arr, out);
             add_op(idx, out);
-        }
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             add_op(arr, out);
             add_op(idx, out);
             add_op(src, out);
-        }
+        },
         InstKind::Call { callee, args, .. } => {
             add_op(callee, out);
             for a in args {
                 add_op(a, out);
             }
-        }
+        },
         InstKind::MemberLoad { obj, .. } => add_op(obj, out),
         InstKind::MemberStore { obj, src, .. } => {
             add_op(obj, out);
             add_op(src, out);
-        }
+        },
         InstKind::Select { cond, then_, else_ } => {
             add_op(cond, out);
             add_op(then_, out);
             add_op(else_, out);
-        }
+        },
         InstKind::InlineAsm {
             inputs, outputs, ..
         } => {
@@ -2451,8 +2526,8 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
             for output in outputs {
                 collect_expr_uses(output, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2475,43 +2550,43 @@ fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             collect_expr_uses(l, out);
             collect_expr_uses(r, out);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             collect_expr_uses(arr, out);
             collect_expr_uses(idx, out);
-        }
+        },
         Expr::Member { expr, .. } => collect_expr_uses(expr, out),
         Expr::Call { callee, args, .. } => {
             collect_expr_uses(callee, out);
             for arg in args {
                 collect_expr_uses(arg, out);
             }
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             collect_expr_uses(cond, out);
             collect_expr_uses(then_, out);
             collect_expr_uses(else_, out);
-        }
+        },
         Expr::StmtExpr { block, .. } => {
             for item in &block.items {
                 collect_block_item_uses(item, out);
             }
-        }
+        },
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             for init in inits {
                 collect_init_uses(init, out);
             }
-        }
+        },
         Expr::AsmExpr {
             outputs, inputs, ..
         } => {
             for expr in outputs.iter().chain(inputs.iter()) {
                 collect_expr_uses(expr, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2521,7 +2596,7 @@ fn collect_init_uses(init: &InitItem, out: &mut Vec<String>) {
         InitItem::Designated { designator, value } => {
             collect_designator_uses(designator, out);
             collect_expr_uses(value, out);
-        }
+        },
     }
 }
 
@@ -2531,13 +2606,13 @@ fn collect_designator_uses(designator: &Designator, out: &mut Vec<String>) {
         Designator::Range(first, last) => {
             collect_expr_uses(first, out);
             collect_expr_uses(last, out);
-        }
+        },
         Designator::Chain(items) => {
             for item in items {
                 collect_designator_uses(item, out);
             }
-        }
-        Designator::Field(_) => {}
+        },
+        Designator::Field(_) => {},
     }
 }
 
@@ -2547,9 +2622,9 @@ fn collect_block_item_uses(item: &BlockItem, out: &mut Vec<String>) {
             if let Some(init) = &v.init {
                 collect_expr_uses(init, out);
             }
-        }
+        },
         BlockItem::Stmt(stmt) => collect_stmt_uses(stmt, out),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -2564,11 +2639,11 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
             if let Some(stmt) = else_ {
                 collect_stmt_uses(stmt, out);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             collect_expr_uses(cond, out);
             collect_stmt_uses(body, out);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -2586,7 +2661,7 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_expr_uses(step, out);
             }
             collect_stmt_uses(body, out);
-        }
+        },
         Stmt::Switch { expr, cases, .. } => {
             collect_expr_uses(expr, out);
             for case in cases {
@@ -2600,12 +2675,12 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
                     collect_block_item_uses(item, out);
                 }
             }
-        }
+        },
         Stmt::Block { b, .. } => {
             for item in &b.items {
                 collect_block_item_uses(item, out);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => collect_stmt_uses(stmt, out),
         Stmt::GotoIndirect { expr, .. } => collect_expr_uses(expr, out),
         Stmt::AsmGoto {
@@ -2614,8 +2689,8 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
             for expr in outputs.iter().chain(inputs.iter()) {
                 collect_expr_uses(expr, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -2666,11 +2741,7 @@ pub fn software_pipelining(func: &mut Function) -> bool {
         // Check if loop body is safe to pipeline:
         // no stores, no calls, no inline asm, no volatile loads
         let has_side_effects = header_bb.insts.iter().any(|inst| {
-            inst_is_side_effecting(&inst.kind)
-                || matches!(
-                    &inst.kind,
-                    InstKind::InlineAsm { .. }
-                )
+            inst_is_side_effecting(&inst.kind) || matches!(&inst.kind, InstKind::InlineAsm { .. })
         });
         if has_side_effects {
             continue;
@@ -2706,11 +2777,11 @@ fn find_natural_loops(func: &Function) -> Vec<(String, String)> {
                 if t == name || f == name {
                     loops.push((name.clone(), name.clone()));
                 }
-            }
+            },
             Terminator::Jump(target) if target == name => {
                 loops.push((name.clone(), name.clone()));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     loops
@@ -2778,7 +2849,7 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_old_style: false,
             format_kind: None,
             format_string_idx: None,
@@ -2814,7 +2885,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         }
     }
 
@@ -2830,10 +2901,7 @@ mod tests {
         let names: Vec<&str> = funcs.iter().map(|f| f.name.name.as_str()).collect();
         assert!(names.contains(&"main"));
         assert!(names.contains(&"helper"));
-        assert!(
-            !names.contains(&"dead_func"),
-            "unreachable static should be removed"
-        );
+        assert!(!names.contains(&"dead_func"), "unreachable static should be removed");
     }
 
     #[test]
@@ -2927,7 +2995,7 @@ mod tests {
                 op: BinOp::Shl,
                 r: Operand::Int(3),
                 ..
-            } => {}
+            } => {},
             other => panic!("expected Shl 3, got {other:?}"),
         }
         // Div 4 -> Shr 2 (UInt is unsigned)
@@ -2936,7 +3004,7 @@ mod tests {
                 op: BinOp::Shr,
                 r: Operand::Int(2),
                 ..
-            } => {}
+            } => {},
             other => panic!("expected Shr 2, got {other:?}"),
         }
     }
@@ -2974,7 +3042,7 @@ mod tests {
         assert!(!changed, "signed Div must not be converted");
         let bb = f.blocks.get("entry").unwrap();
         match &bb.insts[0].kind {
-            InstKind::Bin { op: BinOp::Div, .. } => {}
+            InstKind::Bin { op: BinOp::Div, .. } => {},
             other => panic!("Div should remain, got {other:?}"),
         }
     }
@@ -3186,14 +3254,8 @@ mod tests {
         }
         assert!(instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(
-            bb.insts[0].dest.as_ref().map(|v| v.name()),
-            Some("a_1".into())
-        );
-        assert_eq!(
-            bb.insts[1].dest.as_ref().map(|v| v.name()),
-            Some("z_1".into())
-        );
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(bb.insts[1].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
         assert!(matches!(bb.insts[2].kind, InstKind::InlineAsm { .. }));
     }
 
@@ -3253,15 +3315,9 @@ mod tests {
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(
-            bb.insts[0].dest.as_ref().map(|v| v.name()),
-            Some("z_1".into())
-        );
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(
-            bb.insts[2].dest.as_ref().map(|v| v.name()),
-            Some("a_1".into())
-        );
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
     }
 
     #[test]
@@ -3335,14 +3391,8 @@ mod tests {
             .iter()
             .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "a_1"))
             .unwrap();
-        assert!(
-            pos_load < pos_asm,
-            "memory clobber must keep earlier load before asm"
-        );
-        assert!(
-            pos_pure < pos_asm,
-            "pure instruction may cross memory-clobber asm"
-        );
+        assert!(pos_load < pos_asm, "memory clobber must keep earlier load before asm");
+        assert!(pos_pure < pos_asm, "pure instruction may cross memory-clobber asm");
     }
 
     #[test]
@@ -3414,15 +3464,9 @@ mod tests {
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(
-            bb.insts[0].dest.as_ref().map(|v| v.name()),
-            Some("x_1".into())
-        );
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("x_1".into()));
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(
-            bb.insts[2].dest.as_ref().map(|v| v.name()),
-            Some("a_1".into())
-        );
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
     }
 
     #[test]
@@ -3546,10 +3590,7 @@ mod tests {
         f.blocks.insert("entry".into(), bb);
         assert!(!dead_inst_elim(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(
-            bb.insts.len(), 1,
-            "asm with memory clobber must be preserved"
-        );
+        assert_eq!(bb.insts.len(), 1, "asm with memory clobber must be preserved");
     }
 
     // ── P12 register_allocation tests ──
@@ -3601,7 +3642,7 @@ mod tests {
                 // val 编码: (total << 16) | (alloc << 8) | spill
                 let total = (*val >> 16) & 0xFFFF;
                 assert!(total > 0, "should have at least 1 SSA value");
-            }
+            },
             other => panic!("expected regalloc hint, got {:?}", other),
         }
     }
@@ -3659,7 +3700,7 @@ mod tests {
                     spilled,
                     allocated
                 );
-            }
+            },
             other => panic!("expected regalloc hint, got {:?}", other),
         }
     }
@@ -3708,7 +3749,7 @@ mod tests {
                 ..
             } => {
                 assert!(name.contains("divrem_overflow"), "got: {}", name);
-            }
+            },
             other => panic!("expected ubsan guard, got {:?}", other),
         }
     }
@@ -3778,7 +3819,7 @@ mod tests {
                 ..
             } => {
                 assert!(name.contains("negate_overflow"), "got: {}", name);
-            }
+            },
             other => panic!("expected ubsan guard, got {:?}", other),
         }
     }

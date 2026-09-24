@@ -8,29 +8,59 @@ use crate::codegen::x86_64::Codegen;
 
 // REX prefix encoding helpers
 #[inline]
-fn rex_w() -> u8 { 0x48 }
+fn rex_w() -> u8 {
+    0x48
+}
 #[inline]
-fn rex_r() -> u8 { 0x4C }
+fn rex_r() -> u8 {
+    0x4C
+}
 #[inline]
-fn rex_b() -> u8 { 0x41 }
+fn rex_b() -> u8 {
+    0x41
+}
 #[inline]
-fn rex_rb() -> u8 { 0x4D }
+fn rex_rb() -> u8 {
+    0x4D
+}
 #[inline]
-fn rex_xb() -> u8 { 0x45 }
+fn rex_xb() -> u8 {
+    0x45
+}
 #[inline]
-fn rex_wb() -> u8 { 0x49 }
+fn rex_wb() -> u8 {
+    0x49
+}
 #[inline]
-fn rex_wr() -> u8 { 0x4C }
+fn rex_wr() -> u8 {
+    0x4C
+}
 
 // Encode full REX prefix
 fn encode_rex_full(w: bool, r: u8, x: u8, b: u8) -> Option<u8> {
     let mut rex = 0x40u8;
     let mut needed = false;
-    if w { rex |= 0x08; needed = true; }
-    if r >= 8 { rex |= 0x04; needed = true; }
-    if x >= 8 { rex |= 0x02; needed = true; }
-    if b >= 8 { rex |= 0x01; needed = true; }
-    if needed { Some(rex) } else { None }
+    if w {
+        rex |= 0x08;
+        needed = true;
+    }
+    if r >= 8 {
+        rex |= 0x04;
+        needed = true;
+    }
+    if x >= 8 {
+        rex |= 0x02;
+        needed = true;
+    }
+    if b >= 8 {
+        rex |= 0x01;
+        needed = true;
+    }
+    if needed {
+        Some(rex)
+    } else {
+        None
+    }
 }
 
 impl Codegen {
@@ -87,14 +117,15 @@ impl Codegen {
         let disp_offset = self.code.len() as u64;
         self.emit(&[0x00, 0x00, 0x00, 0x00]); // placeholder
         let next_ip = self.code.len() as u64;
-        self.pending.push(crate::codegen::x86_64::codegen::PendingJump {
-            at,
-            target: target.to_string(),
-            kind,
-            disp_offset,
-            next_ip,
-            is_push_imm: false,
-        });
+        self.pending
+            .push(crate::codegen::x86_64::codegen::PendingJump {
+                at,
+                target: target.to_string(),
+                kind,
+                disp_offset,
+                next_ip,
+                is_push_imm: false,
+            });
     }
 
     // ========================================================================
@@ -185,7 +216,13 @@ impl Codegen {
         // r13 = 13, needs REX.B
         let rex = if reg >= 8 { 0x4D } else { 0x49 };
         if off >= -128 && off <= 127 {
-            self.emit(&[rex, 0x8D, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+            self.emit(&[
+                rex,
+                0x8D,
+                0x44 | ((reg & 7) << 3),
+                0x24 | (13 & 7),
+                off as u8,
+            ]);
         } else {
             self.emit(&[rex, 0x8D, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
             self.emit(&(off as i32).to_le_bytes());
@@ -196,7 +233,13 @@ impl Codegen {
     pub fn emit_mov_mem_r13(&mut self, reg: u8, off: i64) {
         let rex = if reg >= 8 { 0x4D } else { 0x49 };
         if off >= -128 && off <= 127 {
-            self.emit(&[rex, 0x8B, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+            self.emit(&[
+                rex,
+                0x8B,
+                0x44 | ((reg & 7) << 3),
+                0x24 | (13 & 7),
+                off as u8,
+            ]);
         } else {
             self.emit(&[rex, 0x8B, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
             self.emit(&(off as i32).to_le_bytes());
@@ -259,17 +302,20 @@ impl Codegen {
 
     /// Get the r13-relative offset of a local variable.
     pub fn var_offset(&mut self, name: &str) -> i64 {
-        self.var_map
-            .get(name)
-            .map(|(off, _)| *off)
-            .unwrap_or(0)
+        self.var_map.get(name).map(|(off, _)| *off).unwrap_or(0)
     }
 
     /// Load variable from stack to register (qword).
     pub fn load_stack(&mut self, reg: u8, off: i64) {
         let rex = if reg >= 8 { 0x4D } else { 0x49 };
         if off >= -128 && off <= 127 {
-            self.emit(&[rex, 0x8B, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+            self.emit(&[
+                rex,
+                0x8B,
+                0x44 | ((reg & 7) << 3),
+                0x24 | (13 & 7),
+                off as u8,
+            ]);
         } else {
             self.emit(&[rex, 0x8B, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
             self.emit(&(off as i32).to_le_bytes());
@@ -280,7 +326,13 @@ impl Codegen {
     pub fn store_stack(&mut self, reg: u8, off: i64) {
         let rex = if reg >= 8 { 0x4D } else { 0x49 };
         if off >= -128 && off <= 127 {
-            self.emit(&[rex, 0x89, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+            self.emit(&[
+                rex,
+                0x89,
+                0x44 | ((reg & 7) << 3),
+                0x24 | (13 & 7),
+                off as u8,
+            ]);
         } else {
             self.emit(&[rex, 0x89, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
             self.emit(&(off as i32).to_le_bytes());
@@ -294,31 +346,51 @@ impl Codegen {
                 // movzx reg, byte [r13+off]
                 let rex = if reg >= 8 { 0x4D } else { 0x49 };
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x0F, 0xB6, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x0F,
+                        0xB6,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x0F, 0xB6, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             2 => {
                 let rex = if reg >= 8 { 0x4D } else { 0x49 };
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x0F, 0xB7, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x0F,
+                        0xB7,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x0F, 0xB7, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             4 => {
                 // mov r32, [r13+off] (zero-extends to 64-bit)
                 let rex = if reg >= 8 { 0x45 } else { 0x41 };
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x8B, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x8B,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x8B, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             8 => self.load_stack(reg, off),
             _ => self.load_stack(reg, off),
         }
@@ -331,31 +403,50 @@ impl Codegen {
                 let rex = if reg >= 8 { 0x41 } else { 0x00 };
                 let rex = rex | 0x40;
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x88, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x88,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x88, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             2 => {
                 let rex = if reg >= 8 { 0x41 } else { 0x00 };
                 let rex = rex | 0x40 | 0x08; // REX.W for 16-bit? No, 66h prefix
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x66, 0x89, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x66,
+                        0x89,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x66, 0x89, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             4 => {
                 let rex = if reg >= 8 { 0x41 } else { 0x00 };
                 if off >= -128 && off <= 127 {
-                    self.emit(&[rex, 0x89, 0x44 | ((reg & 7) << 3), 0x24 | (13 & 7), off as u8]);
+                    self.emit(&[
+                        rex,
+                        0x89,
+                        0x44 | ((reg & 7) << 3),
+                        0x24 | (13 & 7),
+                        off as u8,
+                    ]);
                 } else {
                     self.emit(&[rex, 0x89, 0x84 | ((reg & 7) << 3), 0x24 | (13 & 7)]);
                     self.emit(&(off as i32).to_le_bytes());
                 }
-            }
+            },
             8 => self.store_stack(reg, off),
             _ => self.store_stack(reg, off),
         }
@@ -370,25 +461,25 @@ impl Codegen {
                 // movsx rax, byte [r13+off] -> but off is variable
                 // Since we don't know the off here, this is a stub that should be refactored
                 self.emit(&[0x49, 0x0F, 0xBE, 0x04, 0x24]); // movsx rax, byte [r13]
-            }
+            },
             (1, false) => {
                 self.emit(&[0x49, 0x0F, 0xB6, 0x04, 0x24]); // movzx rax, byte [r13]
-            }
+            },
             (2, true) => {
                 self.emit(&[0x49, 0x0F, 0xBF, 0x04, 0x24]); // movsx rax, word [r13]
-            }
+            },
             (2, false) => {
                 self.emit(&[0x49, 0x0F, 0xB7, 0x04, 0x24]); // movzx rax, word [r13]
-            }
+            },
             (4, true) => {
                 self.emit(&[0x49, 0x63, 0x04, 0x24]); // movsxd rax, dword [r13]
-            }
+            },
             (4, false) => {
                 self.emit(&[0x45, 0x8B, 0x04, 0x24]); // mov eax, [r13] (zero extends)
-            }
+            },
             _ => {
                 self.emit(&[0x49, 0x8B, 0x04, 0x24]); // mov rax, [r13]
-            }
+            },
         }
     }
 
@@ -398,7 +489,9 @@ impl Codegen {
 
     /// Subtract from RSP (allocate stack space).
     pub fn emit_sub_rsp(&mut self, bytes: i64) {
-        if bytes <= 0 { return; }
+        if bytes <= 0 {
+            return;
+        }
         if bytes <= 127 {
             self.emit(&[0x48, 0x83, 0xEC, bytes as u8]);
         } else if bytes <= i32::MAX as i64 {
@@ -412,7 +505,9 @@ impl Codegen {
 
     /// Add to RSP (deallocate stack space).
     pub fn emit_add_rsp(&mut self, bytes: i64) {
-        if bytes <= 0 { return; }
+        if bytes <= 0 {
+            return;
+        }
         if bytes <= 127 {
             self.emit(&[0x48, 0x83, 0xC4, bytes as u8]);
         } else if bytes <= i32::MAX as i64 {
@@ -599,7 +694,7 @@ impl Codegen {
         // pfx: 0xF3 (movss), 0xF2 (movsd), 0x66 (movdqa/movups) etc.
         let rex_x = if reg >= 8 { 0x41 } else { 0x00 };
         let rex = 0x40 | rex_x;
-        self.emit(&[rex, pfx, 0x0F, 0x11]); // MOVSS/MOVSD/MOVDQA ... 
+        self.emit(&[rex, pfx, 0x0F, 0x11]); // MOVSS/MOVSD/MOVDQA ...
         if off < 128 {
             self.emit(&[0x44 | ((reg & 7) << 3), 0x24, off as u8]);
         } else {
@@ -624,9 +719,9 @@ impl Codegen {
     /// Load XMM register from stack (r13-relative) at given offset.
     pub fn load_stack_xmm(&mut self, reg: u8, off: i64, sz: usize, _aligned: bool) {
         let pfx = match sz {
-            4 => 0xF3,   // movss
-            8 => 0xF2,   // movsd
-            16 => 0x66,  // movdqa
+            4 => 0xF3,  // movss
+            8 => 0xF2,  // movsd
+            16 => 0x66, // movdqa
             _ => 0xF3,
         };
         let rex = if reg >= 8 { 0x45 } else { 0x41 };
@@ -697,7 +792,9 @@ impl Codegen {
 
     /// Align code to the given boundary by emitting NOPs.
     pub fn align(&mut self, alignment: usize) {
-        if alignment <= 1 { return; }
+        if alignment <= 1 {
+            return;
+        }
         let pos = self.code.len() % alignment;
         if pos != 0 {
             let nops = alignment - pos;
@@ -738,7 +835,7 @@ impl Codegen {
                 } else {
                     self.emit(&[0x48, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
                 }
-            }
+            },
             16 => {
                 let rex = encode_rex_full(true, dst, 0, src);
                 if let Some(r) = rex {
@@ -746,7 +843,7 @@ impl Codegen {
                 } else {
                     self.emit(&[0x48, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
                 }
-            }
+            },
             32 => {
                 let rex = encode_rex_full(true, dst, 0, src);
                 if let Some(r) = rex {
@@ -754,12 +851,12 @@ impl Codegen {
                 } else {
                     self.emit(&[0x48, 0x63, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
                 }
-            }
+            },
             _ => {
                 if dst != src {
                     self.mov(dst, src);
                 }
-            }
+            },
         }
     }
 
@@ -779,7 +876,10 @@ impl Codegen {
     /// Resolve GNU asm label: if the symbol carries an `__asm__("name")`
     /// alias, return the alias name; otherwise None.
     pub fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
-        self.asm_label_map.get(c_name).map(|s| s.as_str()).unwrap_or(c_name)
+        self.asm_label_map
+            .get(c_name)
+            .map(|s| s.as_str())
+            .unwrap_or(c_name)
     }
 
     /// RSP (current stack pointer value - stored as field or computed)

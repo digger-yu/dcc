@@ -131,10 +131,9 @@ mod char_class {
             b'A'..=b'Z' | b'a'..=b'z' => LETTER,
             b'0'..=b'9' => DIGIT,
             b'_' => IDENT_CONT,
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b',' | b';' | b':'
-            | b'?' | b'~' | b'#' | b'+' | b'-' | b'*' | b'/' | b'%'
-            | b'&' | b'|' | b'^' | b'!' | b'=' | b'<' | b'>' | b'.'
-            | b'@' | b'$' | b'\\' | b'`' => PUNCT,
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b',' | b';' | b':' | b'?' | b'~' | b'#'
+            | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'!' | b'=' | b'<' | b'>'
+            | b'.' | b'@' | b'$' | b'\\' | b'`' => PUNCT,
             _ => OTHER,
         }
     }
@@ -238,7 +237,7 @@ pub enum TokKind {
     KwChar16, // char16_t (C11)
     KwChar32, // char32_t (C11)
     KwFract,
-    KwAccum,   // _Fract, _Accum (定点数)
+    KwAccum,     // _Fract, _Accum (定点数)
     KwComplex,   // _Complex
     KwImaginary, // _Imaginary (C99)
     KwReal,      // __real__ / __real (取复数实部)
@@ -464,12 +463,12 @@ impl<'a> Lexer<'a> {
                 Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'\x0c')
                 | Some(b'\x0b') => {
                     self.bump();
-                }
+                },
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
                     while self.peek().is_some() && self.peek() != Some(b'\n') {
                         self.bump();
                     }
-                }
+                },
                 Some(b'/') if self.peek_at(1) == Some(b'*') => {
                     self.bump();
                     self.bump();
@@ -481,7 +480,7 @@ impl<'a> Lexer<'a> {
                         }
                         self.bump();
                     }
-                }
+                },
                 _ => break,
             }
         }
@@ -504,8 +503,7 @@ impl<'a> Lexer<'a> {
             || b == b'_'
             || (b == b'\\'
                 && self.pos + 1 < self.src.len()
-                && (self.src[self.pos + 1] == b'u'
-                    || self.src[self.pos + 1] == b'U'))
+                && (self.src[self.pos + 1] == b'u' || self.src[self.pos + 1] == b'U'))
         {
             while let Some(c) = self.peek() {
                 if c.is_ascii_alphanumeric() || c == b'_' {
@@ -829,20 +827,21 @@ impl<'a> Lexer<'a> {
                 }
                 // hex float exponent: p/P followed by decimal exponent
                 if (is_float || matches!(self.peek(), Some(b'p') | Some(b'P')))
-                    && matches!(self.peek(), Some(b'p') | Some(b'P')) {
-                        is_float = true;
+                    && matches!(self.peek(), Some(b'p') | Some(b'P'))
+                {
+                    is_float = true;
+                    self.bump();
+                    if let Some(b'+') | Some(b'-') = self.peek() {
                         self.bump();
-                        if let Some(b'+') | Some(b'-') = self.peek() {
+                    }
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_digit() {
                             self.bump();
-                        }
-                        while let Some(c) = self.peek() {
-                            if c.is_ascii_digit() {
-                                self.bump();
-                            } else {
-                                break;
-                            }
+                        } else {
+                            break;
                         }
                     }
+                }
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {
                 self.bump();
                 self.bump();
@@ -912,18 +911,28 @@ impl<'a> Lexer<'a> {
                                     self.bump();
                                 }
                             }
-                        }
+                        },
                         Some(b'l' | b'L') => {
                             self.bump();
-                        }
-                        Some(b'd' | b'D') if matches!(self.peek_at(1), Some(b'f') | Some(b'F') | Some(b'd') | Some(b'D') | Some(b'l') | Some(b'L')) => {
+                        },
+                        Some(b'd' | b'D')
+                            if matches!(
+                                self.peek_at(1),
+                                Some(b'f')
+                                    | Some(b'F')
+                                    | Some(b'd')
+                                    | Some(b'D')
+                                    | Some(b'l')
+                                    | Some(b'L')
+                            ) =>
+                        {
                             // Decimal float: DF/DD/DL
                             self.bump(); // d
                             self.bump(); // f/d/l
-                        }
+                        },
                         Some(b'i' | b'I' | b'j' | b'J') => {
                             self.bump();
-                        }
+                        },
                         _ => break,
                     }
                 }
@@ -1046,7 +1055,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Colon, 1)
                 }
-            }
+            },
             b'?' => (TokKind::Question, 1),
             b'~' => (TokKind::Tilde, 1),
             b'#' => (TokKind::Hash, 1),
@@ -1060,7 +1069,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Plus, 1)
                 }
-            }
+            },
             b'-' => {
                 if self.peek() == Some(b'-') {
                     self.bump();
@@ -1074,7 +1083,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Minus, 1)
                 }
-            }
+            },
             b'*' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1082,7 +1091,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Star, 1)
                 }
-            }
+            },
             b'/' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1090,7 +1099,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Slash, 1)
                 }
-            }
+            },
             b'%' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1106,7 +1115,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Percent, 1)
                 }
-            }
+            },
             b'&' => {
                 if self.peek() == Some(b'&') {
                     self.bump();
@@ -1117,7 +1126,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Amp, 1)
                 }
-            }
+            },
             b'|' => {
                 if self.peek() == Some(b'|') {
                     self.bump();
@@ -1128,7 +1137,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Pipe, 1)
                 }
-            }
+            },
             b'^' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1136,7 +1145,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Caret, 1)
                 }
-            }
+            },
             b'!' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1144,7 +1153,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Not, 1)
                 }
-            }
+            },
             b'=' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1152,7 +1161,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Assign, 1)
                 }
-            }
+            },
             b'<' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1176,7 +1185,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Lt, 1)
                 }
-            }
+            },
             b'>' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
@@ -1192,7 +1201,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Gt, 1)
                 }
-            }
+            },
             b'.' => {
                 if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
                     self.bump();
@@ -1201,7 +1210,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     (TokKind::Dot, 1)
                 }
-            }
+            },
             _ => {
                 // 非 ASCII 字节 (含 PUA 占位码点): 消费完整的 UTF-8 多字节
                 // 序列, 产生 Invalid token。游离在字面量之外的非 ASCII
@@ -1232,7 +1241,7 @@ impl<'a> Lexer<'a> {
                     },
                     text: String::from_utf8_lossy(&self.src[start..self.pos]).into_owned(),
                 };
-            }
+            },
         };
         let text = std::str::from_utf8(&self.src[start..self.pos])
             .unwrap()
@@ -1417,14 +1426,8 @@ mod arena_tests {
         let id = it.intern("foo");
         assert_eq!(CompactTok::Kind(TokKind::Plus).kind(), TokKind::Plus);
         assert_eq!(CompactTok::Ident(id).kind(), TokKind::Ident);
-        assert_eq!(
-            CompactTok::Int(42, IntSuffix::L).kind(),
-            TokKind::Number
-        );
-        assert_eq!(
-            CompactTok::Float(0x7ff0_0000_0000_0000).kind(),
-            TokKind::FloatLit
-        );
+        assert_eq!(CompactTok::Int(42, IntSuffix::L).kind(), TokKind::Number);
+        assert_eq!(CompactTok::Float(0x7ff0_0000_0000_0000).kind(), TokKind::FloatLit);
         let sid = it.intern("hello");
         assert_eq!(CompactTok::Str(sid).kind(), TokKind::StringLit);
         assert_eq!(CompactTok::Char(b'a' as u32).kind(), TokKind::CharLit);

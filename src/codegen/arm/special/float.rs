@@ -28,11 +28,7 @@ impl ArmCodegen {
             | (sd_hi << 12)
             | imm8;
         // Adjust for U bit: if negative, clear U bit
-        let inst = if fp_off < 0 {
-            inst & !(1 << 23)
-        } else {
-            inst
-        };
+        let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -54,11 +50,7 @@ impl ArmCodegen {
             | d_bit
             | (dd_hi << 12)
             | imm8;
-        let inst = if fp_off < 0 {
-            inst & !(1 << 23)
-        } else {
-            inst
-        };
+        let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -77,11 +69,7 @@ impl ArmCodegen {
             | d_bit
             | (sd_hi << 12)
             | imm8;
-        let inst = if fp_off < 0 {
-            inst & !(1 << 23)
-        } else {
-            inst
-        };
+        let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -100,11 +88,7 @@ impl ArmCodegen {
             | d_bit
             | (dd_hi << 12)
             | imm8;
-        let inst = if fp_off < 0 {
-            inst & !(1 << 23)
-        } else {
-            inst
-        };
+        let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -117,13 +101,7 @@ impl ArmCodegen {
         let sn_hi = ((sn >> 1) & 0xF) as u32;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         let sd_hi = ((sd >> 1) & 0xF) as u32;
-        let inst = 0xEE300A00u32
-            | d_bit
-            | (sn_hi << 16)
-            | (sd_hi << 12)
-            | n_bit
-            | sm_hi
-            | m_bit;
+        let inst = 0xEE300A00u32 | d_bit | (sn_hi << 16) | (sd_hi << 12) | n_bit | sm_hi | m_bit;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -260,11 +238,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCMP.S Sd, Sm: cond 1110 1011 1 D 00 Vd 1010 E 1 M 0 Vm
-        let inst = 0xEEB40A40u32
-            | d_bit
-            | (sd_hi << 12)
-            | m_bit
-            | sm_hi;
+        let inst = 0xEEB40A40u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -275,11 +249,7 @@ impl ArmCodegen {
         let m_bit = ((dm & 1) as u32) << 5;
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VCMP.D Dd, Dm
-        let inst = 0xEEB40B40u32
-            | d_bit
-            | (dd_hi << 12)
-            | m_bit
-            | dm_hi;
+        let inst = 0xEEB40B40u32 | d_bit | (dd_hi << 12) | m_bit | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -294,10 +264,7 @@ impl ArmCodegen {
         let d_bit = ((sd & 1) as u32) << 22;
         let sd_hi = ((sd >> 1) & 0xF) as u32;
         // VMOV Sd, Rn: cond 1110 0000 0 D 00 Vd 1010 N 0 0 Rn
-        let inst = 0xEE000A10u32
-            | d_bit
-            | (sd_hi << 12)
-            | (rn as u32);
+        let inst = 0xEE000A10u32 | d_bit | (sd_hi << 12) | (rn as u32);
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -306,10 +273,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VMOV Rn, Sm: cond 1110 0000 1 D 00 Vn 1010 N 1 0 Rn
-        let inst = 0xEE100A10u32
-            | m_bit
-            | (sm_hi << 12)
-            | (rn as u32);
+        let inst = 0xEE100A10u32 | m_bit | (sm_hi << 12) | (rn as u32);
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -318,11 +282,7 @@ impl ArmCodegen {
         let m_bit = ((dm & 1) as u32) << 5;
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VMOV r1, r2, Dm: cond 1100 0101 Rn1 Rn2 Dm_hi 1011 M 1 Dm_lo
-        let inst = 0xEC500B10u32
-            | ((rn as u32) << 12)
-            | (((rn + 1) as u32) << 16)
-            | m_bit
-            | dm_hi;
+        let inst = 0xEC500B10u32 | ((rn as u32) << 12) | (((rn + 1) as u32) << 16) | m_bit | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -331,11 +291,7 @@ impl ArmCodegen {
         let m_bit = ((dm & 1) as u32) << 5;
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VMOV Dm, r1, r2
-        let inst = 0xEC400B10u32
-            | ((rn as u32) << 12)
-            | (((rn + 1) as u32) << 16)
-            | m_bit
-            | dm_hi;
+        let inst = 0xEC400B10u32 | ((rn as u32) << 12) | (((rn + 1) as u32) << 16) | m_bit | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -346,11 +302,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.S32.F32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
-        let inst = 0xEEBD0AC0u32
-            | d_bit
-            | (sd_hi << 12)
-            | m_bit
-            | sm_hi;
+        let inst = 0xEEBD0AC0u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -361,11 +313,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.F32.S32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
-        let inst = 0xEEB80AC0u32
-            | d_bit
-            | (sd_hi << 12)
-            | m_bit
-            | sm_hi;
+        let inst = 0xEEB80AC0u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -376,11 +324,7 @@ impl ArmCodegen {
         let m_bit = ((dm & 1) as u32) << 5;
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VCVT.F32.F64: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
-        let inst = 0xEEBC0BC0u32
-            | d_bit
-            | (sd_hi << 12)
-            | m_bit
-            | dm_hi;
+        let inst = 0xEEBC0BC0u32 | d_bit | (sd_hi << 12) | m_bit | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -391,11 +335,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.F64.F32: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
-        let inst = 0xEEBB0AC0u32
-            | d_bit
-            | (dd_hi << 12)
-            | m_bit
-            | sm_hi;
+        let inst = 0xEEBB0AC0u32 | d_bit | (dd_hi << 12) | m_bit | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -406,11 +346,7 @@ impl ArmCodegen {
         let m_bit = ((sm & 1) as u32) << 5;
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VNEG.S: cond 1111 1011 1 D 00 Vd 1010 01 M 0 Vm
-        let inst = 0xEEB10A40u32
-            | d_bit
-            | (sd_hi << 12)
-            | m_bit
-            | sm_hi;
+        let inst = 0xEEB10A40u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
@@ -421,11 +357,7 @@ impl ArmCodegen {
         let m_bit = ((dm & 1) as u32) << 5;
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VNEG.D
-        let inst = 0xEEB10B40u32
-            | d_bit
-            | (dd_hi << 12)
-            | m_bit
-            | dm_hi;
+        let inst = 0xEEB10B40u32 | d_bit | (dd_hi << 12) | m_bit | dm_hi;
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 

@@ -86,7 +86,7 @@ enum Token {
     Colon,
     Semicolon,
     Comma,
-    Star,      // *
+    Star, // *
     Plus,
     Minus,
     Slash,
@@ -103,16 +103,16 @@ enum Token {
     Gt,
     Le,
     Ge,
-    And,   // &&
-    Or,    // ||
+    And, // &&
+    Or,  // ||
     Question,
     Bang,
-    Dot,   // .
-    Assign, // =
-    PlusAssign,  // +=
-    MinusAssign, // -=
-    AndAssign,   // &=
-    OrAssign,    // |=
+    Dot,          // .
+    Assign,       // =
+    PlusAssign,   // +=
+    MinusAssign,  // -=
+    AndAssign,    // &=
+    OrAssign,     // |=
     LShiftAssign, // <<=
     RShiftAssign, // >>=
     // 特殊
@@ -207,7 +207,7 @@ impl Lexer {
                     if let Some(c2) = self.next_char() {
                         s.push(c2);
                     }
-                }
+                },
                 Some(c) => s.push(c),
                 None => break,
             }
@@ -230,8 +230,8 @@ impl Lexer {
                         }
                     }
                     return Token::Int(u64::from_str_radix(&hex, 16).unwrap_or(0));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         // 读取整数部分
@@ -294,11 +294,11 @@ impl Lexer {
                 Some('K') | Some('k') => {
                     self.next_char();
                     Token::Int(num.parse::<u64>().unwrap_or(0) * 1024)
-                }
+                },
                 Some('M') | Some('m') => {
                     self.next_char();
                     Token::Int(num.parse::<u64>().unwrap_or(0) * 1024 * 1024)
-                }
+                },
                 _ => Token::Int(num.parse().unwrap_or(0)),
             }
         }
@@ -310,7 +310,8 @@ impl Lexer {
             // 允许字母、数字、下划线、方括号、连字符、加号作为标识符的一部分
             // 这是为了支持链接器脚本中的节名模式，如 ___ksymtab+*
             // 也允许 `.` 后跟字母/数字，以支持 .got.plt 这样的节名
-            if c.is_ascii_alphanumeric() || c == '_' || c == '[' || c == ']' || c == '-' || c == '+' {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '[' || c == ']' || c == '-' || c == '+'
+            {
                 s.push(c);
                 self.next_char();
             } else if c == '.' {
@@ -356,7 +357,7 @@ impl Lexer {
                 } else {
                     Token::Plus
                 }
-            }
+            },
             '-' => {
                 if self.peek_char() == Some('=') {
                     self.next_char();
@@ -364,7 +365,7 @@ impl Lexer {
                 } else {
                     Token::Minus
                 }
-            }
+            },
             '/' => {
                 // Check for /DISCARD/
                 let saved = self.pos;
@@ -383,7 +384,7 @@ impl Lexer {
                     self.pos = saved;
                     Token::Slash
                 }
-            }
+            },
             '%' => Token::Percent,
             '&' => {
                 if self.peek_char() == Some('&') {
@@ -395,7 +396,7 @@ impl Lexer {
                 } else {
                     Token::Amp
                 }
-            }
+            },
             '|' => {
                 if self.peek_char() == Some('|') {
                     self.next_char();
@@ -406,7 +407,7 @@ impl Lexer {
                 } else {
                     Token::Pipe
                 }
-            }
+            },
             '^' => Token::Caret,
             '~' => Token::Tilde,
             '<' => {
@@ -424,7 +425,7 @@ impl Lexer {
                 } else {
                     Token::Lt
                 }
-            }
+            },
             '>' => {
                 if self.peek_char() == Some('>') {
                     self.next_char();
@@ -440,7 +441,7 @@ impl Lexer {
                 } else {
                     Token::Gt
                 }
-            }
+            },
             '=' => {
                 if self.peek_char() == Some('=') {
                     self.next_char();
@@ -448,7 +449,7 @@ impl Lexer {
                 } else {
                     Token::Assign
                 }
-            }
+            },
             '!' => {
                 if self.peek_char() == Some('=') {
                     self.next_char();
@@ -456,7 +457,7 @@ impl Lexer {
                 } else {
                     Token::Bang
                 }
-            }
+            },
             '?' => Token::Question,
             '.' => {
                 // check if it's a section name starting with .
@@ -471,7 +472,7 @@ impl Lexer {
                     }
                 }
                 Token::Dot
-            }
+            },
             c if c.is_ascii_digit() => self.read_number(c),
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let ident = self.read_ident(c);
@@ -521,11 +522,11 @@ impl Lexer {
                     "INFO" => Token::Info,
                     _ => Token::Ident(ident),
                 }
-            }
+            },
             _ => {
                 // skip unknown characters
                 self.next_token()
-            }
+            },
         }
     }
 }
@@ -612,17 +613,17 @@ impl LinkerScript {
             match cmd {
                 SectionCommand::SymbolAssign(a) => {
                     syms.push(a.name.clone());
-                }
+                },
                 SectionCommand::ProvideCmd(name, _) => {
                     syms.push(name.clone());
-                }
+                },
                 SectionCommand::OutputSection(def) => {
                     for item in &def.body {
                         if let SectionBodyItem::SymbolAssign(a) = item {
                             syms.push(a.name.clone());
                         }
                     }
-                }
+                },
                 SectionCommand::Overlay(overlay) => {
                     // OVERLAY 块中每个子节的 body 中可能有符号赋值
                     for sec in &overlay.sections {
@@ -632,8 +633,8 @@ impl LinkerScript {
                             }
                         }
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         // 尾部 PROVIDE
@@ -661,11 +662,7 @@ impl LinkerScript {
         self.version_nodes
             .iter()
             .map(|n| {
-                (
-                    n.version_id.as_str(),
-                    n.global_symbols.as_slice(),
-                    n.local_symbols.as_slice(),
-                )
+                (n.version_id.as_str(), n.global_symbols.as_slice(), n.local_symbols.as_slice())
             })
             .collect()
     }
@@ -838,7 +835,7 @@ impl SortMode {
             SortMode::Single(existing) => {
                 let e = *existing;
                 *self = SortMode::Combined(vec![e, kind]);
-            }
+            },
             SortMode::Combined(chain) => chain.push(kind),
         }
     }
@@ -928,7 +925,10 @@ impl Parser {
                 let mut ctx = format!(" (pos: {}, prev: {:?}", self.pos - 1, prev);
                 // 显示前几个 token
                 if self.pos >= 3 {
-                    ctx.push_str(&format!(", tokens[-3..-1]: {:?}", &self.tokens[self.pos-3..self.pos-1]));
+                    ctx.push_str(&format!(
+                        ", tokens[-3..-1]: {:?}",
+                        &self.tokens[self.pos - 3..self.pos - 1]
+                    ));
                 }
                 // 显示后几个 token
                 let end = std::cmp::min(self.pos + 2, self.tokens.len());
@@ -978,7 +978,7 @@ impl Parser {
                         script.output_format = Some(s);
                     }
                     self.expect(&Token::RParen)?;
-                }
+                },
                 Token::OutputArch => {
                     self.next();
                     self.expect(&Token::LParen)?;
@@ -991,24 +991,24 @@ impl Parser {
                             Token::Colon => {
                                 self.next();
                                 arch.push(':');
-                            }
+                            },
                             Token::Ident(s) => {
                                 self.next();
                                 arch.push_str(&s);
-                            }
+                            },
                             Token::Str(s) => {
                                 self.next();
                                 arch.push_str(&s);
-                            }
+                            },
                             _ => {
                                 let tok = self.next();
                                 return Err(format!("OUTPUT_ARCH: unexpected {:?}", tok));
-                            }
+                            },
                         }
                     }
                     script.output_arch = Some(arch);
                     self.expect(&Token::RParen)?;
-                }
+                },
                 Token::Entry => {
                     self.next();
                     self.expect(&Token::LParen)?;
@@ -1016,16 +1016,16 @@ impl Parser {
                         script.entry = Some(s);
                     }
                     self.expect(&Token::RParen)?;
-                }
+                },
                 Token::Phdrs => {
                     script.phdrs = self.parse_phdrs()?;
-                }
+                },
                 Token::Memory => {
                     script.memory_regions = self.parse_memory()?;
-                }
+                },
                 Token::Sections => {
                     script.sections = self.parse_sections()?;
-                }
+                },
                 Token::Input | Token::Group => {
                     // INPUT(file1, file2, ...) or GROUP(file1, file2, ...)
                     self.next();
@@ -1035,21 +1035,21 @@ impl Parser {
                             Token::Str(s) => {
                                 self.next();
                                 script.input_files.push(s);
-                            }
+                            },
                             Token::Ident(s) => {
                                 self.next();
                                 script.input_files.push(s);
-                            }
+                            },
                             Token::Comma => {
                                 self.next();
-                            }
+                            },
                             Token::Eof => break,
                             _ => {
                                 self.next(); // skip unknown
-                            }
+                            },
                         }
                     }
-                }
+                },
                 Token::NoCrossRefs => {
                     // NOCROSSREFS(section1, section2, ...)
                     self.next();
@@ -1060,18 +1060,18 @@ impl Parser {
                             Token::Ident(s) => {
                                 self.next();
                                 sections.push(s);
-                            }
+                            },
                             Token::Comma => {
                                 self.next();
-                            }
+                            },
                             Token::Eof => break,
                             _ => {
                                 self.next(); // skip unknown
-                            }
+                            },
                         }
                     }
                     script.no_cross_refs.push(sections);
-                }
+                },
                 Token::Insert => {
                     // INSERT AFTER section_name or INSERT BEFORE section_name
                     self.next();
@@ -1102,10 +1102,10 @@ impl Parser {
                         section_name,
                     });
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Version => {
                     script.version_nodes = self.parse_version()?;
-                }
+                },
                 Token::Ident(_) => {
                     // 可能是符号赋值: sym = expr
                     if let Some(assign) = self.try_parse_symbol_assignment(false)? {
@@ -1113,39 +1113,53 @@ impl Parser {
                     } else {
                         self.next(); // skip unknown
                     }
-                }
+                },
                 Token::Dot => {
                     // . = expr at top level (after SECTIONS)
                     self.next();
                     if self.eat(&Token::Assign) {
                         let expr = self.parse_expr()?;
-                        script.trailing_commands.push(TrailingCommand::LocationAssign(expr));
+                        script
+                            .trailing_commands
+                            .push(TrailingCommand::LocationAssign(expr));
                         self.eat(&Token::Semicolon);
                     }
-                }
+                },
                 Token::Assert => {
                     self.next();
                     self.expect(&Token::LParen)?;
                     let expr = self.parse_expr()?;
                     self.expect(&Token::Comma)?;
-                    let msg = if let Token::Str(s) = self.next() { s } else { String::new() };
+                    let msg = if let Token::Str(s) = self.next() {
+                        s
+                    } else {
+                        String::new()
+                    };
                     self.expect(&Token::RParen)?;
-                    script.trailing_commands.push(TrailingCommand::Assert(expr, msg));
+                    script
+                        .trailing_commands
+                        .push(TrailingCommand::Assert(expr, msg));
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Provide => {
                     self.next();
                     self.expect(&Token::LParen)?;
-                    let name = if let Token::Ident(s) = self.next() { s } else { String::new() };
+                    let name = if let Token::Ident(s) = self.next() {
+                        s
+                    } else {
+                        String::new()
+                    };
                     self.expect(&Token::Assign)?;
                     let expr = self.parse_expr()?;
                     self.expect(&Token::RParen)?;
-                    script.trailing_commands.push(TrailingCommand::Provide(name, expr));
+                    script
+                        .trailing_commands
+                        .push(TrailingCommand::Provide(name, expr));
                     self.eat(&Token::Semicolon);
-                }
+                },
                 _ => {
                     self.next(); // skip unknown tokens
-                }
+                },
             }
         }
 
@@ -1201,7 +1215,7 @@ impl Parser {
             } else {
                 return Err("expected memory region name".into());
             };
-            
+
             // Optional attributes in parentheses
             let mut attributes = String::new();
             if self.eat(&Token::LParen) {
@@ -1210,24 +1224,24 @@ impl Parser {
                         Token::Ident(s) => {
                             self.next();
                             attributes.push_str(&s);
-                        }
+                        },
                         Token::Comma => {
                             self.next();
-                        }
+                        },
                         Token::Eof => break,
                         _ => {
                             self.next(); // skip unknown
-                        }
+                        },
                     }
                 }
             }
-            
+
             self.expect(&Token::Colon)?;
-            
+
             // Parse ORIGIN = expr, LENGTH = expr
             let mut origin = Expr::Int(0);
             let mut length = Expr::Int(0);
-            
+
             // ORIGIN = expr
             if let Token::Origin = self.peek().clone() {
                 self.next();
@@ -1235,16 +1249,21 @@ impl Parser {
                 origin = self.parse_expr()?;
             }
             self.eat(&Token::Comma);
-            
+
             // LENGTH = expr
             if let Token::Length = self.peek().clone() {
                 self.next();
                 self.expect(&Token::Assign)?;
                 length = self.parse_expr()?;
             }
-            
+
             self.eat(&Token::Semicolon);
-            regions.push(MemoryRegion { name, origin, length, attributes });
+            regions.push(MemoryRegion {
+                name,
+                origin,
+                length,
+                attributes,
+            });
         }
         Ok(regions)
     }
@@ -1277,13 +1296,10 @@ impl Parser {
                 Token::Ident(s) => {
                     self.next();
                     s
-                }
+                },
                 _ => {
-                    return Err(format!(
-                        "expected version identifier, found {:?}",
-                        self.peek()
-                    ));
-                }
+                    return Err(format!("expected version identifier, found {:?}", self.peek()));
+                },
             };
 
             // 可选的父版本: (@parent_id) 或 (parent_id)
@@ -1322,15 +1338,15 @@ impl Parser {
                                 self.next();
                                 global_symbols.push("*".to_string());
                                 self.eat(&Token::Semicolon);
-                            }
+                            },
                             Token::Ident(s) => {
                                 self.next();
                                 global_symbols.push(s);
                                 self.eat(&Token::Semicolon);
-                            }
+                            },
                             _ => {
                                 self.next(); // skip unknown
-                            }
+                            },
                         }
                     }
                 } else if self.peek() == &Token::Local {
@@ -1345,15 +1361,15 @@ impl Parser {
                                 self.next();
                                 local_symbols.push("*".to_string());
                                 self.eat(&Token::Semicolon);
-                            }
+                            },
                             Token::Ident(s) => {
                                 self.next();
                                 local_symbols.push(s);
                                 self.eat(&Token::Semicolon);
-                            }
+                            },
                             _ => {
                                 self.next(); // skip unknown
-                            }
+                            },
                         }
                     }
                 } else {
@@ -1408,7 +1424,7 @@ impl Parser {
                         // 这里不会到达因为 .name 会被 lexer 识别为 Ident
                     }
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Assert => {
                     self.next();
                     self.expect(&Token::LParen)?;
@@ -1423,17 +1439,21 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     cmds.push(SectionCommand::AssertCmd(expr, msg));
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Provide => {
                     self.next();
                     self.expect(&Token::LParen)?;
-                    let name = if let Token::Ident(s) = self.next() { s } else { String::new() };
+                    let name = if let Token::Ident(s) = self.next() {
+                        s
+                    } else {
+                        String::new()
+                    };
                     self.expect(&Token::Assign)?;
                     let expr = self.parse_expr()?;
                     self.expect(&Token::RParen)?;
                     cmds.push(SectionCommand::ProvideCmd(name, expr));
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Ident(_) => {
                     // 可能是输出节定义或符号赋值
                     if let Some(assign) = self.try_parse_symbol_assignment(false)? {
@@ -1446,7 +1466,7 @@ impl Parser {
                             self.next(); // skip
                         }
                     }
-                }
+                },
                 Token::Discard => {
                     // /DISCARD/ : { ... }
                     if let Some(sec) = self.try_parse_output_section()? {
@@ -1454,7 +1474,7 @@ impl Parser {
                     } else {
                         self.next();
                     }
-                }
+                },
                 Token::Overlay => {
                     // OVERLAY [addr] : [NOCROSSREFS] [AT(lma)] { ... }
                     if let Some(overlay) = self.try_parse_overlay()? {
@@ -1462,42 +1482,49 @@ impl Parser {
                     } else {
                         self.next();
                     }
-                }
+                },
                 _ => {
                     self.next(); // skip unknown
-                }
+                },
             }
         }
 
         Ok(cmds)
     }
 
-    fn try_parse_symbol_assignment(&mut self, _in_section: bool) -> Result<Option<SymbolAssignment>, String> {
+    fn try_parse_symbol_assignment(
+        &mut self,
+        _in_section: bool,
+    ) -> Result<Option<SymbolAssignment>, String> {
         let saved = self.pos;
         // 尝试: name = expr 或 PROVIDE(name = expr)
         let (name, is_provide, is_hidden) = match self.peek().clone() {
             Token::Provide => {
                 self.next();
                 self.expect(&Token::LParen)?;
-                let n = if let Token::Ident(s) = self.next() { s } else {
+                let n = if let Token::Ident(s) = self.next() {
+                    s
+                } else {
                     self.pos = saved;
                     return Ok(None);
                 };
                 (n, true, false)
-            }
+            },
             Token::ProvideHidden => {
                 self.next();
                 self.expect(&Token::LParen)?;
-                let n = if let Token::Ident(s) = self.next() { s } else {
+                let n = if let Token::Ident(s) = self.next() {
+                    s
+                } else {
                     self.pos = saved;
                     return Ok(None);
                 };
                 (n, true, true)
-            }
+            },
             Token::Ident(name) => {
                 self.next();
                 (name, false, false)
-            }
+            },
             _ => return Ok(None),
         };
 
@@ -1513,18 +1540,14 @@ impl Parser {
             _ => {
                 self.pos = saved;
                 return Ok(None);
-            }
+            },
         };
 
         let mut expr = self.parse_expr()?;
 
         // 如果有复合赋值操作符，包装为二元操作
         if let Some(op) = assign_op {
-            expr = Expr::BinaryOp(
-                Box::new(Expr::Symbol(name.clone())),
-                op,
-                Box::new(expr),
-            );
+            expr = Expr::BinaryOp(Box::new(Expr::Symbol(name.clone())), op, Box::new(expr));
         }
 
         if is_provide {
@@ -1559,12 +1582,12 @@ impl Parser {
                     }
                 }
                 (full_name, false)
-            }
+            },
             Token::Discard => ("/DISCARD/".to_string(), true),
             _ => {
                 self.pos = saved;
                 return Ok(None);
-            }
+            },
         };
 
         // 可选的地址: .text ADDR_EXPR : ...
@@ -1817,12 +1840,12 @@ impl Parser {
                         )));
                     }
                     self.eat(&Token::Semicolon);
-                }
+                },
                 Token::Star => {
                     // *(.text ...)
                     let spec = self.parse_input_section_spec(false)?;
                     items.push(SectionBodyItem::InputSection(spec));
-                }
+                },
                 Token::Keep => {
                     // KEEP(*(.text ...))
                     self.next(); // consume KEEP
@@ -1830,11 +1853,11 @@ impl Parser {
                     let spec = self.parse_input_section_spec(true)?;
                     self.expect(&Token::RParen)?; // consume )
                     items.push(SectionBodyItem::InputSection(spec));
-                }
+                },
                 Token::Constructors => {
                     self.next();
                     items.push(SectionBodyItem::Constructors);
-                }
+                },
                 Token::Ident(_) => {
                     // 可能是符号赋值
                     if let Some(assign) = self.try_parse_symbol_assignment(true)? {
@@ -1842,10 +1865,10 @@ impl Parser {
                     } else {
                         self.next(); // skip
                     }
-                }
+                },
                 _ => {
                     self.next(); // skip unknown
-                }
+                },
             }
         }
 
@@ -1867,7 +1890,7 @@ impl Parser {
         let mut patterns = Vec::new();
         let mut exclude_files = Vec::new();
         let mut is_common = false;
-        
+
         while !self.eat(&Token::RParen) {
             match self.peek().clone() {
                 Token::Eof => break,
@@ -1884,7 +1907,7 @@ impl Parser {
                     }
                     // 内层 KEEP 确保 spec 标记为 keep
                     keep = true;
-                }
+                },
                 Token::Sort => {
                     self.next();
                     self.expect(&Token::LParen)?;
@@ -1896,7 +1919,7 @@ impl Parser {
                             patterns.push(pat);
                         }
                     }
-                }
+                },
                 Token::SortByAlignment => {
                     self.next();
                     self.expect(&Token::LParen)?;
@@ -1908,7 +1931,7 @@ impl Parser {
                             patterns.push(pat);
                         }
                     }
-                }
+                },
                 Token::ExcludeFile => {
                     // EXCLUDE_FILE(file1, file2, ...)
                     self.next();
@@ -1918,21 +1941,21 @@ impl Parser {
                             Token::Ident(s) => {
                                 self.next();
                                 exclude_files.push(s);
-                            }
+                            },
                             Token::Str(s) => {
                                 self.next();
                                 exclude_files.push(s);
-                            }
+                            },
                             Token::Comma => {
                                 self.next();
-                            }
+                            },
                             Token::Eof => break,
                             _ => {
                                 self.next(); // skip unknown
-                            }
+                            },
                         }
                     }
-                }
+                },
                 Token::Common => {
                     // *(COMMON) - special handling for COMMON symbols
                     self.next();
@@ -1942,13 +1965,13 @@ impl Parser {
                         pattern: "COMMON".to_string(),
                         sort: SortMode::None,
                     });
-                }
+                },
                 Token::RParen => break,
                 _ => {
                     if let Some(pat) = self.parse_section_pattern()? {
                         patterns.push(pat);
                     }
-                }
+                },
             }
         }
 
@@ -1965,7 +1988,7 @@ impl Parser {
         // 节名模式由多个 token 组成（如 .text.asan.* 或 .text..__x86.rethunk_untrain）
         // 当遇到一个新的以 . 开头的 Ident 且前面已经有内容时，表示新模式的开始
         let mut pattern = String::new();
-        
+
         loop {
             match self.peek().clone() {
                 Token::RParen | Token::Comma | Token::Eof => break,
@@ -2000,37 +2023,37 @@ impl Parser {
                     }
                     self.next();
                     pattern.push_str(&s);
-                }
+                },
                 Token::Dot => {
                     self.next();
                     pattern.push('.');
-                }
+                },
                 Token::Star => {
                     self.next();
                     pattern.push('*');
-                }
+                },
                 Token::Plus => {
                     self.next();
                     pattern.push('+');
-                }
+                },
                 Token::Minus => {
                     self.next();
                     pattern.push('-');
-                }
+                },
                 Token::Int(n) => {
                     self.next();
                     pattern.push_str(&n.to_string());
-                }
+                },
                 _ => {
                     break;
-                }
+                },
             }
         }
-        
+
         if pattern.is_empty() {
             return Ok(None);
         }
-        
+
         Ok(Some(SectionPattern {
             pattern,
             sort: SortMode::None,
@@ -2055,7 +2078,7 @@ impl Parser {
                 let pat = self.parse_sort_chain(sort)?;
                 self.expect(&Token::RParen)?;
                 Ok(pat)
-            }
+            },
             Token::SortByAlignment => {
                 self.next();
                 self.expect(&Token::LParen)?;
@@ -2063,11 +2086,11 @@ impl Parser {
                 let pat = self.parse_sort_chain(sort)?;
                 self.expect(&Token::RParen)?;
                 Ok(pat)
-            }
+            },
             _ => {
                 // 基线情况：没有更多嵌套 SORT，解析节模式
                 self.parse_section_pattern()
-            }
+            },
         }
     }
 
@@ -2102,11 +2125,7 @@ impl Parser {
             let then_expr = self.parse_expr()?;
             self.expect(&Token::Colon)?;
             let else_expr = self.parse_expr()?;
-            Ok(Expr::Ternary(
-                Box::new(cond),
-                Box::new(then_expr),
-                Box::new(else_expr),
-            ))
+            Ok(Expr::Ternary(Box::new(cond), Box::new(then_expr), Box::new(else_expr)))
         } else {
             Ok(cond)
         }
@@ -2244,17 +2263,17 @@ impl Parser {
                 self.next();
                 let expr = self.parse_unary()?;
                 Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(expr)))
-            }
+            },
             Token::Tilde => {
                 self.next();
                 let expr = self.parse_unary()?;
                 Ok(Expr::UnaryOp(UnaryOp::BitNot, Box::new(expr)))
-            }
+            },
             Token::Bang => {
                 self.next();
                 let expr = self.parse_unary()?;
                 Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(expr)))
-            }
+            },
             _ => self.parse_primary(),
         }
     }
@@ -2264,11 +2283,11 @@ impl Parser {
             Token::Int(n) => {
                 self.next();
                 Ok(Expr::Int(n))
-            }
+            },
             Token::Float(f) => {
                 self.next();
                 Ok(Expr::Float(f))
-            }
+            },
             Token::Dot => {
                 self.next();
                 // check for .name (section name)
@@ -2278,16 +2297,24 @@ impl Parser {
                     // and .name shouldn't appear in expressions
                 }
                 Ok(Expr::Dot)
-            }
+            },
             Token::LParen => {
                 self.next();
                 let expr = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
-            }
-            Token::Absolute | Token::Addr | Token::Sizeof | Token::Align
-            | Token::Max | Token::Min | Token::Defined | Token::Length
-            | Token::Assert | Token::Next | Token::Log2Ceil => {
+            },
+            Token::Absolute
+            | Token::Addr
+            | Token::Sizeof
+            | Token::Align
+            | Token::Max
+            | Token::Min
+            | Token::Defined
+            | Token::Length
+            | Token::Assert
+            | Token::Next
+            | Token::Log2Ceil => {
                 let name = match self.next() {
                     Token::Absolute => "ABSOLUTE",
                     Token::Addr => "ADDR",
@@ -2312,7 +2339,7 @@ impl Parser {
                 }
                 self.expect(&Token::RParen)?;
                 Ok(Expr::Call(name.to_string(), args))
-            }
+            },
             Token::Ident(name) => {
                 self.next();
                 // 合并以 .. 开头的续接 token（如 .data..percpu）
@@ -2339,15 +2366,13 @@ impl Parser {
                 } else {
                     Ok(Expr::Symbol(full_name))
                 }
-            }
+            },
             Token::Str(s) => {
                 self.next();
                 // 字符串在表达式中当作符号名
                 Ok(Expr::Symbol(s))
-            }
-            other => {
-                Err(format!("unexpected token in expression: {:?}", other))
-            }
+            },
+            other => Err(format!("unexpected token in expression: {:?}", other)),
         }
     }
 }
@@ -2424,7 +2449,7 @@ impl EvalContext {
                 self.symbols.get(name).map(|&v| Value::I(v)).ok_or_else(|| {
                     format!("undefined symbol '{}' in linker script expression", name)
                 })
-            }
+            },
             Expr::Dot => Ok(Value::I(self.location_counter)),
             Expr::BinaryOp(left, op, right) => {
                 let l = self.eval_value(left)?;
@@ -2438,17 +2463,61 @@ impl EvalContext {
                         BinOp::Sub => lf - rf,
                         BinOp::Mul => lf * rf,
                         BinOp::Div => {
-                            if rf == 0.0 { 0.0 } else { lf / rf }
-                        }
+                            if rf == 0.0 {
+                                0.0
+                            } else {
+                                lf / rf
+                            }
+                        },
                         BinOp::Mod => {
-                            if rf == 0.0 { 0.0 } else { lf % rf }
-                        }
-                        BinOp::Eq => if lf == rf { 1.0 } else { 0.0 },
-                        BinOp::Ne => if lf != rf { 1.0 } else { 0.0 },
-                        BinOp::Lt => if lf < rf { 1.0 } else { 0.0 },
-                        BinOp::Gt => if lf > rf { 1.0 } else { 0.0 },
-                        BinOp::Le => if lf <= rf { 1.0 } else { 0.0 },
-                        BinOp::Ge => if lf >= rf { 1.0 } else { 0.0 },
+                            if rf == 0.0 {
+                                0.0
+                            } else {
+                                lf % rf
+                            }
+                        },
+                        BinOp::Eq => {
+                            if lf == rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                        BinOp::Ne => {
+                            if lf != rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                        BinOp::Lt => {
+                            if lf < rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                        BinOp::Gt => {
+                            if lf > rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                        BinOp::Le => {
+                            if lf <= rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                        BinOp::Ge => {
+                            if lf >= rf {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
                         // 位运算不适用于浮点，回退为整数
                         BinOp::BitAnd => Value::I(l.as_u64() & r.as_u64()).as_f64(),
                         BinOp::BitOr => Value::I(l.as_u64() | r.as_u64()).as_f64(),
@@ -2456,11 +2525,19 @@ impl EvalContext {
                         BinOp::LShift => Value::I(l.as_u64() << r.as_u64()).as_f64(),
                         BinOp::RShift => Value::I(l.as_u64() >> r.as_u64()).as_f64(),
                         BinOp::LogAnd => {
-                            if lf != 0.0 && rf != 0.0 { 1.0 } else { 0.0 }
-                        }
+                            if lf != 0.0 && rf != 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
                         BinOp::LogOr => {
-                            if lf != 0.0 || rf != 0.0 { 1.0 } else { 0.0 }
-                        }
+                            if lf != 0.0 || rf != 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
                     }))
                 } else {
                     let li = l.as_u64();
@@ -2476,35 +2553,95 @@ impl EvalContext {
                         BinOp::BitXor => li ^ ri,
                         BinOp::LShift => li << ri,
                         BinOp::RShift => li >> ri,
-                        BinOp::Eq => if li == ri { 1 } else { 0 },
-                        BinOp::Ne => if li != ri { 1 } else { 0 },
-                        BinOp::Lt => if li < ri { 1 } else { 0 },
-                        BinOp::Gt => if li > ri { 1 } else { 0 },
-                        BinOp::Le => if li <= ri { 1 } else { 0 },
-                        BinOp::Ge => if li >= ri { 1 } else { 0 },
-                        BinOp::LogAnd => if li != 0 && ri != 0 { 1 } else { 0 },
-                        BinOp::LogOr => if li != 0 || ri != 0 { 1 } else { 0 },
+                        BinOp::Eq => {
+                            if li == ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::Ne => {
+                            if li != ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::Lt => {
+                            if li < ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::Gt => {
+                            if li > ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::Le => {
+                            if li <= ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::Ge => {
+                            if li >= ri {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::LogAnd => {
+                            if li != 0 && ri != 0 {
+                                1
+                            } else {
+                                0
+                            }
+                        },
+                        BinOp::LogOr => {
+                            if li != 0 || ri != 0 {
+                                1
+                            } else {
+                                0
+                            }
+                        },
                     }))
                 }
-            }
+            },
             Expr::UnaryOp(op, expr) => {
                 let v = self.eval_value(expr)?;
                 if v.is_float() {
                     let f = v.as_f64();
                     Ok(Value::F(match op {
                         UnaryOp::Neg => -f,
-                        UnaryOp::Not => if f == 0.0 { 1.0 } else { 0.0 },
+                        UnaryOp::Not => {
+                            if f == 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
                         UnaryOp::BitNot => (!(f as u64)) as f64,
                     }))
                 } else {
                     let i = v.as_u64();
                     Ok(Value::I(match op {
                         UnaryOp::Neg => i.wrapping_neg(),
-                        UnaryOp::Not => if i == 0 { 1 } else { 0 },
+                        UnaryOp::Not => {
+                            if i == 0 {
+                                1
+                            } else {
+                                0
+                            }
+                        },
                         UnaryOp::BitNot => !i,
                     }))
                 }
-            }
+            },
             Expr::Ternary(cond, then_e, else_e) => {
                 let c = self.eval_value(cond)?;
                 if c.as_u64() != 0 {
@@ -2512,169 +2649,153 @@ impl EvalContext {
                 } else {
                     self.eval_value(else_e)
                 }
-            }
-            Expr::Call(name, args) => {
-                match name.as_str() {
-                    "ABSOLUTE" => {
-                        if args.is_empty() {
-                            return Err("ABSOLUTE() requires 1 argument".into());
-                        }
-                        self.eval_value(&args[0])
+            },
+            Expr::Call(name, args) => match name.as_str() {
+                "ABSOLUTE" => {
+                    if args.is_empty() {
+                        return Err("ABSOLUTE() requires 1 argument".into());
                     }
-                    "ADDR" => {
-                        if args.is_empty() {
-                            return Err("ADDR() requires 1 argument".into());
-                        }
-                        if let Expr::Symbol(sec_name) = &args[0] {
-                            self.section_addrs.get(sec_name).map(|&v| Value::I(v)).ok_or_else(|| {
-                                format!("ADDR: section '{}' not found", sec_name)
+                    self.eval_value(&args[0])
+                },
+                "ADDR" => {
+                    if args.is_empty() {
+                        return Err("ADDR() requires 1 argument".into());
+                    }
+                    if let Expr::Symbol(sec_name) = &args[0] {
+                        self.section_addrs
+                            .get(sec_name)
+                            .map(|&v| Value::I(v))
+                            .ok_or_else(|| format!("ADDR: section '{}' not found", sec_name))
+                    } else {
+                        Err("ADDR() requires section name".into())
+                    }
+                },
+                "SIZEOF" => {
+                    if args.is_empty() {
+                        return Err("SIZEOF() requires 1 argument".into());
+                    }
+                    if let Expr::Symbol(sec_name) = &args[0] {
+                        Ok(Value::I(self.section_sizes.get(sec_name).copied().unwrap_or(0)))
+                    } else {
+                        Err("SIZEOF() requires section name".into())
+                    }
+                },
+                "ALIGN" => {
+                    if args.is_empty() {
+                        return Err("ALIGN() requires 1 argument".into());
+                    }
+                    let align = self.eval_value(&args[0])?.as_u64();
+                    if align == 0 {
+                        return Ok(Value::I(self.location_counter));
+                    }
+                    Ok(Value::I(self.location_counter.wrapping_add(align - 1) & !(align - 1)))
+                },
+                "MAX" => {
+                    if args.len() < 2 {
+                        return Err("MAX() requires 2 arguments".into());
+                    }
+                    let a = self.eval_value(&args[0])?;
+                    let b = self.eval_value(&args[1])?;
+                    if a.is_float() || b.is_float() {
+                        Ok(Value::F(a.as_f64().max(b.as_f64())))
+                    } else {
+                        Ok(Value::I(a.as_u64().max(b.as_u64())))
+                    }
+                },
+                "MIN" => {
+                    if args.len() < 2 {
+                        return Err("MIN() requires 2 arguments".into());
+                    }
+                    let a = self.eval_value(&args[0])?;
+                    let b = self.eval_value(&args[1])?;
+                    if a.is_float() || b.is_float() {
+                        Ok(Value::F(a.as_f64().min(b.as_f64())))
+                    } else {
+                        Ok(Value::I(a.as_u64().min(b.as_u64())))
+                    }
+                },
+                "DEFINED" => {
+                    if args.is_empty() {
+                        return Err("DEFINED() requires 1 argument".into());
+                    }
+                    if let Expr::Symbol(name) = &args[0] {
+                        Ok(Value::I(if self.symbols.contains_key(name) { 1 } else { 0 }))
+                    } else {
+                        Ok(Value::I(0))
+                    }
+                },
+                "ORIGIN" | "ORG" => {
+                    if args.is_empty() {
+                        return Err("ORIGIN() requires 1 argument".into());
+                    }
+                    if let Expr::Symbol(region_name) = &args[0] {
+                        self.memory_regions
+                            .get(region_name)
+                            .map(|(o, _)| Value::I(*o))
+                            .ok_or_else(|| {
+                                format!("ORIGIN: memory region '{}' not found", region_name)
                             })
-                        } else {
-                            Err("ADDR() requires section name".into())
-                        }
+                    } else {
+                        Err("ORIGIN() requires memory region name".into())
                     }
-                    "SIZEOF" => {
-                        if args.is_empty() {
-                            return Err("SIZEOF() requires 1 argument".into());
-                        }
-                        if let Expr::Symbol(sec_name) = &args[0] {
-                            Ok(Value::I(
-                                self.section_sizes.get(sec_name).copied().unwrap_or(0)
-                            ))
-                        } else {
-                            Err("SIZEOF() requires section name".into())
-                        }
+                },
+                "LENGTH" => {
+                    if args.is_empty() {
+                        return Err("LENGTH() requires 1 argument".into());
                     }
-                    "ALIGN" => {
-                        if args.is_empty() {
-                            return Err("ALIGN() requires 1 argument".into());
-                        }
-                        let align = self.eval_value(&args[0])?.as_u64();
-                        if align == 0 {
-                            return Ok(Value::I(self.location_counter));
-                        }
-                        Ok(Value::I(
-                            self.location_counter.wrapping_add(align - 1) & !(align - 1)
-                        ))
+                    if let Expr::Symbol(region_name) = &args[0] {
+                        self.memory_regions
+                            .get(region_name)
+                            .map(|(_, l)| Value::I(*l))
+                            .ok_or_else(|| {
+                                format!("LENGTH: memory region '{}' not found", region_name)
+                            })
+                    } else {
+                        Err("LENGTH() requires memory region name".into())
                     }
-                    "MAX" => {
-                        if args.len() < 2 {
-                            return Err("MAX() requires 2 arguments".into());
-                        }
-                        let a = self.eval_value(&args[0])?;
-                        let b = self.eval_value(&args[1])?;
-                        if a.is_float() || b.is_float() {
-                            Ok(Value::F(a.as_f64().max(b.as_f64())))
-                        } else {
-                            Ok(Value::I(a.as_u64().max(b.as_u64())))
-                        }
+                },
+                "NEXT" => {
+                    if args.is_empty() {
+                        return Err("NEXT() requires 1 argument".into());
                     }
-                    "MIN" => {
-                        if args.len() < 2 {
-                            return Err("MIN() requires 2 arguments".into());
-                        }
-                        let a = self.eval_value(&args[0])?;
-                        let b = self.eval_value(&args[1])?;
-                        if a.is_float() || b.is_float() {
-                            Ok(Value::F(a.as_f64().min(b.as_f64())))
-                        } else {
-                            Ok(Value::I(a.as_u64().min(b.as_u64())))
-                        }
+                    let val = self.eval_value(&args[0])?.as_u64();
+                    Ok(Value::I((val.wrapping_add(7)) & !7))
+                },
+                "LOG2CEIL" => {
+                    if args.is_empty() {
+                        return Err("LOG2CEIL() requires 1 argument".into());
                     }
-                    "DEFINED" => {
-                        if args.is_empty() {
-                            return Err("DEFINED() requires 1 argument".into());
-                        }
-                        if let Expr::Symbol(name) = &args[0] {
-                            Ok(Value::I(
-                                if self.symbols.contains_key(name) { 1 } else { 0 }
-                            ))
-                        } else {
-                            Ok(Value::I(0))
-                        }
+                    let val = self.eval_value(&args[0])?.as_u64();
+                    if val == 0 {
+                        return Ok(Value::I(0));
                     }
-                    "ORIGIN" | "ORG" => {
-                        if args.is_empty() {
-                            return Err("ORIGIN() requires 1 argument".into());
-                        }
-                        if let Expr::Symbol(region_name) = &args[0] {
-                            self.memory_regions.get(region_name)
-                                .map(|(o, _)| Value::I(*o))
-                                .ok_or_else(|| {
-                                    format!(
-                                        "ORIGIN: memory region '{}' not found",
-                                        region_name
-                                    )
-                                })
-                        } else {
-                            Err("ORIGIN() requires memory region name".into())
-                        }
+                    let mut result = 0u64;
+                    let mut v = val - 1;
+                    while v > 0 {
+                        result += 1;
+                        v >>= 1;
                     }
-                    "LENGTH" => {
-                        if args.is_empty() {
-                            return Err("LENGTH() requires 1 argument".into());
-                        }
-                        if let Expr::Symbol(region_name) = &args[0] {
-                            self.memory_regions.get(region_name)
-                                .map(|(_, l)| Value::I(*l))
-                                .ok_or_else(|| {
-                                    format!(
-                                        "LENGTH: memory region '{}' not found",
-                                        region_name
-                                    )
-                                })
-                        } else {
-                            Err("LENGTH() requires memory region name".into())
-                        }
+                    Ok(Value::I(result))
+                },
+                "REGION_ALIAS" => {
+                    if args.len() < 2 {
+                        return Err("REGION_ALIAS() requires 2 arguments".into());
                     }
-                    "NEXT" => {
-                        if args.is_empty() {
-                            return Err("NEXT() requires 1 argument".into());
-                        }
-                        let val = self.eval_value(&args[0])?.as_u64();
-                        Ok(Value::I((val.wrapping_add(7)) & !7))
+                    if let Expr::Symbol(region_name) = &args[1] {
+                        self.memory_regions
+                            .get(region_name)
+                            .map(|(o, _)| Value::I(*o))
+                            .ok_or_else(|| {
+                                format!("REGION_ALIAS: memory region '{}' not found", region_name)
+                            })
+                    } else {
+                        Err("REGION_ALIAS() requires memory region name \
+                                 as second argument"
+                            .into())
                     }
-                    "LOG2CEIL" => {
-                        if args.is_empty() {
-                            return Err("LOG2CEIL() requires 1 argument".into());
-                        }
-                        let val = self.eval_value(&args[0])?.as_u64();
-                        if val == 0 {
-                            return Ok(Value::I(0));
-                        }
-                        let mut result = 0u64;
-                        let mut v = val - 1;
-                        while v > 0 {
-                            result += 1;
-                            v >>= 1;
-                        }
-                        Ok(Value::I(result))
-                    }
-                    "REGION_ALIAS" => {
-                        if args.len() < 2 {
-                            return Err("REGION_ALIAS() requires 2 arguments".into());
-                        }
-                        if let Expr::Symbol(region_name) = &args[1] {
-                            self.memory_regions.get(region_name)
-                                .map(|(o, _)| Value::I(*o))
-                                .ok_or_else(|| {
-                                    format!(
-                                        "REGION_ALIAS: memory region '{}' not found",
-                                        region_name
-                                    )
-                                })
-                        } else {
-                            Err(
-                                "REGION_ALIAS() requires memory region name \
-                                 as second argument".into()
-                            )
-                        }
-                    }
-                    other => Err(format!(
-                        "unknown function '{}' in linker script", other
-                    )),
-                }
-            }
+                },
+                other => Err(format!("unknown function '{}' in linker script", other)),
+            },
         }
     }
 }
@@ -2703,7 +2824,7 @@ impl LinkerScript {
 
 use super::object::InputBundle;
 use super::resolve::ResolvedSymbol;
-use crate::codegen::shared::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
+use crate::codegen::shared::elf::{SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS};
 
 /// 链接脚本执行结果
 pub struct ScriptLayoutResult {
@@ -2811,7 +2932,8 @@ pub fn execute_script(
     for region in &script.memory_regions {
         let origin = ctx.eval(&region.origin).unwrap_or(0);
         let length = ctx.eval(&region.length).unwrap_or(0);
-        ctx.memory_regions.insert(region.name.clone(), (origin, length));
+        ctx.memory_regions
+            .insert(region.name.clone(), (origin, length));
     }
 
     // 0. 将已解析的输入符号加入 ctx.symbols（值为节内偏移，稍后会更新）
@@ -2837,7 +2959,7 @@ pub fn execute_script(
         match cmd {
             SectionCommand::LocationAssign(expr) => {
                 ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
-            }
+            },
             SectionCommand::SymbolAssign(assign) => {
                 let value = ctx.eval(&assign.expr).unwrap_or(0);
                 ctx.symbols.insert(assign.name.clone(), value);
@@ -2846,10 +2968,14 @@ pub fn execute_script(
                     value,
                     is_provide: assign.is_provide,
                 });
-            }
+            },
             SectionCommand::OutputSection(sec_def) => {
                 let out_sec = execute_output_section(
-                    sec_def, bundle, &mut ctx, &mut used_sections, resolved,
+                    sec_def,
+                    bundle,
+                    &mut ctx,
+                    &mut used_sections,
+                    resolved,
                     &mut result.common_placements,
                 )?;
                 if !out_sec.is_discard {
@@ -2858,13 +2984,13 @@ pub fn execute_script(
                     ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
                     result.sections.push(out_sec);
                 }
-            }
+            },
             SectionCommand::AssertCmd(expr, msg) => {
                 let val = ctx.eval(expr).unwrap_or(0);
                 if val == 0 {
                     result.assert_failures.push(msg.clone());
                 }
-            }
+            },
             SectionCommand::ProvideCmd(name, expr) => {
                 if !ctx.symbols.contains_key(name) {
                     let value = ctx.eval(expr).unwrap_or(0);
@@ -2875,7 +3001,7 @@ pub fn execute_script(
                         is_provide: true,
                     });
                 }
-            }
+            },
             SectionCommand::Overlay(overlay) => {
                 // OVERLAY: 所有子节共享相同 VMA，但可有不同的 LMA
                 let base_vma = if let Some(ref addr) = overlay.address {
@@ -2917,7 +3043,8 @@ pub fn execute_script(
                         match item {
                             SectionBodyItem::InputSection(spec) => {
                                 // 匹配输入节
-                                let matches = match_input_sections(spec, bundle, &ctx, &used_sections);
+                                let matches =
+                                    match_input_sections(spec, bundle, &ctx, &used_sections);
                                 for m in matches {
                                     let in_sec = &bundle.sections[m.input_index as usize];
                                     // 更新节标志
@@ -2931,7 +3058,9 @@ pub fn execute_script(
                                     if aligned > current_offset && out_sec.ty != SHT_NOBITS {
                                         let pad = aligned - current_offset;
                                         if pad < 0x10000000 {
-                                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                                            out_sec
+                                                .data
+                                                .extend(std::iter::repeat_n(0, pad as usize));
                                         }
                                     }
                                     current_offset = aligned;
@@ -2947,7 +3076,7 @@ pub fn execute_script(
                                         offset: aligned,
                                     });
                                 }
-                            }
+                            },
                             SectionBodyItem::SymbolAssign(a) => {
                                 let value = ctx.eval(&a.expr).unwrap_or(0);
                                 ctx.symbols.insert(a.name.clone(), value);
@@ -2956,7 +3085,7 @@ pub fn execute_script(
                                     value,
                                     is_provide: a.is_provide,
                                 });
-                            }
+                            },
                             SectionBodyItem::LocationAssign(expr) => {
                                 let val = ctx.eval(expr).unwrap_or(0);
                                 let new_offset = if val >= out_sec.vma {
@@ -2973,8 +3102,8 @@ pub fn execute_script(
                                     }
                                 }
                                 current_offset = new_offset.max(out_sec.data.len() as u64);
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
 
@@ -2990,7 +3119,7 @@ pub fn execute_script(
 
                 // 位置计数器前进到最大子节之后
                 ctx.location_counter = base_vma.wrapping_add(max_size);
-            }
+            },
         }
     }
 
@@ -3035,10 +3164,7 @@ pub fn execute_script(
             // 将属于该输入节的符号映射到输出节
             for sym in resolved {
                 if sym.section == m.input_index && !sym.name.is_empty() {
-                    sym_to_section.insert(
-                        sym.name.clone(),
-                        out_sec.name.clone(),
-                    );
+                    sym_to_section.insert(sym.name.clone(), out_sec.name.clone());
                 }
             }
         }
@@ -3054,7 +3180,9 @@ pub fn execute_script(
     for group in &script.no_cross_refs {
         for i in 0..group.len() {
             for j in 0..group.len() {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let src_sec = &group[i];
                 let dst_sec = &group[j];
                 // 检查 dst_sec 中定义的符号是否被 src_sec 中的代码引用
@@ -3072,7 +3200,7 @@ pub fn execute_script(
                 if val == 0 {
                     result.assert_failures.push(msg.clone());
                 }
-            }
+            },
             TrailingCommand::Provide(name, expr) => {
                 if !ctx.symbols.contains_key(name) {
                     let value = ctx.eval(expr).unwrap_or(0);
@@ -3083,10 +3211,10 @@ pub fn execute_script(
                         is_provide: true,
                     });
                 }
-            }
+            },
             TrailingCommand::LocationAssign(expr) => {
                 ctx.location_counter = ctx.eval(expr).unwrap_or(ctx.location_counter);
-            }
+            },
         }
     }
 
@@ -3162,7 +3290,7 @@ pub fn execute_script(
                         }
                     }
                     f
-                }
+                },
                 PhdrType::PtGnuStack => 6, // PF_R | PF_W
                 PhdrType::PtPhdr => 4,     // PF_R
                 _ => 4,
@@ -3256,7 +3384,8 @@ fn execute_output_section(
 
     // 对齐位置计数器
     if out_sec.align > 1 {
-        ctx.location_counter = ctx.location_counter.wrapping_add(out_sec.align - 1) & !(out_sec.align - 1);
+        ctx.location_counter =
+            ctx.location_counter.wrapping_add(out_sec.align - 1) & !(out_sec.align - 1);
         out_sec.vma = ctx.location_counter;
     }
 
@@ -3287,11 +3416,11 @@ fn execute_output_section(
                 }
                 // current_offset 不能回退到已有数据之前
                 current_offset = new_offset.max(out_sec.data.len() as u64);
-            }
+            },
             SectionBodyItem::SymbolAssign(assign) => {
                 let val = ctx.eval(&assign.expr).unwrap_or(0);
                 ctx.symbols.insert(assign.name.clone(), val);
-            }
+            },
             SectionBodyItem::InputSection(spec) => {
                 // 匹配输入节
                 let matches = match_input_sections(spec, bundle, ctx, used_sections);
@@ -3346,10 +3475,10 @@ fn execute_output_section(
                         });
                     }
                 }
-            }
+            },
             SectionBodyItem::Constructors => {
                 // CONSTRUCTORS 用于 a.out 兼容，现代 ELF 不需要特殊处理
-            }
+            },
             SectionBodyItem::DataFill(value, size) => {
                 let bytes = match size {
                     1 => vec![*value as u8],
@@ -3360,7 +3489,7 @@ fn execute_output_section(
                 };
                 out_sec.data.extend_from_slice(&bytes);
                 current_offset += *size as u64;
-            }
+            },
         }
     }
 
@@ -3378,11 +3507,7 @@ fn execute_output_section(
 /// - ByAlignment: 按对齐值降序排序（对齐值大的在前）
 ///
 /// Rust 的 sort_by 是稳定排序，组合排序时从最后一个条件反向应用即可实现多级排序。
-fn apply_sort_criterion(
-    matches: &mut [InputSectionMatch],
-    bundle: &InputBundle,
-    kind: SortKind,
-) {
+fn apply_sort_criterion(matches: &mut [InputSectionMatch], bundle: &InputBundle, kind: SortKind) {
     match kind {
         SortKind::ByName => {
             matches.sort_by(|a, b| {
@@ -3390,14 +3515,14 @@ fn apply_sort_criterion(
                 let nb = &bundle.sections[b.input_index as usize].name;
                 na.cmp(nb)
             });
-        }
+        },
         SortKind::ByAlignment => {
             matches.sort_by(|a, b| {
                 let aa = bundle.sections[a.input_index as usize].align;
                 let ab = bundle.sections[b.input_index as usize].align;
                 ab.cmp(&aa) // 降序，对齐值大的在前
             });
-        }
+        },
     }
 }
 
@@ -3439,9 +3564,10 @@ fn match_input_sections(
 
             // 检查是否被 EXCLUDE_FILE 排除
             let file_name = &bundle.objects[in_sec.input_obj].name;
-            let excluded = spec.exclude_files.iter().any(|ex| {
-                section_name_matches(file_name, ex)
-            });
+            let excluded = spec
+                .exclude_files
+                .iter()
+                .any(|ex| section_name_matches(file_name, ex));
             if excluded {
                 continue;
             }
@@ -3464,15 +3590,15 @@ fn match_input_sections(
         match &pat.sort {
             SortMode::None => {
                 // 保持文件出现顺序（已是遍历顺序）
-            }
+            },
             SortMode::Single(kind) => {
                 apply_sort_criterion(&mut pat_matches, bundle, *kind);
-            }
+            },
             SortMode::Combined(chain) => {
                 for kind in chain.iter().rev() {
                     apply_sort_criterion(&mut pat_matches, bundle, *kind);
                 }
-            }
+            },
         }
 
         // 标记为已匹配并追加到结果
@@ -3634,11 +3760,8 @@ mod tests {
     #[test]
     fn eval_expression() {
         let ctx = EvalContext::new();
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Int(0x1000)),
-            BinOp::Add,
-            Box::new(Expr::Int(0x200)),
-        );
+        let expr =
+            Expr::BinaryOp(Box::new(Expr::Int(0x1000)), BinOp::Add, Box::new(Expr::Int(0x200)));
         assert_eq!(ctx.eval(&expr).unwrap(), 0x1200);
     }
 
@@ -3761,29 +3884,61 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         // 找到 .text 输出节
-        let text_sec = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::OutputSection(def) = cmd {
-                if def.name == ".text" { Some(def) } else { None }
-            } else { None }
-        }).expect("should have .text output section");
+        let text_sec = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::OutputSection(def) = cmd {
+                    if def.name == ".text" {
+                        Some(def)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have .text output section");
         // 收集所有 InputSectionSpec
-        let specs: Vec<&InputSectionSpec> = text_sec.body.iter().filter_map(|item| {
-            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
-        }).collect();
+        let specs: Vec<&InputSectionSpec> = text_sec
+            .body
+            .iter()
+            .filter_map(|item| {
+                if let SectionBodyItem::InputSection(spec) = item {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(specs.len(), 5, "expected 5 input section specs");
         // .text.asan.* .text.tsan.* → 2 patterns
-        assert_eq!(specs[0].section_patterns.len(), 2,
+        assert_eq!(
+            specs[0].section_patterns.len(),
+            2,
             "asan/tsan should be 2 patterns: {:?}",
-            specs[0].section_patterns.iter().map(|p| &p.pattern).collect::<Vec<_>>());
+            specs[0]
+                .section_patterns
+                .iter()
+                .map(|p| &p.pattern)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(specs[0].section_patterns[0].pattern, ".text.asan.*");
         assert_eq!(specs[0].section_patterns[1].pattern, ".text.tsan.*");
         // .text..__x86.rethunk_untrain → 1 pattern
         assert_eq!(specs[1].section_patterns.len(), 1);
         assert_eq!(specs[1].section_patterns[0].pattern, ".text..__x86.rethunk_untrain");
         // .text .text.[...]  .text.s[...] → 3 patterns
-        assert_eq!(specs[2].section_patterns.len(), 3,
+        assert_eq!(
+            specs[2].section_patterns.len(),
+            3,
             "complex pattern should be 3: {:?}",
-            specs[2].section_patterns.iter().map(|p| &p.pattern).collect::<Vec<_>>());
+            specs[2]
+                .section_patterns
+                .iter()
+                .map(|p| &p.pattern)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(specs[2].section_patterns[0].pattern, ".text");
         // .text.hot .text.hot.* → 2 patterns
         assert_eq!(specs[3].section_patterns.len(), 2);
@@ -3850,26 +4005,26 @@ mod tests {
             Ok(s) => s,
             Err(e) => {
                 panic!("parse vmlinux.lds failed: {}", e);
-            }
+            },
         };
-        
+
         // 验证基本结构
         assert_eq!(script.output_format.as_deref(), Some("elf64-x86-64"));
         assert!(script.output_arch.is_some());
         assert_eq!(script.entry.as_deref(), Some("phys_startup_64"));
         assert_eq!(script.phdrs.len(), 3, "expected 3 phdrs");
-        
+
         // 验证 PHDRS
         assert_eq!(script.phdrs[0].name, "text");
         assert_eq!(script.phdrs[1].name, "data");
         assert_eq!(script.phdrs[2].name, "note");
-        
+
         // 验证 SECTIONS 不为空
         assert!(!script.sections.is_empty(), "sections should not be empty");
-        
+
         // 验证顶层符号赋值 (jiffies = jiffies_64)
         assert!(!script.top_assignments.is_empty(), "should have top-level assignments");
-        
+
         println!("Successfully parsed kernel vmlinux.lds:");
         println!("  - {} sections", script.sections.len());
         println!("  - {} phdrs", script.phdrs.len());
@@ -3890,11 +4045,21 @@ mod tests {
             }
         "#;
         let script = LinkerScript::parse(text).unwrap();
-        let discard_sec = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::OutputSection(def) = cmd {
-                if def.name == "/DISCARD/" { Some(def) } else { None }
-            } else { None }
-        }).expect("should have /DISCARD/ output section");
+        let discard_sec = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::OutputSection(def) = cmd {
+                    if def.name == "/DISCARD/" {
+                        Some(def)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have /DISCARD/ output section");
         assert!(discard_sec.is_discard);
     }
 
@@ -3910,11 +4075,21 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         // 找到 SECTIONS 块内的 SymbolAssign
-        let sym_assign = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::SymbolAssign(assign) = cmd {
-                if assign.name == "phys_startup_64" { Some(assign) } else { None }
-            } else { None }
-        }).expect("should have phys_startup_64 assignment in SECTIONS");
+        let sym_assign = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::SymbolAssign(assign) = cmd {
+                    if assign.name == "phys_startup_64" {
+                        Some(assign)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have phys_startup_64 assignment in SECTIONS");
         assert_eq!(sym_assign.name, "phys_startup_64");
     }
 
@@ -3962,11 +4137,12 @@ mod tests {
     #[test]
     fn eval_origin_length() {
         let mut ctx = EvalContext::new();
-        ctx.memory_regions.insert("rom".to_string(), (0x1000, 0x2000));
-        
+        ctx.memory_regions
+            .insert("rom".to_string(), (0x1000, 0x2000));
+
         let origin_expr = Expr::Call("ORIGIN".into(), vec![Expr::Symbol("rom".into())]);
         assert_eq!(ctx.eval(&origin_expr).unwrap(), 0x1000);
-        
+
         let length_expr = Expr::Call("LENGTH".into(), vec![Expr::Symbol("rom".into())]);
         assert_eq!(ctx.eval(&length_expr).unwrap(), 0x2000);
     }
@@ -3974,16 +4150,16 @@ mod tests {
     #[test]
     fn eval_log2ceil() {
         let ctx = EvalContext::new();
-        
+
         let expr1 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(1)]);
         assert_eq!(ctx.eval(&expr1).unwrap(), 0);
-        
+
         let expr2 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(2)]);
         assert_eq!(ctx.eval(&expr2).unwrap(), 1);
-        
+
         let expr3 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(5)]);
         assert_eq!(ctx.eval(&expr3).unwrap(), 3);
-        
+
         let expr4 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(1024)]);
         assert_eq!(ctx.eval(&expr4).unwrap(), 10);
     }
@@ -3998,16 +4174,34 @@ mod tests {
             }
         "#;
         let script = LinkerScript::parse(text).unwrap();
-        let text_sec = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::OutputSection(def) = cmd {
-                if def.name == ".text" { Some(def) } else { None }
-            } else { None }
-        }).expect("should have .text output section");
-        
-        let spec = text_sec.body.iter().find_map(|item| {
-            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
-        }).expect("should have input section spec");
-        
+        let text_sec = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::OutputSection(def) = cmd {
+                    if def.name == ".text" {
+                        Some(def)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have .text output section");
+
+        let spec = text_sec
+            .body
+            .iter()
+            .find_map(|item| {
+                if let SectionBodyItem::InputSection(spec) = item {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .expect("should have input section spec");
+
         assert_eq!(spec.exclude_files.len(), 1);
         assert_eq!(spec.exclude_files[0], "*special.o");
     }
@@ -4023,16 +4217,34 @@ mod tests {
             }
         "#;
         let script = LinkerScript::parse(text).unwrap();
-        let bss_sec = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::OutputSection(def) = cmd {
-                if def.name == ".bss" { Some(def) } else { None }
-            } else { None }
-        }).expect("should have .bss output section");
-        
-        let spec = bss_sec.body.iter().find_map(|item| {
-            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
-        }).expect("should have input section spec");
-        
+        let bss_sec = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::OutputSection(def) = cmd {
+                    if def.name == ".bss" {
+                        Some(def)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have .bss output section");
+
+        let spec = bss_sec
+            .body
+            .iter()
+            .find_map(|item| {
+                if let SectionBodyItem::InputSection(spec) = item {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .expect("should have input section spec");
+
         assert!(spec.is_common);
         assert!(spec.section_patterns.iter().any(|p| p.pattern == "COMMON"));
     }
@@ -4084,10 +4296,7 @@ mod tests {
         assert_eq!(script.version_nodes.len(), 1);
         assert_eq!(script.version_nodes[0].version_id, "GCC_3.0");
         assert!(script.version_nodes[0].parent.is_none());
-        assert_eq!(
-            script.version_nodes[0].global_symbols,
-            vec!["some_symbol"]
-        );
+        assert_eq!(script.version_nodes[0].global_symbols, vec!["some_symbol"]);
         assert!(script.version_nodes[0].local_symbols.is_empty());
     }
 
@@ -4112,19 +4321,10 @@ mod tests {
         let script = LinkerScript::parse(text).unwrap();
         assert_eq!(script.version_nodes.len(), 2);
         assert_eq!(script.version_nodes[0].version_id, "GLIBC_2.0");
-        assert_eq!(
-            script.version_nodes[0].global_symbols,
-            vec!["printf", "malloc"]
-        );
+        assert_eq!(script.version_nodes[0].global_symbols, vec!["printf", "malloc"]);
         assert_eq!(script.version_nodes[1].version_id, "GLIBC_2.1");
-        assert_eq!(
-            script.version_nodes[1].global_symbols,
-            vec!["memcpy"]
-        );
-        assert_eq!(
-            script.version_nodes[1].local_symbols,
-            vec!["internal_func"]
-        );
+        assert_eq!(script.version_nodes[1].global_symbols, vec!["memcpy"]);
+        assert_eq!(script.version_nodes[1].local_symbols, vec!["internal_func"]);
     }
 
     #[test]
@@ -4143,10 +4343,7 @@ mod tests {
         let script = LinkerScript::parse(text).unwrap();
         assert_eq!(script.version_nodes.len(), 2);
         assert!(script.version_nodes[0].parent.is_none());
-        assert_eq!(
-            script.version_nodes[1].parent.as_deref(),
-            Some("BASE")
-        );
+        assert_eq!(script.version_nodes[1].parent.as_deref(), Some("BASE"));
     }
 
     #[test]
@@ -4164,14 +4361,8 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         assert_eq!(script.version_nodes.len(), 1);
-        assert_eq!(
-            script.version_nodes[0].global_symbols,
-            vec!["public_api"]
-        );
-        assert_eq!(
-            script.version_nodes[0].local_symbols,
-            vec!["*"]
-        );
+        assert_eq!(script.version_nodes[0].global_symbols, vec!["public_api"]);
+        assert_eq!(script.version_nodes[0].local_symbols, vec!["*"]);
     }
 
     #[test]
@@ -4199,10 +4390,7 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         assert_eq!(script.version_nodes.len(), 1);
-        assert_eq!(
-            script.version_nodes[0].global_symbols,
-            vec!["sym_a", "sym_b"]
-        );
+        assert_eq!(script.version_nodes[0].global_symbols, vec!["sym_a", "sym_b"]);
         assert!(script.version_nodes[0].local_symbols.is_empty());
     }
 
@@ -4266,21 +4454,15 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         assert_eq!(script.version_nodes.len(), 1);
-        assert_eq!(
-            script.version_nodes[0].global_symbols,
-            vec!["public_sym"]
-        );
-        assert_eq!(
-            script.version_nodes[0].local_symbols,
-            vec!["internal_sym"]
-        );
+        assert_eq!(script.version_nodes[0].global_symbols, vec!["public_sym"]);
+        assert_eq!(script.version_nodes[0].local_symbols, vec!["internal_sym"]);
     }
 
     #[test]
     fn test_sort_by_name_execution() {
         // 测试 SORT_BY_NAME 执行时按节名排序
         use super::super::object::{FlatSection, InputObject};
-        
+
         // 创建测试数据：多个 .text.* 节，名称乱序
         let mut bundle = InputBundle {
             objects: vec![InputObject {
@@ -4298,7 +4480,7 @@ mod tests {
             machine: 62, // EM_X86_64
             comdat_groups: vec![],
         };
-        
+
         // 添加乱序的 .text.* 节
         for name in &[".text.zzz", ".text.aaa", ".text.mmm", ".text.bbb"] {
             bundle.sections.push(FlatSection {
@@ -4313,28 +4495,27 @@ mod tests {
                 comdat_signature: None,
             });
         }
-        
+
         // 创建带 SORT 的 spec
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: vec![
-                SectionPattern {
-                    pattern: ".text.*".to_string(),
-                    sort: SortMode::Single(SortKind::ByName),
-                },
-            ],
+            section_patterns: vec![SectionPattern {
+                pattern: ".text.*".to_string(),
+                sort: SortMode::Single(SortKind::ByName),
+            }],
             keep: false,
             exclude_files: vec![],
             is_common: false,
         };
-        
+
         let used = std::collections::HashSet::new();
         let ctx = EvalContext::new();
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
-        
+
         // 验证按名称排序
         assert_eq!(matches.len(), 4);
-        let names: Vec<&str> = matches.iter()
+        let names: Vec<&str> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].name.as_str())
             .collect();
         assert_eq!(names, vec![".text.aaa", ".text.bbb", ".text.mmm", ".text.zzz"]);
@@ -4344,7 +4525,7 @@ mod tests {
     fn test_sort_by_alignment_execution() {
         // 测试 SORT_BY_ALIGNMENT 执行时按对齐值降序排序
         use super::super::object::{FlatSection, InputObject};
-        
+
         let mut bundle = InputBundle {
             objects: vec![InputObject {
                 name: "test.o".to_string(),
@@ -4361,7 +4542,7 @@ mod tests {
             machine: 62,
             comdat_groups: vec![],
         };
-        
+
         // 添加不同对齐值的节
         let test_data = vec![
             (".data.1", 1u64),
@@ -4369,7 +4550,7 @@ mod tests {
             (".data.3", 4u64),
             (".data.4", 8u64),
         ];
-        
+
         for (name, align) in test_data {
             bundle.sections.push(FlatSection {
                 name: name.to_string(),
@@ -4383,27 +4564,26 @@ mod tests {
                 comdat_signature: None,
             });
         }
-        
+
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: vec![
-                SectionPattern {
-                    pattern: ".data.*".to_string(),
-                    sort: SortMode::Single(SortKind::ByAlignment),
-                },
-            ],
+            section_patterns: vec![SectionPattern {
+                pattern: ".data.*".to_string(),
+                sort: SortMode::Single(SortKind::ByAlignment),
+            }],
             keep: false,
             exclude_files: vec![],
             is_common: false,
         };
-        
+
         let used = std::collections::HashSet::new();
         let ctx = EvalContext::new();
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
-        
+
         // 验证按对齐值降序排序
         assert_eq!(matches.len(), 4);
-        let aligns: Vec<u64> = matches.iter()
+        let aligns: Vec<u64> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].align)
             .collect();
         assert_eq!(aligns, vec![16, 8, 4, 1]);
@@ -4413,7 +4593,7 @@ mod tests {
     fn test_mixed_sort_and_nonsort_patterns() {
         // 测试混合模式：SORT 包裹的模式排序，未包裹的保持文件顺序
         use super::super::object::{FlatSection, InputObject};
-        
+
         let mut bundle = InputBundle {
             objects: vec![InputObject {
                 name: "test.o".to_string(),
@@ -4430,7 +4610,7 @@ mod tests {
             machine: 62,
             comdat_groups: vec![],
         };
-        
+
         // 添加节：.text.* 应该排序，.data.* 保持文件顺序
         let test_sections = vec![
             (".text.zzz", 1u64),
@@ -4439,7 +4619,7 @@ mod tests {
             (".data.second", 1u64),
             (".text.mmm", 1u64),
         ];
-        
+
         for (name, align) in test_sections {
             bundle.sections.push(FlatSection {
                 name: name.to_string(),
@@ -4453,7 +4633,7 @@ mod tests {
                 comdat_signature: None,
             });
         }
-        
+
         // 第一个模式 SORT(.text.*)，第二个模式 .data.*（无 SORT）
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
@@ -4471,17 +4651,18 @@ mod tests {
             exclude_files: vec![],
             is_common: false,
         };
-        
+
         let used = std::collections::HashSet::new();
         let ctx = EvalContext::new();
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
-        
+
         // 验证：.text.* 按名称排序，.data.* 保持文件顺序
         assert_eq!(matches.len(), 5);
-        let names: Vec<&str> = matches.iter()
+        let names: Vec<&str> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].name.as_str())
             .collect();
-        
+
         // .text.* 应该排序在前
         assert_eq!(&names[0..3], &[".text.aaa", ".text.mmm", ".text.zzz"]);
         // .data.* 保持文件顺序
@@ -4509,27 +4690,18 @@ mod tests {
         let ctx = EvalContext::new();
 
         // 浮点加法: 1.5 + 2.5 = 4.0 -> 4
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Float(1.5)),
-            BinOp::Add,
-            Box::new(Expr::Float(2.5)),
-        );
+        let expr =
+            Expr::BinaryOp(Box::new(Expr::Float(1.5)), BinOp::Add, Box::new(Expr::Float(2.5)));
         assert_eq!(ctx.eval(&expr).unwrap(), 4);
 
         // 浮点乘法: 3.0 * 2.0 = 6.0 -> 6
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Float(3.0)),
-            BinOp::Mul,
-            Box::new(Expr::Float(2.0)),
-        );
+        let expr =
+            Expr::BinaryOp(Box::new(Expr::Float(3.0)), BinOp::Mul, Box::new(Expr::Float(2.0)));
         assert_eq!(ctx.eval(&expr).unwrap(), 6);
 
         // 浮点除法: 7.0 / 2.0 = 3.5 -> 3
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Float(7.0)),
-            BinOp::Div,
-            Box::new(Expr::Float(2.0)),
-        );
+        let expr =
+            Expr::BinaryOp(Box::new(Expr::Float(7.0)), BinOp::Div, Box::new(Expr::Float(2.0)));
         assert_eq!(ctx.eval(&expr).unwrap(), 3);
     }
 
@@ -4539,27 +4711,15 @@ mod tests {
         let ctx = EvalContext::new();
 
         // int + float: 10 + 0.5 = 10.5 -> 10
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Int(10)),
-            BinOp::Add,
-            Box::new(Expr::Float(0.5)),
-        );
+        let expr = Expr::BinaryOp(Box::new(Expr::Int(10)), BinOp::Add, Box::new(Expr::Float(0.5)));
         assert_eq!(ctx.eval(&expr).unwrap(), 10);
 
         // float * int: 2.5 * 4 = 10.0 -> 10
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Float(2.5)),
-            BinOp::Mul,
-            Box::new(Expr::Int(4)),
-        );
+        let expr = Expr::BinaryOp(Box::new(Expr::Float(2.5)), BinOp::Mul, Box::new(Expr::Int(4)));
         assert_eq!(ctx.eval(&expr).unwrap(), 10);
 
         // int / float: 10 / 3.0 = 3.333 -> 3
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::Int(10)),
-            BinOp::Div,
-            Box::new(Expr::Float(3.0)),
-        );
+        let expr = Expr::BinaryOp(Box::new(Expr::Int(10)), BinOp::Div, Box::new(Expr::Float(3.0)));
         assert_eq!(ctx.eval(&expr).unwrap(), 3);
     }
 
@@ -4658,19 +4818,17 @@ mod tests {
             }],
             symbols: vec![],
             relocations: vec![],
-            sections: vec![
-                FlatSection {
-                    name: ".text".to_string(),
-                    ty: SHT_PROGBITS,
-                    flags: 0x6, // SHF_ALLOC | SHF_EXECINSTR
-                    align: 1,
-                    data: vec![0x90; 16],
-                    size: 16,
-                    input_obj: 0,
-                    orig_index: 0,
-                    comdat_signature: None,
-                },
-            ],
+            sections: vec![FlatSection {
+                name: ".text".to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x6, // SHF_ALLOC | SHF_EXECINSTR
+                align: 1,
+                data: vec![0x90; 16],
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            }],
             machine: 62,
             comdat_groups: vec![],
         };
@@ -4730,7 +4888,9 @@ mod tests {
         assert_eq!(cp.offset, 0); // 第一个 COMMON 符号偏移为 0
 
         // 验证 .bss 输出节存在且类型为 NOBITS
-        let bss_sec = result.sections.iter()
+        let bss_sec = result
+            .sections
+            .iter()
             .find(|s| s.name == ".bss")
             .expect("should have .bss section");
         assert_eq!(bss_sec.ty, SHT_NOBITS);
@@ -4754,14 +4914,27 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         // 找到 .debug_info 输出节
-        let debug_sec = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::OutputSection(def) = cmd {
-                if def.name == ".debug_info" { Some(def) } else { None }
-            } else { None }
-        }).expect("should have .debug_info section");
+        let debug_sec = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::OutputSection(def) = cmd {
+                    if def.name == ".debug_info" {
+                        Some(def)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("should have .debug_info section");
         // :NONE 应被解析为 phdrs 列表中的 "NONE"
-        assert!(debug_sec.phdrs.contains(&"NONE".to_string()),
-            "phdrs should contain NONE: {:?}", debug_sec.phdrs);
+        assert!(
+            debug_sec.phdrs.contains(&"NONE".to_string()),
+            "phdrs should contain NONE: {:?}",
+            debug_sec.phdrs
+        );
     }
 
     #[test]
@@ -4826,17 +4999,20 @@ mod tests {
         let result = execute_script(&script, &bundle, &resolved).unwrap();
 
         // .text 节不应是 :NONE
-        let text_sec = result.sections.iter()
+        let text_sec = result
+            .sections
+            .iter()
             .find(|s| s.name == ".text")
             .expect("should have .text");
         assert!(!text_sec.is_none_phdr, ".text should not be :NONE");
 
         // .debug_info 节应标记为 :NONE
-        let debug_sec = result.sections.iter()
+        let debug_sec = result
+            .sections
+            .iter()
             .find(|s| s.name == ".debug_info")
             .expect("should have .debug_info");
-        assert!(debug_sec.is_none_phdr,
-            ".debug_info should be :NONE");
+        assert!(debug_sec.is_none_phdr, ".debug_info should be :NONE");
     }
 
     // ─── SORT 组合/嵌套/KEEP 交互测试 ─────────────────────────────────────
@@ -4869,7 +5045,7 @@ mod tests {
                 assert_eq!(chain.len(), 2);
                 assert_eq!(chain[0], SortKind::ByName);
                 assert_eq!(chain[1], SortKind::ByAlignment);
-            }
+            },
             _ => panic!("expected Combined sort, got {:?}", pat.sort),
         }
     }
@@ -4900,7 +5076,7 @@ mod tests {
                 assert_eq!(chain.len(), 2);
                 assert_eq!(chain[0], SortKind::ByName); // SORT = SORT_BY_NAME
                 assert_eq!(chain[1], SortKind::ByAlignment);
-            }
+            },
             _ => panic!("expected Combined sort, got {:?}", pat.sort),
         }
     }
@@ -4928,10 +5104,10 @@ mod tests {
         match &pat.sort {
             SortMode::Combined(chain) => {
                 assert_eq!(chain.len(), 3);
-                assert_eq!(chain[0], SortKind::ByName);   // outermost SORT
-                assert_eq!(chain[1], SortKind::ByName);   // middle SORT_BY_NAME
+                assert_eq!(chain[0], SortKind::ByName); // outermost SORT
+                assert_eq!(chain[1], SortKind::ByName); // middle SORT_BY_NAME
                 assert_eq!(chain[2], SortKind::ByAlignment); // innermost
-            }
+            },
             _ => panic!("expected Combined sort, got {:?}", pat.sort),
         }
     }
@@ -4962,7 +5138,7 @@ mod tests {
         assert_eq!(pat.pattern, ".text.*");
         // SORT 应解析为 ByName
         match &pat.sort {
-            SortMode::Single(SortKind::ByName) => {}
+            SortMode::Single(SortKind::ByName) => {},
             _ => panic!("expected Single(ByName), got {:?}", pat.sort),
         }
     }
@@ -4993,7 +5169,7 @@ mod tests {
                 assert_eq!(chain.len(), 2);
                 assert_eq!(chain[0], SortKind::ByName);
                 assert_eq!(chain[1], SortKind::ByAlignment);
-            }
+            },
             _ => panic!("expected Combined sort, got {:?}", pat.sort),
         }
     }
@@ -5022,7 +5198,7 @@ mod tests {
         let pat = &spec.section_patterns[0];
         assert_eq!(pat.pattern, "___ksymtab+*");
         match &pat.sort {
-            SortMode::Single(SortKind::ByName) => {}
+            SortMode::Single(SortKind::ByName) => {},
             _ => panic!("expected Single(ByName), got {:?}", pat.sort),
         }
     }
@@ -5056,7 +5232,7 @@ mod tests {
         let test_data = vec![
             (".text.zzz", 4u64),
             (".text.aaa", 16u64),
-            (".text.aaa", 4u64),  // 同名但不同对齐
+            (".text.aaa", 4u64), // 同名但不同对齐
             (".text.mmm", 8u64),
             (".text.mmm", 16u64), // 同名但不同对齐
         ];
@@ -5078,12 +5254,10 @@ mod tests {
         // 组合排序: [ByName, ByAlignment]
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: vec![
-                SectionPattern {
-                    pattern: ".text.*".to_string(),
-                    sort: SortMode::Combined(vec![SortKind::ByName, SortKind::ByAlignment]),
-                },
-            ],
+            section_patterns: vec![SectionPattern {
+                pattern: ".text.*".to_string(),
+                sort: SortMode::Combined(vec![SortKind::ByName, SortKind::ByAlignment]),
+            }],
             keep: false,
             exclude_files: vec![],
             is_common: false,
@@ -5094,7 +5268,8 @@ mod tests {
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
 
         assert_eq!(matches.len(), 5);
-        let result: Vec<(&str, u64)> = matches.iter()
+        let result: Vec<(&str, u64)> = matches
+            .iter()
             .map(|m| {
                 let s = &bundle.sections[m.input_index as usize];
                 (s.name.as_str(), s.align)
@@ -5153,12 +5328,13 @@ mod tests {
         let levels = ["early", "0", "1", "3", "5"];
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: levels.iter().map(|l| {
-                SectionPattern {
+            section_patterns: levels
+                .iter()
+                .map(|l| SectionPattern {
                     pattern: format!(".initcall{}.init", l),
                     sort: SortMode::None,
-                }
-            }).collect(),
+                })
+                .collect(),
             keep: true,
             exclude_files: vec![],
             is_common: false,
@@ -5169,17 +5345,21 @@ mod tests {
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
 
         assert_eq!(matches.len(), 5);
-        let names: Vec<&str> = matches.iter()
+        let names: Vec<&str> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].name.as_str())
             .collect();
         // 应按脚本定义顺序：early, 0, 1, 3, 5
-        assert_eq!(names, vec![
-            ".initcallearly.init",
-            ".initcall0.init",
-            ".initcall1.init",
-            ".initcall3.init",
-            ".initcall5.init",
-        ]);
+        assert_eq!(
+            names,
+            vec![
+                ".initcallearly.init",
+                ".initcall0.init",
+                ".initcall1.init",
+                ".initcall3.init",
+                ".initcall5.init",
+            ]
+        );
     }
 
     #[test]
@@ -5221,12 +5401,10 @@ mod tests {
 
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: vec![
-                SectionPattern {
-                    pattern: "___ksymtab+*".to_string(),
-                    sort: SortMode::Single(SortKind::ByName),
-                },
-            ],
+            section_patterns: vec![SectionPattern {
+                pattern: "___ksymtab+*".to_string(),
+                sort: SortMode::Single(SortKind::ByName),
+            }],
             keep: true,
             exclude_files: vec![],
             is_common: false,
@@ -5237,15 +5415,12 @@ mod tests {
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
 
         assert_eq!(matches.len(), 3);
-        let names: Vec<&str> = matches.iter()
+        let names: Vec<&str> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].name.as_str())
             .collect();
         // 按名称排序
-        assert_eq!(names, vec![
-            "___ksymtab+alpha",
-            "___ksymtab+middle",
-            "___ksymtab+zebra",
-        ]);
+        assert_eq!(names, vec!["___ksymtab+alpha", "___ksymtab+middle", "___ksymtab+zebra",]);
     }
 
     #[test]
@@ -5293,12 +5468,10 @@ mod tests {
 
         let spec = InputSectionSpec {
             file_pattern: "*".to_string(),
-            section_patterns: vec![
-                SectionPattern {
-                    pattern: ".data.*".to_string(),
-                    sort: SortMode::Single(SortKind::ByAlignment),
-                },
-            ],
+            section_patterns: vec![SectionPattern {
+                pattern: ".data.*".to_string(),
+                sort: SortMode::Single(SortKind::ByAlignment),
+            }],
             keep: false,
             exclude_files: vec![],
             is_common: false,
@@ -5308,7 +5481,8 @@ mod tests {
         let ctx = EvalContext::new();
         let matches = match_input_sections(&spec, &bundle, &ctx, &used);
 
-        let aligns: Vec<u64> = matches.iter()
+        let aligns: Vec<u64> = matches
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].align)
             .collect();
         // 降序：32, 16, 4, 1
@@ -5413,8 +5587,11 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text_pass).unwrap();
         let result = execute_script(&script, &bundle, &resolved).unwrap();
-        assert!(result.assert_failures.is_empty(),
-            "passing ASSERT should not produce failures: {:?}", result.assert_failures);
+        assert!(
+            result.assert_failures.is_empty(),
+            "passing ASSERT should not produce failures: {:?}",
+            result.assert_failures
+        );
 
         // Failing assertion
         let text_fail = r#"
@@ -5426,8 +5603,11 @@ mod tests {
         "#;
         let script2 = LinkerScript::parse(text_fail).unwrap();
         let result2 = execute_script(&script2, &bundle, &resolved).unwrap();
-        assert_eq!(result2.assert_failures.len(), 1,
-            "failing ASSERT should produce exactly one failure");
+        assert_eq!(
+            result2.assert_failures.len(),
+            1,
+            "failing ASSERT should produce exactly one failure"
+        );
         assert!(result2.assert_failures[0].contains("text should be empty"));
     }
 
@@ -5450,7 +5630,9 @@ mod tests {
         let result = execute_script(&script, &bundle, &resolved).unwrap();
         let text_sec = result.sections.iter().find(|s| s.name == ".text").unwrap();
         // Input sections should be sorted by name: .text.a, .text.b, .text.c
-        let names: Vec<&str> = text_sec.input_sections.iter()
+        let names: Vec<&str> = text_sec
+            .input_sections
+            .iter()
             .map(|m| bundle.sections[m.input_index as usize].name.as_str())
             .collect();
         assert_eq!(names, vec![".text.a", ".text.b", ".text.c"]);
@@ -5514,10 +5696,18 @@ mod tests {
         "#;
         let script = LinkerScript::parse(text).unwrap();
         // Find the OVERLAY command
-        let overlay_cmd = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
-        }).expect("should have OVERLAY command");
-        
+        let overlay_cmd = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::Overlay(o) = cmd {
+                    Some(o)
+                } else {
+                    None
+                }
+            })
+            .expect("should have OVERLAY command");
+
         // Check OVERLAY properties
         assert!(overlay_cmd.address.is_some());
         assert!(overlay_cmd.lma.is_some());
@@ -5539,10 +5729,18 @@ mod tests {
             }
         "#;
         let script = LinkerScript::parse(text).unwrap();
-        let overlay_cmd = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
-        }).expect("should have OVERLAY command");
-        
+        let overlay_cmd = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::Overlay(o) = cmd {
+                    Some(o)
+                } else {
+                    None
+                }
+            })
+            .expect("should have OVERLAY command");
+
         assert!(overlay_cmd.no_cross_refs);
         assert!(overlay_cmd.address.is_none());
         assert!(overlay_cmd.lma.is_none());
@@ -5568,10 +5766,18 @@ mod tests {
             }
         "#;
         let script = LinkerScript::parse(text).unwrap();
-        let overlay_cmd = script.sections.iter().find_map(|cmd| {
-            if let SectionCommand::Overlay(o) = cmd { Some(o) } else { None }
-        }).expect("should have OVERLAY command");
-        
+        let overlay_cmd = script
+            .sections
+            .iter()
+            .find_map(|cmd| {
+                if let SectionCommand::Overlay(o) = cmd {
+                    Some(o)
+                } else {
+                    None
+                }
+            })
+            .expect("should have OVERLAY command");
+
         // Check that symbol assignments are in the section bodies
         assert!(!overlay_cmd.sections[0].body.is_empty());
         assert!(!overlay_cmd.sections[1].body.is_empty());
@@ -5596,4 +5802,3 @@ mod tests {
         assert_eq!(script.insert_commands[1].before.as_deref(), Some(".bss"));
     }
 }
-

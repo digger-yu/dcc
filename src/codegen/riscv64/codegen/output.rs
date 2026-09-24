@@ -1,12 +1,12 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, find_func};
+use crate::codegen::riscv64::codegen::{find_func, Riscv64Codegen};
 use crate::codegen::shared::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
 use crate::codegen::shared::elf::{self};
-use crate::ir::{Module};
+use crate::ir::Module;
 
 impl Riscv64Codegen {
     pub(crate) fn build_output(&self) -> Vec<u8> {
@@ -101,5 +101,4 @@ impl Riscv64Codegen {
             true,
         )
     }
-
 }

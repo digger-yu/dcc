@@ -134,9 +134,7 @@ impl Codegen {
             }
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
-            let sym_name = self
-                .resolve_asm_label(&f.name.name)
-                .to_string();
+            let sym_name = self.resolve_asm_label(&f.name.name).to_string();
             self.label(&sym_name);
             for _ in 0..suffix_len {
                 self.code.push(0x90);
@@ -145,9 +143,7 @@ impl Codegen {
         } else {
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
-            let sym_name = self
-                .resolve_asm_label(&f.name.name)
-                .to_string();
+            let sym_name = self.resolve_asm_label(&f.name.name).to_string();
             self.label(&sym_name);
             func_start
         };
@@ -194,7 +190,9 @@ impl Codegen {
         // Static 局部变量: 已由分析 pass 预注册到 data/bss,
         // 此处仅需计算 real_global_names (排除 static local 的 mangled 名)
         // (mangled 名以 ".Lsl" 开头, 不会与 C 标识符冲突)
-        self.real_global_names = self.globals_raw.keys()
+        self.real_global_names = self
+            .globals_raw
+            .keys()
             .filter(|k| !k.starts_with(".Lsl"))
             .cloned()
             .collect();
@@ -209,7 +207,15 @@ impl Codegen {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方).
             // 使用 var_map_total_slots 累加器替代 O(n) 遍历.
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.static_local_map, &f.name.name, &mut self.var_map_total_slots);
+                Self::pre_register_vars(
+                    &mut self.var_map,
+                    &body.items,
+                    temp_slots,
+                    kasan_rz_slots,
+                    &self.static_local_map,
+                    &f.name.name,
+                    &mut self.var_map_total_slots,
+                );
             }
             // 预计算已注册局部变量的总大小, 用于参数偏移计算.
             // limits-fndefn.c 有 100,000 个参数, 每次重新遍历 var_map
@@ -217,7 +223,11 @@ impl Codegen {
             let var_contribution = |ty: &Type| -> i64 {
                 match ty {
                     t if Self::type_has_vla(t) => t.size() as i64 + 16,
-                    Type::Ptr(q) if matches!(&q.base, Type::Array(_, crate::ast::ArraySize::Var(_))) => 16,
+                    Type::Ptr(q)
+                        if matches!(&q.base, Type::Array(_, crate::ast::ArraySize::Var(_))) =>
+                    {
+                        16
+                    },
                     t => (t.size().div_ceil(8) * 8) as i64,
                 }
             };
@@ -241,8 +251,8 @@ impl Codegen {
                 self.variadic_named_gp = 1;
             }
             let mut param_stores: Vec<(u8, i64)> = Vec::new(); // (gp reg, offset)
-            // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
-            // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
+                                                               // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
+                                                               // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
             let mut xmm_param_stores: Vec<(u8, i64, Type, bool)> = Vec::new();
             // (栈上字节偏移, var offset)。SysV 栈参数按类型对齐:
             // long double / __int128 / 16 字节对齐聚合体须落在 16 的
@@ -280,16 +290,15 @@ impl Codegen {
                 // 在 `if let Some(nm)` 里, 导致 pr103209 / simple7 中
                 // 有名字参数被错误地分配到前一个无名字参数应占据的寄
                 // 存器, 栈槽里是垃圾值.
-                let is_agg_param =
-                    matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
-                        || matches!(
-                            &p.ty,
-                            Type::Struct(_, _, _, _)
-                                | Type::Union(_, _, _, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Atomic(_)
-                                | Type::Vector(_, _)
-                        );
+                let is_agg_param = matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
+                    || matches!(
+                        &p.ty,
+                        Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _)
+                            | Type::Array(_, ArraySize::Const(_))
+                            | Type::Atomic(_)
+                            | Type::Vector(_, _)
+                    );
                 if is_agg_param {
                     let classes = Self::abi_classes(&p.ty);
                     let chunks = p.ty.size().div_ceil(8);
@@ -306,7 +315,8 @@ impl Codegen {
                     let hdr = 48i64 + temp_slots as i64 * 8;
                     let base_off = -(used_before + hdr) - (chunks as i64 - 1) * 8;
                     if let Some(nm) = nm_opt {
-                        self.var_map.insert(nm.name.clone(), (base_off, p.ty.clone()));
+                        self.var_map
+                            .insert(nm.name.clone(), (base_off, p.ty.clone()));
                     }
                     let mut local_gp = gp_idx;
                     let mut local_fp = fp_idx;
@@ -335,12 +345,11 @@ impl Codegen {
                                         self.variadic_named_gp += 1;
                                     }
                                 }
-                            }
+                            },
                             AbiClass::Sse => {
                                 // 下一 chunk 是否为 SseUp: 若是, 本 Sse 与它共用
                                 // 同一 xmm, 标记 wide128 一次性保存 16 字节。
-                                let next_up = classes.get(c + 1)
-                                    .copied() == Some(AbiClass::SseUp);
+                                let next_up = classes.get(c + 1).copied() == Some(AbiClass::SseUp);
                                 if local_fp < 8 {
                                     // 通过 XMM 寄存器传递。仅当类型真正占满
                                     // 16 字节 (而非 16B 对齐但只含 8B double
@@ -369,7 +378,7 @@ impl Codegen {
                                     }
                                     prev_sse = Some((None, aligned));
                                 }
-                            }
+                            },
                             AbiClass::SseUp => {
                                 // SseUp 不占新寄存器: 它复用前一个 Sse 的同一
                                 // xmm 的高 64 位。寄存器情形已由 Sse 以 wide128
@@ -378,22 +387,23 @@ impl Codegen {
                                 match prev_sse {
                                     Some((Some(_), _)) => {
                                         // 寄存器: 无需额外动作 (wide128 已覆盖)
-                                    }
+                                    },
                                     Some((None, prev_aligned)) => {
                                         if nm_opt.is_some() {
-                                            stack_param_stores
-                                                .push((prev_aligned + 8, chunk_off));
+                                            stack_param_stores.push((prev_aligned + 8, chunk_off));
                                         }
                                         stack_arg_off = prev_aligned + 16;
-                                    }
-                                    None => {}
+                                    },
+                                    None => {},
                                 }
                                 // 计数需要与 caller 一致: SseUp 不增加已用 xmm。
-                            }
-                            AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
+                            },
+                            AbiClass::Memory
+                            | AbiClass::X87
+                            | AbiClass::X87Up
+                            | AbiClass::ComplexX87 => {
                                 // 强制内存类：整个参数通过栈传递
-                                let aligned =
-                                    (stack_arg_off + agg_align - 1) & !(agg_align - 1);
+                                let aligned = (stack_arg_off + agg_align - 1) & !(agg_align - 1);
                                 stack_arg_off = aligned + chunks as i64 * 8;
                                 if nm_opt.is_some() {
                                     for i in 0..chunks {
@@ -404,7 +414,7 @@ impl Codegen {
                                     self.variadic_named_fp += need_fp as i32;
                                 }
                                 break; // 所有 chunks 都已处理
-                            }
+                            },
                             AbiClass::NoClass => unreachable!(),
                         }
                     }
@@ -488,7 +498,11 @@ impl Codegen {
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             let sc_slot: i64 = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
             let va_slots: i64 = if f.is_variadic {
-                if self.target.sse { 48 + 128 } else { 48 }
+                if self.target.sse {
+                    48 + 128
+                } else {
+                    48
+                }
             } else {
                 0
             };
@@ -615,10 +629,20 @@ impl Codegen {
                         // cvtsd2ss xmmN, xmmN: double → float
                         let lo = xmm & 7;
                         let mut rex = 0u8;
-                        if lo >= 8 { rex |= 0x01; } // REX.B
-                        if lo >= 8 { rex |= 0x04; } // REX.R
+                        if lo >= 8 {
+                            rex |= 0x01;
+                        } // REX.B
+                        if lo >= 8 {
+                            rex |= 0x04;
+                        } // REX.R
                         if rex != 0 {
-                            self.emit(&[0xF2, rex | 0x40, 0x0F, 0x5A, 0xC0 | ((lo & 7) << 3) | (lo & 7)]);
+                            self.emit(&[
+                                0xF2,
+                                rex | 0x40,
+                                0x0F,
+                                0x5A,
+                                0xC0 | ((lo & 7) << 3) | (lo & 7),
+                            ]);
                         } else {
                             self.emit(&[0xF2, 0x0F, 0x5A, 0xC0 | (lo << 3) | lo]);
                         }
@@ -651,7 +675,15 @@ impl Codegen {
             }
         } else {
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots, &self.static_local_map, &f.name.name, &mut self.var_map_total_slots);
+                Self::pre_register_vars(
+                    &mut self.var_map,
+                    &body.items,
+                    temp_slots,
+                    kasan_rz_slots,
+                    &self.static_local_map,
+                    &f.name.name,
+                    &mut self.var_map_total_slots,
+                );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
@@ -722,7 +754,8 @@ impl Codegen {
             let parent_name = f.name.name.clone();
             for nf_decl in &nested_decls {
                 let orig_name = nf_decl.name.name.clone();
-                let unique_name = format!("{}_{}.{}", orig_name, parent_name, self.nested_func_rename_counter);
+                let unique_name =
+                    format!("{}_{}.{}", orig_name, parent_name, self.nested_func_rename_counter);
                 self.nested_func_rename_counter += 1;
                 // 使用作用域化的重命名: (父函数名, 原名) → 唯一名
                 self.nested_func_renames
@@ -746,7 +779,8 @@ impl Codegen {
         let parent_name = f.name.name.clone();
         for nf_decl in &nested_decls {
             let orig_name = nf_decl.name.name.clone();
-            let unique_name = self.nested_func_renames
+            let unique_name = self
+                .nested_func_renames
                 .get(&parent_name)
                 .and_then(|m| m.get(&orig_name))
                 .cloned()
@@ -767,8 +801,15 @@ impl Codegen {
                 match item {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
-                        if v.is_static && self.static_local_map.is_static_local(&self.current_func_name, &v.name.name) {
-                            if self.static_local_map.needs_runtime_init(&self.current_func_name, &v.name.name) {
+                        if v.is_static
+                            && self
+                                .static_local_map
+                                .is_static_local(&self.current_func_name, &v.name.name)
+                        {
+                            if self
+                                .static_local_map
+                                .needs_runtime_init(&self.current_func_name, &v.name.name)
+                            {
                                 // static local 需要运行时初始化: 发射初始化代码到全局地址
                                 if let Some(init) = &v.init {
                                     self.gen_expr(init, 0);
@@ -885,25 +926,24 @@ impl Codegen {
                                     if matches!(
                                         &init_ty,
                                         Type::Float | Type::Double | Type::LongDouble
-                                    ) && Self::is_integer_type(&v.ty) {
-                                        self.emit_implicit_float_to_int(
-                                            0, &init_ty, &v.ty,
-                                        );
+                                    ) && Self::is_integer_type(&v.ty)
+                                    {
+                                        self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                                     }
                                     self.mov_to_stack(0, &v.name.name);
                                 }
                             }
                         }
-                    }
+                    },
                     // 函数体顶层的局部 struct/union 定义: 含 VLA 字段时
                     // 声明点绑定总大小槽 (与 gen_block_items 同处理)
                     BlockItem::Decl(Decl::StructDef(sd)) => {
                         self.gen_vm_struct_bind(sd, false);
-                    }
+                    },
                     BlockItem::Decl(Decl::UnionDef(sd)) => {
                         self.gen_vm_struct_bind(sd, true);
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
             Self::ends_with_return(&body.items)
@@ -985,7 +1025,10 @@ impl Codegen {
                     }
                 }
                 // 写入新的 upvars + 临时设置 self 的链深度/中间偏移
-                nf_decl.upvars = new_upvars.iter().map(|(n, o, _, _)| (n.clone(), *o)).collect();
+                nf_decl.upvars = new_upvars
+                    .iter()
+                    .map(|(n, o, _, _)| (n.clone(), *o))
+                    .collect();
                 // 保存父级链状态, 设置子级链状态
                 let saved_upvar_chain_depth = self.upvar_chain_depth.clone();
                 let saved_upvar_intermediate = self.upvar_intermediate_offsets.clone();
@@ -998,7 +1041,8 @@ impl Codegen {
                 }
                 // 从预注册的重命名映射中查找唯一名称
                 let orig_name = nf_decl.name.name.clone();
-                let unique_name = self.nested_func_renames
+                let unique_name = self
+                    .nested_func_renames
                     .get(&parent_name)
                     .and_then(|m| m.get(&orig_name))
                     .cloned()

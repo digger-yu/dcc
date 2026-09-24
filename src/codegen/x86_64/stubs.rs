@@ -7,20 +7,27 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::ast::{find_field, BinOp, Expr, Type, UnOp, Designator, Field};
+use crate::ast::{find_field, BinOp, Designator, Expr, Field, Type, UnOp};
 use crate::codegen::x86_64::Codegen;
 use crate::debug::FuncFrame;
 use std::sync::Arc;
 
 impl Codegen {
-
-
     // ================================================================
     // ================================================================
     // 类型判断相关关联函数
     // ================================================================
     pub fn is_signed_int(ty: &Type) -> bool {
-        matches!(ty, Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong | Type::Int128)
+        matches!(
+            ty,
+            Type::Char
+                | Type::SChar
+                | Type::Short
+                | Type::Int
+                | Type::Long
+                | Type::LongLong
+                | Type::Int128
+        )
     }
 
     pub fn is_integer_type(ty: &Type) -> bool {
@@ -77,7 +84,13 @@ impl Codegen {
         unimplemented!("gen_vector_load_into_slot stub")
     }
 
-    pub fn gen_vector_init_rvalue(&mut self, _inits: &[crate::ast::InitItem], _elem_ty: &Type, _n: usize, _dst_slot: i64) {
+    pub fn gen_vector_init_rvalue(
+        &mut self,
+        _inits: &[crate::ast::InitItem],
+        _elem_ty: &Type,
+        _n: usize,
+        _dst_slot: i64,
+    ) {
         unimplemented!("gen_vector_init_rvalue stub")
     }
 
@@ -93,7 +106,14 @@ impl Codegen {
         unimplemented!("gen_vector_binop stub")
     }
 
-    pub fn gen_vector_unary_into_slot(&mut self, _op: UnOp, _e: &Expr, _elem_ty: &Type, _count: usize, _slot: i64) {
+    pub fn gen_vector_unary_into_slot(
+        &mut self,
+        _op: UnOp,
+        _e: &Expr,
+        _elem_ty: &Type,
+        _count: usize,
+        _slot: i64,
+    ) {
         unimplemented!("gen_vector_unary_into_slot stub")
     }
 
@@ -116,7 +136,14 @@ impl Codegen {
         unimplemented!("emit_load_mem_typed_seg stub")
     }
 
-    pub fn emit_load_global_indexed(&mut self, dst: u8, idx_reg: u8, name: &str, scale: u8, ty: &Type) {
+    pub fn emit_load_global_indexed(
+        &mut self,
+        dst: u8,
+        idx_reg: u8,
+        name: &str,
+        scale: u8,
+        ty: &Type,
+    ) {
         unimplemented!("emit_load_global_indexed stub")
     }
 
@@ -136,7 +163,13 @@ impl Codegen {
         unimplemented!("emit_global_float_store stub")
     }
 
-    pub fn emit_global_float_load_to_xmm_offset(&mut self, dst: u8, name: &str, offset: i32, ty: &Type) {
+    pub fn emit_global_float_load_to_xmm_offset(
+        &mut self,
+        dst: u8,
+        name: &str,
+        offset: i32,
+        ty: &Type,
+    ) {
         unimplemented!("emit_global_float_load_to_xmm_offset stub")
     }
 
@@ -157,13 +190,13 @@ impl Codegen {
                 if let Some(complete_ty) = self.complete_struct_types.get(name) {
                     return complete_ty.clone();
                 }
-            }
+            },
             Type::Union(name, fields, _, _) if fields.is_empty() => {
                 if let Some(complete_ty) = self.complete_struct_types.get(name) {
                     return complete_ty.clone();
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         ty
     }
@@ -183,8 +216,6 @@ impl Codegen {
     pub fn gen_init_list_at(&mut self, _slot: i64, _ty: &Type, _inits: &[crate::ast::InitItem]) {
         unimplemented!("gen_init_list_at stub")
     }
-
-
 
     pub fn gen_same_size_bitcast(&mut self, _e: &Expr, _ty: &Type, _dst: u8) -> bool {
         false
@@ -352,7 +383,7 @@ impl Codegen {
             self.source_name.clone()
         };
         out.push_str(&format!("\t.file \"{name}\"\n"));
-        
+
         if !self.rodata.is_empty() {
             out.push_str("\t.section .rodata,\"a\",@progbits\n");
             // Emit rodata entries from string pool
@@ -365,7 +396,9 @@ impl Codegen {
                 for chunk in bytes.chunks(16) {
                     out.push_str("\t.byte ");
                     for (i, &b) in chunk.iter().enumerate() {
-                        if i > 0 { out.push_str(", "); }
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
                         out.push_str(&format!("{:#04x}", b));
                     }
                     out.push_str("\n");
@@ -373,31 +406,31 @@ impl Codegen {
                 out.push_str(&format!("\t.size {}, {}\n", name, bytes.len()));
             }
         }
-        
+
         out.push_str("\t.text\n");
         // Emit functions from program declarations
         for decl in &prog.decls {
             if let crate::ast::Decl::Func(func) = decl {
                 let is_weak = func.is_weak;
-                
+
                 let name_str = &func.name.name;
                 if is_weak {
                     out.push_str(&format!("\t.weak {}\n", name_str));
                 } else {
                     out.push_str(&format!("\t.globl {}\n", name_str));
                 }
-                
+
                 out.push_str(&format!("\t.type {}, @function\n", name_str));
-                
+
                 // Emit function entry
                 out.push_str(&format!("{}:\n", name_str));
-                
+
                 // x86_64 return instruction
                 out.push_str("\tret\n");
                 out.push_str(&format!("\t.size {}, .-{}\n", name_str, name_str));
             }
         }
-        
+
         out
     }
 
@@ -442,12 +475,7 @@ impl Codegen {
         unimplemented!("emit_resolved_asm_lines stub")
     }
 
-    pub fn writeback_asm_operand(
-        &mut self,
-        expr: &Expr,
-        reg: u8,
-        xmm_width: u16,
-    ) {
+    pub fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u16) {
         unimplemented!("writeback_asm_operand stub")
     }
 
@@ -562,11 +590,23 @@ impl Codegen {
         false
     }
 
-    pub fn gen_unknown_builtin_fallback(&mut self, name: &str, _ty: &Type, _dst: u8, _sret_off: Option<i64>) {
+    pub fn gen_unknown_builtin_fallback(
+        &mut self,
+        name: &str,
+        _ty: &Type,
+        _dst: u8,
+        _sret_off: Option<i64>,
+    ) {
         unimplemented!("gen_unknown_builtin_fallback stub")
     }
 
-    pub fn gen_compound_assign_single_eval(&mut self, _lhs: &Expr, _rhs: &Expr, _op: BinOp, _dst: u8) {
+    pub fn gen_compound_assign_single_eval(
+        &mut self,
+        _lhs: &Expr,
+        _rhs: &Expr,
+        _op: BinOp,
+        _dst: u8,
+    ) {
         unimplemented!("gen_compound_assign_single_eval stub")
     }
 
@@ -578,7 +618,15 @@ impl Codegen {
         unimplemented!("asm_warn stub")
     }
 
-    pub fn binop(&mut self, _op: BinOp, _dst: u8, _src: u8, _signed: bool, _lty: &Type, _rty: &Type) {
+    pub fn binop(
+        &mut self,
+        _op: BinOp,
+        _dst: u8,
+        _src: u8,
+        _signed: bool,
+        _lty: &Type,
+        _rty: &Type,
+    ) {
         unimplemented!("binop stub")
     }
 
@@ -628,7 +676,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                         is_tls: false,
                     }
                 }
-            }
+            },
             crate::semantics::ObjectIdentity::Global { resolved_key } => {
                 if let Some(gv) = self.globals_raw.get(resolved_key) {
                     let st = StorageType::Scalar { size: gv.size };
@@ -648,7 +696,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                         is_tls: false,
                     }
                 }
-            }
+            },
             _ => crate::semantics::StorageInfo {
                 class: StorageClass::Stack,
                 obj_type: StorageType::Scalar { size: 8 },
@@ -701,12 +749,7 @@ impl Codegen {
         unimplemented!("emit_instrument_func_enter stub")
     }
 
-    pub fn gen_init_list(
-        &mut self,
-        _var_name: &str,
-        _ty: &Type,
-        _inits: &[crate::ast::InitItem],
-    ) {
+    pub fn gen_init_list(&mut self, _var_name: &str, _ty: &Type, _inits: &[crate::ast::InitItem]) {
         unimplemented!("gen_init_list stub")
     }
 

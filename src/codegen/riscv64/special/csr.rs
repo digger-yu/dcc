@@ -1,10 +1,9 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 
 impl Riscv64Codegen {
-
     /// CSRRW rd, csr, rs1: 原子读写 CSR
     pub(crate) fn emit_csrrw(&mut self, rd: u8, csr: u16, rs1: u8) {
         let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x73;

@@ -3,8 +3,8 @@
 // import paths were adjusted for the modular layout.
 use crate::ast::{BlockItem, Expr, FuncDecl, Stmt};
 use crate::codegen::shared::elf::{
-    ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
-    STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
+    ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STB_WEAK,
+    STT_FUNC, STT_GNU_IFUNC,
 };
 use crate::ir::Function;
 
@@ -41,7 +41,7 @@ impl ArmCodegen {
                     match item {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                             self.gen_naked_asm_expr(e);
-                        }
+                        },
                         BlockItem::Stmt(Stmt::AsmGoto {
                             asm_str,
                             outputs,
@@ -58,18 +58,11 @@ impl ArmCodegen {
                             let mut resolved = asm_str.clone();
                             let label_base = outputs.len();
                             for (i, label) in goto_labels.iter().enumerate().rev() {
-                                resolved = resolved.replace(
-                                    &format!("%l{}", i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l{}", label_base + i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l[{}]", label.name),
-                                    &label.name,
-                                );
+                                resolved = resolved.replace(&format!("%l{}", i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l{}", label_base + i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l[{}]", label.name), &label.name);
                             }
                             for line in resolved.split('\n') {
                                 let line = line.trim();
@@ -77,8 +70,8 @@ impl ArmCodegen {
                                     self.emit_asm_line_naked(line, span);
                                 }
                             }
-                        }
-                        _ => {} // naked 函数忽略非 asm 语句
+                        },
+                        _ => {}, // naked 函数忽略非 asm 语句
                     }
                 }
             }
@@ -133,12 +126,12 @@ impl ArmCodegen {
                 let pos = self.code.len() as u64;
                 self.emit_bl("__fentry__");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::MCount => {
                 let pos = self.code.len() as u64;
                 self.emit_bl("mcount");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::None => None,
         };
         // -mrecord-mcount: record call site for __mcount_loc section
@@ -245,7 +238,7 @@ impl ArmCodegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
             Expr::StmtExpr { block, .. } => {
                 for item in &block.items {
@@ -253,17 +246,13 @@ impl ArmCodegen {
                         self.gen_naked_asm_expr(inner);
                     }
                 }
-            }
-            _ => {} // 忽略非 asm 表达式
+            },
+            _ => {}, // 忽略非 asm 表达式
         }
     }
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
-    pub(crate) fn emit_asm_line_naked(
-        &mut self,
-        line: &str,
-        span: &crate::diagnostics::Span,
-    ) {
+    pub(crate) fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
         if self.asm_text_mode {
             self.raw_func_asm_lines
                 .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
@@ -381,7 +370,7 @@ impl ArmCodegen {
         // In real implementation, this would use ADRP+LDR or similar
         // For now, emit a placeholder that loads 0 (will be patched by linker)
         self.emit_load_imm(0, 0); // r0 = 0 (placeholder for canary)
-        // STR r0, [fp, #canary_off]
+                                  // STR r0, [fp, #canary_off]
         self.emit_str_fp_off(0, canary_off);
     }
 
@@ -393,7 +382,7 @@ impl ArmCodegen {
         self.emit_ldr_fp_off(0, canary_off);
         // Load expected canary (simplified: compare with 0)
         self.emit_load_imm(1, 0); // r1 = 0 (placeholder for expected canary)
-        // CMP r0, r1
+                                  // CMP r0, r1
         self.emit_cmp(0, 1);
         // BNE fail_label
         self.emit_bne(&fail_label);

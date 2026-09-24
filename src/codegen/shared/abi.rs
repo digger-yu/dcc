@@ -115,7 +115,10 @@ impl ABILoweringEngine {
 
     /// Determine parameter passing strategy
     pub fn determine_param_passing(&self, params: &[Type]) -> Vec<ParamInfo> {
-        params.iter().map(|ty| self.param_info_for_type(ty)).collect()
+        params
+            .iter()
+            .map(|ty| self.param_info_for_type(ty))
+            .collect()
     }
 
     /// Build the default [`ParamInfo`] for a single parameter type.
@@ -135,7 +138,9 @@ impl ABILoweringEngine {
                 // First 6 integer/pointer args in RDI, RSI, RDX, RCX, R8, R9
                 let gp_regs = ["RDI", "RSI", "RDX", "RCX", "R8", "R9"];
                 // First 8 floating-point args in XMM0-XMM7
-                let fp_regs = ["XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7"];
+                let fp_regs = [
+                    "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7",
+                ];
 
                 // SysV: integer args are placed in GP slots by argument
                 // position (so the 3rd argument lands in RDX even when an
@@ -157,7 +162,7 @@ impl ABILoweringEngine {
                         result.push(None); // Stack
                     }
                 }
-            }
+            },
             CallingConvention::SystemVAarch64 => {
                 // First 8 arguments in X0-X7
                 for idx in 0..params.len() {
@@ -167,19 +172,19 @@ impl ABILoweringEngine {
                         result.push(None);
                     }
                 }
-            }
+            },
             CallingConvention::CDecl | CallingConvention::FastCall => {
                 // Conservative approach: all on stack or first few in registers
                 for _ty in params {
                     result.push(None); // Simplified
                 }
-            }
+            },
             _ => {
                 // Default: conservative stack-based
                 for _ty in params {
                     result.push(None);
                 }
-            }
+            },
         }
 
         result
@@ -200,17 +205,38 @@ impl ABILoweringEngine {
     pub fn callee_saved_registers(&self) -> Vec<String> {
         match &self.cconv {
             CallingConvention::SystemVAMD64 => {
-                vec!["RBX".to_string(), "RBP".to_string(), "R12".to_string(), "R13".to_string(), "R14".to_string(), "R15".to_string()]
-            }
+                vec![
+                    "RBX".to_string(),
+                    "RBP".to_string(),
+                    "R12".to_string(),
+                    "R13".to_string(),
+                    "R14".to_string(),
+                    "R15".to_string(),
+                ]
+            },
             CallingConvention::MicrosoftX64 => {
-                vec!["RBX".to_string(), "RBP".to_string(), "R12".to_string(), "R13".to_string(), "R14".to_string(), "R15".to_string()]
-            }
-            CallingConvention::SystemVAarch64 => {
-                vec!["X19".to_string(), "X20".to_string(), "X21".to_string(), 
-                     "X22".to_string(), "X23".to_string(), "X24".to_string(),
-                     "X25".to_string(), "X26".to_string(), "X27".to_string(),
-                     "X28".to_string()].to_vec()
-            }
+                vec![
+                    "RBX".to_string(),
+                    "RBP".to_string(),
+                    "R12".to_string(),
+                    "R13".to_string(),
+                    "R14".to_string(),
+                    "R15".to_string(),
+                ]
+            },
+            CallingConvention::SystemVAarch64 => vec![
+                "X19".to_string(),
+                "X20".to_string(),
+                "X21".to_string(),
+                "X22".to_string(),
+                "X23".to_string(),
+                "X24".to_string(),
+                "X25".to_string(),
+                "X26".to_string(),
+                "X27".to_string(),
+                "X28".to_string(),
+            ]
+            .to_vec(),
             _ => Vec::new(),
         }
     }
@@ -227,18 +253,11 @@ impl ABILoweringEngine {
 
     /// Determine if red zone is available
     pub fn has_red_zone(&self) -> bool {
-        matches!(
-            &self.cconv,
-            CallingConvention::SystemVAMD64 | CallingConvention::SystemVAarch64
-        )
+        matches!(&self.cconv, CallingConvention::SystemVAMD64 | CallingConvention::SystemVAarch64)
     }
 
     /// Calculate required stack space for local variables
-    pub fn calc_stack_space(
-        &self,
-        locals: &[LocalVar],
-        param_count: usize,
-    ) -> usize {
+    pub fn calc_stack_space(&self, locals: &[LocalVar], param_count: usize) -> usize {
         let align = self.stack_alignment();
         let mut total_size = 0;
 
@@ -297,14 +316,14 @@ mod tests {
     #[test]
     fn test_system_v_amd64_param_passing() {
         let engine = ABILoweringEngine::new(CallingConvention::SystemVAMD64);
-        
+
         let params = vec![
             Type::Int,
             Type::Double,
             Type::Ptr(Box::new(crate::ast::QualType::new(Type::Int))),
         ];
         let regs = engine.alloc_params_registers(&params);
-        
+
         assert_eq!(regs[0], Some("RDI".to_string()));
         assert_eq!(regs[1], Some("XMM0".to_string()));
         assert_eq!(regs[2], Some("RDX".to_string()));
@@ -313,15 +332,15 @@ mod tests {
     #[test]
     fn test_aarch64_param_passing() {
         let engine = ABILoweringEngine::new(CallingConvention::SystemVAarch64);
-        
+
         let params = vec![Type::Int; 10];
         let regs = engine.alloc_params_registers(&params);
-        
+
         // First 8 in registers
         for i in 0..8 {
             assert_eq!(regs[i], Some(format!("X{}", i)));
         }
-        
+
         // Rest on stack
         for i in 8..10 {
             assert_eq!(regs[i], None);
@@ -332,7 +351,7 @@ mod tests {
     fn test_callee_saved_registers() {
         let engine = ABILoweringEngine::new(CallingConvention::SystemVAMD64);
         let saved = engine.callee_saved_registers();
-        
+
         assert!(saved.contains(&"RBX".to_string()));
         assert!(saved.contains(&"R12".to_string()));
         assert_eq!(saved.len(), 6);

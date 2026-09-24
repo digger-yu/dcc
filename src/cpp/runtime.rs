@@ -99,10 +99,10 @@ impl CxxRuntimeSymbol {
             Self::GuardAcquire => "__cxa_guard_acquire",
             Self::GuardRelease => "__cxa_guard_release",
             Self::GuardAbort => "__cxa_guard_abort",
-            Self::New => "_Znwm",           // operator new(unsigned long)
-            Self::Delete => "_ZdlPv",       // operator delete(void*)
-            Self::NewArray => "_Znam",      // operator new[](unsigned long)
-            Self::DeleteArray => "_ZdaPv",  // operator delete[](void*)
+            Self::New => "_Znwm",          // operator new(unsigned long)
+            Self::Delete => "_ZdlPv",      // operator delete(void*)
+            Self::NewArray => "_Znam",     // operator new[](unsigned long)
+            Self::DeleteArray => "_ZdaPv", // operator delete[](void*)
             Self::AllocException => "__cxa_allocate_exception",
             Self::FreeException => "__cxa_free_exception",
             Self::Throw => "__cxa_throw",

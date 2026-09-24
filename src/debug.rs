@@ -1077,7 +1077,7 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
                 strs.intern(&m.name);
                 intern_type(strs, &m.ty);
             }
-        }
+        },
         DwarfTypeKind::Class { members, bases, .. } => {
             for m in members {
                 strs.intern(&m.name);
@@ -1086,7 +1086,7 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
             for b in bases {
                 intern_type(strs, &b.base_type);
             }
-        }
+        },
         DwarfTypeKind::Array { element, .. } => intern_type(strs, element),
         DwarfTypeKind::Pointer(p)
         | DwarfTypeKind::Const(p)
@@ -1097,7 +1097,7 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
             for p in params {
                 intern_type(strs, p);
             }
-        }
+        },
         DwarfTypeKind::Enum {
             members,
             underlying,
@@ -1106,12 +1106,12 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
                 strs.intern(n);
             }
             intern_type(strs, underlying);
-        }
+        },
         DwarfTypeKind::Typedef { alias, target } => {
             strs.intern(alias);
             intern_type(strs, target);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1127,15 +1127,15 @@ fn collect_all_types_from(ty: &DwarfType, out: &mut Vec<DwarfType>) {
         | DwarfTypeKind::Volatile(inner)
         | DwarfTypeKind::Restrict(inner) => {
             collect_all_types_from(inner, out);
-        }
+        },
         DwarfTypeKind::Array { element, .. } => {
             collect_all_types_from(element, out);
-        }
+        },
         DwarfTypeKind::Struct { members } | DwarfTypeKind::Union { members } => {
             for m in members {
                 collect_all_types_from(&m.ty, out);
             }
-        }
+        },
         DwarfTypeKind::Class { members, bases, .. } => {
             for m in members {
                 collect_all_types_from(&m.ty, out);
@@ -1143,20 +1143,20 @@ fn collect_all_types_from(ty: &DwarfType, out: &mut Vec<DwarfType>) {
             for b in bases {
                 collect_all_types_from(&b.base_type, out);
             }
-        }
+        },
         DwarfTypeKind::Enum { underlying, .. } => {
             collect_all_types_from(underlying, out);
-        }
+        },
         DwarfTypeKind::Func { ret, params } => {
             collect_all_types_from(ret, out);
             for p in params {
                 collect_all_types_from(p, out);
             }
-        }
+        },
         DwarfTypeKind::Typedef { target, .. } => {
             collect_all_types_from(target, out);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1229,7 +1229,7 @@ fn build_abbrev_and_info(
     cu_attrs.push((DW_AT_name, DW_FORM_strp));
     cu_attrs.push((DW_AT_comp_dir, DW_FORM_strp));
     cu_attrs.push((DW_AT_low_pc, DW_FORM_addr));
-    cu_attrs.push((DW_AT_high_pc, DW_FORM_data8));  // constant offset, not address
+    cu_attrs.push((DW_AT_high_pc, DW_FORM_data8)); // constant offset, not address
     cu_attrs.push((DW_AT_stmt_list, DW_FORM_sec_offset));
     let cu_code = abb.get_or_create(DW_TAG_compile_unit, DW_CHILDREN_yes, &cu_attrs);
     write_uleb128(&mut info, cu_code as u64);
@@ -1249,9 +1249,7 @@ fn build_abbrev_and_info(
     // name
     write_attr_strp(&mut info, strs.intern(&cu.source_name));
     // comp_dir (always write to match abbrev table)
-    write_attr_strp(&mut info, strs.intern(
-        cu.comp_dir.as_deref().unwrap_or("")
-    ));
+    write_attr_strp(&mut info, strs.intern(cu.comp_dir.as_deref().unwrap_or("")));
     // low_pc (relocated to first function address)
     let cu_low_pc_off = info.len() as u64;
     info.extend_from_slice(&cu.low_pc.to_le_bytes());
@@ -1290,7 +1288,7 @@ fn build_abbrev_and_info(
             (DW_AT_type, DW_FORM_ref4),
             (DW_AT_external, DW_FORM_flag_present),
             (DW_AT_low_pc, DW_FORM_addr),
-            (DW_AT_high_pc, DW_FORM_data8),  // constant offset, not address
+            (DW_AT_high_pc, DW_FORM_data8), // constant offset, not address
         ];
         if has_linkage {
             sub_attrs.insert(1, (DW_AT_linkage_name, DW_FORM_strp));
@@ -1356,13 +1354,15 @@ fn build_abbrev_and_info(
         // lexical blocks (DW_TAG_lexical_block) with nested variables
         for block in &f.lexical_blocks {
             let block_has_vars = !block.variables.is_empty();
-            let block_attrs: Vec<(u16, u16)> = vec![
-                (DW_AT_low_pc, DW_FORM_addr),
-                (DW_AT_high_pc, DW_FORM_addr),
-            ];
+            let block_attrs: Vec<(u16, u16)> =
+                vec![(DW_AT_low_pc, DW_FORM_addr), (DW_AT_high_pc, DW_FORM_addr)];
             let bcode = abb.get_or_create(
                 DW_TAG_lexical_block,
-                if block_has_vars { DW_CHILDREN_yes } else { DW_CHILDREN_no },
+                if block_has_vars {
+                    DW_CHILDREN_yes
+                } else {
+                    DW_CHILDREN_no
+                },
                 &block_attrs,
             );
             write_uleb128(&mut info, bcode as u64);
@@ -1474,30 +1474,28 @@ fn write_type_die(
             write_attr_strp(info, strs.intern(&ty.name));
             info.push(ty.byte_size as u8);
             info.push(*enc as u8);
-        }
+        },
         DwarfTypeKind::Pointer(inner) => {
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_byte_size, DW_FORM_data1), (DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_pointer_type, DW_CHILDREN_no, &attrs);
             write_uleb128(info, code as u64);
             info.push(ty.byte_size as u8);
-            let inner_off =
-                ensure_type_die(info, abb, strs, type_offsets, inner);
+            let inner_off = ensure_type_die(info, abb, strs, type_offsets, inner);
             info.extend_from_slice(&inner_off.to_le_bytes());
-        }
+        },
         DwarfTypeKind::Struct { members } => {
             write_aggregate_die(info, abb, strs, type_offsets, ty, members, false);
-        }
+        },
         DwarfTypeKind::Union { members } => {
             write_aggregate_die(info, abb, strs, type_offsets, ty, members, true);
-        }
+        },
         DwarfTypeKind::Array { element, count } => {
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_type, DW_FORM_ref4), (DW_AT_count, DW_FORM_data4)];
             let code = abb.get_or_create(DW_TAG_array_type, DW_CHILDREN_yes, &attrs);
             write_uleb128(info, code as u64);
-            let elem_off =
-                ensure_type_die(info, abb, strs, type_offsets, element);
+            let elem_off = ensure_type_die(info, abb, strs, type_offsets, element);
             info.extend_from_slice(&elem_off.to_le_bytes());
             info.extend_from_slice(&(*count as u32).to_le_bytes());
             // subrange child
@@ -1506,16 +1504,16 @@ fn write_type_die(
             write_uleb128(info, sub_code as u64);
             info.extend_from_slice(&((*count as u32).saturating_sub(1)).to_le_bytes());
             info.push(0); // array_type children 终止
-        }
+        },
         DwarfTypeKind::Const(inner) => {
             write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_const_type);
-        }
+        },
         DwarfTypeKind::Volatile(inner) => {
             write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_volatile_type);
-        }
+        },
         DwarfTypeKind::Restrict(inner) => {
             write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_restrict_type);
-        }
+        },
         DwarfTypeKind::Enum {
             members,
             underlying,
@@ -1529,9 +1527,7 @@ fn write_type_die(
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(&ty.name));
             info.push(ty.byte_size as u8);
-            let u_off = ensure_type_die(
-                info, abb, strs, type_offsets, underlying,
-            );
+            let u_off = ensure_type_die(info, abb, strs, type_offsets, underlying);
             info.extend_from_slice(&u_off.to_le_bytes());
             for (name, val) in members {
                 let mem_attrs: Vec<(u16, u16)> = vec![
@@ -1544,13 +1540,12 @@ fn write_type_die(
                 info.extend_from_slice(&(*val as i64 as u32).to_le_bytes());
             }
             info.push(0); // enum children 终止
-        }
+        },
         DwarfTypeKind::Func { ret, params } => {
             let attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_subroutine_type, DW_CHILDREN_yes, &attrs);
             write_uleb128(info, code as u64);
-            let ret_off =
-                ensure_type_die(info, abb, strs, type_offsets, ret);
+            let ret_off = ensure_type_die(info, abb, strs, type_offsets, ret);
             info.extend_from_slice(&ret_off.to_le_bytes());
             for p in params {
                 let p_off = ensure_type_die(info, abb, strs, type_offsets, p);
@@ -1561,26 +1556,23 @@ fn write_type_die(
                 info.extend_from_slice(&p_off.to_le_bytes());
             }
             info.push(0);
-        }
+        },
         DwarfTypeKind::Typedef { alias, target } => {
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_name, DW_FORM_strp), (DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_typedef, DW_CHILDREN_no, &attrs);
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(alias));
-            let t_off =
-                ensure_type_die(info, abb, strs, type_offsets, target);
+            let t_off = ensure_type_die(info, abb, strs, type_offsets, target);
             info.extend_from_slice(&t_off.to_le_bytes());
-        }
+        },
         DwarfTypeKind::Class {
             members,
             bases,
             vtable_count,
         } => {
-            write_class_die(
-                info, abb, strs, type_offsets, ty, members, bases, *vtable_count,
-            );
-        }
+            write_class_die(info, abb, strs, type_offsets, ty, members, bases, *vtable_count);
+        },
         DwarfTypeKind::Void => {
             // DW_ATE_void (0x00) 兜底
             let attrs: Vec<(u16, u16)> = vec![
@@ -1593,7 +1585,7 @@ fn write_type_die(
             write_attr_strp(info, strs.intern("void"));
             info.push(0);
             info.push(0x00);
-        }
+        },
     }
 }
 
@@ -1647,11 +1639,8 @@ fn write_aggregate_die(
     };
     let has_members = !members.is_empty();
     let attrs: Vec<(u16, u16)> = vec![(DW_AT_name, DW_FORM_strp), (DW_AT_byte_size, DW_FORM_data1)];
-    let code = abb.get_or_create(
-        tag,
-        if has_members { DW_CHILDREN_yes } else { DW_CHILDREN_no },
-        &attrs,
-    );
+    let code =
+        abb.get_or_create(tag, if has_members { DW_CHILDREN_yes } else { DW_CHILDREN_no }, &attrs);
     write_uleb128(info, code as u64);
     write_attr_strp(info, strs.intern(&ty.name));
     info.push(ty.byte_size as u8);
@@ -1713,10 +1702,8 @@ fn write_class_die(
 ) {
     let has_children = !members.is_empty() || !bases.is_empty();
     // 构建属性列表: 始终有 name + byte_size
-    let mut attrs: Vec<(u16, u16)> = vec![
-        (DW_AT_name, DW_FORM_strp),
-        (DW_AT_byte_size, DW_FORM_data1),
-    ];
+    let mut attrs: Vec<(u16, u16)> =
+        vec![(DW_AT_name, DW_FORM_strp), (DW_AT_byte_size, DW_FORM_data1)];
     // 多态类添加 DW_AT_vtable_elem_count
     if vtable_count > 0 {
         attrs.push((DW_AT_vtable_elem_count, DW_FORM_data2));
@@ -1944,8 +1931,7 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u
     let mut first_entry = true;
     for (i, e) in entries.iter().enumerate() {
         // Use DW_LNE_set_address at function boundaries or for first entry
-        let need_set_addr = first_entry
-            || (cu.line_entries.is_empty() && i > 0);
+        let need_set_addr = first_entry || (cu.line_entries.is_empty() && i > 0);
         if need_set_addr {
             // DW_LNE_set_address: extended opcode 0x02 with 8-byte address
             out.push(DW_LNS_extended_op);
@@ -2397,7 +2383,7 @@ fn build_str_offsets(_cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     out.extend_from_slice(&[0u8; 4]); // unit_length placeholder
     out.extend_from_slice(&5u16.to_le_bytes()); // version = 5
     out.extend_from_slice(&0u16.to_le_bytes()); // padding
-    // No offset entries (we use DW_FORM_strp, not DW_FORM_strx*)
+                                                // No offset entries (we use DW_FORM_strp, not DW_FORM_strx*)
     let unit_len = (out.len() - 4) as u32;
     out[0..4].copy_from_slice(&unit_len.to_le_bytes());
     out
@@ -2417,7 +2403,7 @@ fn build_addr(_cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     out.extend_from_slice(&5u16.to_le_bytes()); // version = 5
     out.push(opts.arch.address_size()); // address_size
     out.push(0); // padding
-    // No address entries (we use DW_FORM_addr, not DW_FORM_addrx*)
+                 // No address entries (we use DW_FORM_addr, not DW_FORM_addrx*)
     let unit_len = (out.len() - 4) as u32;
     out[0..4].copy_from_slice(&unit_len.to_le_bytes());
     out
@@ -2509,10 +2495,7 @@ fn build_split_dwarf(cu: &CompileUnit, opts: &DebugOptions) -> SplitDwarfOutput 
         write_attr_strp(&mut skeleton, strs.intern(cd));
     }
     skeleton.extend_from_slice(&0u64.to_le_bytes()); // dwo_id
-    write_attr_strp(
-        &mut skeleton,
-        strs.intern(&format!("{}.dwo", cu.source_name)),
-    );
+    write_attr_strp(&mut skeleton, strs.intern(&format!("{}.dwo", cu.source_name)));
     skeleton.push(0);
     let sklen = (skeleton.len() - 4) as u32;
     skeleton[0..4].copy_from_slice(&sklen.to_le_bytes());
@@ -2617,7 +2600,7 @@ impl BtfStringTable {
 
 /// BTF 类型编码器：收集类型并分配 ID
 struct BtfTypeEncoder {
-    types: Vec<Vec<u8>>,     // 每个元素的编码后的 type record
+    types: Vec<Vec<u8>>, // 每个元素的编码后的 type record
     name_to_id: std::collections::HashMap<String, u32>,
 }
 
@@ -2694,9 +2677,9 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
     // 预注册基础 int 类型（如果尚未存在）
     // BTF 中 int 类型需要编码位大小和偏移
     let int_names = [
-        ("int", 32, true),      // signed 32-bit
+        ("int", 32, true), // signed 32-bit
         ("unsigned int", 32, false),
-        ("long", 64, true),     // 64-bit on x86_64
+        ("long", 64, true), // 64-bit on x86_64
         ("unsigned long", 64, false),
         ("short", 16, true),
         ("unsigned short", 16, false),
@@ -2722,11 +2705,7 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
     }
 
     // 预编码浮点类型 (BTF_KIND_FLOAT = 16)
-    let float_names = [
-        ("float", 32),
-        ("double", 64),
-        ("long double", 128),
-    ];
+    let float_names = [("float", 32), ("double", 64), ("long double", 128)];
     for (name, bits) in &float_names {
         let name_off = strs.intern(name);
         let id = encoder.add_type(name_off, BTF_KIND_FLOAT, 0, *bits, &[]);
@@ -2786,10 +2765,7 @@ pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
     // 编码 DATASEC 节 (.bss, .data, .rodata)
     // 每个 DATASEC 包含一组 VAR, 按偏移排列
     let _ = rodata_vars; // reserved for future use
-    for (sec_name, var_ids) in &[
-        (".bss", &bss_vars),
-        (".data", &data_vars),
-    ] {
+    for (sec_name, var_ids) in &[(".bss", &bss_vars), (".data", &data_vars)] {
         if var_ids.is_empty() {
             continue;
         }
@@ -2890,7 +2866,7 @@ pub fn build_btf_ext(cu: &CompileUnit) -> Vec<u8> {
             };
             // source line offset (into string table)
             let line_off = 0u32; // placeholder
-            // line(24 bits) | column(8 bits) packed
+                                 // line(24 bits) | column(8 bits) packed
             let line_col = ((le.line & 0x00FFFFFF) << 8) | (le.column & 0xFF);
             line_data.extend_from_slice(&insn_off.to_le_bytes());
             line_data.extend_from_slice(&file_name_off.to_le_bytes());
@@ -2928,11 +2904,7 @@ pub fn build_btf_ext(cu: &CompileUnit) -> Vec<u8> {
     out
 }
 
-fn encode_btf_type(
-    ty: &DwarfType,
-    strs: &mut BtfStringTable,
-    encoder: &mut BtfTypeEncoder,
-) -> u32 {
+fn encode_btf_type(ty: &DwarfType, strs: &mut BtfStringTable, encoder: &mut BtfTypeEncoder) -> u32 {
     // 检查是否已编码（通过名称查找）
     if !ty.name.is_empty() {
         if let Some(id) = encoder.lookup_name(&ty.name) {
@@ -2956,47 +2928,40 @@ fn encode_btf_type(
                 encoder.register_name(&ty.name, id);
                 return id;
             }
-            let signed = matches!(
-                enc,
-                TypeEncoding::Signed | TypeEncoding::SignedChar
-            );
-            let int_data = if signed {
-                bits << 24
-            } else {
-                (bits << 24) | (1 << 31)
-            };
+            let signed = matches!(enc, TypeEncoding::Signed | TypeEncoding::SignedChar);
+            let int_data = if signed { bits << 24 } else { (bits << 24) | (1 << 31) };
             let id = encoder.add_type(name_off, BTF_KIND_INT, 0, int_data, &[]);
             encoder.register_name(&ty.name, id);
             id
-        }
+        },
 
         DwarfTypeKind::Pointer(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0; // 指针通常无名
 
             encoder.add_type(name_off, BTF_KIND_PTR, 0, target_id, &[])
-        }
+        },
 
         DwarfTypeKind::Const(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
 
             encoder.add_type(name_off, BTF_KIND_CONST, 0, target_id, &[])
-        }
+        },
 
         DwarfTypeKind::Volatile(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
 
             encoder.add_type(name_off, BTF_KIND_VOLATILE, 0, target_id, &[])
-        }
+        },
 
         DwarfTypeKind::Restrict(inner) => {
             let target_id = encode_btf_type(inner, strs, encoder);
             let name_off = 0;
 
             encoder.add_type(name_off, BTF_KIND_RESTRICT, 0, target_id, &[])
-        }
+        },
 
         DwarfTypeKind::Struct { members } => {
             // 先注册名称以防止递归
@@ -3028,7 +2993,9 @@ fn encode_btf_type(
             let vlen = members.len() as u32;
             // 实际编码（替换占位）
             // 由于我们已经注册了名称，需要检查是否是第一次编码
-            if encoder.lookup_name(&ty.name) == Some(temp_id) && encoder.types.len() >= (temp_id as usize) {
+            if encoder.lookup_name(&ty.name) == Some(temp_id)
+                && encoder.types.len() >= (temp_id as usize)
+            {
                 // 已经编码过了
                 return temp_id;
             }
@@ -3038,7 +3005,7 @@ fn encode_btf_type(
                 encoder.name_to_id.insert(ty.name.clone(), id);
             }
             id
-        }
+        },
 
         DwarfTypeKind::Union { members } => {
             let name_off = strs.intern(&ty.name);
@@ -3068,27 +3035,28 @@ fn encode_btf_type(
                 encoder.name_to_id.insert(ty.name.clone(), id);
             }
             id
-        }
+        },
 
         DwarfTypeKind::Array { element, count } => {
             let elem_id = encode_btf_type(element, strs, encoder);
             // 数组索引类型：使用 unsigned long
             let idx_name = "unsigned long";
-            let idx_id = encoder
-                .lookup_name(idx_name)
-                .unwrap_or(1); // 默认使用第一个 int 类型
+            let idx_id = encoder.lookup_name(idx_name).unwrap_or(1); // 默认使用第一个 int 类型
 
             let name_off = 0; // 数组通常无名
-            // BTF array: elem_type(4) + index_type(4) + nelems(4)
+                              // BTF array: elem_type(4) + index_type(4) + nelems(4)
             let mut arr_data = Vec::new();
             arr_data.extend_from_slice(&elem_id.to_le_bytes());
             arr_data.extend_from_slice(&idx_id.to_le_bytes());
             arr_data.extend_from_slice(&(*count as u32).to_le_bytes());
 
             encoder.add_type(name_off, BTF_KIND_ARRAY, 0, 0, &arr_data)
-        }
+        },
 
-        DwarfTypeKind::Enum { members: variants, underlying } => {
+        DwarfTypeKind::Enum {
+            members: variants,
+            underlying,
+        } => {
             let name_off = strs.intern(&ty.name);
             let _ = encode_btf_type(underlying, strs, encoder);
 
@@ -3104,7 +3072,7 @@ fn encode_btf_type(
             let id = encoder.add_type(name_off, BTF_KIND_ENUM, vlen, size, &enum_data);
             encoder.register_name(&ty.name, id);
             id
-        }
+        },
 
         DwarfTypeKind::Typedef { alias, target } => {
             let target_id = encode_btf_type(target, strs, encoder);
@@ -3112,7 +3080,7 @@ fn encode_btf_type(
             let id = encoder.add_type(name_off, BTF_KIND_TYPEDEF, 0, target_id, &[]);
             encoder.register_name(alias, id);
             id
-        }
+        },
 
         DwarfTypeKind::Func { ret, params } => {
             // 先编码函数原型
@@ -3130,7 +3098,8 @@ fn encode_btf_type(
             // 先编码 FUNC_PROTO
             let proto_name_off = if ty.name.is_empty() { 0 } else { strs.intern(&ty.name) };
             let vlen = params.len() as u32;
-            let proto_id = encoder.add_type(proto_name_off, BTF_KIND_FUNC_PROTO, vlen, ret_id, &param_data);
+            let proto_id =
+                encoder.add_type(proto_name_off, BTF_KIND_FUNC_PROTO, vlen, ret_id, &param_data);
 
             // 然后编码 FUNC（引用 FUNC_PROTO）
             let func_name_off = if ty.name.is_empty() { 0 } else { strs.intern(&ty.name) };
@@ -3139,7 +3108,7 @@ fn encode_btf_type(
                 encoder.register_name(&ty.name, id);
             }
             id
-        }
+        },
 
         DwarfTypeKind::Class { members, bases, .. } => {
             // BTF 不区分 struct 和 class, 统一使用 BTF_KIND_STRUCT.
@@ -3166,7 +3135,9 @@ fn encode_btf_type(
 
             let size = ty.byte_size as u32;
             let vlen = members.len() as u32;
-            if encoder.lookup_name(&ty.name) == Some(temp_id) && encoder.types.len() >= (temp_id as usize) {
+            if encoder.lookup_name(&ty.name) == Some(temp_id)
+                && encoder.types.len() >= (temp_id as usize)
+            {
                 return temp_id;
             }
             let id = encoder.add_type(name_off, BTF_KIND_STRUCT, vlen, size, &member_data);
@@ -3174,7 +3145,7 @@ fn encode_btf_type(
                 encoder.name_to_id.insert(ty.name.clone(), id);
             }
             id
-        }
+        },
     }
 }
 
@@ -3499,10 +3470,7 @@ mod tests {
 
         // 验证字符串表包含类型名
         let btf_str = String::from_utf8_lossy(&btf);
-        assert!(
-            btf_str.contains("test_struct"),
-            "BTF string table should contain 'test_struct'"
-        );
+        assert!(btf_str.contains("test_struct"), "BTF string table should contain 'test_struct'");
     }
 
     /// 测试 BTF 指针类型编码
@@ -3651,10 +3619,7 @@ mod tests {
 
         // 验证字符串表包含 typedef 名
         let btf_str = String::from_utf8_lossy(&btf);
-        assert!(
-            btf_str.contains("my_int"),
-            "BTF string table should contain 'my_int'"
-        );
+        assert!(btf_str.contains("my_int"), "BTF string table should contain 'my_int'");
     }
 
     #[test]
@@ -3724,10 +3689,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            found_r13,
-            "FDE should embed DW_CFA_offset(13, 2) for r13 save"
-        );
+        assert!(found_r13, "FDE should embed DW_CFA_offset(13, 2) for r13 save");
         // 验证 %rip (reg 16) 字节
         let needle_rip = [0x80u8 | 16, 1];
         let mut found_rip = false;
@@ -3737,10 +3699,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            found_rip,
-            "FDE should embed DW_CFA_offset(16, 1) for %rip save"
-        );
+        assert!(found_rip, "FDE should embed DW_CFA_offset(16, 1) for %rip save");
     }
 
     /// M24.1: cfi_ops 为空时 FDE 不嵌入任何 CFI ops, 仅 PC+size.
@@ -3757,10 +3716,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            !found_in_full,
-            "FDE with empty cfi_ops should not embed def_cfa(7,16)"
-        );
+        assert!(!found_in_full, "FDE with empty cfi_ops should not embed def_cfa(7,16)");
     }
 
     #[test]
@@ -3843,7 +3799,7 @@ mod tests {
         assert_eq!(sec.line[5], 0);
         // DWARF v5: address_size at offset 6
         assert_eq!(sec.line[6], 8); // x86_64
-        // DWARF v5: segment_selector_size at offset 7
+                                    // DWARF v5: segment_selector_size at offset 7
         assert_eq!(sec.line[7], 0);
     }
 
@@ -4221,10 +4177,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            !has_bit_size,
-            "non-bitfield struct should not emit DW_AT_bit_size"
-        );
+        assert!(!has_bit_size, "non-bitfield struct should not emit DW_AT_bit_size");
     }
 
     fn make_line_cu(entries: Vec<LineEntry>) -> CompileUnit {
@@ -4426,19 +4379,19 @@ mod tests {
                     0x02 | 0x04 | 0x05 | 0x0c => {
                         let (_, bytes_read) = read_uleb128_from_slice(&ops[i..]);
                         i += bytes_read;
-                    }
+                    },
                     // SLEB128 参数: advance_line
                     0x03 => {
                         let (_, bytes_read) = read_sleb128_from_slice(&ops[i..]);
                         i += bytes_read;
-                    }
+                    },
                     // 固定 2 字节参数: fixed_advance_pc
                     0x09 => {
                         i += 2;
-                    }
+                    },
                     // 无参数: copy, negate_stmt, set_basic_block, const_add_pc,
                     //         set_prologue_end, set_epilogue_begin
-                    _ => {}
+                    _ => {},
                 }
             }
         }
@@ -4817,20 +4770,18 @@ mod tests {
             producer: "test".to_string(),
             language: 12,
             functions: vec![],
-            globals: vec![
-                DwarfGlobalInfo {
-                    name: "my_global".to_string(),
-                    linkage_name: None,
-                    ty: DwarfType {
-                        name: "int".to_string(),
-                        byte_size: 4,
-                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
-                    },
-                    decl_line: 1,
-                    decl_file_idx: 0,
-                    is_external: false,
+            globals: vec![DwarfGlobalInfo {
+                name: "my_global".to_string(),
+                linkage_name: None,
+                ty: DwarfType {
+                    name: "int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
                 },
-            ],
+                decl_line: 1,
+                decl_file_idx: 0,
+                is_external: false,
+            }],
             types: vec![],
             line_entries: vec![],
             line_files: vec![],

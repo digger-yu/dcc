@@ -1,8 +1,8 @@
 // src/codegen/x86_64/elf/helpers.rs
 // Small ELF-specific helpers: visibility parsing and label-diff patching.
 
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::shared::elf::{STV_DEFAULT, STV_HIDDEN, STV_PROTECTED};
+use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
     pub fn parse_visibility(vis: &Option<String>) -> u8 {
@@ -14,9 +14,7 @@ impl Codegen {
     }
 
     pub fn patch_label_diff_rels(&mut self) {
-        for (data_off, label_a, label_b, width) in
-            self.pending_label_diff_rels.drain(..)
-        {
+        for (data_off, label_a, label_b, width) in self.pending_label_diff_rels.drain(..) {
             if let (Some(&off_a), Some(&off_b)) =
                 (self.labels.get(&label_a), self.labels.get(&label_b))
             {
@@ -29,8 +27,7 @@ impl Codegen {
                         4 => (diff as i32).to_le_bytes().to_vec(),
                         _ => diff.to_le_bytes()[..width.min(8)].to_vec(),
                     };
-                    self.data_section[p..p + bytes.len()]
-                        .copy_from_slice(&bytes);
+                    self.data_section[p..p + bytes.len()].copy_from_slice(&bytes);
                 }
             }
         }

@@ -105,7 +105,7 @@ pub fn type_key(ty: &MangleType) -> String {
                 s.push_str(&type_key(a));
             }
             s
-        }
+        },
         MangleType::TplMember { name, args, member } => {
             let flat_name = name.replace("::", "_");
             let mut s = format!("tm_{}", flat_name);
@@ -116,11 +116,11 @@ pub fn type_key(ty: &MangleType) -> String {
             s.push('_');
             s.push_str(member);
             s
-        }
+        },
         // G11: 模板模板参数符号
         MangleType::TemplateParam(sym) => {
             format!("tt_{}", sym.0.replace("::", "_"))
-        }
+        },
         // G12: 参数包展开 - 将包内类型都转换为 key 并连接
         MangleType::VariadicPack(packed) => {
             let mut s = String::from("pack_");
@@ -129,7 +129,7 @@ pub fn type_key(ty: &MangleType) -> String {
                 s.push_str(&type_key(t));
             });
             s
-        }
+        },
         // M30.1: 非类型实参 key `n<值>` (n0/n1/n42); 偏特化 pattern
         // 字面量 (true/false/整数) 由 pick_partial 解析后与之比较
         MangleType::Array(t, n) => format!("arr{}_{}", n, type_key(t)),
@@ -145,7 +145,7 @@ pub fn type_key(ty: &MangleType) -> String {
 pub fn instantiated_class_name(name: &str, args: &[MangleType]) -> String {
     // G12: Expand any variadic packs first
     let expanded_args = merge_expanded_args(args);
-    
+
     // Flatten namespace qualifiers: std::vector -> std_vector
     let flat_name = name.replace("::", "_");
     let mut s = format!("__dcc_template_{}", flat_name);
@@ -185,7 +185,7 @@ impl TemplateRegistry {
         };
         // G12: Determine which params are packs
         let is_variadic_param: Vec<bool> = targs.params.iter().map(|p| p.is_pack).collect();
-        
+
         Some(TemplateDecl {
             name,
             param_names: targs.params.iter().map(|p| p.name.clone()).collect(),
@@ -199,7 +199,9 @@ impl TemplateRegistry {
 
     /// G12: 检查 template 是否包含 variadic pack params
     pub fn has_variadic(&self) -> bool {
-        self.templates.iter().any(|t| t.is_variadic_param.iter().any(|&p| p))
+        self.templates
+            .iter()
+            .any(|t| t.is_variadic_param.iter().any(|&p| p))
             || self.partials.iter().any(|p| p.pattern_text.contains("..."))
     }
 
@@ -212,22 +214,22 @@ impl TemplateRegistry {
     ) -> Option<Vec<MangleType>> {
         // Check if this template has variadic parameters
         let has_pack = td.is_variadic_param.iter().any(|&p| p);
-        
+
         if !has_pack {
             // Non-variadic template, simple passthrough
             return Some(args.to_vec());
         }
-        
+
         // Variadic template scenario
         // Need to match args against params where some are packs
         // e.g., template<typename... T> foo<int, double, char>
         // params: ["T"] (is_variadic_param: [true])
         // args: [int, double, char]
-        
+
         // Special handling for last pack param
         let mut resolved = Vec::new();
         let mut arg_idx = 0;
-        
+
         for (_param_idx, is_pack) in td.is_variadic_param.iter().enumerate() {
             if *is_pack {
                 // This parameter is a pack
@@ -243,7 +245,7 @@ impl TemplateRegistry {
                 }
             }
         }
-        
+
         if arg_idx == args.len() {
             Some(resolved)
         } else {
@@ -386,7 +388,7 @@ impl TemplateRegistry {
             // Convert body to a class declaration
             return Some(self.full_body_to_class_decl(&full.name, &full.body));
         }
-        
+
         // Try partial specialization
         if let Some((decl, param_names, bound)) = self.pick_partial(name, args) {
             let key = Self::key_for(name, args);
@@ -398,7 +400,7 @@ impl TemplateRegistry {
             self.inst_order.push(key);
             return Some(inst);
         }
-        
+
         // Fallback to primary template
         let td = self.find(name)?;
         let resolved = if self.has_variadic() {
@@ -415,7 +417,12 @@ impl TemplateRegistry {
         // 类实例化必须使用实例化后的名称 (如 __dcc_template_Box_int)
         let inst_name = instantiated_class_name(name, &resolved);
         let inst = instantiate_decl_with_template_params(
-            &td.decl, &td.param_names, &resolved, Some(&inst_name), primary_params);
+            &td.decl,
+            &td.param_names,
+            &resolved,
+            Some(&inst_name),
+            primary_params,
+        );
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
@@ -437,7 +444,12 @@ impl TemplateRegistry {
         // G11: 使用模板模板参数增强的实例化
         let primary_params = &td.template_params;
         let inst = instantiate_decl_with_template_params(
-            &td.decl, &td.param_names, &resolved, None, primary_params);
+            &td.decl,
+            &td.param_names,
+            &resolved,
+            None,
+            primary_params,
+        );
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
@@ -478,9 +490,9 @@ impl TemplateRegistry {
                 let pat_key = pat.replace('*', "").trim().to_string();
                 // 检查/记录形参绑定; 同名二次出现时实参必须一致
                 let bind_check = |bindings: &mut Vec<(String, MangleType)>,
-                                      name: &str,
-                                      arg_ty: &MangleType,
-                                      all_match: &mut bool| {
+                                  name: &str,
+                                  arg_ty: &MangleType,
+                                  all_match: &mut bool| {
                     if let Some((_, prev)) = bindings.iter().find(|(n, _)| n == name) {
                         if type_key(prev) != *arg {
                             *all_match = false;
@@ -506,10 +518,9 @@ impl TemplateRegistry {
                 } else if pat_key == *arg {
                     // 精确匹配：最特化
                     specificity += 3;
-                } else if let (Some(pv), Some(av)) = (
-                    Self::parse_non_type_pattern(&pat_key),
-                    Self::parse_non_type_pattern(arg),
-                ) {
+                } else if let (Some(pv), Some(av)) =
+                    (Self::parse_non_type_pattern(&pat_key), Self::parse_non_type_pattern(arg))
+                {
                     // M30.1: 非类型实参匹配 (`conditional<false, T, F>` 的
                     // pattern `false` 与实参 NonType(0)). pattern 与实参
                     // key 都是编译期常量字面量，值相等才匹配.
@@ -567,11 +578,7 @@ impl TemplateRegistry {
     }
 
     /// G13: 查找全特化：精确匹配优先
-    pub fn find_full_spec(
-        &self,
-        name: &str,
-        args: &[MangleType],
-    ) -> Option<&FullSpecEntry> {
+    pub fn find_full_spec(&self, name: &str, args: &[MangleType]) -> Option<&FullSpecEntry> {
         self.full_specs.iter().find(|full| {
             if full.name != name {
                 return false;
@@ -593,26 +600,22 @@ impl TemplateRegistry {
     /// 1. Full specializations (exact match required)
     /// 2. Partial specializations (most specialized)
     /// 3. Primary template (fallback)
-    pub fn get_best_match(
-        &self,
-        name: &str,
-        args: &[MangleType],
-    ) -> BestMatchResult<'_> {
+    pub fn get_best_match(&self, name: &str, args: &[MangleType]) -> BestMatchResult<'_> {
         // First try full spec
         if let Some(full) = self.find_full_spec(name, args) {
             return BestMatchResult::FullSpec(full);
         }
-        
+
         // Then try partial specs
         if let Some(partial) = self.pick_partial(name, args) {
             return BestMatchResult::PartialSpec(partial);
         }
-        
+
         // Finally fallback to primary template
         if let Some(prim) = self.find(name) {
             return BestMatchResult::Primary(prim);
         }
-        
+
         BestMatchResult::NotFound
     }
 }
@@ -622,33 +625,40 @@ impl TemplateRegistry {
     fn full_body_to_class_decl(&self, name: &str, body: &CppBody) -> CppDecl {
         // For now, create a minimal struct - the body members will be properly handled in lowering
         let mut members = Vec::new();
-        
+
         // Extract members from the full spec body if any
         for stmt in &body.stmts {
             if let CppStmt::Decl(decl) = stmt {
                 match decl {
-                    CppDecl::MemberVar { ty, name: member_name, .. } => {
+                    CppDecl::MemberVar {
+                        ty,
+                        name: member_name,
+                        ..
+                    } => {
                         members.push(CppDecl::MemberVar {
                             ty: ty.clone(),
                             name: member_name.clone(),
                             is_mutable: false,
                             is_volatile: false,
                         });
-                    }
-                    CppDecl::Typedef { target, name: alias } => {
+                    },
+                    CppDecl::Typedef {
+                        target,
+                        name: alias,
+                    } => {
                         members.push(CppDecl::Typedef {
                             target: target.clone(),
                             name: alias.clone(),
                         });
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         }
-        
+
         // Simple hash using String as key
         let hash_val = format!("{}", name.len() * 17);
-        
+
         CppDecl::Class(ClassDecl {
             name: format!("__dcc_fullspec_{}_{}", name, hash_val),
             is_struct: true,
@@ -676,7 +686,7 @@ impl TemplateRegistry {
         match s {
             "true" => return Some(1),
             "false" => return Some(0),
-            _ => {}
+            _ => {},
         }
         if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             return i64::from_str_radix(hex, 16).ok();
@@ -700,7 +710,7 @@ fn collect_bindings(
         (MangleType::Class(n), _) if names.iter().any(|x| x == n) => {
             // 形参名直接对应实参 (整棵)
             out.push((n.clone(), at.clone()));
-        }
+        },
         (MangleType::Pointer(a), MangleType::Pointer(b)) => collect_bindings(a, b, names, out),
         (MangleType::Reference(a), MangleType::Pointer(b)) => collect_bindings(a, b, names, out),
         (MangleType::Reference(a), MangleType::Reference(b)) => collect_bindings(a, b, names, out),
@@ -708,8 +718,8 @@ fn collect_bindings(
             for (x, y) in pa.iter().zip(aa.iter()) {
                 collect_bindings(x, y, names, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -725,21 +735,21 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
                 }
             }
             ty.clone()
-        }
+        },
         // G12: 参数包展开 - 如果是 pack 形参，返回整个包
         MangleType::Class(n) if params.len() != args.len() => {
             // 检查是否是 pack 形参的引用 (需要特殊处理)
             // 这里简化处理：如果 param count 不等于 arg count，可能是 pack 场景
             // 实际应在 TemplateParam 中记录 is_pack 标志
             ty.clone()
-        }
+        },
         MangleType::Pointer(t) => MangleType::Pointer(Box::new(substitute_type(t, params, args))),
         MangleType::Reference(t) => {
             MangleType::Reference(Box::new(substitute_type(t, params, args)))
-        }
+        },
         MangleType::Array(t, n) => {
             MangleType::Array(Box::new(substitute_type(t, params, args)), *n)
-        }
+        },
         MangleType::Template { name, args: tas } => {
             let new_args: Vec<MangleType> = tas
                 .iter()
@@ -749,7 +759,7 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
                 name: name.clone(),
                 args: new_args,
             }
-        }
+        },
         // M30: `Tpl<Args>::member` 的实参递归替换; name/member 保留
         // (typedef 展开由 lower 在查 inst_typedefs 时完成)
         MangleType::TplMember {
@@ -766,7 +776,7 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
                 args: new_args,
                 member: member.clone(),
             }
-        }
+        },
         other => other.clone(),
     }
 }
@@ -781,9 +791,9 @@ pub fn substitute_and_resolve(
 ) -> Result<CppDecl, String> {
     // Step 1: Text substitution (existing behavior)
     let substituted = substitute_decl(decl, params, args, class_rename);
-    
+
     // G14 TODO: Future enhancement - re-parse and run semantic analysis:
-    // 2. Serialize substituted AST back to text  
+    // 2. Serialize substituted AST back to text
     // 3. Re-parse into fresh AST
     // 4. Run semantic analysis with instantiation context
     // 5. Resolve dependent names using actual template arguments
@@ -817,10 +827,10 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
         CppExpr::TypeidType(ty) => CppExpr::TypeidType(substitute_type(ty, params, args)),
         CppExpr::Sizeof(SizeofArg::Type(ty)) => {
             CppExpr::Sizeof(SizeofArg::Type(substitute_type(ty, params, args)))
-        }
+        },
         CppExpr::Sizeof(SizeofArg::Expr(x)) => {
             CppExpr::Sizeof(SizeofArg::Expr(Box::new(substitute_expr(x, params, args))))
-        }
+        },
         CppExpr::TypedInitList { ty, elems } => CppExpr::TypedInitList {
             ty: substitute_type(ty, params, args),
             elems: elems
@@ -830,16 +840,16 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
         },
         CppExpr::Member(o, s) => {
             CppExpr::Member(Box::new(substitute_expr(o, params, args)), s.clone())
-        }
+        },
         CppExpr::PtrMember(o, s) => {
             CppExpr::PtrMember(Box::new(substitute_expr(o, params, args)), s.clone())
-        }
+        },
         CppExpr::MemberStar(o, s) => {
             CppExpr::MemberStar(Box::new(substitute_expr(o, params, args)), s.clone())
-        }
+        },
         CppExpr::PtrMemberStar(o, s) => {
             CppExpr::PtrMemberStar(Box::new(substitute_expr(o, params, args)), s.clone())
-        }
+        },
         CppExpr::Call(f, as_) => CppExpr::Call(
             Box::new(substitute_expr(f, params, args)),
             as_.iter()
@@ -880,7 +890,7 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
         ),
         CppExpr::UnaryOp(op, x) => {
             CppExpr::UnaryOp(*op, Box::new(substitute_expr(x, params, args)))
-        }
+        },
         CppExpr::Ref(x) => CppExpr::Ref(Box::new(substitute_expr(x, params, args))),
         CppExpr::AddrOf(x) => CppExpr::AddrOf(Box::new(substitute_expr(x, params, args))),
         CppExpr::Delete(x) => CppExpr::Delete(Box::new(substitute_expr(x, params, args))),
@@ -971,14 +981,24 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
         CppStmt::Block(b) => CppStmt::Block(substitute_body(b, params, args)),
         CppStmt::ThisMember(n, inner) => {
             CppStmt::ThisMember(n.clone(), Box::new(substitute_stmt(inner, params, args)))
-        }
-        CppStmt::LocalVar { ty, name, init, is_volatile } => CppStmt::LocalVar {
+        },
+        CppStmt::LocalVar {
+            ty,
+            name,
+            init,
+            is_volatile,
+        } => CppStmt::LocalVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             init: init.as_ref().map(|x| substitute_expr(x, params, args)),
             is_volatile: *is_volatile,
         },
-        CppStmt::StaticLocal { ty, name, init, is_volatile } => CppStmt::StaticLocal {
+        CppStmt::StaticLocal {
+            ty,
+            name,
+            init,
+            is_volatile,
+        } => CppStmt::StaticLocal {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             init: init.as_ref().map(|x| substitute_expr(x, params, args)),
@@ -1000,7 +1020,7 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
         CppStmt::CoYield(e) => CppStmt::CoYield(substitute_expr(e, params, args)),
         CppStmt::CoReturn(e) => {
             CppStmt::CoReturn(e.as_ref().map(|x| substitute_expr(x, params, args)))
-        }
+        },
         CppStmt::Decl(d) => CppStmt::Decl(substitute_decl(d, params, args, None)),
         other => other.clone(),
     }
@@ -1042,13 +1062,16 @@ pub fn substitute_decl(
                     .map(|m| substitute_decl(m, params, args, class_rename))
                     .collect(),
             })
-        }
+        },
         CppDecl::FreeFn {
             ret,
             name,
             params: ps,
             body,
-            is_noexcept, trailing_ret_type, .. } => CppDecl::FreeFn {
+            is_noexcept,
+            trailing_ret_type,
+            ..
+        } => CppDecl::FreeFn {
             ret: substitute_type(ret, params, args),
             name: name.clone(),
             params: ps
@@ -1070,7 +1093,10 @@ pub fn substitute_decl(
             is_const,
             is_final,
             is_noexcept,
-            is_volatile, is_friend, .. } => {
+            is_volatile,
+            is_friend,
+            ..
+        } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1091,14 +1117,17 @@ pub fn substitute_decl(
                 is_volatile: *is_volatile,
                 is_friend: *is_friend,
             }
-        }
+        },
         CppDecl::Ctor {
             class,
             params: ps,
             inits,
             body,
             is_virtual,
-            is_explicit, is_noexcept, .. } => {
+            is_explicit,
+            is_noexcept,
+            ..
+        } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1117,11 +1146,14 @@ pub fn substitute_decl(
                 is_explicit: *is_explicit,
                 is_noexcept: *is_noexcept,
             }
-        }
+        },
         CppDecl::Dtor {
             class,
             body,
-            is_virtual, is_noexcept, .. } => {
+            is_virtual,
+            is_noexcept,
+            ..
+        } => {
             let new_class = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| class.clone());
@@ -1131,11 +1163,14 @@ pub fn substitute_decl(
                 is_virtual: *is_virtual,
                 is_noexcept: *is_noexcept,
             }
-        }
+        },
         CppDecl::MemberVar {
             ty,
             name,
-            is_mutable, is_volatile, .. } => CppDecl::MemberVar {
+            is_mutable,
+            is_volatile,
+            ..
+        } => CppDecl::MemberVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             is_mutable: *is_mutable,
@@ -1163,7 +1198,7 @@ pub fn substitute_decl(
                 ret: substitute_type(ret, params, args),
                 is_unary: *is_unary,
             }
-        }
+        },
         CppDecl::Namespace { name, body } => CppDecl::Namespace {
             name: name.clone(),
             body: body
@@ -1203,10 +1238,7 @@ pub fn instantiate_decl(
     _orig_args: &[MangleType],
 ) -> CppDecl {
     let rename = match decl {
-        CppDecl::Class(_) => Some(instantiated_class_name(
-            _orig_name.unwrap_or(""),
-            _orig_args,
-        )),
+        CppDecl::Class(_) => Some(instantiated_class_name(_orig_name.unwrap_or(""), _orig_args)),
         _ => None,
     };
     substitute_decl(decl, params, args, rename.as_deref())
@@ -1288,11 +1320,7 @@ mod tests {
         );
         // 模板嵌套: vector<T>
         assert_eq!(
-            substitute_type(
-                &t("vector", &[MangleType::Class("T".to_string())]),
-                &params,
-                &args
-            ),
+            substitute_type(&t("vector", &[MangleType::Class("T".to_string())]), &params, &args),
             t("vector", &[MangleType::Int])
         );
     }
@@ -1317,7 +1345,10 @@ mod tests {
                     class: "Box".to_string(),
                     params: vec![("v".to_string(), MangleType::Class("T".to_string()))],
                     inits: vec![("payload".to_string(), CppExpr::Ident("v".to_string()))],
-                    body: CppBody { stmts: vec![], is_decl: false },
+                    body: CppBody {
+                        stmts: vec![],
+                        is_decl: false,
+                    },
                     is_virtual: false,
                     is_explicit: false,
                     is_noexcept: false,
@@ -1348,17 +1379,17 @@ mod tests {
                     CppDecl::MemberVar { ty, name, .. } => {
                         assert_eq!(*ty, MangleType::Int);
                         assert_eq!(name, "payload");
-                    }
+                    },
                     _ => panic!("member 0 not MemberVar"),
                 }
                 match &c.members[1] {
                     CppDecl::Ctor { class, params, .. } => {
                         assert_eq!(class, "__dcc_template_Box_int");
                         assert_eq!(params[0].1, MangleType::Int);
-                    }
+                    },
                     _ => panic!("member 1 not Ctor"),
                 }
-            }
+            },
             _ => panic!("not class"),
         }
         // 缓存: 再次实例化返回相同结果
@@ -1434,7 +1465,7 @@ mod tests {
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
-                    template_params: None,
+                template_params: None,
                 name: "T".to_string(),
                 default: Some(MangleType::Int),
                 non_type: None,
@@ -1464,7 +1495,7 @@ mod tests {
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
-                    template_params: None,
+                template_params: None,
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
@@ -1509,28 +1540,28 @@ mod tests {
 #[cfg(test)]
 mod g14_tests {
     use super::*;
-    use crate::cpp::parser::{TemplateParam, CppExpr};
+    use crate::cpp::parser::{CppExpr, TemplateParam};
 
     #[test]
     fn test_is_template_parameter() {
         // Verify basic parameter detection
         let params = vec![
             TemplateParam {
-                    template_params: None,
+                template_params: None,
                 name: "T".to_string(),
                 default: None,
                 non_type: None,
                 is_pack: false,
             },
             TemplateParam {
-                    template_params: None,
+                template_params: None,
                 name: "U".to_string(),
                 default: None,
                 non_type: None,
                 is_pack: false,
             },
         ];
-        
+
         assert!(crate::cpp::parser::is_template_parameter("T", &params));
         assert!(crate::cpp::parser::is_template_parameter("U", &params));
         assert!(!crate::cpp::parser::is_template_parameter("X", &params));
@@ -1539,15 +1570,13 @@ mod g14_tests {
 
     #[test]
     fn test_dependent_expression_detection() {
-        let params = vec![
-            TemplateParam {
-                    template_params: None,
-                name: "T".to_string(),
-                default: None,
-                non_type: None,
-                is_pack: false,
-            },
-        ];
+        let params = vec![TemplateParam {
+            template_params: None,
+            name: "T".to_string(),
+            default: None,
+            non_type: None,
+            is_pack: false,
+        }];
 
         // Ident 'T' should be dependent
         assert!(crate::cpp::parser::is_dependent_expression(
@@ -1572,21 +1601,19 @@ mod g14_tests {
     #[test]
     fn test_substitute_and_resolve_basic() {
         let mut reg = TemplateRegistry::default();
-        
+
         // Create a simple template class
         let inner = CppDecl::Class(ClassDecl {
             name: "Box".to_string(),
             is_struct: true,
             is_union: false,
             bases: vec![],
-            members: vec![
-                CppDecl::MemberVar {
-                    ty: MangleType::Class("T".to_string()),
-                    name: "payload".to_string(),
-                    is_mutable: false,
-                    is_volatile: false,
-                },
-            ],
+            members: vec![CppDecl::MemberVar {
+                ty: MangleType::Class("T".to_string()),
+                name: "payload".to_string(),
+                is_mutable: false,
+                is_volatile: false,
+            }],
         });
 
         reg.register(
@@ -1612,14 +1639,14 @@ mod g14_tests {
             CppDecl::Class(c) => {
                 // Should have renamed the class
                 assert_eq!(c.name, "__dcc_template_Box_int");
-                
+
                 // The member type should be substituted
                 if let CppDecl::MemberVar { ty, .. } = &c.members[0] {
                     assert_eq!(*ty, MangleType::Int);
                 } else {
                     panic!("Expected MemberVar");
                 }
-            }
+            },
             _ => panic!("Expected Class"),
         }
     }
@@ -1629,25 +1656,23 @@ mod g14_tests {
         // Test pattern similar to std::reverse_iterator::difference_type
         // template<typename _Iterator>
         // class reverse_iterator { typedef typename _Iterator::difference_type diff; };
-        
+
         let mut reg = TemplateRegistry::default();
-        
+
         // Simulate nested type pattern: _Iterator::difference_type
         let inner = CppDecl::Class(ClassDecl {
             name: "reverse_iterator".to_string(),
             is_struct: true,
             is_union: false,
             bases: vec![],
-            members: vec![
-                CppDecl::Typedef {
-                    target: MangleType::TplMember {
-                        name: "_Iterator".to_string(),
-                        args: vec![],
-                        member: "difference_type".to_string(),
-                    },
-                    name: "difference_type".to_string(),
+            members: vec![CppDecl::Typedef {
+                target: MangleType::TplMember {
+                    name: "_Iterator".to_string(),
+                    args: vec![],
+                    member: "difference_type".to_string(),
                 },
-            ],
+                name: "difference_type".to_string(),
+            }],
         });
 
         reg.register(
@@ -1669,7 +1694,7 @@ mod g14_tests {
             name: "vector".to_string(),
             args: vec![MangleType::Int],
         };
-        
+
         let result = reg.instantiate_class("reverse_iterator", &[iterator_type.clone()]);
         assert!(result.is_some());
 
@@ -1681,16 +1706,20 @@ mod g14_tests {
                     if let CppDecl::Typedef { target, .. } = member {
                         // The target should still be TplMember pattern (text substitution doesn't fully resolve)
                         match target {
-                            MangleType::TplMember { name: _name, member, .. } => {
+                            MangleType::TplMember {
+                                name: _name,
+                                member,
+                                ..
+                            } => {
                                 // Name stays as template param name (_Iterator), but type args would be substituted
                                 // For this test, we just verify it's still a TplMember after instantiation
                                 assert_eq!(member, "difference_type");
-                            }
+                            },
                             _ => panic!("Expected TplMember after instantiation, got {:?}", target),
                         }
                     }
                 }
-            }
+            },
             _ => panic!("Expected Class"),
         }
     }
@@ -1698,28 +1727,32 @@ mod g14_tests {
     #[test]
     fn test_instantiation_context_binding() {
         use crate::cpp::sema::InstantiationContext;
-        
+
         let mut ctx = InstantiationContext::new();
-        
+
         // Bind template parameter T to int (base type, no members)
         ctx.bind("T".to_string(), MangleType::Int);
         // Bind Container to vector<double> (has nested types)
-        ctx.bind("Container".to_string(), MangleType::Template {
-            name: "vector".to_string(),
-            args: vec![MangleType::Double],
-        });
-        
+        ctx.bind(
+            "Container".to_string(),
+            MangleType::Template {
+                name: "vector".to_string(),
+                args: vec![MangleType::Double],
+            },
+        );
+
         // Lookup on base type should return None (int has no members)
         assert!(ctx.lookup_dependent_member("T", "anything").is_none());
-        
+
         // Lookup on template type should return Some
-        assert!(ctx.lookup_dependent_member("Container", "iterator").is_some());
-        
+        assert!(ctx
+            .lookup_dependent_member("Container", "iterator")
+            .is_some());
+
         // Non-existent parameter should return None
         assert!(ctx.lookup_dependent_member("X", "anything").is_none());
     }
 }
-
 
 // ===== G11: 模板模板参数实例化逻辑 =====
 
@@ -1735,21 +1768,18 @@ fn substitute_template_refs_in_type(
                 return bound.clone();
             }
             ty.clone()
-        }
-        
+        },
+
         MangleType::Pointer(inner) => {
             MangleType::Pointer(Box::new(substitute_template_refs_in_type(inner, bindings)))
-        }
+        },
         MangleType::Reference(inner) => {
             MangleType::Reference(Box::new(substitute_template_refs_in_type(inner, bindings)))
-        }
+        },
         MangleType::Array(inner, size) => {
-            MangleType::Array(
-                Box::new(substitute_template_refs_in_type(inner, bindings)),
-                *size,
-            )
-        }
-        
+            MangleType::Array(Box::new(substitute_template_refs_in_type(inner, bindings)), *size)
+        },
+
         MangleType::Template { name, args } => {
             let new_args: Vec<MangleType> = args
                 .iter()
@@ -1759,8 +1789,8 @@ fn substitute_template_refs_in_type(
                 name: name.clone(),
                 args: new_args,
             }
-        }
-        
+        },
+
         MangleType::TplMember { name, args, member } => {
             let new_args: Vec<MangleType> = args
                 .iter()
@@ -1771,8 +1801,8 @@ fn substitute_template_refs_in_type(
                 args: new_args,
                 member: member.clone(),
             }
-        }
-        
+        },
+
         _ => ty.clone(),
     }
 }
@@ -1784,25 +1814,31 @@ fn substitute_template_refs_in_decl(
 ) -> CppDecl {
     // 先执行普通的类型参数替换
     let substituted = substitute_decl(decl, &[], &[], None);
-    
+
     // 然后对关键成员进行模板模板参数替换
     match &substituted {
         CppDecl::Class(c) => {
             // 递归替换类成员中的模板模板参数
-            let new_members: Vec<CppDecl> = c.members.iter().map(|m| {
-                match m {
-                    CppDecl::MemberVar { ty, name, is_mutable, is_volatile, .. } => {
-                        CppDecl::MemberVar {
-                            ty: substitute_template_refs_in_type(ty, bindings),
-                            name: name.clone(),
-                            is_mutable: *is_mutable,
-                            is_volatile: *is_volatile,
-                        }
-                    }
+            let new_members: Vec<CppDecl> = c
+                .members
+                .iter()
+                .map(|m| match m {
+                    CppDecl::MemberVar {
+                        ty,
+                        name,
+                        is_mutable,
+                        is_volatile,
+                        ..
+                    } => CppDecl::MemberVar {
+                        ty: substitute_template_refs_in_type(ty, bindings),
+                        name: name.clone(),
+                        is_mutable: *is_mutable,
+                        is_volatile: *is_volatile,
+                    },
                     _ => m.clone(),
-                }
-            }).collect();
-            
+                })
+                .collect();
+
             CppDecl::Class(ClassDecl {
                 name: c.name.clone(),
                 is_struct: c.is_struct,
@@ -1810,7 +1846,7 @@ fn substitute_template_refs_in_decl(
                 bases: c.bases.clone(),
                 members: new_members,
             })
-        }
+        },
         _ => substituted,
     }
 }
@@ -1830,7 +1866,7 @@ pub fn instantiate_decl_with_template_params(
             bindings.insert(param_name.clone(), arg.clone());
         }
     }
-    
+
     // Step 2: 识别模板模板参数并添加到绑定中
     for (i, param_name) in params.iter().enumerate() {
         if let Some(primary_param) = primary_params.get(i) {
@@ -1841,7 +1877,7 @@ pub fn instantiate_decl_with_template_params(
             }
         }
     }
-    
+
     // Step 3: 先执行普通替换，再执行模板模板参数的特殊替换
     let substituted = substitute_decl(decl, params, args, class_rename);
     substitute_template_refs_in_decl(&substituted, &bindings)

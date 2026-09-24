@@ -141,24 +141,19 @@ impl MipsCodegen {
         ) {
             Ok(bytes) => {
                 self.code.extend_from_slice(&bytes);
-            }
+            },
             Err(unrecognized) => {
                 for mnem in &unrecognized {
                     let span = crate::diagnostics::Span::point(span_file, span_line, 1);
                     let mut diag = crate::diagnostics::Diagnostic::err(
                         "E0311",
-                        format!(
-                            "unsupported inline asm instruction '{}' on {} target",
-                            mnem, arch
-                        ),
+                        format!("unsupported inline asm instruction '{}' on {} target", mnem, arch),
                         span,
                     );
-                    diag.hint = Some(
-                        "add encoding support or use asm text mode (-S)".to_string(),
-                    );
+                    diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
                     self.diagnostics.push(diag);
                 }
-            }
+            },
         }
     }
 
@@ -239,7 +234,8 @@ impl MipsCodegen {
                             ty: STT_FUNC,
                             visibility: 0,
                         };
-                        self.sym_index.insert(f.name.name.clone(), self.symbols.len() as u32);
+                        self.sym_index
+                            .insert(f.name.name.clone(), self.symbols.len() as u32);
                         self.symbols.push(alias_sym);
                     }
                 }
@@ -254,18 +250,17 @@ impl MipsCodegen {
         match self._target.ftrace_mode {
             crate::cli::FtraceMode::MCount => {
                 self.ensure_sym("mcount");
-            }
+            },
             crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
                 self.ensure_sym("__fentry__");
-            }
-            crate::cli::FtraceMode::None => {}
+            },
+            crate::cli::FtraceMode::None => {},
         }
         // -mrecord-mcount: generate __mcount_loc section with call site addresses
         if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
             && !self.mcount_loc_entries.is_empty()
         {
-            let mut mcount_data =
-                Vec::with_capacity(self.mcount_loc_entries.len() * 4); // MIPS: 32-bit addresses
+            let mut mcount_data = Vec::with_capacity(self.mcount_loc_entries.len() * 4); // MIPS: 32-bit addresses
             for &(call_pos, _) in &self.mcount_loc_entries {
                 mcount_data.extend_from_slice(&(call_pos as u32).to_be_bytes());
             }
@@ -375,7 +370,7 @@ impl MipsCodegen {
             let val = match (&init_expr.kind, &init_expr.literal) {
                 (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => {
                     Some(*v as i64)
-                }
+                },
                 _ => None,
             };
             if let Some(val) = val {
@@ -468,7 +463,7 @@ impl MipsCodegen {
                     match item {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                             self.gen_naked_asm_expr(e);
-                        }
+                        },
                         BlockItem::Stmt(Stmt::AsmGoto {
                             asm_str,
                             outputs,
@@ -485,18 +480,11 @@ impl MipsCodegen {
                             let mut resolved = asm_str.clone();
                             let label_base = outputs.len();
                             for (i, label) in goto_labels.iter().enumerate().rev() {
-                                resolved = resolved.replace(
-                                    &format!("%l{}", i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l{}", label_base + i),
-                                    &label.name,
-                                );
-                                resolved = resolved.replace(
-                                    &format!("%l[{}]", label.name),
-                                    &label.name,
-                                );
+                                resolved = resolved.replace(&format!("%l{}", i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l{}", label_base + i), &label.name);
+                                resolved =
+                                    resolved.replace(&format!("%l[{}]", label.name), &label.name);
                             }
                             for line in resolved.split('\n') {
                                 let line = line.trim();
@@ -504,8 +492,8 @@ impl MipsCodegen {
                                     self.emit_asm_line_naked(line, span);
                                 }
                             }
-                        }
-                        _ => {} // naked 函数忽略非 asm 语句
+                        },
+                        _ => {}, // naked 函数忽略非 asm 语句
                     }
                 }
             }
@@ -541,7 +529,7 @@ impl MipsCodegen {
         self.emit_sw(31, 29, (self.frame_bytes - 4) as i16); // sw $ra, frame-4($sp)
         self.emit_sw(30, 29, (self.frame_bytes - 8) as i16); // sw $fp, frame-8($sp)
         self.emit_addiu(30, 29, (self.frame_bytes - 8) as i16); // addiu $fp, $sp, frame-8
-        // -fstack-clash-protection: probe each page for large frames
+                                                                // -fstack-clash-protection: probe each page for large frames
         if self._target.stack_clash_protection && self.frame_bytes > 4096 {
             self.emit_stack_clash_probes(self.frame_bytes as u32);
         }
@@ -563,13 +551,13 @@ impl MipsCodegen {
                 self.emit_jal("__fentry__");
                 self.emit_nop(); // delay slot
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::MCount => {
                 let pos = self.code.len() as u64;
                 self.emit_jal("mcount");
                 self.emit_nop(); // delay slot
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::None => None,
         };
         // -mrecord-mcount: record call site for __mcount_loc section
@@ -602,7 +590,8 @@ impl MipsCodegen {
         // va_save 槽位相对于 $fp 的偏移: -(frame_bytes - 8 - va_save_base_off - i*4)
         if is_variadic {
             for i in 0..4u8 {
-                let fp_off = -(self.frame_bytes as i16 - 8 - self.va_save_base_off as i16 - (i as i16) * 4);
+                let fp_off =
+                    -(self.frame_bytes as i16 - 8 - self.va_save_base_off as i16 - (i as i16) * 4);
                 self.emit_sw(4 + i, 30, fp_off); // sw $a{i}, fp_off($fp)
             }
         }
@@ -711,7 +700,7 @@ impl MipsCodegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
             Expr::StmtExpr { block, .. } => {
                 for item in &block.items {
@@ -719,17 +708,13 @@ impl MipsCodegen {
                         self.gen_naked_asm_expr(inner);
                     }
                 }
-            }
-            _ => {} // 忽略非 asm 表达式
+            },
+            _ => {}, // 忽略非 asm 表达式
         }
     }
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
-    fn emit_asm_line_naked(
-        &mut self,
-        line: &str,
-        span: &crate::diagnostics::Span,
-    ) {
+    fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
         if self.asm_text_mode {
             self.raw_func_asm_lines
                 .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
@@ -806,8 +791,8 @@ impl MipsCodegen {
                     self.gen_expr_from_ast(init);
                     self.emit_store_v0(off);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -820,10 +805,10 @@ impl MipsCodegen {
                     self.emit_addiu(2, 0, 0); // move $v0, $zero
                 }
                 self.emit_epilogue();
-            }
+            },
             Stmt::Expr { e, .. } => {
                 self.gen_expr_from_ast(e);
-            }
+            },
             Stmt::If {
                 cond, then_, else_, ..
             } => {
@@ -840,7 +825,7 @@ impl MipsCodegen {
                     self.gen_stmt(el);
                 }
                 self.set_label(&lbl_end);
-            }
+            },
             Stmt::While { cond, body, .. } => {
                 let lbl_top = self.fresh_label("Lwhile");
                 let lbl_end = self.fresh_label("Lendwhile");
@@ -856,7 +841,7 @@ impl MipsCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -888,14 +873,14 @@ impl MipsCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::Block { b, .. } => {
                 for item in &b.items {
                     if let BlockItem::Stmt(s) = item {
                         self.gen_stmt(s);
                     }
                 }
-            }
+            },
             Stmt::Do { body, cond, .. } => {
                 let lbl_body = self.fresh_label("Ldobody");
                 let lbl_cond = self.fresh_label("Ldocond");
@@ -913,19 +898,19 @@ impl MipsCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::Break { .. } => {
                 if let Some(lbl) = self.break_labels.last().cloned() {
                     self.emit_b(&lbl);
                     self.emit_nop();
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 if let Some(lbl) = self.continue_labels.last().cloned() {
                     self.emit_b(&lbl);
                     self.emit_nop();
                 }
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 self.gen_expr_from_ast(expr);
                 // $v0 now holds the switch expression value
@@ -971,7 +956,7 @@ impl MipsCodegen {
                 }
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
-            }
+            },
             Stmt::AsmGoto {
                 asm_str,
                 outputs: _,
@@ -1008,8 +993,8 @@ impl MipsCodegen {
                 } else {
                     self.encode_and_emit_asm(&resolved, &span.file, span.line);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -1017,18 +1002,19 @@ impl MipsCodegen {
         match expr {
             Expr::Int { v, .. } => {
                 self.emit_load_imm(2, *v as i32);
-            }
+            },
             Expr::Char { v, .. } => {
                 self.emit_load_imm(2, *v as i32);
-            }
+            },
             Expr::Float { v, ty, .. } => {
-                let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_double =
+                    matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_double {
                     self.load_float_d0(*v);
                 } else {
                     self.load_float_f0(*v as f32);
                 }
-            }
+            },
             Expr::String { data, .. } => {
                 let offset = if let Some(&off) = self.string_pool.get(data) {
                     off
@@ -1042,18 +1028,28 @@ impl MipsCodegen {
                     off
                 };
                 self.emit_load_imm(2, offset as i32);
-            }
+            },
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.emit_load_v0(off);
                 } else {
                     self.emit_load_imm(2, 0);
                 }
-            }
+            },
             Expr::Binop { op, l, r, ty, .. } => {
-                let is_float_ty = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
-                let is_float_arith = is_float_ty && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
-                let is_float_cmp = is_float_ty && matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::EqEq | BinOp::Ne);
+                let is_float_ty = matches!(
+                    ty,
+                    crate::ast::Type::Float
+                        | crate::ast::Type::Double
+                        | crate::ast::Type::LongDouble
+                );
+                let is_float_arith =
+                    is_float_ty && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+                let is_float_cmp = is_float_ty
+                    && matches!(
+                        op,
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+                    );
                 if is_float_arith || is_float_cmp {
                     // 浮点路径
                     self.gen_expr_from_ast(l);
@@ -1074,24 +1070,24 @@ impl MipsCodegen {
                     self.emit_addiu(29, 29, 4);
                     self.emit_binop(*op);
                 }
-            }
+            },
             Expr::Unary { op, e, .. } => {
                 self.gen_expr_from_ast(e);
                 match op {
                     UnOp::Neg => {
                         let inst: u32 = (2u32 << 11) | 0b100011;
                         self.code.extend_from_slice(&inst.to_be_bytes());
-                    }
+                    },
                     UnOp::Not => {
                         self.emit_sltiu(2, 2, 1);
-                    }
+                    },
                     UnOp::BitNot => {
                         let inst: u32 = (2u32 << 21) | (2u32 << 11) | 0b100111;
                         self.code.extend_from_slice(&inst.to_be_bytes());
-                    }
-                    UnOp::Plus => {}
+                    },
+                    UnOp::Plus => {},
                 }
-            }
+            },
             Expr::Cast { e, .. } => self.gen_expr_from_ast(e),
             Expr::Call { callee, args, .. } => {
                 for (i, arg) in args.iter().enumerate().take(4) {
@@ -1109,7 +1105,7 @@ impl MipsCodegen {
                     self.emit_jal(&name.name);
                     self.emit_nop();
                 }
-            }
+            },
             Expr::Assign { op, l, r, .. } => {
                 self.gen_expr_from_ast(r);
                 if let Expr::Ident { name, .. } = l.as_ref() {
@@ -1126,8 +1122,10 @@ impl MipsCodegen {
                         self.emit_store_v0(off);
                     }
                 }
-            }
-            Expr::Cond { cond, then_, else_, .. } => {
+            },
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
                 self.gen_expr_from_ast(cond);
                 let lbl_else = self.fresh_label("Lcond_else");
                 let lbl_end = self.fresh_label("Lcond_end");
@@ -1139,25 +1137,25 @@ impl MipsCodegen {
                 self.set_label(&lbl_else);
                 self.gen_expr_from_ast(else_);
                 self.set_label(&lbl_end);
-            }
+            },
             Expr::SizeofTy { ty, .. } => {
                 self.emit_load_imm(2, ty.size() as i32);
-            }
+            },
             Expr::SizeofExpr { e, .. } => {
                 let sz = e.ty().size();
                 self.emit_load_imm(2, sz as i32);
-            }
+            },
             Expr::AlignofTy { ty, .. } => {
                 self.emit_load_imm(2, ty.align() as i32);
-            }
+            },
             Expr::AlignofExpr { e, .. } => {
                 let al = e.ty().align();
                 self.emit_load_imm(2, al as i32);
-            }
+            },
             Expr::Comma { l, r, .. } => {
                 self.gen_expr_from_ast(l);
                 self.gen_expr_from_ast(r);
-            }
+            },
             Expr::AddrOf { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if let Some(&off) = self.locals.get(&name.name) {
@@ -1170,7 +1168,7 @@ impl MipsCodegen {
                 } else {
                     self.emit_load_imm(2, 0);
                 }
-            }
+            },
             Expr::Deref { e, .. } => {
                 self.gen_expr_from_ast(e);
                 // $v0 现在是指针地址, 加载 [$v0] 到 $v0
@@ -1179,7 +1177,7 @@ impl MipsCodegen {
                 self.emit_lw(8, 29, 0); // $t0 = 地址
                 self.emit_addiu(29, 29, 4);
                 self.emit_lw(2, 8, 0); // lw $v0, 0($t0)
-            }
+            },
             Expr::Index { arr, idx, .. } => {
                 self.gen_expr_from_ast(arr);
                 self.emit_addiu(29, 29, -4);
@@ -1191,12 +1189,12 @@ impl MipsCodegen {
                 // 简化: 假设元素大小为 4 字节
                 self.emit_addu(2, 8, 2); // $v0 = base + idx*4 (简化)
                 self.emit_lw(2, 2, 0); // lw $v0, 0($v0)
-            }
+            },
             Expr::Member { expr, field, .. } => {
                 self.gen_expr_from_ast(expr);
                 // 简化: 假设字段偏移为 0 (实际需要根据 aggregate_fields 计算)
                 let _ = field;
-            }
+            },
             Expr::PreInc { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if let Some(&off) = self.locals.get(&name.name) {
@@ -1205,7 +1203,7 @@ impl MipsCodegen {
                         self.emit_store_v0(off);
                     }
                 }
-            }
+            },
             Expr::PreDec { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if let Some(&off) = self.locals.get(&name.name) {
@@ -1214,7 +1212,7 @@ impl MipsCodegen {
                         self.emit_store_v0(off);
                     }
                 }
-            }
+            },
             Expr::PostInc { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if let Some(&off) = self.locals.get(&name.name) {
@@ -1227,7 +1225,7 @@ impl MipsCodegen {
                         self.emit_addiu(29, 29, 4);
                     }
                 }
-            }
+            },
             Expr::PostDec { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if let Some(&off) = self.locals.get(&name.name) {
@@ -1240,18 +1238,18 @@ impl MipsCodegen {
                         self.emit_addiu(29, 29, 4);
                     }
                 }
-            }
+            },
             Expr::ComplexLit { real, .. } => {
                 // 简化: 返回实部
                 self.emit_load_imm(2, *real as i32);
-            }
+            },
             Expr::Real { e, .. } => {
                 self.gen_expr_from_ast(e);
-            }
+            },
             Expr::Imag { .. } => {
                 // 简化: 返回 0
                 self.emit_load_imm(2, 0);
-            }
+            },
             Expr::AsmExpr {
                 asm_str,
                 outputs,
@@ -1278,24 +1276,32 @@ impl MipsCodegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             Expr::VaArg { ap, ty, .. } => {
-                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_float = matches!(
+                    ty,
+                    crate::ast::Type::Float
+                        | crate::ast::Type::Double
+                        | crate::ast::Type::LongDouble
+                );
                 if is_float {
                     // 浮点变参: O32 hard-float 使用 $f12/$f14
-                    self.gen_va_arg_float("ap", matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble));
+                    self.gen_va_arg_float(
+                        "ap",
+                        matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble),
+                    );
                 } else {
                     self.gen_va_arg_int("ap");
                 }
                 let _ = ap;
-            }
+            },
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
                     self.emit_load_imm(2, v as i32);
                 } else {
                     self.emit_load_imm(2, 0);
                 }
-            }
+            },
         }
     }
 
@@ -1308,66 +1314,66 @@ impl MipsCodegen {
             BinOp::Div => {
                 self.emit_div(8, 2);
                 self.emit_mflo(2); // $v0 = quotient
-            }
+            },
             BinOp::Mod => {
                 self.emit_div(8, 2);
                 self.emit_mfhi(2); // $v0 = remainder
-            }
+            },
             BinOp::And => {
                 // R-type: rs=$t0(8), rt=$v0(2), rd=$v0(2), funct=AND
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
                 self.code.extend_from_slice(&inst.to_be_bytes());
-            }
+            },
             BinOp::Or => {
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
                 self.code.extend_from_slice(&inst.to_be_bytes());
-            }
+            },
             BinOp::Xor => {
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100110;
                 self.code.extend_from_slice(&inst.to_be_bytes());
-            }
+            },
             BinOp::Shl => {
                 // sllv $v0, $t0, $v0
                 let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000100;
                 self.code.extend_from_slice(&inst.to_be_bytes());
-            }
+            },
             BinOp::Shr => {
                 // srav $v0, $t0, $v0
                 let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000111;
                 self.code.extend_from_slice(&inst.to_be_bytes());
-            }
+            },
             BinOp::Lt => self.emit_slt(2, 8, 2),
             BinOp::Gt => self.emit_slt(2, 2, 8),
             BinOp::Le => {
                 self.emit_slt(2, 2, 8); // $v0 = rhs < lhs
                 self.emit_xori(2, 2, 1); // $v0 ^= 1
-            }
+            },
             BinOp::Ge => {
                 self.emit_slt(2, 8, 2); // $v0 = lhs < rhs
                 self.emit_xori(2, 2, 1); // $v0 ^= 1
-            }
+            },
             BinOp::EqEq => {
                 self.emit_subu(2, 8, 2); // $v0 = lhs - rhs
                 self.emit_sltiu(2, 2, 1); // $v0 = ($v0 < 1) ? 1 : 0
-            }
+            },
             BinOp::Ne => {
                 self.emit_subu(2, 8, 2);
                 // $v0 != 0 ? 1 : 0
                 self.emit_sltu(2, 0, 2); // sltu $v0, $zero, $v0
-            }
+            },
             BinOp::AndAnd => {
                 // both non-zero?
                 self.emit_sltu(8, 0, 8); // $t0 = (lhs != 0)
                 self.emit_sltu(2, 0, 2); // $v0 = (rhs != 0)
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
                 self.code.extend_from_slice(&inst.to_be_bytes()); // and
-            }
+            },
             BinOp::OrOr => {
                 self.emit_sltu(8, 0, 8);
                 self.emit_sltu(2, 0, 2);
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
                 self.code.extend_from_slice(&inst.to_be_bytes()); // or
-            }
+            },
         }
     }
 
@@ -1483,7 +1489,7 @@ impl MipsCodegen {
         // In real implementation, this would use LW from GOT
         // For now, emit a placeholder that loads 0 (will be patched by linker)
         self.emit_load_imm(2, 0); // $v0 = 0 (placeholder for canary)
-        // SW $v0, -canary_off($fp)
+                                  // SW $v0, -canary_off($fp)
         let fp_off = -(canary_off as i16);
         self.emit_sw(2, 30, fp_off);
     }
@@ -1497,11 +1503,11 @@ impl MipsCodegen {
         self.emit_lw(2, 30, fp_off);
         // Load expected canary (simplified: compare with 0)
         self.emit_load_imm(8, 0); // $t0 = 0 (placeholder for expected canary)
-        // BNE $v0, $t0, fail_label
+                                  // BNE $v0, $t0, fail_label
         self.emit_bne(2, 8, &fail_label);
         self.emit_nop(); // delay slot
-        // Normal path continues
-        // Fail path: call __stack_chk_fail (never returns)
+                         // Normal path continues
+                         // Fail path: call __stack_chk_fail (never returns)
         self.set_label(&fail_label);
         self.ensure_sym("__stack_chk_fail");
         self.emit_jal("__stack_chk_fail");
@@ -1518,10 +1524,8 @@ impl MipsCodegen {
 
     /// SB rt, offset(base): store byte
     fn emit_sb(&mut self, rt: u8, base: u8, offset: i16) {
-        let inst = (0b101000 << 26)
-            | ((base as u32) << 21)
-            | ((rt as u32) << 16)
-            | (offset as u16 as u32);
+        let inst =
+            (0b101000 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -1952,37 +1956,29 @@ impl MipsCodegen {
 
     /// LWC1 ft, offset(base): Load Word to Coprocessor 1
     fn emit_lwc1(&mut self, ft: u8, base: u8, offset: i16) {
-        let inst = (0b110001 << 26)
-            | ((base as u32) << 21)
-            | ((ft as u32) << 16)
-            | (offset as u16 as u32);
+        let inst =
+            (0b110001 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     /// LDC1 ft, offset(base): Load Double to Coprocessor 1
     fn emit_ldc1(&mut self, ft: u8, base: u8, offset: i16) {
-        let inst = (0b110101 << 26)
-            | ((base as u32) << 21)
-            | ((ft as u32) << 16)
-            | (offset as u16 as u32);
+        let inst =
+            (0b110101 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     /// SWC1 ft, offset(base): Store Word from Coprocessor 1
     fn emit_swc1(&mut self, ft: u8, base: u8, offset: i16) {
-        let inst = (0b111001 << 26)
-            | ((base as u32) << 21)
-            | ((ft as u32) << 16)
-            | (offset as u16 as u32);
+        let inst =
+            (0b111001 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     /// SDC1 ft, offset(base): Store Double from Coprocessor 1
     fn emit_sdc1(&mut self, ft: u8, base: u8, offset: i16) {
-        let inst = (0b111101 << 26)
-            | ((base as u32) << 21)
-            | ((ft as u32) << 16)
-            | (offset as u16 as u32);
+        let inst =
+            (0b111101 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -2089,7 +2085,8 @@ impl MipsCodegen {
 
     /// MTC1 rt, fs: Move To Coprocessor 1 (GP -> FPU)
     fn emit_mtc1(&mut self, rt: u8, fs: u8) {
-        let inst: u32 = (0b010001 << 26) | (0b00100 << 21) | ((rt as u32) << 16) | ((fs as u32) << 11);
+        let inst: u32 =
+            (0b010001 << 26) | (0b00100 << 21) | ((rt as u32) << 16) | ((fs as u32) << 11);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -2215,7 +2212,7 @@ impl MipsCodegen {
                 self.emit_load_imm(2, 0);
                 self.set_label(&lbl_eq);
                 return;
-            }
+            },
             _ => self.emit_fpu_cmp(2, 0, 0b10, is_double),
         }
         // BC1T: set $v0 = 1, else $v0 = 0
@@ -2307,7 +2304,7 @@ mod tests {
         cg.va_save_base_off = 0;
         cg.va_gp_offs = 0;
         cg.frame_bytes = 24; // 8 (fp+ra) + 16 (va_save)
-        // 读 3 个变参
+                             // 读 3 个变参
         cg.gen_va_arg_int("ap");
         cg.gen_va_arg_int("ap");
         cg.gen_va_arg_int("ap");
@@ -2324,10 +2321,7 @@ mod tests {
                 opcode == 0b100011 && rt == 2 && rs == 30
             })
             .count();
-        assert_eq!(
-            lw_count, 3,
-            "expected 3 lw $v0, offset($fp) instructions, got {lw_count}"
-        );
+        assert_eq!(lw_count, 3, "expected 3 lw $v0, offset($fp) instructions, got {lw_count}");
         // 验证 va_gp_offs 推进
         assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
@@ -2364,27 +2358,61 @@ mod tests {
 // Backend trait implementation (Phase 3b)
 mod backend {
     use super::*;
-    use crate::codegen::shared::backend::{Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage};
-    use crate::codegen::shared::features::FeatureSet;
     use crate::cli::Arch;
+    use crate::codegen::shared::backend::{
+        Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
+    };
+    use crate::codegen::shared::features::FeatureSet;
     use crate::diagnostics::Diagnostic;
-    
+
     impl Backend for MipsCodegen {
-        fn arch(&self) -> Arch { Arch::Mips }
-        fn features(&self) -> FeatureSet { FeatureSet::tier2_cross() }
+        fn arch(&self) -> Arch {
+            Arch::Mips
+        }
+        fn features(&self) -> FeatureSet {
+            FeatureSet::tier2_cross()
+        }
         fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
             self.set_source_name(&input.opts.source_name);
             self.set_asm_text_mode(input.opts.emit_asm);
             self.compile(input.module);
             build_aux_sections(self, input);
             Ok(CommonImage {
-                code: self.code.clone(), rodata: self.rodata.clone(), data: vec![], bss: 0,
-                tls: TlsImage { offset: 0, size: 0, decl: None },
-                symbols: ObjectSymbols { globals: self.symbols.iter().map(|s| s.name.clone()).collect(), locals: vec![], imports: vec![] },
-                relocs: ObjectRelocs { rellocs: self.relocations.iter().map(|r| format!("{:?}", r)).collect() },
-                extra_sections: self.extra_sections.iter().map(|sec| ExtraSection { name: sec.name.clone(), content: sec.data.clone() }).collect(),
+                code: self.code.clone(),
+                rodata: self.rodata.clone(),
+                data: vec![],
+                bss: 0,
+                tls: TlsImage {
+                    offset: 0,
+                    size: 0,
+                    decl: None,
+                },
+                symbols: ObjectSymbols {
+                    globals: self.symbols.iter().map(|s| s.name.clone()).collect(),
+                    locals: vec![],
+                    imports: vec![],
+                },
+                relocs: ObjectRelocs {
+                    rellocs: self
+                        .relocations
+                        .iter()
+                        .map(|r| format!("{:?}", r))
+                        .collect(),
+                },
+                extra_sections: self
+                    .extra_sections
+                    .iter()
+                    .map(|sec| ExtraSection {
+                        name: sec.name.clone(),
+                        content: sec.data.clone(),
+                    })
+                    .collect(),
                 diagnostics: self.diagnostics.clone(),
-                func_sizes: self.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                func_sizes: self
+                    .func_sizes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
             })
         }
         fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
@@ -2411,7 +2439,11 @@ mod backend {
             let func_pcs: Vec<(&str, u64, u64)> = module
                 .functions
                 .iter()
-                .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64)))
+                .filter_map(|f| {
+                    cg.labels
+                        .get(&f.name)
+                        .map(|&pc| (f.name.as_str(), pc, pc + 64))
+                })
                 .collect();
             let dbg_opts = crate::debug::DebugOptions {
                 level: opts.debug_level,
@@ -2436,7 +2468,10 @@ mod backend {
             if !frames.is_empty() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".eh_frame".to_string(),
-                    data: crate::debug::build_eh_frame_with_arch(&frames, crate::debug::ArchKind::Mips),
+                    data: crate::debug::build_eh_frame_with_arch(
+                        &frames,
+                        crate::debug::ArchKind::Mips,
+                    ),
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 4,

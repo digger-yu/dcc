@@ -277,10 +277,7 @@ pub fn detect_system_vdso(arch: crate::debug::ArchKind) -> Option<std::path::Pat
     };
 
     // 1. /sys/devices/system/cpu/vdso/
-    let sys_paths = [
-        "/sys/devices/system/cpu/vdso",
-        "/sys/kernel/vdso",
-    ];
+    let sys_paths = ["/sys/devices/system/cpu/vdso", "/sys/kernel/vdso"];
     for dir in &sys_paths {
         for name in vdso_names {
             let p = std::path::Path::new(dir).join(name);
@@ -296,10 +293,7 @@ pub fn detect_system_vdso(arch: crate::debug::ArchKind) -> Option<std::path::Pat
     }
 
     // 3. 常见 sysroot / 调试路径
-    let fallback_paths = [
-        "/usr/lib/debug/vdso64.so.dbg",
-        "/usr/lib64/vdso64.so",
-    ];
+    let fallback_paths = ["/usr/lib/debug/vdso64.so.dbg", "/usr/lib64/vdso64.so"];
     for path in &fallback_paths {
         let p = PathBuf::from(path);
         if p.exists() {

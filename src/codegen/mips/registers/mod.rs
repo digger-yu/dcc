@@ -27,7 +27,7 @@ pub struct MipsZero;
 
 impl MipsZero {
     pub const ZERO: MipsZero = MipsZero;
-    
+
     pub fn read(self) -> u32 {
         0
     }
@@ -36,34 +36,34 @@ impl MipsZero {
 /// MIPS32 General-Purpose Register enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MipsGpr {
-    Zero,   // $0: Hard-wired zero
-    At,     // $1: Assembler register
-    V0,     // $2: Return value / expression
-    V1,     // $3: Return value / expression
-    A0,     // $4: Argument 1
-    A1,     // $5: Argument 2
-    A2,     // $6: Argument 3
-    A3,     // $7: Argument 4
-    T0,     // $8: Temporary (caller-saved)
-    T1,     // $9: Temporary (caller-saved)
-    T2,     // $10: Temporary (caller-saved)
-    T3,     // $11: Temporary (caller-saved)
-    T4,     // $12: Temporary (caller-saved)
-    T5,     // $13: Temporary (caller-saved)
-    T6,     // $14: Temporary (caller-saved)
-    T7,     // $15: Temporary (caller-saved)
-    S0,     // $16: Saved (callee-saved)
-    S1,     // $17: Saved (callee-saved)
-    S2,     // $18: Saved (callee-saved)
-    S3,     // $19: Saved (callee-saved)
-    S4,     // $20: Saved (callee-saved)
-    S5,     // $21: Saved (callee-saved)
-    T8,     // $24: Temp (caller-saved, often used for loop counter)
-    T9,     // $25: Temp (caller-saved, often used for jump table)
-    JP,     // $28: Jump pointer
-    GP,     // $29: Global pointer ($gp)
-    SP,     // $30: Stack pointer ($sp)
-    FP,     // $31: Frame pointer ($fp)
+    Zero, // $0: Hard-wired zero
+    At,   // $1: Assembler register
+    V0,   // $2: Return value / expression
+    V1,   // $3: Return value / expression
+    A0,   // $4: Argument 1
+    A1,   // $5: Argument 2
+    A2,   // $6: Argument 3
+    A3,   // $7: Argument 4
+    T0,   // $8: Temporary (caller-saved)
+    T1,   // $9: Temporary (caller-saved)
+    T2,   // $10: Temporary (caller-saved)
+    T3,   // $11: Temporary (caller-saved)
+    T4,   // $12: Temporary (caller-saved)
+    T5,   // $13: Temporary (caller-saved)
+    T6,   // $14: Temporary (caller-saved)
+    T7,   // $15: Temporary (caller-saved)
+    S0,   // $16: Saved (callee-saved)
+    S1,   // $17: Saved (callee-saved)
+    S2,   // $18: Saved (callee-saved)
+    S3,   // $19: Saved (callee-saved)
+    S4,   // $20: Saved (callee-saved)
+    S5,   // $21: Saved (callee-saved)
+    T8,   // $24: Temp (caller-saved, often used for loop counter)
+    T9,   // $25: Temp (caller-saved, often used for jump table)
+    JP,   // $28: Jump pointer
+    GP,   // $29: Global pointer ($gp)
+    SP,   // $30: Stack pointer ($sp)
+    FP,   // $31: Frame pointer ($fp)
 }
 
 impl MipsGpr {
@@ -138,19 +138,12 @@ impl MipsGpr {
 
     /// Is this register callee-saved per O32 ABI?
     pub fn is_callee_saved(&self) -> bool {
-        matches!(
-            self,
-            Self::S0 | Self::S1 | Self::S2 | Self::S3
-                | Self::S4 | Self::S5
-        )
+        matches!(self, Self::S0 | Self::S1 | Self::S2 | Self::S3 | Self::S4 | Self::S5)
     }
 
     /// Is this a special-purpose register?
     pub fn is_special(&self) -> bool {
-        matches!(
-            self,
-            Self::Zero | Self::At | Self::GP | Self::SP | Self::FP
-        )
+        matches!(self, Self::Zero | Self::At | Self::GP | Self::SP | Self::FP)
     }
 
     /// Get human-readable register name (shell-style: $n)
@@ -419,14 +412,14 @@ impl Default for DelaySlotState {
 #[derive(Debug, Clone, Copy)]
 pub enum MipsInstruction {
     Nop,
-    Add(MipsGpr, MipsGpr, MipsGpr),      // add rd, rs, rt
-    Mul(MipsGpr, MipsGpr, MipsGpr),      // mul rd, rs, rt
-    Lw(MipsGpr, i16, MipsGpr),           // lw rt, offset(rs)
-    Sw(MipsGpr, i16, MipsGpr),           // sw rt, offset(rs)
-    Beq(MipsGpr, MipsGpr, i32),          // beq rs, rt, offset
-    Bne(MipsGpr, MipsGpr, i32),          // bne rs, rt, offset
-    J(u32),                              // j target
-    Jal(u32),                            // jal target
+    Add(MipsGpr, MipsGpr, MipsGpr), // add rd, rs, rt
+    Mul(MipsGpr, MipsGpr, MipsGpr), // mul rd, rs, rt
+    Lw(MipsGpr, i16, MipsGpr),      // lw rt, offset(rs)
+    Sw(MipsGpr, i16, MipsGpr),      // sw rt, offset(rs)
+    Beq(MipsGpr, MipsGpr, i32),     // beq rs, rt, offset
+    Bne(MipsGpr, MipsGpr, i32),     // bne rs, rt, offset
+    J(u32),                         // j target
+    Jal(u32),                       // jal target
     /// Other instructions...
     Other,
 }
@@ -437,15 +430,9 @@ impl MipsInstruction {
         match self {
             Self::Lw(dest, _, _) => dest == &reg,
             Self::Sw(_, _, src) => src == &reg,
-            Self::Beq(rs, rt, _) | Self::Bne(rs, rt, _) => {
-                *rs == reg || *rt == reg
-            }
-            Self::Add(rd, rs, rt) => {
-                *rd == reg || *rs == reg || *rt == reg
-            }
-            Self::Mul(rd, rs, rt) => {
-                *rd == reg || *rs == reg || *rt == reg
-            }
+            Self::Beq(rs, rt, _) | Self::Bne(rs, rt, _) => *rs == reg || *rt == reg,
+            Self::Add(rd, rs, rt) => *rd == reg || *rs == reg || *rt == reg,
+            Self::Mul(rd, rs, rt) => *rd == reg || *rs == reg || *rt == reg,
             _ => false,
         }
     }
@@ -469,7 +456,7 @@ mod mips_registers_tests {
     fn test_gpr_argument_registers() {
         assert_eq!(MipsGpr::A0.index(), 4);
         assert_eq!(MipsGpr::A3.index(), 7);
-        
+
         // O32 uses $a0-$a3 for up to 4 integer arguments
         for i in 0..4 {
             let reg = MipsGpr::from_index(4 + i as u8).unwrap();
@@ -484,7 +471,7 @@ mod mips_registers_tests {
             let reg = MipsGpr::from_index(16 + i as u8).unwrap();
             assert!(reg.is_callee_saved(), "{:?} should be callee-saved", reg);
         }
-        
+
         // Caller-saved: $t0-$t9 ($8-$15, $24-$25)
         for i in 0..8 {
             let reg = MipsGpr::from_index(8 + i as u8).unwrap();
@@ -502,7 +489,7 @@ mod mips_registers_tests {
     fn test_zero_register_behavior() {
         let zero = MipsZero::ZERO;
         assert_eq!(zero.read(), 0);
-        
+
         // $0 cannot be written to
         assert_eq!(MipsGpr::Zero.is_special(), true);
         assert_eq!(MipsGpr::Zero.is_callee_saved(), false);
@@ -521,14 +508,14 @@ mod mips_registers_tests {
     fn test_delay_slot_state() {
         let mut state = DelaySlotState::new();
         assert_eq!(state.filled, false);
-        
+
         // Simulate filling delay slot
         state.filled = true;
         state.instruction = Some(MipsInstruction::Nop);
         state.has_data_dependency = false;
-        
+
         assert_eq!(state.filled, true);
-        
+
         state.clear();
         assert_eq!(state.filled, false);
     }

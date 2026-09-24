@@ -10,10 +10,7 @@ impl Aarch64Codegen {
         // 调用目标总是少 4 字节 (实测 bl 落到 callee 前一条指令)。
         let pc = at;
         let diff = target as i64 - pc as i64;
-        debug_assert!(
-            Self::bl_offset_in_range(diff),
-            "BL offset out of range: diff={diff}"
-        );
+        debug_assert!(Self::bl_offset_in_range(diff), "BL offset out of range: diff={diff}");
         let imm26 = ((diff >> 2) as u32) & 0x03ff_ffff;
         let insn = 0x9400_0000u32 | imm26;
         let off = at as usize;

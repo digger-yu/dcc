@@ -17,8 +17,8 @@ impl ArmCodegen {
                     self.gen_expr_from_ast(init);
                     self.emit_store_r0(off);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -31,10 +31,10 @@ impl ArmCodegen {
                     self.emit_mov_imm(0, 0);
                 }
                 self.emit_epilogue();
-            }
+            },
             Stmt::Expr { e, .. } => {
                 self.gen_expr_from_ast(e);
-            }
+            },
             Stmt::If {
                 cond, then_, else_, ..
             } => {
@@ -50,7 +50,7 @@ impl ArmCodegen {
                     self.gen_stmt(el);
                 }
                 self.set_label(&lbl_end);
-            }
+            },
             Stmt::While { cond, body, .. } => {
                 let lbl_top = self.fresh_label("Lwhile");
                 let lbl_end = self.fresh_label("Lendwhile");
@@ -65,7 +65,7 @@ impl ArmCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -96,14 +96,14 @@ impl ArmCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::Block { b, .. } => {
                 for item in &b.items {
                     if let BlockItem::Stmt(s) = item {
                         self.gen_stmt(s);
                     }
                 }
-            }
+            },
             Stmt::Do { body, cond, .. } => {
                 let lbl_body = self.fresh_label("Ldobody");
                 let lbl_cond = self.fresh_label("Ldocond");
@@ -120,17 +120,17 @@ impl ArmCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
                 self.continue_labels.pop();
-            }
+            },
             Stmt::Break { .. } => {
                 if let Some(lbl) = self.break_labels.last().cloned() {
                     self.emit_b(&lbl);
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 if let Some(lbl) = self.continue_labels.last().cloned() {
                     self.emit_b(&lbl);
                 }
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 self.gen_expr_from_ast(expr);
                 // r0 now holds the switch expression value
@@ -172,7 +172,7 @@ impl ArmCodegen {
                 }
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
-            }
+            },
             Stmt::AsmGoto {
                 asm_str,
                 outputs: _,
@@ -209,8 +209,8 @@ impl ArmCodegen {
                 } else {
                     self.encode_and_emit_asm(&resolved, &span.file, span.line);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

@@ -76,21 +76,21 @@ impl BmfModule {
             match e.kind {
                 BmfKind::Function => {
                     out.push_str(&format!("E F {} {}\n", e.name, e.signature));
-                }
+                },
                 BmfKind::Class => {
                     out.push_str(&format!(
                         "E C {} {}\n",
                         e.name,
                         e.layout.as_deref().unwrap_or("")
                     ));
-                }
+                },
                 BmfKind::Variable => {
                     out.push_str(&format!("E V {} {}\n", e.name, e.signature));
-                }
+                },
                 BmfKind::Template => {
                     // M26: 模板导出格式 E T <name> <params>
                     out.push_str(&format!("E T {} {}\n", e.name, e.signature));
-                }
+                },
             }
         }
         out
@@ -145,7 +145,7 @@ impl BmfModule {
                         }),
                         _ => return None,
                     }
-                }
+                },
                 _ => return None,
             }
         }

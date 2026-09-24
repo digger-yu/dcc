@@ -126,10 +126,13 @@ impl PrattParser {
         match tok.kind {
             TokKind::Number => Ok(self.nud_int(tok)),
             TokKind::FloatLit => Ok(self.nud_float(tok)),
-            TokKind::StringLit | TokKind::WideStringLit | TokKind::Char16StringLit
+            TokKind::StringLit
+            | TokKind::WideStringLit
+            | TokKind::Char16StringLit
             | TokKind::Char32StringLit => Ok(self.nud_string(tok)),
-            TokKind::CharLit | TokKind::WideCharLit | TokKind::Char16Lit
-            | TokKind::Char32Lit => Ok(self.nud_char(tok)),
+            TokKind::CharLit | TokKind::WideCharLit | TokKind::Char16Lit | TokKind::Char32Lit => {
+                Ok(self.nud_char(tok))
+            },
             TokKind::Ident => Ok(self.nud_ident(tok)),
             TokKind::LParen => self.nud_paren(tok),
             TokKind::Plus
@@ -147,7 +150,7 @@ impl PrattParser {
                     tok.span.clone(),
                 ));
                 Err(())
-            }
+            },
         }
     }
 
@@ -261,7 +264,7 @@ impl PrattParser {
                     ty: Type::Int,
                 };
                 return Ok(e);
-            }
+            },
             TokKind::Amp => {
                 // 取址: Expr::AddrOf
                 let operand = self.parse_expr(prefix_rbp())?;
@@ -271,7 +274,7 @@ impl PrattParser {
                     ty: Type::Ptr(Box::new(Type::Int.into())),
                 };
                 return Ok(e);
-            }
+            },
             TokKind::PlusPlus => {
                 let operand = self.parse_expr(prefix_rbp())?;
                 let e = Expr::PreInc {
@@ -280,7 +283,7 @@ impl PrattParser {
                     ty: Type::Int,
                 };
                 return Ok(e);
-            }
+            },
             TokKind::MinusMinus => {
                 let operand = self.parse_expr(prefix_rbp())?;
                 let e = Expr::PreDec {
@@ -289,7 +292,7 @@ impl PrattParser {
                     ty: Type::Int,
                 };
                 return Ok(e);
-            }
+            },
             _ => unreachable!("nud_unary called with non-unary token"),
         };
         let operand = self.parse_expr(prefix_rbp())?;
@@ -336,7 +339,7 @@ impl PrattParser {
                     span: tok.span.clone(),
                     ty: Type::Int,
                 })
-            }
+            },
             TokKind::MinusMinus => Ok(Expr::PostDec {
                 e: Box::new(left),
                 span: tok.span.clone(),
@@ -382,7 +385,7 @@ impl PrattParser {
                     op_tok.span.clone(),
                 ));
                 return Err(());
-            }
+            },
         };
         let right = self.parse_expr(next_min_prec)?;
         let span = op_tok.span.clone();
@@ -440,7 +443,7 @@ impl PrattParser {
                     op_tok.span.clone(),
                 ));
                 return Err(());
-            }
+            },
         };
         let right = self.parse_expr(next_min_prec)?;
         let span = op_tok.span.clone();
@@ -624,8 +627,12 @@ impl PrattParser {
             TokKind::Shl | TokKind::Shr => Some((11, 12)),
             TokKind::Plus | TokKind::Minus => Some((12, 13)),
             TokKind::Star | TokKind::Slash | TokKind::Percent => Some((13, 14)),
-            TokKind::LParen | TokKind::LBracket | TokKind::Dot | TokKind::Arrow
-            | TokKind::PlusPlus | TokKind::MinusMinus => Some((14, 15)),
+            TokKind::LParen
+            | TokKind::LBracket
+            | TokKind::Dot
+            | TokKind::Arrow
+            | TokKind::PlusPlus
+            | TokKind::MinusMinus => Some((14, 15)),
             _ => None,
         }
     }
@@ -674,7 +681,10 @@ fn parse_int_lit_simple(s: &str) -> i128 {
         i128::from_str_radix(r, 16).unwrap_or(0)
     } else if let Some(r) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
         i128::from_str_radix(r, 2).unwrap_or(0)
-    } else if let Some(r) = t.strip_prefix("0").filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit())) {
+    } else if let Some(r) = t
+        .strip_prefix("0")
+        .filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+    {
         i128::from_str_radix(r, 8).unwrap_or(0)
     } else {
         t.parse::<i128>().unwrap_or(0)
@@ -747,8 +757,8 @@ mod pratt_tests {
                 break;
             }
         }
-        let (expr, diags) = PrattParser::parse_expression(tokens)
-            .expect("parse_expression should succeed");
+        let (expr, diags) =
+            PrattParser::parse_expression(tokens).expect("parse_expression should succeed");
         assert!(
             diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -765,7 +775,7 @@ mod pratt_tests {
             Expr::Int { v, ty, .. } => {
                 assert_eq!(v, 42);
                 assert_eq!(ty, Type::Int);
-            }
+            },
             other => panic!("expected Int, got {:?}", std::mem::discriminant(&other)),
         }
     }
@@ -785,7 +795,7 @@ mod pratt_tests {
                     Expr::Int { v, .. } => assert_eq!(v, 2),
                     _ => panic!("right is not Int"),
                 }
-            }
+            },
             _ => panic!("expected Binop"),
         }
     }
@@ -805,13 +815,13 @@ mod pratt_tests {
                     Expr::Binop { op, l, r, .. } => {
                         assert_eq!(op, BinOp::Mul);
                         match (*l, *r) {
-                            (Expr::Int { v: 2, .. }, Expr::Int { v: 3, .. }) => {}
+                            (Expr::Int { v: 2, .. }, Expr::Int { v: 3, .. }) => {},
                             _ => panic!("inner Binop args wrong"),
                         }
-                    }
+                    },
                     _ => panic!("right is not Binop"),
                 }
-            }
+            },
             _ => panic!("expected Binop"),
         }
     }
@@ -833,13 +843,13 @@ mod pratt_tests {
                             _ => panic!("inner left is not Ident(b)"),
                         }
                         match *r {
-                            Expr::Int { v: 5, .. } => {}
+                            Expr::Int { v: 5, .. } => {},
                             _ => panic!("inner right is not Int(5)"),
                         }
-                    }
+                    },
                     _ => panic!("inner right is not Assign"),
                 }
-            }
+            },
             _ => panic!("expected Assign"),
         }
     }
@@ -855,17 +865,17 @@ mod pratt_tests {
                     Expr::Binop { op, l, r, .. } => {
                         assert_eq!(op, BinOp::Add);
                         match (*l, *r) {
-                            (Expr::Int { v: 1, .. }, Expr::Int { v: 2, .. }) => {}
+                            (Expr::Int { v: 1, .. }, Expr::Int { v: 2, .. }) => {},
                             _ => panic!("inner Binop args wrong"),
                         }
-                    }
+                    },
                     _ => panic!("left is not Binop"),
                 }
                 match *r {
-                    Expr::Int { v: 3, .. } => {}
+                    Expr::Int { v: 3, .. } => {},
                     _ => panic!("right is not Int(3)"),
                 }
-            }
+            },
             _ => panic!("expected Binop"),
         }
     }
@@ -878,10 +888,10 @@ mod pratt_tests {
             Expr::Unary { op, e, .. } => {
                 assert_eq!(op, UnOp::Neg);
                 match *e {
-                    Expr::Int { v: 42, .. } => {}
+                    Expr::Int { v: 42, .. } => {},
                     _ => panic!("operand is not Int(42)"),
                 }
-            }
+            },
             _ => panic!("expected Unary"),
         }
     }
@@ -898,10 +908,10 @@ mod pratt_tests {
                 }
                 assert_eq!(args.len(), 2);
                 match (&args[0], &args[1]) {
-                    (Expr::Int { v: 1, .. }, Expr::Int { v: 2, .. }) => {}
+                    (Expr::Int { v: 1, .. }, Expr::Int { v: 2, .. }) => {},
                     _ => panic!("args not Int(1), Int(2)"),
                 }
-            }
+            },
             _ => panic!("expected Call"),
         }
     }
@@ -917,10 +927,10 @@ mod pratt_tests {
                     _ => panic!("arr is not Ident(a)"),
                 }
                 match *idx {
-                    Expr::Int { v: 0, .. } => {}
+                    Expr::Int { v: 0, .. } => {},
                     _ => panic!("idx is not Int(0)"),
                 }
-            }
+            },
             _ => panic!("expected Index"),
         }
     }

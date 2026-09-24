@@ -11,7 +11,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::{Codegen, JumpKind};
 
-
 impl Codegen {
     // P1-4: __int128 二元运算 codegen
     // 使用 rax:rdx = 右操作数, rcx:r8 = 左操作数, 结果 → rax:rdx
@@ -72,7 +71,7 @@ impl Codegen {
                 self.emit(&[0x4D, 0x11, 0xD8]); // adc r8, r11
                 self.mov(0, 1); // rax = result_low
                 self.mov(2, 8); // rdx = result_high
-            }
+            },
             BinOp::Sub => {
                 // sub rcx, r9 (low): REX.W+R(r9) = 0x4C
                 self.emit(&[0x4C, 0x29, 0xC9]); // sub rcx, r9
@@ -80,25 +79,25 @@ impl Codegen {
                 self.emit(&[0x4D, 0x19, 0xD8]); // sbb r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
-            }
+            },
             BinOp::And => {
                 self.emit(&[0x4C, 0x21, 0xC9]); // and rcx, r9
                 self.emit(&[0x4D, 0x21, 0xD8]); // and r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
-            }
+            },
             BinOp::Or => {
                 self.emit(&[0x4C, 0x09, 0xC9]); // or rcx, r9
                 self.emit(&[0x4D, 0x09, 0xD8]); // or r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
-            }
+            },
             BinOp::Xor => {
                 self.emit(&[0x4C, 0x31, 0xC9]); // xor rcx, r9
                 self.emit(&[0x4D, 0x31, 0xD8]); // xor r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
-            }
+            },
             BinOp::Mul => {
                 // 低 128 位 = a0*b0 + ((a0*b1 + a1*b0) << 64)。
                 self.mov(0, 1); // rax = a0
@@ -113,11 +112,11 @@ impl Codegen {
                 self.emit(&[0x49, 0x01, 0xC2]); // add r10, rax
                 self.mov(0, 14);
                 self.mov(2, 10);
-            }
+            },
             BinOp::Div | BinOp::Mod => {
                 let signed = !matches!(l.ty(), Type::UInt128) && !matches!(r.ty(), Type::UInt128);
                 self.gen_int128_divmod(signed, matches!(op, BinOp::Mod));
-            }
+            },
             BinOp::EqEq => {
                 self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.emit(&[0x4C, 0x39, 0xC9]); // cmp rcx, r9 (low)
@@ -128,7 +127,7 @@ impl Codegen {
                 self.mov_imm(0, 1);
                 self.label(&lne);
                 self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
-            }
+            },
             BinOp::Ne => {
                 self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.mov_imm(0, 1);
@@ -140,12 +139,12 @@ impl Codegen {
                 self.mov_imm(0, 0);
                 self.label(&leq);
                 self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
-            }
+            },
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let is_signed =
                     !matches!(l.ty(), Type::UInt128) && !matches!(r.ty(), Type::UInt128);
                 self.gen_int128_cmp_ordering(op, is_signed);
-            }
+            },
             BinOp::Shl => {
                 // rcx=left_low, r8=left_high, r9=shift_amount
                 // 目标: rax:left_low, rdx:left_high, rcx:shift_count
@@ -180,7 +179,7 @@ impl Codegen {
                 self.emit(&[0x48, 0xD3, 0xE0]); // shl rax, cl
                 self.label(&l_end);
                 // rax:rdx = result
-            }
+            },
             BinOp::Shr => {
                 // rcx=left_low, r8=left_high, r9=shift_amount
                 self.mov(0, 1); // rax = rcx = left_low
@@ -221,10 +220,10 @@ impl Codegen {
                 self.emit(&[0x48, 0x0F, 0xAD, 0xD0]); // shrd rax, rdx, cl
                 self.emit(&[0x48, 0xD3, if signed { 0xFA } else { 0xEA }]);
                 self.label(&l_end);
-            }
+            },
             BinOp::AndAnd | BinOp::OrOr => {
                 unreachable!("logical int128 ops are lowered separately")
-            }
+            },
         }
         self.pop(15);
         self.pop(14);
@@ -415,10 +414,10 @@ impl Codegen {
         } else {
             self.gen_expr(l, 0);
             let t_off = self.vector_temp_base(l_slot as i64, 16);
-            self.emit_store(0, t_off, 8);            // [r13+t_off] = rax (low)
-            // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
-            self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
-            self.emit_store(2, t_off + 8, 8);        // [r13+t_off+8] = rdx (high)
+            self.emit_store(0, t_off, 8); // [r13+t_off] = rax (low)
+                                          // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
+            self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+            self.emit_store(2, t_off + 8, 8); // [r13+t_off+8] = rdx (high)
             l_off = t_off;
         }
 
@@ -429,7 +428,7 @@ impl Codegen {
             self.gen_expr(r, 0);
             let t_off = self.vector_temp_base(r_slot as i64, 16);
             self.emit_store(0, t_off, 8);
-            self.emit(&[0x48, 0x31, 0xD2]);          // xor rdx, rdx
+            self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8);
             r_off = t_off;
         }
@@ -437,26 +436,26 @@ impl Codegen {
         for _i in 0..count {
             // 加载操作数到 GP 寄存器对:
             // rax:rdx = left (low:high), rcx:r8 = right (low:high)
-            self.load_stack(0, l_off);       // rax = left low 64-bit
-            self.load_stack(2, l_off + 8);   // rdx = left high 64-bit
-            self.load_stack(1, r_off);       // rcx = right low 64-bit
-            self.load_stack(8, r_off + 8);   // r8 = right high 64-bit
+            self.load_stack(0, l_off); // rax = left low 64-bit
+            self.load_stack(2, l_off + 8); // rdx = left high 64-bit
+            self.load_stack(1, r_off); // rcx = right low 64-bit
+            self.load_stack(8, r_off + 8); // r8 = right high 64-bit
 
             match op {
                 // === 比较操作 (EqEq/Ne): 顺序 setcc + AND, 无需跳转 ===
                 BinOp::EqEq | BinOp::Ne => {
                     // 比较低 64-bit
-                    self.emit(&[0x48, 0x39, 0xC1]);    // cmp rax, rcx
-                    self.emit(&[0x0F, 0x94, 0xC0]);    // sete al (al=1 if low equal)
-                    // 比较高 64-bit
-                    self.emit(&[0x4C, 0x39, 0xC2]);    // cmp rdx, r8
-                    self.emit(&[0x0F, 0x94, 0xC4]);    // sete ah (ah=1 if high equal)
-                    // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
-                    // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
+                    self.emit(&[0x48, 0x39, 0xC1]); // cmp rax, rcx
+                    self.emit(&[0x0F, 0x94, 0xC0]); // sete al (al=1 if low equal)
+                                                    // 比较高 64-bit
+                    self.emit(&[0x4C, 0x39, 0xC2]); // cmp rdx, r8
+                    self.emit(&[0x0F, 0x94, 0xC4]); // sete ah (ah=1 if high equal)
+                                                    // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
+                                                    // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
                     self.emit(&[0x20, 0xE0]);
                     // 零扩展到 rax
                     self.emit(&[0x48, 0x0F, 0xB6, 0xC0]); // movzbq rax, al
-                    // rax = 1 (两 chunk 都相等 → a==b) 或 0 (至少一个不等 → a!=b)
+                                                          // rax = 1 (两 chunk 都相等 → a==b) 或 0 (至少一个不等 → a!=b)
 
                     if matches!(op, BinOp::Ne) {
                         // 取反: rax = !rax (0→1, 1→0)
@@ -464,42 +463,42 @@ impl Codegen {
                     }
 
                     // neg rax → 0/1 映射到 0/全1 (向量真值)
-                    self.emit(&[0x48, 0xF7, 0xD8]);        // neg rax
-                    // 复制 rax 到 rdx (让两个 64-bit 半部分都是相同值)
-                    self.emit(&[0x48, 0x89, 0xC2]);        // mov rdx, rax
-                    // 结果在 rax:rdx → 存回
+                    self.emit(&[0x48, 0xF7, 0xD8]); // neg rax
+                                                    // 复制 rax 到 rdx (让两个 64-bit 半部分都是相同值)
+                    self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+                                                    // 结果在 rax:rdx → 存回
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
-                }
+                },
                 // === 按位运算: 逐 chunk GP 运算, 结果在 rcx (low), r8 (high) ===
                 BinOp::And => {
-                    self.emit(&[0x48, 0x21, 0xC1]);    // and rcx, rax (low &= left)
-                    self.emit(&[0x4C, 0x21, 0xD0]);    // and r8, rdx (high &= left)
-                    // mov rax, rcx; mov rdx, r8
+                    self.emit(&[0x48, 0x21, 0xC1]); // and rcx, rax (low &= left)
+                    self.emit(&[0x4C, 0x21, 0xD0]); // and r8, rdx (high &= left)
+                                                    // mov rax, rcx; mov rdx, r8
                     self.emit(&[0x48, 0x89, 0xC8]);
                     self.emit(&[0x4C, 0x89, 0xC2]);
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
-                }
+                },
                 BinOp::Or => {
-                    self.emit(&[0x48, 0x09, 0xC1]);    // or rcx, rax
-                    self.emit(&[0x4C, 0x09, 0xD0]);    // or r8, rdx
+                    self.emit(&[0x48, 0x09, 0xC1]); // or rcx, rax
+                    self.emit(&[0x4C, 0x09, 0xD0]); // or r8, rdx
                     self.emit(&[0x48, 0x89, 0xC8]);
                     self.emit(&[0x4C, 0x89, 0xC2]);
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
-                }
+                },
                 BinOp::Xor => {
-                    self.emit(&[0x48, 0x31, 0xC1]);    // xor rcx, rax
-                    self.emit(&[0x4C, 0x31, 0xD0]);    // xor r8, rdx
+                    self.emit(&[0x48, 0x31, 0xC1]); // xor rcx, rax
+                    self.emit(&[0x4C, 0x31, 0xD0]); // xor r8, rdx
                     self.emit(&[0x48, 0x89, 0xC8]);
                     self.emit(&[0x4C, 0x89, 0xC2]);
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
-                }
+                },
                 _ => {
                     // 暂不支持, 结果槽保持未定义
-                }
+                },
             }
         }
 

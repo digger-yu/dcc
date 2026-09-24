@@ -20,7 +20,7 @@ impl ThumbInstruction {
         match self {
             ThumbInstruction::T16(encoding) => {
                 vec![(encoding & 0xFF) as u8, (encoding >> 8) as u8]
-            }
+            },
             ThumbInstruction::T32(encoding) => {
                 let hw1 = ((encoding >> 16) & 0xFFFF) as u16;
                 let hw2 = (encoding & 0xFFFF) as u16;
@@ -30,7 +30,7 @@ impl ThumbInstruction {
                     (hw2 & 0xFF) as u8,
                     (hw2 >> 8) as u8,
                 ]
-            }
+            },
         }
     }
 

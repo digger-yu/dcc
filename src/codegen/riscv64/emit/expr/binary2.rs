@@ -1,8 +1,10 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{BranchKind, Riscv64Codegen, align_rodata};
-use crate::codegen::shared::elf::{self, ElfRela, ElfSym, R_RISCV_JAL, STB_GLOBAL, STT_FUNC, STT_OBJECT};
+use crate::codegen::riscv64::codegen::{align_rodata, BranchKind, Riscv64Codegen};
+use crate::codegen::shared::elf::{
+    self, ElfRela, ElfSym, R_RISCV_JAL, STB_GLOBAL, STT_FUNC, STT_OBJECT,
+};
 
 impl Riscv64Codegen {
     pub(crate) fn mv_fa_reg(&mut self, idx: u8, bits: u16) {
@@ -80,8 +82,7 @@ impl Riscv64Codegen {
             let loop_end = self.pos();
             let offset = loop_start as i64 - loop_end as i64;
             let off = offset as u32;
-            let bne = (((off >> 12) & 1) << 31
-                | ((off >> 5) & 0x3f) << 25)
+            let bne = (((off >> 12) & 1) << 31 | ((off >> 5) & 0x3f) << 25)
                 | (5u32) << 15
                 | ((off >> 1) & 0xf) << 8
                 | ((off >> 11) & 1) << 7
@@ -436,7 +437,9 @@ impl Riscv64Codegen {
 
     /// SRLI rd, rs1, shamt — 64-bit logical right shift immediate
     pub(crate) fn emit_srli(&mut self, rd: u8, rs1: u8, shamt: u8) {
-        if shamt == 0 { return; }
+        if shamt == 0 {
+            return;
+        }
         let shamt = (shamt as u32) & 0x3f;
         // I-type: imm[5:0]=shamt, rs1, funct3=101, rd, opcode=0010011
         let insn = shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
@@ -445,7 +448,9 @@ impl Riscv64Codegen {
 
     /// SLLI rd, rs1, shamt — 64-bit logical left shift immediate
     pub(crate) fn emit_slli(&mut self, rd: u8, rs1: u8, shamt: u8) {
-        if shamt == 0 { return; }
+        if shamt == 0 {
+            return;
+        }
         let shamt = (shamt as u32) & 0x3f;
         let insn = shamt << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x13;
         self.emit(&insn.to_le_bytes());
@@ -453,10 +458,13 @@ impl Riscv64Codegen {
 
     /// SRAI rd, rs1, shamt — 64-bit arithmetic right shift immediate
     pub(crate) fn emit_srai(&mut self, rd: u8, rs1: u8, shamt: u8) {
-        if shamt == 0 { return; }
+        if shamt == 0 {
+            return;
+        }
         let shamt = (shamt as u32) & 0x3f;
         // I-type: imm[11:0] = 0100000|shamt[5:0], rs1, funct3=101, rd, opcode=0010011
-        let insn = 0x40000000 | shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
+        let insn =
+            0x40000000 | shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -506,5 +514,4 @@ impl Riscv64Codegen {
             self.emit_addi(rd, 10, 0); // MV rd, a0
         }
     }
-
 }

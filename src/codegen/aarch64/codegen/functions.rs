@@ -17,7 +17,7 @@ impl Aarch64Codegen {
                     match item {
                         BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                             self.gen_naked_asm_expr(e);
-                        }
+                        },
                         BlockItem::Stmt(Stmt::AsmGoto {
                             asm_str,
                             outputs,
@@ -46,8 +46,8 @@ impl Aarch64Codegen {
                                     self.emit_asm_line_naked(line, span);
                                 }
                             }
-                        }
-                        _ => {} // naked 函数忽略非 asm 语句
+                        },
+                        _ => {}, // naked 函数忽略非 asm 语句
                     }
                 }
             }
@@ -64,19 +64,16 @@ impl Aarch64Codegen {
                 let pos = self.pos();
                 self.emit_bl_to("__fentry__");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::MCount => {
                 let pos = self.pos();
                 self.emit_bl_to("mcount");
                 Some(pos)
-            }
+            },
             crate::cli::FtraceMode::None => None,
         };
         // -mrecord-mcount: record call site for __mcount_loc section
-        if matches!(
-            self._target.ftrace_mode,
-            crate::cli::FtraceMode::RecordMCount
-        ) {
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
             if let Some(call_pos) = ftrace_call_pos {
                 self.mcount_loc_entries.push((call_pos, func.name.clone()));
             }
@@ -202,12 +199,12 @@ impl Aarch64Codegen {
                                         | 2 << 22
                                         | 0x2e000000;
                                     self.emit(&insn.to_le_bytes());
-                                }
+                                },
                                 Type::Double | Type::LongDouble => {
                                     // str d{fp_reg_idx}, [sp, #off]
                                     self.str_dt_sp(fp_reg_idx, off);
-                                }
-                                _ => {}
+                                },
+                                _ => {},
                             }
                             fp_reg_idx += 1;
                         } else if gp_reg_idx < 8 {
@@ -233,8 +230,8 @@ impl Aarch64Codegen {
                                         _ => 8,
                                     };
                                     self.emit_store_sz(gp_reg_idx, 31, off as u32, size);
-                                }
-                                _ => {}
+                                },
+                                _ => {},
                             }
                             gp_reg_idx += 1;
                         }
@@ -283,7 +280,7 @@ impl Aarch64Codegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             // 语句表达式 ({...}) 可能包含 asm: 递归处理
             Expr::StmtExpr { block, .. } => {
                 for item in &block.items {
@@ -291,18 +288,16 @@ impl Aarch64Codegen {
                         self.gen_naked_asm_expr(inner);
                     }
                 }
-            }
-            _ => {} // 忽略非 asm 表达式
+            },
+            _ => {}, // 忽略非 asm 表达式
         }
     }
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
     pub(crate) fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
         if self.asm_text_mode {
-            self.raw_func_asm_lines.push((
-                format!("__naked_{}", self.label_serial),
-                vec![line.to_string()],
-            ));
+            self.raw_func_asm_lines
+                .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
             self.label_serial += 1;
         } else {
             self.encode_and_emit_asm(line, &span.file, span.line);

@@ -43,7 +43,7 @@ impl<'a> LineMap<'a> {
                 } else {
                     *lines.last().unwrap()
                 }
-            }
+            },
             LineMap::Scalar(base) => base + nl,
         }
     }
@@ -501,7 +501,7 @@ impl PchBundle {
                     Some(other) => {
                         out.push('\\');
                         out.push(other);
-                    }
+                    },
                     None => out.push('\\'),
                 }
             } else {
@@ -551,7 +551,7 @@ pub fn decode_source(src: &[u8]) -> String {
                     Ok(text) => {
                         out.push_str(text);
                         break;
-                    }
+                    },
                     Err(e) => {
                         let valid = e.valid_up_to();
                         // 分段内必为合法 UTF-8 (Utf8Error 保证 valid_up_to 前有效)
@@ -561,11 +561,11 @@ pub fn decode_source(src: &[u8]) -> String {
                             out.push(char::from_u32(0xE000 + b as u32).unwrap());
                         }
                         rest = &rest[valid + bad_len..];
-                    }
+                    },
                 }
             }
             out
-        }
+        },
     }
 }
 
@@ -693,10 +693,8 @@ pub fn preprocess(
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
     // === 架构相关宏 (根据 target 动态定义) ===
-    let is_lp64 = matches!(
-        target.arch,
-        Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64
-    );
+    let is_lp64 =
+        matches!(target.arch, Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64);
     let is_big_endian = matches!(target.arch, Arch::Mips | Arch::Mips64);
     // 架构标识宏
     match target.arch {
@@ -707,23 +705,23 @@ pub fn preprocess(
             pp.define_builtin("__amd64", "1");
             pp.define_builtin("__k8__", "1");
             pp.define_builtin("__k8", "1");
-        }
+        },
         Arch::AArch64 => {
             pp.define_builtin("__aarch64__", "1");
             pp.define_builtin("__ARM_ARCH", "8");
             pp.define_builtin("__ARM_NEON", "1");
             pp.define_builtin("__AARCH64EL__", "1");
-        }
+        },
         Arch::RiscV64 => {
             pp.define_builtin("__riscv", "1");
             pp.define_builtin("__riscv_xlen", "64");
             pp.define_builtin("__riscv_integer_extension", "64");
-        }
+        },
         Arch::RiscV32 => {
             pp.define_builtin("__riscv", "1");
             pp.define_builtin("__riscv_xlen", "32");
             pp.define_builtin("__riscv_integer_extension", "32");
-        }
+        },
         Arch::Mips64 => {
             pp.define_builtin("__mips__", "1");
             pp.define_builtin("__mips64", "1");
@@ -732,20 +730,20 @@ pub fn preprocess(
             pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS64");
             pp.define_builtin("__MIPSEB__", "1");
             pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS64");
-        }
+        },
         Arch::Mips => {
             pp.define_builtin("__mips__", "1");
             pp.define_builtin("__mips", "1");
             pp.define_builtin("_MIPS_ISA", "_MIPS_ISA_MIPS32");
             pp.define_builtin("__MIPSEB__", "1");
-        }
+        },
         Arch::Arm => {
             pp.define_builtin("__arm__", "1");
             pp.define_builtin("__arm", "1");
             pp.define_builtin("__ARM_ARCH", "7");
             pp.define_builtin("__ARMEL__", "1");
             pp.define_builtin("__ARM_NEON", "1");
-        }
+        },
     }
     // GCC 兼容宏
     pp.define_builtin("__USER_LABEL_PREFIX__", "");
@@ -765,18 +763,18 @@ pub fn preprocess(
         Os::Linux => {
             pp.define_builtin("__linux__", "1");
             pp.define_builtin("__unix__", "1");
-        }
+        },
         Os::Freestanding => {
             // freestanding: 不定义 OS 宏
-        }
+        },
         Os::Windows => {
             pp.define_builtin("_WIN32", "1");
             pp.define_builtin("__WIN32__", "1");
-        }
+        },
         Os::Macos => {
             pp.define_builtin("__APPLE__", "1");
             pp.define_builtin("__MACH__", "1");
-        }
+        },
     }
     // 数据模型宏
     if is_lp64 {
@@ -826,10 +824,7 @@ pub fn preprocess(
     // C11 <stdalign.h>: alignas/alignof 宏 (仅 C11/C17)
     // C23 中 alignas/alignof 是关键字, 不需要宏定义;
     // <stdalign.h> 在 C23 中也不应定义它们
-    if matches!(
-        std_mode,
-        StdMode::C11 | StdMode::Gnu11 | StdMode::C17 | StdMode::Gnu17
-    ) {
+    if matches!(std_mode, StdMode::C11 | StdMode::Gnu11 | StdMode::C17 | StdMode::Gnu17) {
         pp.macros.insert(
             "alignas".to_string(),
             MacroDef {
@@ -860,112 +855,212 @@ pub fn preprocess(
         pp.define_builtin("__STDC_VERSION_STDBIT_H__", "202312L");
         // C23 <stdbit.h> 位操作宏: 类型通用, 用 _Generic 分派到 builtin
         // stdc_count_ones: 计算 1 的位数 (popcount)
-        pp.macros.insert("stdc_count_ones_uc".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(x)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_ones_us".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(x)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_ones_ui".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(x)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_ones_ul".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcountl(x)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_ones_ull".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcountll(x)".to_string(), variadic: false,
-        });
+        pp.macros.insert(
+            "stdc_count_ones_uc".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(x)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_ones_us".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(x)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_ones_ui".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(x)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_ones_ul".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcountl(x)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_ones_ull".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcountll(x)".to_string(),
+                variadic: false,
+            },
+        );
         // stdc_count_zeros: 计算 0 的位数
-        pp.macros.insert("stdc_count_zeros_uc".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_zeros_us".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_zeros_ui".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcount(~(x))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_zeros_ul".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcountl(~(x))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_count_zeros_ull".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "__builtin_popcountll(~(x))".to_string(), variadic: false,
-        });
+        pp.macros.insert(
+            "stdc_count_zeros_uc".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(~(x))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_zeros_us".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(~(x))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_zeros_ui".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcount(~(x))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_zeros_ul".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcountl(~(x))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_count_zeros_ull".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "__builtin_popcountll(~(x))".to_string(),
+                variadic: false,
+            },
+        );
         // stdc_bit_ceil: 向上取整到 2 的幂
         // stdc_bit_floor: 向下取整到 2 的幂
         // stdc_has_single_bit: 是否为 2 的幂
-        pp.macros.insert("stdc_has_single_bit_uc".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_has_single_bit_us".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_has_single_bit_ui".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_has_single_bit_ul".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_has_single_bit_ull".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) && !((x) & ((x) - 1)))".to_string(), variadic: false,
-        });
+        pp.macros.insert(
+            "stdc_has_single_bit_uc".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) && !((x) & ((x) - 1)))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_has_single_bit_us".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) && !((x) & ((x) - 1)))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_has_single_bit_ui".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) && !((x) & ((x) - 1)))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_has_single_bit_ul".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) && !((x) & ((x) - 1)))".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_has_single_bit_ull".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) && !((x) & ((x) - 1)))".to_string(),
+                variadic: false,
+            },
+        );
         // stdc_log2_floor: floor(log2(x))
-        pp.macros.insert("stdc_log2_floor_uc".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) ? 7 - __builtin_clz(x) : 0)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_floor_us".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) ? 15 - __builtin_clz(x) : 0)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_floor_ui".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) ? 31 - __builtin_clz(x) : 0)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_floor_ul".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) ? (int)(sizeof(long)*8-1) - __builtin_clzl(x) : 0)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_floor_ull".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) ? 63 - __builtin_clzll(x) : 0)".to_string(), variadic: false,
-        });
+        pp.macros.insert(
+            "stdc_log2_floor_uc".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) ? 7 - __builtin_clz(x) : 0)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_floor_us".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) ? 15 - __builtin_clz(x) : 0)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_floor_ui".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) ? 31 - __builtin_clz(x) : 0)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_floor_ul".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) ? (int)(sizeof(long)*8-1) - __builtin_clzl(x) : 0)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_floor_ull".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) ? 63 - __builtin_clzll(x) : 0)".to_string(),
+                variadic: false,
+            },
+        );
         // stdc_log2_ceil: ceil(log2(x))
-        pp.macros.insert("stdc_log2_ceil_uc".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) <= 1 ? 0 : stdc_log2_floor_uc((x) - 1) + 1)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_ceil_us".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) <= 1 ? 0 : stdc_log2_floor_us((x) - 1) + 1)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_ceil_ui".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) <= 1 ? 0 : stdc_log2_floor_ui((x) - 1) + 1)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_ceil_ul".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) <= 1 ? 0 : stdc_log2_floor_ul((x) - 1) + 1)".to_string(), variadic: false,
-        });
-        pp.macros.insert("stdc_log2_ceil_ull".to_string(), MacroDef {
-            params: Some(vec!["x".to_string()]),
-            body: "((x) <= 1 ? 0 : stdc_log2_floor_ull((x) - 1) + 1)".to_string(), variadic: false,
-        });
+        pp.macros.insert(
+            "stdc_log2_ceil_uc".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) <= 1 ? 0 : stdc_log2_floor_uc((x) - 1) + 1)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_ceil_us".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) <= 1 ? 0 : stdc_log2_floor_us((x) - 1) + 1)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_ceil_ui".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) <= 1 ? 0 : stdc_log2_floor_ui((x) - 1) + 1)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_ceil_ul".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) <= 1 ? 0 : stdc_log2_floor_ul((x) - 1) + 1)".to_string(),
+                variadic: false,
+            },
+        );
+        pp.macros.insert(
+            "stdc_log2_ceil_ull".to_string(),
+            MacroDef {
+                params: Some(vec!["x".to_string()]),
+                body: "((x) <= 1 ? 0 : stdc_log2_floor_ull((x) - 1) + 1)".to_string(),
+                variadic: false,
+            },
+        );
     }
     if freestanding {
         // 独立 (freestanding) 实现: C11 § 4/6 允许省略 <stdatomic.h>,
@@ -1464,7 +1559,8 @@ pub fn preprocess(
                 __typeof__(var) __seg_gs *__pcpu_ptr = \
                     (__typeof__(var) __seg_gs *)((unsigned long)(&(var)) + __pcpu_off); \
                 __pcpu_ptr; \
-            }))".to_string(),
+            }))"
+            .to_string(),
             variadic: false,
         },
     );
@@ -1483,7 +1579,9 @@ pub fn preprocess(
         "__this_cpu_write".to_string(),
         MacroDef {
             params: Some(vec!["var".to_string(), "val".to_string()]),
-            body: "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            body:
+                "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })"
+                    .to_string(),
             variadic: false,
         },
     );
@@ -1501,7 +1599,9 @@ pub fn preprocess(
         "this_cpu_write".to_string(),
         MacroDef {
             params: Some(vec!["var".to_string(), "val".to_string()]),
-            body: "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            body:
+                "({ asm volatile(\"mov %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })"
+                    .to_string(),
             variadic: false,
         },
     );
@@ -1510,7 +1610,9 @@ pub fn preprocess(
         "__this_cpu_add".to_string(),
         MacroDef {
             params: Some(vec!["var".to_string(), "val".to_string()]),
-            body: "({ asm volatile(\"add %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })".to_string(),
+            body:
+                "({ asm volatile(\"add %0, %%gs:%1\" : : \"r\"(val), \"m\"(var) : \"memory\"); })"
+                    .to_string(),
             variadic: false,
         },
     );
@@ -1655,14 +1757,49 @@ pub fn preprocess(
     // with function declarations. A <tgmath.h> header would map
     // the standard names to these prefixed macros.
     let tgmath_fns = [
-        "acos", "asin", "atan", "acosh", "asinh", "atanh",
-        "cos", "sin", "tan", "cosh", "sinh", "tanh",
-        "exp", "log", "log10", "log2", "exp2", "expm1", "log1p",
-        "sqrt", "cbrt", "hypot",
-        "fabs", "ceil", "floor", "round", "trunc", "rint", "nearbyint",
-        "fmod", "remainder", "remquo", "copysign", "nextafter", "nexttoward",
-        "fdim", "fmax", "fmin", "fma",
-        "erf", "erfc", "lgamma", "tgamma",
+        "acos",
+        "asin",
+        "atan",
+        "acosh",
+        "asinh",
+        "atanh",
+        "cos",
+        "sin",
+        "tan",
+        "cosh",
+        "sinh",
+        "tanh",
+        "exp",
+        "log",
+        "log10",
+        "log2",
+        "exp2",
+        "expm1",
+        "log1p",
+        "sqrt",
+        "cbrt",
+        "hypot",
+        "fabs",
+        "ceil",
+        "floor",
+        "round",
+        "trunc",
+        "rint",
+        "nearbyint",
+        "fmod",
+        "remainder",
+        "remquo",
+        "copysign",
+        "nextafter",
+        "nexttoward",
+        "fdim",
+        "fmax",
+        "fmin",
+        "fma",
+        "erf",
+        "erfc",
+        "lgamma",
+        "tgamma",
     ];
     for fn_name in &tgmath_fns {
         // _Generic based type-generic dispatch
@@ -1682,8 +1819,16 @@ pub fn preprocess(
     }
     // 2-argument tgmath functions
     let tgmath_fns2 = [
-        "atan2", "pow", "hypot", "fmod", "remainder",
-        "copysign", "nextafter", "fdim", "fmax", "fmin",
+        "atan2",
+        "pow",
+        "hypot",
+        "fmod",
+        "remainder",
+        "copysign",
+        "nextafter",
+        "fdim",
+        "fmax",
+        "fmin",
     ];
     for fn_name in &tgmath_fns2 {
         let macro_body = format!(
@@ -1761,7 +1906,7 @@ pub fn preprocess(
                                 Span::point(file, 1, 1),
                             ));
                         }
-                    }
+                    },
                     Err(e) => {
                         pp.diags.push(Diagnostic::warn(
                             "W0401",
@@ -1771,7 +1916,7 @@ pub fn preprocess(
                             ),
                             Span::point(file, 1, 1),
                         ));
-                    }
+                    },
                 },
                 Err(e) => {
                     pp.diags.push(Diagnostic::warn(
@@ -1782,7 +1927,7 @@ pub fn preprocess(
                         ),
                         Span::point(file, 1, 1),
                     ));
-                }
+                },
             }
         };
 
@@ -1959,14 +2104,14 @@ impl Preprocessor {
                 self.process_text(&content, &self.file.clone());
                 self.file = saved_file;
                 self.base_dir = saved_dir;
-            }
+            },
             Err(e) => {
                 self.diags.push(Diagnostic::err(
                     "E0209",
                     format!("cannot read forced include {}: {}", resolved.display(), e),
                     Span::point(file_path, 1, 1),
                 ));
-            }
+            },
         }
     }
 
@@ -2054,7 +2199,16 @@ impl Preprocessor {
         let month_days = [
             31,
             if is_leap { 29 } else { 28 },
-            31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
         ];
         let mut month = 0;
         for (i, &days_in_month) in month_days.iter().enumerate() {
@@ -2077,13 +2231,7 @@ impl Preprocessor {
 
         format!(
             "{} {} {:2} {:02}:{:02}:{:02} {}",
-            weekdays[weekday as usize],
-            months[month],
-            day,
-            hours,
-            minutes,
-            seconds,
-            year
+            weekdays[weekday as usize], months[month], day, hours, minutes, seconds, year
         )
     }
 
@@ -2168,14 +2316,9 @@ impl Preprocessor {
             };
 
             if let Some(directive) = trimmed.strip_prefix('#') {
-                let unclosed =
-                    !active_source.is_empty() && self.has_unclosed_paren(&active_source);
+                let unclosed = !active_source.is_empty() && self.has_unclosed_paren(&active_source);
                 if !active_source.is_empty() && !unclosed {
-                    self.flush_active_source(
-                        &mut active_source,
-                        &mut active_spans,
-                        &mut pending,
-                    );
+                    self.flush_active_source(&mut active_source, &mut active_spans, &mut pending);
                 }
                 let out_len_before = self.out.len();
                 // ISO C 允许指令出现在未闭合的函数调用实参中间 (GCC 测试
@@ -2228,11 +2371,7 @@ impl Preprocessor {
                 // 检测 _Pragma 操作符: 如果当前行包含 _Pragma, 立即刷新
                 // 以确保 _Pragma 效果能影响后续行
                 if trimmed.starts_with("_Pragma") && !self.has_unclosed_paren(&active_source) {
-                    self.flush_active_source(
-                        &mut active_source,
-                        &mut active_spans,
-                        &mut pending,
-                    );
+                    self.flush_active_source(&mut active_source, &mut active_spans, &mut pending);
                 }
             } else {
                 self.preserve_lines(ll.phys_start, ll.phys_end);
@@ -2279,8 +2418,7 @@ impl Preprocessor {
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
         // 立即应用展开阶段累积的 _Pragma 字符串, 以确保后续 # 指令能感知其效果
-        let pragmas: Vec<(String, u32)> =
-            std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        let pragmas: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
         for (p, line_no) in pragmas {
             self.apply_pragma_string(&p, line_no);
         }
@@ -2338,18 +2476,14 @@ impl Preprocessor {
     }
 
     /// 宏表恢复: Some(d) 重新注册, None 删除 (undo/replay 共用)
-    fn restore_macro(
-        macros: &mut HashMap<String, MacroDef>,
-        name: &str,
-        def: &Option<MacroDef>,
-    ) {
+    fn restore_macro(macros: &mut HashMap<String, MacroDef>, name: &str, def: &Option<MacroDef>) {
         match def {
             Some(d) => {
                 macros.insert(name.to_string(), d.clone());
-            }
+            },
             None => {
                 macros.remove(name);
-            }
+            },
         }
     }
 
@@ -2488,7 +2622,7 @@ impl Preprocessor {
                 '\'' => in_char = true,
                 '(' => depth += 1,
                 ')' => depth -= 1,
-                _ => {}
+                _ => {},
             }
         }
         depth > 0
@@ -2693,10 +2827,10 @@ impl Preprocessor {
                     Some((acc, _)) => {
                         acc.push_str(prefix);
                         acc.push(' ');
-                    }
+                    },
                     None => {
                         continued = Some((format!("{} ", prefix), phys));
-                    }
+                    },
                 }
             } else if let Some((mut acc, start)) = continued.take() {
                 acc.push_str(line);
@@ -2985,10 +3119,10 @@ impl Preprocessor {
                             "POSIX" | "C" | "ASCII" => self.charset = "ASCII".to_string(),
                             "UTF-8" | "utf8" => self.charset = "UTF-8".to_string(),
                             "ISO-8859-1" | "latin1" => self.charset = "ISO-8859-1".to_string(),
-                            _ => {} // 未知 locale 静默接受
+                            _ => {}, // 未知 locale 静默接受
                         }
-                    }
-                    _ => {} // 其他形式静默接受
+                    },
+                    _ => {}, // 其他形式静默接受
                 }
             } else if pragma_text.starts_with("comment") {
                 // #pragma comment(...) — 链接器注释, 忽略
@@ -3009,16 +3143,25 @@ impl Preprocessor {
             } else if pragma_text.starts_with("simd") {
                 // #pragma simd — 向量化指示 (C 等价于 !DIR$ SIMD)
                 // 标记下一个循环可安全向量化 (无循环携带依赖)
-                self.openmp_pragmas
-                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+                self.openmp_pragmas.push((
+                    self.file.clone(),
+                    line_no,
+                    pragma_text.trim().to_string(),
+                ));
             } else if pragma_text.starts_with("vector") {
                 // #pragma vector always — 强制向量化指示
-                self.openmp_pragmas
-                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+                self.openmp_pragmas.push((
+                    self.file.clone(),
+                    line_no,
+                    pragma_text.trim().to_string(),
+                ));
             } else if pragma_text.starts_with("unroll") {
                 // #pragma unroll / #pragma unroll N — 展开指示
-                self.openmp_pragmas
-                    .push((self.file.clone(), line_no, pragma_text.trim().to_string()));
+                self.openmp_pragmas.push((
+                    self.file.clone(),
+                    line_no,
+                    pragma_text.trim().to_string(),
+                ));
             } else if let Some(rest) = pragma_text.strip_prefix("push_macro") {
                 // #pragma push_macro("macro_name")
                 // 保存当前宏定义到栈, 以便后续 pop_macro 恢复
@@ -3026,15 +3169,17 @@ impl Preprocessor {
                 if let Some(arg) = rest.strip_prefix("(").and_then(|s| s.strip_suffix(")")) {
                     let arg = arg.trim();
                     // 去除引号
-                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
-                        &arg[1..arg.len()-1]
+                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2
+                    {
+                        &arg[1..arg.len() - 1]
                     } else {
                         arg
                     };
                     if !macro_name.is_empty() {
                         // 保存当前宏定义 (如果存在)
                         let saved = self.macros.get(macro_name).cloned();
-                        self.macro_stack.entry(macro_name.to_string())
+                        self.macro_stack
+                            .entry(macro_name.to_string())
                             .or_default()
                             .push(saved);
                     }
@@ -3046,8 +3191,9 @@ impl Preprocessor {
                 if let Some(arg) = rest.strip_prefix("(").and_then(|s| s.strip_suffix(")")) {
                     let arg = arg.trim();
                     // 去除引号
-                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2 {
-                        &arg[1..arg.len()-1]
+                    let macro_name = if arg.starts_with('"') && arg.ends_with('"') && arg.len() >= 2
+                    {
+                        &arg[1..arg.len() - 1]
                     } else {
                         arg
                     };
@@ -3058,11 +3204,11 @@ impl Preprocessor {
                                     Some(def) => {
                                         // 恢复之前的定义
                                         self.macros.insert(macro_name.to_string(), def);
-                                    }
+                                    },
                                     None => {
                                         // 之前未定义, 现在取消定义
                                         self.macros.remove(macro_name);
-                                    }
+                                    },
                                 }
                             }
                         }
@@ -3136,9 +3282,7 @@ impl Preprocessor {
             if variadic && !gnu_named_variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
                 params.push("__VA_ARGS__".to_string());
             }
-            let body = Self::convert_body_digraphs(
-                after_name[paren_end + 1..].trim(),
-            );
+            let body = Self::convert_body_digraphs(after_name[paren_end + 1..].trim());
             self.macros.insert(
                 name.to_string(),
                 MacroDef {
@@ -3326,7 +3470,7 @@ impl Preprocessor {
                     format!("include file not found: {}", path),
                     line_no,
                 ));
-            }
+            },
         }
     }
 
@@ -3395,7 +3539,7 @@ impl Preprocessor {
                     format!("include_next file not found: {}", path),
                     line_no,
                 ));
-            }
+            },
         }
     }
 
@@ -3434,7 +3578,7 @@ impl Preprocessor {
                         line_no,
                     ));
                     return;
-                }
+                },
             };
             let text = decode_source(&bytes);
             let content_hash = Self::hash_content(&text);
@@ -3466,7 +3610,7 @@ impl Preprocessor {
                 self.once_guard
                     .insert(key.clone(), (content_hash, g.clone()));
                 g
-            }
+            },
         };
         if let Some(g) = &guard {
             if self.macros.contains_key(g) {
@@ -3481,8 +3625,8 @@ impl Preprocessor {
         let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
         // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
         // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
-        let skip_cache = bool_fixup
-            && (self.macros.contains_key("false") || self.macros.contains_key("true"));
+        let skip_cache =
+            bool_fixup && (self.macros.contains_key("false") || self.macros.contains_key("true"));
 
         if let Some(ref cp) = cache_path {
             if !skip_cache {
@@ -3628,8 +3772,7 @@ impl Preprocessor {
                 // (含嵌套缓存命中回填的传递依赖), 按路径去重后写入
                 let mut dep_closure: Vec<(String, u64)> = vec![(key.clone(), content_hash)];
                 dep_closure.extend(self.dep_hashes[deps_before..].iter().cloned());
-                let mut seen: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 dep_closure.retain(|(p, _)| seen.insert(p.clone()));
                 let counter_delta = self.counter.wrapping_sub(counter_before);
                 // 收集本次处理期间新增的 line_map 区间并相对化:
@@ -3954,12 +4097,12 @@ impl Preprocessor {
                             }
                             self.push_out(&b.to_string());
                         }
-                    }
+                    },
                     Err(_) => {
                         // #embed 空文件或无文件: 不输出任何内容
-                    }
+                    },
                 }
-            }
+            },
             None => {
                 // 找不到文件: 输出空 (C23 标准中 #embed 找不到文件为未定义行为)
                 // #embed "file" limit(0) 总是有效
@@ -3968,7 +4111,7 @@ impl Preprocessor {
                     format!("embed file not found: {}", path),
                     line_no,
                 ));
-            }
+            },
         }
     }
 
@@ -4012,14 +4155,14 @@ impl Preprocessor {
                 self.line_remapping.push((line_no, n, filename));
                 // 同时更新 cur_line 以保持 __LINE__ 在非展开路径的一致性
                 self.cur_line = n.saturating_sub(1);
-            }
+            },
             Err(_) => {
                 self.diags.push(self.err_at(
                     "E0203",
                     format!("invalid #line argument: {}", num_str),
                     line_no,
                 ));
-            }
+            },
         }
     }
 
@@ -4094,8 +4237,7 @@ impl Preprocessor {
             // 2. 同行号但新值为 None (pack 重置) → 覆盖前一条,
             //    解决 #pragma pack(1) 和 #pragma pack() 之间无输出
             //    导致重置被丢弃的问题 (如 ACPI 头文件).
-            if current_out_line > prev_last
-                || (current_out_line == prev_last && new_pack.is_none())
+            if current_out_line > prev_last || (current_out_line == prev_last && new_pack.is_none())
             {
                 // 同行号重置: 覆盖前一条 (pack(1) → 等效为无操作)
                 if current_out_line == prev_last {
@@ -4138,37 +4280,37 @@ impl Preprocessor {
                         out.push('\n');
                         i += 2;
                         continue;
-                    }
+                    },
                     b't' => {
                         out.push('\t');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'r' => {
                         out.push('\r');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'\\' => {
                         out.push('\\');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'"' => {
                         out.push('"');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'\'' => {
                         out.push('\'');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'?' => {
                         out.push('?');
                         i += 2;
                         continue;
-                    }
+                    },
                     b'0'..=b'7' => {
                         // 八进制: 最多 3 位
                         let mut n = 0u32;
@@ -4183,7 +4325,7 @@ impl Preprocessor {
                         out.push(n as u8 as char);
                         i += 1 + k;
                         continue;
-                    }
+                    },
                     b'x' => {
                         // 十六进制
                         let mut n = 0u32;
@@ -4199,12 +4341,12 @@ impl Preprocessor {
                         out.push(n as u8 as char);
                         i += 2 + k;
                         continue;
-                    }
+                    },
                     _ => {
                         out.push(b as char);
                         i += 1;
                         continue;
-                    }
+                    },
                 }
             }
             out.push(b as char);
@@ -4251,7 +4393,7 @@ impl Preprocessor {
                         ),
                         line,
                     ));
-                }
+                },
             }
         } else if kind.eq_ignore_ascii_case("FP_CONTRACT") {
             match state.as_str() {
@@ -4267,7 +4409,7 @@ impl Preprocessor {
                         ),
                         line,
                     ));
-                }
+                },
             }
         } else if kind.eq_ignore_ascii_case("CX_LIMITED_RANGE") {
             match state.as_str() {
@@ -4283,7 +4425,7 @@ impl Preprocessor {
                         ),
                         line,
                     ));
-                }
+                },
             }
         }
     }
@@ -4381,12 +4523,11 @@ impl Preprocessor {
                         if let Some(top) = self.visibility_stack.last_mut() {
                             *top = vis.to_string();
                         }
-                        self.visibility_history
-                            .push((line_no, vis.to_string()));
-                    }
+                        self.visibility_history.push((line_no, vis.to_string()));
+                    },
                     _ => {
                         // 未知可见性值, 静默忽略 (GCC 兼容)
-                    }
+                    },
                 }
             }
         }
@@ -4589,7 +4730,9 @@ impl Preprocessor {
                             240..=247 => 4,
                             _ => 1,
                         };
-                        out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + char_len]) });
+                        out.push_str(unsafe {
+                            std::str::from_utf8_unchecked(&bytes[i..i + char_len])
+                        });
                         i += char_len;
                     }
                 }
@@ -4621,7 +4764,9 @@ impl Preprocessor {
                             240..=247 => 4,
                             _ => 1,
                         };
-                        out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + char_len]) });
+                        out.push_str(unsafe {
+                            std::str::from_utf8_unchecked(&bytes[i..i + char_len])
+                        });
                         i += char_len;
                     }
                 }
@@ -4644,15 +4789,12 @@ impl Preprocessor {
                     let c = bytes[i];
                     if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
                         i += 1;
-                    } else if (c == b'e' || c == b'E'
-                                || c == b'p' || c == b'P')
-                                && i + 1 < len
-                                && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
+                    } else if (c == b'e' || c == b'E' || c == b'p' || c == b'P')
+                        && i + 1 < len
+                        && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
                     {
                         i += 2; // exponent + sign
-                    } else if c == b'\'' && i + 1 < len
-                                && bytes[i + 1].is_ascii_alphanumeric()
-                    {
+                    } else if c == b'\'' && i + 1 < len && bytes[i + 1].is_ascii_alphanumeric() {
                         i += 2; // C23 digit separator
                     } else {
                         break;
@@ -4671,9 +4813,9 @@ impl Preprocessor {
 
                 // 宽/Unicode 字面量前缀: L'x'/L"x"/u'x'/U"x"/u8"x" 等
                 // 前缀与引号之间不允许空白; 若匹配则整体输出, 不做宏展开
-                if (ident == "L" || ident == "u" || ident == "U"
-                    || ident == "u8")
-                    && i < len && (bytes[i] == b'\'' || bytes[i] == b'"')
+                if (ident == "L" || ident == "u" || ident == "U" || ident == "u8")
+                    && i < len
+                    && (bytes[i] == b'\'' || bytes[i] == b'"')
                 {
                     let quote = bytes[i];
                     out.push_str(ident);
@@ -4698,7 +4840,9 @@ impl Preprocessor {
                                 240..=247 => 4,
                                 _ => 1,
                             };
-                            out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + char_len]) });
+                            out.push_str(unsafe {
+                                std::str::from_utf8_unchecked(&bytes[i..i + char_len])
+                            });
                             i += char_len;
                         }
                     }
@@ -4789,7 +4933,8 @@ impl Preprocessor {
                                 }
                                 j += 1;
                             }
-                            let raw = unsafe { std::str::from_utf8_unchecked(&bytes[content_start..j]) };
+                            let raw =
+                                unsafe { std::str::from_utf8_unchecked(&bytes[content_start..j]) };
                             let pragma_text = Self::unescape_string(raw);
                             if j < len {
                                 j += 1;
@@ -4821,7 +4966,8 @@ impl Preprocessor {
                                 k += 1;
                             }
                         }
-                        let arg_text = unsafe { std::str::from_utf8_unchecked(&bytes[arg_start..k]) };
+                        let arg_text =
+                            unsafe { std::str::from_utf8_unchecked(&bytes[arg_start..k]) };
                         // 展开宏参数 (用当前行号构造 phys_lines)
                         let cur_line = map.line(nl);
                         let expanded = self.expand_macros(arg_text.trim(), &[cur_line]);
@@ -4950,10 +5096,7 @@ impl Preprocessor {
                     let line = map.line(nl);
                     self.diags.push(self.err_at(
                         "E0210",
-                        format!(
-                            "attempt to use poisoned \"{}\"",
-                            ident
-                        ),
+                        format!("attempt to use poisoned \"{}\"", ident),
                         line,
                     ));
                 }
@@ -5099,17 +5242,16 @@ impl Preprocessor {
                                     LineMap::Scalar(map.line(nl)),
                                 );
                                 out.push_str(&rescanned);
-                            } else if ident == "va_start" && raw_args.len() == 1 && params.len() == 2 {
+                            } else if ident == "va_start"
+                                && raw_args.len() == 1
+                                && params.len() == 2
+                            {
                                 // C23 va_start(ap) 允许在 2 参数定义下调用 (兼容旧 stdarg.h)。
                                 // 补齐第二个参数为 "0"，对 __builtin_va_start 无影响。
                                 let mut args = raw_args.clone();
                                 args.push("0".to_string());
-                                let substituted = self.substitute_params(
-                                    &def.body,
-                                    params,
-                                    &args,
-                                    def.variadic,
-                                );
+                                let substituted =
+                                    self.substitute_params(&def.body, params, &args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.to_string());
                                 let rescanned = self.expand_with_disabled(
@@ -5168,7 +5310,9 @@ impl Preprocessor {
                                 let msg = if raw_args.len() < n_params {
                                     format!(
                                         "macro \"{}\" requires {} arguments, but only {} given",
-                                        ident, n_params, raw_args.len()
+                                        ident,
+                                        n_params,
+                                        raw_args.len()
                                     )
                                 } else {
                                     format!(
@@ -5178,8 +5322,7 @@ impl Preprocessor {
                                         n_params
                                     )
                                 };
-                                self.diags
-                                    .push(self.err_at("E0211", msg, map.line(nl)));
+                                self.diags.push(self.err_at("E0211", msg, map.line(nl)));
                                 out.push_str(&ident);
                             }
                             i = j;
@@ -5208,7 +5351,10 @@ impl Preprocessor {
                             .next()
                             .map(|c| c.is_ascii_alphabetic() || c == '_')
                             .unwrap_or(false)
-                            && def.body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                            && def
+                                .body
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_');
                         let mut new_disabled = disabled.clone();
                         new_disabled.insert(ident.to_string());
                         let mut j = i;
@@ -5364,15 +5510,15 @@ impl Preprocessor {
                 b'"' => {
                     in_string = true;
                     current.push(c as char);
-                }
+                },
                 b'\'' => {
                     in_char = true;
                     current.push(c as char);
-                }
+                },
                 b'(' => {
                     depth += 1;
                     current.push(c as char);
-                }
+                },
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
@@ -5385,11 +5531,11 @@ impl Preprocessor {
                     } else {
                         current.push(c as char);
                     }
-                }
+                },
                 b',' if depth == 1 => {
                     args.push(current.trim().to_string());
                     current = String::new();
-                }
+                },
                 _ => current.push(c as char),
             }
             *pos += 1;
@@ -5486,8 +5632,8 @@ impl Preprocessor {
                                 if depth == 0 {
                                     break;
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                         k += 1;
                     }
@@ -5628,11 +5774,12 @@ impl Preprocessor {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                
+
                 // 宽/Unicode 字面量前缀: L'x'/L"x"/u'x'/U"x"/u8"x" 等
                 // 前缀与引号之间不允许空白; 若匹配则整体输出, 不做参数替换
                 if (ident == "L" || ident == "u" || ident == "U" || ident == "u8")
-                    && i < len && (chars[i] == '\'' || chars[i] == '"')
+                    && i < len
+                    && (chars[i] == '\'' || chars[i] == '"')
                 {
                     let quote = chars[i];
                     result.push_str(&ident);
@@ -5643,7 +5790,9 @@ impl Preprocessor {
                             result.push(chars[i]);
                             i += 1;
                         }
-                        if chars[i] == '\n' { break; }
+                        if chars[i] == '\n' {
+                            break;
+                        }
                         result.push(chars[i]);
                         i += 1;
                     }
@@ -5653,7 +5802,7 @@ impl Preprocessor {
                     }
                     continue;
                 }
-                
+
                 if let Some(idx) = params.iter().position(|p| p == &ident) {
                     if let Some(arg) = args.get(idx) {
                         result.push_str(arg);
@@ -5943,12 +6092,12 @@ impl Preprocessor {
         let t = t.replace("const ", "").replace("volatile ", "");
         let t = t.replace("_Atomic ", "").replace("restrict ", "");
         let t = t.trim();
-        
+
         // 指针类型: 从 Target 获取
         if t.ends_with('*') {
             return Some(self.target_ptr_size as usize);
         }
-        
+
         // 数组类型: 解析 T[N] 形式
         if let Some(bracket_pos) = t.find('[') {
             let elem_ty = t[..bracket_pos].trim();
@@ -5963,7 +6112,7 @@ impl Preprocessor {
             }
             return None;
         }
-        
+
         // 检查 struct/union 大小表
         if t.starts_with("struct ") || t.starts_with("union ") {
             if let Some(&size) = self.struct_sizes.get(t) {
@@ -5972,36 +6121,38 @@ impl Preprocessor {
             // 未定义的结构体，返回 None
             return None;
         }
-        
+
         // 检查 enum (等同于 int)
         if t.starts_with("enum ") {
             return Some(self.target_int_size as usize);
         }
-        
+
         // 检查 typedef 映射表 (递归解析，限制深度防止循环)
         if let Some(resolved) = self.resolve_typedef(t, 0) {
             if resolved != t {
                 return self.type_size(&resolved);
             }
         }
-        
+
         // 基础类型匹配
         let size = match t {
             "void" => 0,
             "char" | "signed char" | "unsigned char" | "_Bool" | "bool" => 1,
-            "short" | "short int" | "signed short" | "unsigned short"
-            | "short unsigned" | "int16_t" | "uint16_t" => 2,
-            "int" | "signed int" | "unsigned int" | "unsigned" | "signed"
-            | "int32_t" | "uint32_t" | "float" | "wchar_t" => self.target_int_size as usize,
-            "long" | "long int" | "signed long" | "unsigned long"
-            | "long unsigned" => self.target_long_size as usize,
-            "long long" | "long long int" | "signed long long"
-            | "unsigned long long" | "long long unsigned" => self.target_llong_size as usize,
+            "short" | "short int" | "signed short" | "unsigned short" | "short unsigned"
+            | "int16_t" | "uint16_t" => 2,
+            "int" | "signed int" | "unsigned int" | "unsigned" | "signed" | "int32_t"
+            | "uint32_t" | "float" | "wchar_t" => self.target_int_size as usize,
+            "long" | "long int" | "signed long" | "unsigned long" | "long unsigned" => {
+                self.target_long_size as usize
+            },
+            "long long" | "long long int" | "signed long long" | "unsigned long long"
+            | "long long unsigned" => self.target_llong_size as usize,
             "double" => 8,
             "long double" => 16,
             "__int128" | "unsigned __int128" => 16,
-            "int64_t" | "uint64_t" | "size_t" | "ptrdiff_t"
-            | "intptr_t" | "uintptr_t" => self.target_long_size as usize,
+            "int64_t" | "uint64_t" | "size_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => {
+                self.target_long_size as usize
+            },
             "int8_t" | "uint8_t" => 1,
             // 未知类型: 返回 None 而非默认值
             _ => return None,
@@ -6030,18 +6181,18 @@ impl Preprocessor {
         let t = t.replace("const ", "").replace("volatile ", "");
         let t = t.replace("_Atomic ", "").replace("restrict ", "");
         let t = t.trim();
-        
+
         // 指针类型对齐
         if t.ends_with('*') {
             return Some(self.target_ptr_align as usize);
         }
-        
+
         // 数组类型: 元素对齐
         if let Some(bracket_pos) = t.find('[') {
             let elem_ty = t[..bracket_pos].trim();
             return self.type_align(elem_ty);
         }
-        
+
         // struct/union 对齐
         if t.starts_with("struct ") || t.starts_with("union ") {
             if let Some(&align) = self.struct_aligns.get(t) {
@@ -6049,31 +6200,31 @@ impl Preprocessor {
             }
             return None;
         }
-        
+
         // enum 对齐 = int 对齐
         if t.starts_with("enum ") {
             return Some(self.target_int_align as usize);
         }
-        
+
         // typedef 解析
         if let Some(resolved) = self.resolve_typedef(t, 0) {
             if resolved != t {
                 return self.type_align(&resolved);
             }
         }
-        
+
         // 基础类型对齐
         let align = match t {
             "char" | "signed char" | "unsigned char" | "_Bool" | "bool" | "void" => 1,
-            "short" | "short int" | "signed short" | "unsigned short"
-            | "short unsigned" | "int16_t" | "uint16_t" => 2,
-            "int" | "signed int" | "unsigned int" | "unsigned" | "signed"
-            | "int32_t" | "uint32_t" | "float" | "wchar_t" => self.target_int_align as usize,
-            "long" | "long int" | "signed long" | "unsigned long"
-            | "long unsigned" => self.target_long_align as usize,
-            "long long" | "long long int" | "signed long long"
-            | "unsigned long long" | "long long unsigned"
-            | "int64_t" | "uint64_t" => self.target_llong_align as usize,
+            "short" | "short int" | "signed short" | "unsigned short" | "short unsigned"
+            | "int16_t" | "uint16_t" => 2,
+            "int" | "signed int" | "unsigned int" | "unsigned" | "signed" | "int32_t"
+            | "uint32_t" | "float" | "wchar_t" => self.target_int_align as usize,
+            "long" | "long int" | "signed long" | "unsigned long" | "long unsigned" => {
+                self.target_long_align as usize
+            },
+            "long long" | "long long int" | "signed long long" | "unsigned long long"
+            | "long long unsigned" | "int64_t" | "uint64_t" => self.target_llong_align as usize,
             "double" => self.target_double_align as usize,
             "long double" => self.target_long_double_align as usize,
             "__int128" | "unsigned __int128" => 16,
@@ -6165,8 +6316,7 @@ impl Preprocessor {
                         let type_name = &after[1..end - 1];
                         // 使用实例方法，处理 Option 返回值
                         if let Some(align) = self.type_align(type_name) {
-                            result =
-                                format!("{}{}{}", &result[..pos], align, &after[end..]);
+                            result = format!("{}{}{}", &result[..pos], align, &after[end..]);
                             search_from = pos;
                         } else {
                             // 无法确定类型对齐，保留原表达式
@@ -6246,26 +6396,26 @@ impl Preprocessor {
                 ',' if depth == 0 => {
                     comma_pos = Some(i);
                     break;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
-        
+
         let comma_pos = comma_pos?;
         let type_name = args[..comma_pos].trim();
         let member_path = args[comma_pos + 1..].trim();
-        
+
         // 查找结构体偏移信息
         // 目前我们只支持已记录在 struct_sizes 中的结构体
         // 更完整的实现需要解析结构体定义并计算字段偏移
-        
+
         // 检查是否是已知的结构体
         let struct_key = if type_name.starts_with("struct ") || type_name.starts_with("union ") {
             type_name.to_string()
         } else {
             format!("struct {}", type_name)
         };
-        
+
         // 如果我们有结构体的大小信息，尝试计算偏移
         // 这需要 struct_field_offsets 表，目前简化处理
         if self.struct_sizes.contains_key(&struct_key) {
@@ -6278,7 +6428,7 @@ impl Preprocessor {
                 return None;
             }
         }
-        
+
         None
     }
 
@@ -6387,7 +6537,7 @@ impl Preprocessor {
                             ));
                         }
                         result.push('0');
-                    }
+                    },
                 }
             } else {
                 result.push(chars[i]);
@@ -6695,7 +6845,7 @@ impl Preprocessor {
                             }
                         }
                         val
-                    }
+                    },
                     d if d.is_ascii_digit() => {
                         // \NNN 八进制
                         let mut val = (d - b'0') as i64;
@@ -6711,7 +6861,7 @@ impl Preprocessor {
                             }
                         }
                         val
-                    }
+                    },
                     _ => c as i64,
                 }
             } else {
@@ -6917,12 +7067,9 @@ impl Preprocessor {
             // 检查 __has_include_next (18 字符)
             if i + 18 <= bytes.len()
                 && &bytes[i..i + 18] == b"__has_include_next"
-                && (i == 0
-                    || !bytes[i - 1].is_ascii_alphanumeric()
-                        && bytes[i - 1] != b'_')
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
                 && (i + 18 >= bytes.len()
-                    || !bytes[i + 18].is_ascii_alphanumeric()
-                        && bytes[i + 18] != b'_')
+                    || !bytes[i + 18].is_ascii_alphanumeric() && bytes[i + 18] != b'_')
             {
                 let mut j = i + 18;
                 while j < bytes.len() && bytes[j] == b' ' {
@@ -7029,8 +7176,7 @@ impl Preprocessor {
                 && &bytes[i..i + name_len] == name
                 && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
                 && (i + name_len >= bytes.len()
-                    || !bytes[i + name_len].is_ascii_alphanumeric()
-                        && bytes[i + name_len] != b'_')
+                    || !bytes[i + name_len].is_ascii_alphanumeric() && bytes[i + name_len] != b'_')
             {
                 let mut j = i + name_len;
                 while j < bytes.len() && bytes[j] == b' ' {
@@ -7677,7 +7823,7 @@ impl Preprocessor {
                     if Self::hash_content(&content) != *hash {
                         return false;
                     }
-                }
+                },
                 Err(_) => return false,
             }
         }
@@ -7933,10 +8079,8 @@ impl Preprocessor {
                 Some(p) => p.join(","),
             };
             let variadic_str = if def.variadic { "1" } else { "0" };
-            content.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
-                name, params_str, variadic_str, def.body
-            ));
+            content
+                .push_str(&format!("{}\t{}\t{}\t{}\n", name, params_str, variadic_str, def.body));
         }
 
         // 原子写入: 先写临时文件再重命名,防止并行编译时缓存文件损坏
@@ -7990,7 +8134,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -8025,7 +8169,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8063,17 +8207,14 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"1:\""), "output: {output}");
         assert!(output.contains("\"jmp\\n\""), "output: {output}");
-        assert!(
-            output.contains(": : \"i\" (0) : : lbl)"),
-            "output: {output}"
-        );
+        assert!(output.contains(": : \"i\" (0) : : lbl)"), "output: {output}");
         assert!(!output.contains("asm goto(\"1:\")"), "output: {output}");
     }
 
@@ -8102,7 +8243,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8133,7 +8274,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8163,7 +8304,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let diags = out.diags;
 
@@ -8198,7 +8339,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8227,7 +8368,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8259,19 +8400,13 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(
-            !output.contains("__KERNEL_DIV_ROUND_UP"),
-            "output: {output}"
-        );
-        assert!(
-            output.contains("unsigned long tags[3]["),
-            "output: {output}"
-        );
+        assert!(!output.contains("__KERNEL_DIV_ROUND_UP"), "output: {output}");
+        assert!(output.contains("unsigned long tags[3]["), "output: {output}");
     }
 
     /// 嵌套函数宏参数预展开须继承涂蓝集，避免 F(F(1)) 类无限递归
@@ -8298,7 +8433,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8345,7 +8480,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8376,7 +8511,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8409,19 +8544,13 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(
-            output.contains("((struct thread_info *)"),
-            "output: {output}"
-        );
-        assert!(
-            !output.contains("current_thread_info->"),
-            "output: {output}"
-        );
+        assert!(output.contains("((struct thread_info *)"), "output: {output}");
+        assert!(!output.contains("current_thread_info->"), "output: {output}");
     }
 
     #[test]
@@ -8450,15 +8579,12 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(
-            output.contains("\"malloc(sizeof(int) + 1)\""),
-            "output: {output}"
-        );
+        assert!(output.contains("\"malloc(sizeof(int) + 1)\""), "output: {output}");
     }
 
     /// M19: __COUNTER__ 单调递增, 每次访问自增
@@ -8486,7 +8612,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8523,7 +8649,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8560,7 +8686,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8594,17 +8720,14 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         // 非空: __VA_OPT__(, __VA_ARGS__) → , 42
         // 宏体中 fmt 与 __VA_OPT__ 之间有空格, GCC 实际展开也会保留该空格
-        assert!(
-            output.contains("printf(\"hello %d\\n\" , 42)"),
-            "output: {output}"
-        );
+        assert!(output.contains("printf(\"hello %d\\n\" , 42)"), "output: {output}");
     }
 
     /// M19: __VA_OPT__ 变参宏, 空变参时移除 content
@@ -8633,17 +8756,14 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         // 空: __VA_OPT__(, __VA_ARGS__) → 空, 前面紧邻空格也一并去掉 (GCC 行为)
         assert!(output.contains("printf(\"hello\\n\")"), "output: {output}");
-        assert!(
-            !output.contains("printf(\"hello\\n\" )"),
-            "output: {output}"
-        );
+        assert!(!output.contains("printf(\"hello\\n\" )"), "output: {output}");
         assert!(!output.contains("__VA_OPT__"), "output: {output}");
     }
 
@@ -8671,7 +8791,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8679,10 +8799,7 @@ mod tests {
         // 该 fixture 实际调用了宏, 验证非空时 __VA_OPT__(content) 展开为 content
         // NULL 会被预展开为 ((void*)0), 所以 list 部分会变成 ((void*)0)
         assert!(output.contains("for (it = ((void*)0)"), "output: {output}");
-        assert!(
-            output.contains("it = it->next) use(it->next)"),
-            "output: {output}"
-        );
+        assert!(output.contains("it = it->next) use(it->next)"), "output: {output}");
     }
 
     /// M19: __VA_OPT__ 嵌套 (内层先解)
@@ -8709,7 +8826,7 @@ mod tests {
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8748,7 +8865,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8811,7 +8928,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -8844,13 +8961,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_off.diags.is_empty(),
-            "OFF must be silent: {:?}",
-            out_off.diags
-        );
+        assert!(out_off.diags.is_empty(), "OFF must be silent: {:?}", out_off.diags);
         // ON 路径: fenv_access 必须为 true
         let out_on = preprocess(
             b"#pragma STDC FENV_ACCESS ON\nint x = 0;\n",
@@ -8871,13 +8984,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_on.diags.is_empty(),
-            "ON must be silent: {:?}",
-            out_on.diags
-        );
+        assert!(out_on.diags.is_empty(), "ON must be silent: {:?}", out_on.diags);
         // DEFAULT 路径: fenv_access 必须为 true (DEFAULT = ON)
         let out_def = preprocess(
             b"#pragma STDC FENV_ACCESS DEFAULT\nint x = 0;\n",
@@ -8898,13 +9007,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_def.diags.is_empty(),
-            "DEFAULT must be silent: {:?}",
-            out_def.diags
-        );
+        assert!(out_def.diags.is_empty(), "DEFAULT must be silent: {:?}", out_def.diags);
         // 小写状态: 也接受 (不区分大小写)
         let out_lower = preprocess(
             b"#pragma STDC FENV_ACCESS on\nint x = 0;\n",
@@ -8925,29 +9030,13 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_lower.diags.is_empty(),
-            "lowercase on must be silent: {:?}",
-            out_lower.diags
-        );
+        assert!(out_lower.diags.is_empty(), "lowercase on must be silent: {:?}", out_lower.diags);
         // 输出不被影响: 保留 int x = 0;
-        assert!(
-            out_on.text.contains("int x = 0;"),
-            "ON output: {}",
-            out_on.text
-        );
-        assert!(
-            out_off.text.contains("int x = 0;"),
-            "OFF output: {}",
-            out_off.text
-        );
-        assert!(
-            out_def.text.contains("int x = 0;"),
-            "DEFAULT output: {}",
-            out_def.text
-        );
+        assert!(out_on.text.contains("int x = 0;"), "ON output: {}", out_on.text);
+        assert!(out_off.text.contains("int x = 0;"), "OFF output: {}", out_off.text);
+        assert!(out_def.text.contains("int x = 0;"), "DEFAULT output: {}", out_def.text);
     }
 
     /// P4.1: #pragma STDC FENV_ACCESS <bad> 必须发 W0001 警告
@@ -8973,7 +9062,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 至少一个 W0001 警告
         assert!(
@@ -9016,13 +9105,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            on.diags.is_empty(),
-            "STDC pragmas must be silent: {:?}",
-            on.diags
-        );
+        assert!(on.diags.is_empty(), "STDC pragmas must be silent: {:?}", on.diags);
         assert!(on.fp_contract, "FP_CONTRACT ON should set state");
         assert!(on.cx_limited_range, "CX_LIMITED_RANGE ON should set state");
 
@@ -9047,21 +9132,11 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            default.diags.is_empty(),
-            "STDC pragmas must be silent: {:?}",
-            default.diags
-        );
-        assert!(
-            !default.fp_contract,
-            "FP_CONTRACT DEFAULT should clear state"
-        );
-        assert!(
-            !default.cx_limited_range,
-            "CX_LIMITED_RANGE DEFAULT should clear state"
-        );
+        assert!(default.diags.is_empty(), "STDC pragmas must be silent: {:?}", default.diags);
+        assert!(!default.fp_contract, "FP_CONTRACT DEFAULT should clear state");
+        assert!(!default.cx_limited_range, "CX_LIMITED_RANGE DEFAULT should clear state");
     }
 
     /// M19: _FORTIFY_SOURCE 改变时, include 缓存必须按新值重新计算
@@ -9108,7 +9183,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -9130,17 +9205,13 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
         assert!(out2.diags.is_empty(), "{:?}", out2.diags);
         // FORTIFY=2 应生成 __builtin___strncpy_chk 形式
-        assert!(
-            out1.text.contains("__builtin___strncpy_chk"),
-            "out1: {}",
-            out1.text
-        );
+        assert!(out1.text.contains("__builtin___strncpy_chk"), "out1: {}", out1.text);
         // FORTIFY=0 应回退到 libc strncpy
         assert!(out2.text.contains("strncpy("), "out2: {}", out2.text);
     }
@@ -9168,7 +9239,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -9192,7 +9263,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -9216,7 +9287,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert_eq!(out.charset, "UTF-8");
     }
@@ -9329,11 +9400,7 @@ n\
         // 3. 处理使用 common.h 中宏的 TU, 结果与不用 PCH 时一致
         let dir = pch_test_dir("roundtrip");
         let common = dir.join("common.h");
-        std::fs::write(
-            &common,
-            "#define FROM_COMMON 42\n#define SQUARE(x) ((x)*(x))\n",
-        )
-        .unwrap();
+        std::fs::write(&common, "#define FROM_COMMON 42\n#define SQUARE(x) ((x)*(x))\n").unwrap();
         let pch_path = dir.join("common.pch");
 
         // 创建 PCH
@@ -9361,13 +9428,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_create.diags.is_empty(),
-            "create: {:?}",
-            out_create.diags
-        );
+        assert!(out_create.diags.is_empty(), "create: {:?}", out_create.diags);
         assert!(pch_path.exists(), "PCH file should be created");
         let pch_content = std::fs::read_to_string(&pch_path).unwrap();
         assert!(pch_content.starts_with("DCC_PCH_V1"), "magic missing");
@@ -9398,13 +9461,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out_with_pch.diags.is_empty(),
-            "include: {:?}",
-            out_with_pch.diags
-        );
+        assert!(out_with_pch.diags.is_empty(), "include: {:?}", out_with_pch.diags);
         // 宏已被 PCH 展开
         assert!(
             out_with_pch.text.contains("int a = 42"),
@@ -9437,7 +9496,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
         assert!(
@@ -9497,7 +9556,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(pch_path.exists());
 
@@ -9526,7 +9585,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 应有 warning (W0400) 但不致命
         let has_warn = out.diags.iter().any(|d| d.code == "W0400");
@@ -9563,7 +9622,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -9611,7 +9670,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -9658,7 +9717,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0402"),
@@ -9706,7 +9765,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0203"),
@@ -9749,12 +9808,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            !pch_path.exists(),
-            "no PCH file should be created without -fpch-create"
-        );
+        assert!(!pch_path.exists(), "no PCH file should be created without -fpch-create");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9767,11 +9823,8 @@ n\
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let hdr = dir.join("bad.h");
-        fs::write(
-            &hdr,
-            "#ifndef BAD_H\n#define BAD_H\n#error stop here in header\n#endif\n",
-        )
-        .unwrap();
+        fs::write(&hdr, "#ifndef BAD_H\n#define BAD_H\n#error stop here in header\n#endif\n")
+            .unwrap();
         let src = "#include \"bad.h\"\nint x;\n";
         let out = preprocess(
             src.as_bytes(),
@@ -9792,7 +9845,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let err = out
             .diags
@@ -9802,10 +9855,7 @@ n\
         assert!(err.span.file.ends_with("bad.h"), "file: {}", err.span.file);
         assert_eq!(err.span.line, 3);
         let src_line = err.source_line.clone().unwrap_or_default();
-        assert!(
-            src_line.contains("stop here in header"),
-            "source_line: {src_line}"
-        );
+        assert!(src_line.contains("stop here in header"), "source_line: {src_line}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -9848,7 +9898,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let err = out
             .diags
@@ -9890,7 +9940,7 @@ n\
                 128,
                 false,
                 false, // warn_undef
-                0, // opt_level
+                0,     // opt_level
             );
             assert!(
                 out.diags.iter().any(|d| d.code == "E0203"),
@@ -9937,7 +9987,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
@@ -9961,13 +10011,9 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        assert!(
-            out2.text.contains("(52 + 10)"),
-            "run 2 after B.h change: {}",
-            out2.text
-        );
+        assert!(out2.text.contains("(52 + 10)"), "run 2 after B.h change: {}", out2.text);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -10002,7 +10048,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10040,7 +10086,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10075,7 +10121,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10113,7 +10159,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10151,7 +10197,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0200"),
@@ -10193,7 +10239,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10230,7 +10276,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10265,7 +10311,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10299,7 +10345,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10316,10 +10362,7 @@ n\
         fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("data.bin");
         fs::write(&bin, [1u8, 2, 3]).unwrap();
-        let src = format!(
-            "#embed \"{}\"\nint arr[] = {{\n__DCC_EMBED__\n}};\n",
-            bin.display()
-        );
+        let src = format!("#embed \"{}\"\nint arr[] = {{\n__DCC_EMBED__\n}};\n", bin.display());
         let out = preprocess(
             src.as_bytes(),
             "embed.c",
@@ -10339,7 +10382,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10357,10 +10400,8 @@ n\
         fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("data.bin");
         fs::write(&bin, [1u8, 2, 3, 4, 5]).unwrap();
-        let src = format!(
-            "#embed \"{}\" limit(2)\nint arr[] = {{ __DCC_EMBED__ }};\n",
-            bin.display()
-        );
+        let src =
+            format!("#embed \"{}\" limit(2)\nint arr[] = {{ __DCC_EMBED__ }};\n", bin.display());
         let out = preprocess(
             src.as_bytes(),
             "embed-limit.c",
@@ -10380,7 +10421,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10422,7 +10463,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10463,7 +10504,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10508,7 +10549,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10543,7 +10584,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10587,7 +10628,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10622,7 +10663,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10656,7 +10697,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10697,7 +10738,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -10732,7 +10773,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10766,7 +10807,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10800,7 +10841,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -10837,18 +10878,14 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
         let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         // 第二次 include 被 #pragma once 拦截: 头文件只处理一次 (include 注释唯一)
-        assert_eq!(
-            output.matches("/* #include \"once.h\" */").count(),
-            1,
-            "output: {output}"
-        );
+        assert_eq!(output.matches("/* #include \"once.h\" */").count(), 1, "output: {output}");
         assert!(output.contains("int x = 7;"), "output: {output}");
     }
 
@@ -10874,7 +10911,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags
@@ -10911,7 +10948,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
     }
@@ -10938,7 +10975,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.diags
@@ -10986,7 +11023,7 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -11030,17 +11067,10 @@ n\
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let has_w0201 = out
-            .diags
-            .iter()
-            .any(|d| d.code == "W0201");
-        assert!(
-            has_w0201,
-            "expected W0201 depth-limit warning, got: {:?}",
-            out.diags
-        );
+        let has_w0201 = out.diags.iter().any(|d| d.code == "W0201");
+        assert!(has_w0201, "expected W0201 depth-limit warning, got: {:?}", out.diags);
     }
 
     /// 整型极限值预定义宏完整验证 (x86_64 LP64)
@@ -11186,29 +11216,16 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 不应有任何 #error 触发的诊断
         let errors: Vec<_> = out
             .diags
             .iter()
-            .filter(|d| {
-                matches!(
-                    d.sev,
-                    crate::diagnostics::Severity::Error
-                )
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
-        assert!(
-            errors.is_empty(),
-            "some #error triggered: {:?}",
-            errors
-        );
-        assert!(
-            out.text.contains("int ok = 1;"),
-            "output: {}",
-            out.text
-        );
+        assert!(errors.is_empty(), "some #error triggered: {:?}", errors);
+        assert!(out.text.contains("int ok = 1;"), "output: {}", out.text);
     }
 
     /// __clang__ / __clang_major__ / __clang_minor__ /
@@ -11244,24 +11261,15 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let diags = &out.diags;
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| {
-                matches!(
-                    d.sev,
-                    crate::diagnostics::Severity::Error
-                )
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert!(
-            out.text.contains("int ok = 1;"),
-            "output: {}",
-            out.text
-        );
+        assert!(out.text.contains("int ok = 1;"), "output: {}", out.text);
     }
 
     /// #pragma GCC system_header: 抑制后续警告
@@ -11289,15 +11297,11 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 只有第一个 #warning 应该产生 W0200,
         // system_header 后的 #warning 应被抑制
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 1,
             "expected 1 W0200 (before system_header), got {}: {:?}",
@@ -11350,7 +11354,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_file(hdr);
         let _ = fs::remove_file(&src_path);
@@ -11386,8 +11390,7 @@ int ok = 1;\n";
         fs::create_dir_all(&sys_dir).expect("mkdir");
         let hdr = sys_dir.join("auto_sys.h");
         // 头文件在 -isystem 路径下, 含 #warning
-        fs::write(&hdr, "#warning from isystem header\nint auto_sys_var;\n")
-            .expect("write hdr");
+        fs::write(&hdr, "#warning from isystem header\nint auto_sys_var;\n").expect("write hdr");
         let out = preprocess(
             b"#include <auto_sys.h>\nint main(void) { return auto_sys_var; }\n",
             "main.c",
@@ -11407,16 +11410,12 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&sys_dir);
         // 来自 -isystem 路径的头文件应自动抑制警告
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 0,
             "expected 0 W0200 from -isystem header, got {}: {:?}",
@@ -11440,8 +11439,7 @@ int ok = 1;\n";
         fs::create_dir_all(&user_dir).expect("mkdir");
         let hdr = user_dir.join("user_header.h");
         // 头文件在 -I 路径下 (非系统), 含 #warning
-        fs::write(&hdr, "#warning from user header\nint user_var;\n")
-            .expect("write hdr");
+        fs::write(&hdr, "#warning from user header\nint user_var;\n").expect("write hdr");
         let out = preprocess(
             b"#include <user_header.h>\nint main(void) { return user_var; }\n",
             "main.c",
@@ -11461,16 +11459,12 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_file(&hdr);
         let _ = fs::remove_dir_all(&user_dir);
         // -I 路径不是系统路径, #warning 应正常发出
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 1,
             "expected 1 W0200 from -I header, got {}: {:?}",
@@ -11503,13 +11497,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 1,
             "expected 1 W0200 (before _Pragma system_header), got {}: {:?}",
@@ -11562,7 +11552,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_file(&inner_hdr);
         let _ = fs::remove_file(&mid_hdr);
@@ -11578,7 +11568,8 @@ int ok = 1;\n";
         // 内层头文件 (系统路径): 1 个 #warning 被抑制
         // 外层主文件: 1 个 #warning 应正常发出
         assert_eq!(
-            w0200s.len(), 3,
+            w0200s.len(),
+            3,
             "expected 3 W0200 (mid x2 + outer x1), got {}: {:?}",
             w0200s.len(),
             out.diags
@@ -11616,13 +11607,10 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 检查 visibility_history 记录了变化
-        assert!(
-            !out.visibility_history.is_empty(),
-            "expected visibility history, got empty"
-        );
+        assert!(!out.visibility_history.is_empty(), "expected visibility history, got empty");
         // pop 后应恢复到 default
         let last_vis = out.visibility_history.last();
         assert!(
@@ -11640,8 +11628,7 @@ int ok = 1;\n";
         // 创建临时目录结构:
         // dir/a/header.h  (base_dir 中的文件)
         // dir/b/header.h  (-isystem 路径中的文件)
-        let dir =
-            std::env::temp_dir().join(format!("dcc_has_incl_next_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dcc_has_incl_next_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("a")).unwrap();
         fs::create_dir_all(dir.join("b")).unwrap();
@@ -11677,15 +11664,13 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| {
-                matches!(d.sev, crate::diagnostics::Severity::Error)
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
         assert!(errors.is_empty(), "errors: {:?}", errors);
         assert!(
@@ -11726,15 +11711,13 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| {
-                matches!(d.sev, crate::diagnostics::Severity::Error)
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
         assert!(errors.is_empty(), "errors: {:?}", errors);
         // __TIMESTAMP__ 应展开为带引号的字符串, 格式: "Day Mon DD HH:MM:SS YYYY"
@@ -11788,15 +11771,13 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| {
-                matches!(d.sev, crate::diagnostics::Severity::Error)
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
         assert!(errors.is_empty(), "errors: {:?}", errors);
         // __BASE_FILE__ 在主文件和头文件中都应展开为主文件名
@@ -11849,15 +11830,13 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let _ = fs::remove_dir_all(&dir);
         let diags = &out.diags;
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| {
-                matches!(d.sev, crate::diagnostics::Severity::Error)
-            })
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
             .collect();
         assert!(errors.is_empty(), "errors: {:?}", errors);
         // 检查各层的 __INCLUDE_LEVEL__ 值
@@ -11902,7 +11881,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         let diags = out.diags;
@@ -11949,13 +11928,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let e0210_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "E0210")
-            .count();
+        let e0210_count = out.diags.iter().filter(|d| d.code == "E0210").count();
         assert_eq!(
             e0210_count, 1,
             "expected 1 E0210 for poisoned printf, got {}: {:?}",
@@ -11988,13 +11963,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let e0210_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "E0210")
-            .count();
+        let e0210_count = out.diags.iter().filter(|d| d.code == "E0210").count();
         assert_eq!(
             e0210_count, 3,
             "expected 3 E0210 for foo/bar/baz, got {}: {:?}",
@@ -12026,13 +11997,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let e0210_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "E0210")
-            .count();
+        let e0210_count = out.diags.iter().filter(|d| d.code == "E0210").count();
         assert_eq!(
             e0210_count, 0,
             "poison should be exempt in system_header, got {}: {:?}",
@@ -12063,13 +12030,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let e0210_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "E0210")
-            .count();
+        let e0210_count = out.diags.iter().filter(|d| d.code == "E0210").count();
         assert_eq!(
             e0210_count, 0,
             "use before poison should be ok, got {}: {:?}",
@@ -12102,13 +12065,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 0,
             "W0200 should be suppressed by -Wwarning, got {}: {:?}",
@@ -12143,13 +12102,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         // before push: 1, inside push: 0 (suppressed), after pop: 1
         assert_eq!(
             w0200_count, 2,
@@ -12181,18 +12136,14 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // 应该被升级为错误 (Severity::Error)
         let promoted = out
             .diags
             .iter()
             .any(|d| d.code == "W0200" && matches!(d.sev, crate::diagnostics::Severity::Error));
-        assert!(
-            promoted,
-            "W0200 should be promoted to error, got: {:?}",
-            out.diags
-        );
+        assert!(promoted, "W0200 should be promoted to error, got: {:?}", out.diags);
     }
 
     // ===== _Pragma 操作符完整语义测试 =====
@@ -12223,13 +12174,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let w0200_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "W0200")
-            .count();
+        let w0200_count = out.diags.iter().filter(|d| d.code == "W0200").count();
         assert_eq!(
             w0200_count, 1,
             "expected 1 W0200 (after pop), got {}: {:?}",
@@ -12260,13 +12207,9 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
-        let e0210_count = out
-            .diags
-            .iter()
-            .filter(|d| d.code == "E0210")
-            .count();
+        let e0210_count = out.diags.iter().filter(|d| d.code == "E0210").count();
         assert_eq!(
             e0210_count, 1,
             "expected 1 E0210 via _Pragma poison, got {}: {:?}",
@@ -12297,7 +12240,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out.fenv_access, "fenv_access should be ON via _Pragma");
         assert!(
@@ -12330,7 +12273,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.weak_symbols.contains("my_weak_sym"),
@@ -12363,7 +12306,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.text.contains("f(0)"),
@@ -12395,7 +12338,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.text.contains("f(0 , 1, 2)") || out.text.contains("f(0, 1, 2)"),
@@ -12427,7 +12370,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(
             out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),
@@ -12458,7 +12401,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         // __LINE__ should be expanded to 100 (the remapped line number)
@@ -12487,7 +12430,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         // __LINE__ should be 50
@@ -12537,7 +12480,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12574,7 +12517,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12617,7 +12560,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12656,7 +12599,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         // 结构体定义应出现在输出中
@@ -12696,7 +12639,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12728,7 +12671,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12766,7 +12709,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12798,7 +12741,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         let output = out.text;
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12829,7 +12772,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         // Should not produce any diagnostics
         assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -12858,7 +12801,7 @@ int ok = 1;\n";
             128,
             false,
             false, // warn_undef
-            0, // opt_level
+            0,     // opt_level
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
         assert!(out.text.contains("int y;"), "output: {}", out.text);

@@ -38,8 +38,8 @@ fn check_block(
                 if let Some(body) = &f.body {
                     check_block(&body.items, funcs, out);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -92,11 +92,11 @@ fn check_stmt(
             if let Some(e) = else_ {
                 check_stmt(e, funcs, out);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             check_expr(cond, funcs, out, &expr_span(cond));
             check_stmt(body, funcs, out);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -114,9 +114,9 @@ fn check_stmt(
                 check_expr(st, funcs, out, &expr_span(st));
             }
             check_stmt(body, funcs, out);
-        }
+        },
         Stmt::Block { b, .. } => check_block(&b.items, funcs, out),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -144,13 +144,13 @@ fn check_expr(
         Expr::Binop { l, r, .. } => {
             check_expr(l, funcs, out, &expr_span(l));
             check_expr(r, funcs, out, &expr_span(r));
-        }
+        },
         Expr::Unary { e: inner, .. } => check_expr(inner, funcs, out, &expr_span(inner)),
         Expr::Assign { l, r, .. } => {
             check_expr(l, funcs, out, &expr_span(l));
             check_expr(r, funcs, out, &expr_span(r));
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -215,14 +215,7 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
             arg_pos += 1;
         }
         if arg_pos < arg_tys.len() {
-            check_format_type(
-                spec,
-                arg_tys[arg_pos].as_ref(),
-                is_scanf,
-                span,
-                &f.name.name,
-                out,
-            );
+            check_format_type(spec, arg_tys[arg_pos].as_ref(), is_scanf, span, &f.name.name, out);
         }
         arg_pos += 1;
     }
@@ -295,7 +288,7 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
                         length.push('h');
                         i += 1;
                     }
-                }
+                },
                 b'l' => {
                     length.push('l');
                     i += 1;
@@ -303,12 +296,12 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
                         length.push('l');
                         i += 1;
                     }
-                }
+                },
                 b'z' | b'j' | b't' | b'L' => {
                     length.push(bytes[i] as char);
                     i += 1;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         // 解析 conversion specifier
@@ -357,7 +350,7 @@ fn check_format_type(
                     span.clone(),
                 ));
                 return;
-            }
+            },
         }
     } else {
         ty
@@ -365,15 +358,34 @@ fn check_format_type(
     let mismatch = match spec.conv {
         'd' | 'i' => !matches!(
             effective_ty,
-            Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar | Type::UChar
-                | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                | Type::Bool | Type::Enum(_, _, _)
+            Type::Int
+                | Type::Short
+                | Type::UShort
+                | Type::Char
+                | Type::SChar
+                | Type::UChar
+                | Type::Long
+                | Type::ULong
+                | Type::LongLong
+                | Type::ULongLong
+                | Type::Bool
+                | Type::Enum(_, _, _)
         ),
         'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(
             effective_ty,
-            Type::UInt | Type::Int | Type::Short | Type::UShort | Type::Char | Type::SChar
-                | Type::UChar | Type::ULong | Type::Long | Type::ULongLong | Type::LongLong
-                | Type::Bool | Type::Enum(_, _, _)
+            Type::UInt
+                | Type::Int
+                | Type::Short
+                | Type::UShort
+                | Type::Char
+                | Type::SChar
+                | Type::UChar
+                | Type::ULong
+                | Type::Long
+                | Type::ULongLong
+                | Type::LongLong
+                | Type::Bool
+                | Type::Enum(_, _, _)
         ),
         'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             if spec.length == "L" {
@@ -381,22 +393,26 @@ fn check_format_type(
             } else {
                 !matches!(effective_ty, Type::Double | Type::Float)
             }
-        }
+        },
         // %c accepts integer types (char promoted to int in variadic args)
         'c' => !matches!(
             effective_ty,
-            Type::Int | Type::UInt | Type::Char | Type::SChar | Type::UChar
-                | Type::Short | Type::UShort | Type::Long | Type::ULong
+            Type::Int
+                | Type::UInt
+                | Type::Char
+                | Type::SChar
+                | Type::UChar
+                | Type::Short
+                | Type::UShort
+                | Type::Long
+                | Type::ULong
                 | Type::Enum(_, _, _)
         ),
         // %s accepts any pointer (char*) or array (decays to pointer)
         's' => !matches!(effective_ty, Type::Ptr(_) | Type::Array(_, _)),
         // %p accepts any pointer, array (decays to ptr), or function (decays to fn ptr).
         // 内核 %p 扩展 (%pS/%pF/%pU 等) 也接受函数指针和各类指针.
-        'p' => !matches!(
-            effective_ty,
-            Type::Ptr(_) | Type::Array(_, _) | Type::Func(_, _)
-        ),
+        'p' => !matches!(effective_ty, Type::Ptr(_) | Type::Array(_, _) | Type::Func(_, _)),
         'n' => !matches!(effective_ty, Type::Ptr(_)),
         _ => false,
     };
@@ -618,14 +634,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let span = Span::point("t.c", 1, 1);
-        check_format_type(
-            &spec,
-            Some(&Type::LongDouble),
-            false,
-            &span,
-            "log",
-            &mut out,
-        );
+        check_format_type(&spec, Some(&Type::LongDouble), false, &span, "log", &mut out);
         assert!(out.is_empty(), "long double should match %Lf: {out:?}");
     }
 
@@ -718,22 +727,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -825,22 +834,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -913,11 +922,7 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         check_format_type(&spec, Some(&Type::Double), false, &span, "log", &mut out);
         assert_eq!(out.len(), 1, "double should NOT match %b");
-        assert!(
-            out[0].msg.contains("unsigned integer"),
-            "msg: {}",
-            out[0].msg
-        );
+        assert!(out[0].msg.contains("unsigned integer"), "msg: {}", out[0].msg);
     }
 
     // C23: int 匹配 %B 通过 (GCC 兼容: 接受有符号整型)

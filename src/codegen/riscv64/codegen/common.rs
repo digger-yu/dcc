@@ -2,7 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{Decl, Field, FuncDecl, Program, Type};
-use crate::ir::{ValueType};
+use crate::ir::ValueType;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -62,7 +62,7 @@ pub(crate) fn classify_rv_hfa(
     };
     for f in flds.iter() {
         match (&f.ty, first_bits) {
-            (Type::Float, 32) | (Type::Double, 64) => {}
+            (Type::Float, 32) | (Type::Double, 64) => {},
             _ => return None,
         }
     }
@@ -140,4 +140,3 @@ pub(crate) fn align_rodata(buf: &mut Vec<u8>, align: u64) -> u64 {
 pub(crate) fn align_up_u64(v: u64, align: u64) -> u64 {
     (v + align - 1) & !(align - 1)
 }
-

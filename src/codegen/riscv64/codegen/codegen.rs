@@ -2,7 +2,10 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{Decl, Field, Program};
-use crate::codegen::shared::elf::{self, ComdatGroup, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_OBJECT, STT_TLS};
+use crate::codegen::shared::elf::{
+    self, ComdatGroup, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC,
+    STT_OBJECT, STT_TLS,
+};
 use crate::ir::{ExprLiteral, Global, Module, TypedExpr, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -156,7 +159,10 @@ impl Riscv64Codegen {
     /// 解析 GNU asm label: 如果 C 名有对应的 asm 标签则返回 asm 标签名，
     /// 否则返回原始 C 名。用于 ELF 符号名、重定位目标和汇编标签发射。
     pub(crate) fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
-        self.asm_label_map.get(c_name).map(|s| s.as_str()).unwrap_or(c_name)
+        self.asm_label_map
+            .get(c_name)
+            .map(|s| s.as_str())
+            .unwrap_or(c_name)
     }
 
     /// 收集 GNU asm label 映射和 TLS 变量访问模型
@@ -165,15 +171,17 @@ impl Riscv64Codegen {
             match decl {
                 Decl::Func(f) => {
                     if let Some(ref label) = f.asm_label {
-                        self.asm_label_map.insert(f.name.name.clone(), label.clone());
+                        self.asm_label_map
+                            .insert(f.name.name.clone(), label.clone());
                     }
-                }
+                },
                 Decl::Var(v) => {
                     if let Some(ref label) = v.asm_label {
-                        self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                        self.asm_label_map
+                            .insert(v.name.name.clone(), label.clone());
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -185,24 +193,19 @@ impl Riscv64Codegen {
         match crate::codegen::shared::mini_asm::encode_asm_lines_for_arch(&lines, "riscv64", true) {
             Ok(bytes) => {
                 self.code.extend_from_slice(&bytes);
-            }
+            },
             Err(unrecognized) => {
                 for mnem in &unrecognized {
                     let span = crate::diagnostics::Span::point(span_file, span_line, 1);
                     let mut diag = crate::diagnostics::Diagnostic::err(
                         "E0311",
-                        format!(
-                            "unsupported inline asm instruction '{}' on riscv64 target",
-                            mnem
-                        ),
+                        format!("unsupported inline asm instruction '{}' on riscv64 target", mnem),
                         span,
                     );
-                    diag.hint = Some(
-                        "add encoding support or use asm text mode (-S)".to_string(),
-                    );
+                    diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
                     self.diagnostics.push(diag);
                 }
-            }
+            },
         }
     }
 
@@ -245,18 +248,17 @@ impl Riscv64Codegen {
         match self._target.ftrace_mode {
             crate::cli::FtraceMode::MCount => {
                 self.ensure_sym("mcount");
-            }
+            },
             crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
                 self.ensure_sym("__fentry__");
-            }
-            crate::cli::FtraceMode::None => {}
+            },
+            crate::cli::FtraceMode::None => {},
         }
         // -mrecord-mcount: generate __mcount_loc section with call site addresses
         if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
             && !self.mcount_loc_entries.is_empty()
         {
-            let mut mcount_data =
-                Vec::with_capacity(self.mcount_loc_entries.len() * 8);
+            let mut mcount_data = Vec::with_capacity(self.mcount_loc_entries.len() * 8);
             for &(call_pos, _) in &self.mcount_loc_entries {
                 // Each entry is a 64-bit address
                 mcount_data.extend_from_slice(&call_pos.to_le_bytes());
@@ -279,12 +281,12 @@ impl Riscv64Codegen {
                 Decl::StructDef(s) => {
                     self.aggregate_fields
                         .insert(s.name.name.clone(), (Arc::new(s.fields.clone()), false));
-                }
+                },
                 Decl::UnionDef(u) => {
                     self.aggregate_fields
                         .insert(u.name.name.clone(), (Arc::new(u.fields.clone()), true));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -349,13 +351,13 @@ impl Riscv64Codegen {
             Some(ExprLiteral::Int(v)) => {
                 let bytes = (v as i64).to_le_bytes();
                 self.rodata[start..start + size.min(8)].copy_from_slice(&bytes[..size.min(8)]);
-            }
+            },
             Some(ExprLiteral::Float(v)) => {
                 let bits = (v as f32).to_bits();
                 self.rodata[start..start + 4.min(size)]
                     .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -555,7 +557,8 @@ impl Riscv64Codegen {
                             ty: STT_FUNC,
                             visibility: elf::STV_DEFAULT,
                         };
-                        self.sym_index.insert(f.name.name.clone(), self.symbols.len() as u32);
+                        self.sym_index
+                            .insert(f.name.name.clone(), self.symbols.len() as u32);
                         self.symbols.push(alias_sym);
                     }
                 }
@@ -596,10 +599,9 @@ impl Riscv64Codegen {
                             _ => unreachable!(),
                         };
                         self.patch_branch(at, rs1, rs2, target, funct3);
-                    }
+                    },
                 }
             }
         }
     }
-
 }

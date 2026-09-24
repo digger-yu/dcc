@@ -6,7 +6,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::{AbiClass, ArgLoc, Codegen};
 
-
 impl Codegen {
     /// Lower one SysV AMD64 call.  Outgoing stack arguments occupy the lowest
     /// addresses, temporary register staging follows them, and the complete
@@ -52,7 +51,9 @@ impl Codegen {
                 t => t,
             };
             // C 默认参数提升: K&R (无原型) 函数的 float 参数以 double 传递
-            if direct.map(|n| self.old_style_funcs.contains(n)).unwrap_or(false)
+            if direct
+                .map(|n| self.old_style_funcs.contains(n))
+                .unwrap_or(false)
                 && matches!(effective_ty, Type::Float)
             {
                 effective_ty = Type::Double;
@@ -66,8 +67,12 @@ impl Codegen {
             // 标量类型 (__int128, long long 等) 走 gen_va_arg, 支持三路径,
             // 允许单个 chunk 溢出时落到 overflow_arg_area。
             let is_agg = matches!(effective_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
-            let force_mem = classes.iter().any(|c| matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87))
-                || (is_agg && (gp + need_gp > gp_regs.len() || fp + need_fp > 8));
+            let force_mem = classes.iter().any(|c| {
+                matches!(
+                    c,
+                    AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87
+                )
+            }) || (is_agg && (gp + need_gp > gp_regs.len() || fp + need_fp > 8));
             if force_mem {
                 // caller 与 callee 必须用相同的 force_mem 栈参数对齐规则:
                 // 命名参数 (gen_params) 用 agg_align = ty.align().max(8),
@@ -102,7 +107,7 @@ impl Codegen {
                                 stack += 8;
                             }
                             prev_sse_loc = None;
-                        }
+                        },
                         AbiClass::Sse => {
                             let loc = if fp < 8 {
                                 let l = ArgLoc::Xmm(fp as u8);
@@ -115,29 +120,32 @@ impl Codegen {
                             };
                             prev_sse_loc = Some(loc);
                             arg_locs.push(loc);
-                        }
+                        },
                         AbiClass::SseUp => {
                             // 复用前一个 Sse 的位置, 不推进 fp/stack。
                             match prev_sse_loc {
                                 Some(loc @ ArgLoc::Xmm(_)) => {
                                     arg_locs.push(loc);
-                                }
+                                },
                                 Some(ArgLoc::Stack(prev)) => {
                                     // 高 8 字节在相邻栈槽
                                     let hi = ArgLoc::Stack(prev + 8);
                                     stack = prev + 16;
                                     arg_locs.push(hi);
-                                }
+                                },
                                 _ => {
                                     // 防御性回退: 不应发生
                                     arg_locs.push(ArgLoc::Stack(stack));
                                     stack += 8;
-                                }
+                                },
                             }
-                        }
-                        AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 => {
+                        },
+                        AbiClass::Memory
+                        | AbiClass::X87
+                        | AbiClass::X87Up
+                        | AbiClass::ComplexX87 => {
                             unreachable!()
-                        }
+                        },
                         AbiClass::NoClass => unreachable!(),
                     }
                 }
@@ -161,8 +169,7 @@ impl Codegen {
         // force_mem 区起点 (sub 后 rsp) 必须对齐到 force_mem 参数的最大对齐值.
         // 否则 align=32 的 agg 会在 16 对齐的地址上错位.
         let frame_align = max_force_align.max(16); // 至少 16 (SysV ABI call 对齐)
-        let frame_bytes = (stage_base + stage_slots * 8 + frame_align - 1)
-            & !(frame_align - 1);
+        let frame_bytes = (stage_base + stage_slots * 8 + frame_align - 1) & !(frame_align - 1);
         // call 前 rsp 只保证 16 对齐 (SysV ABI). 若 force_mem 区需要 32 对齐,
         // 先 sub 一个 padding 让 call 前 rsp 向上对齐到 frame_align.
         // padding = (call_rsp + frame_align - 1) & ~(frame_align - 1) - call_rsp
@@ -176,7 +183,7 @@ impl Codegen {
             // padding = aligned - rsp_old = -((rsp_old - aligned)),
             // 再 sub rsp, padding.
             let _r10: u8 = 10; // caller-saved scratch
-            // mov r10, rsp: REX.W=1 B=1; 0x89 mov r/m, r; modrm 0xE2 (mod=3, reg=4=rsp, r/m=2=r10 low)
+                               // mov r10, rsp: REX.W=1 B=1; 0x89 mov r/m, r; modrm 0xE2 (mod=3, reg=4=rsp, r/m=2=r10 low)
             self.emit(&[0x49, 0x89, 0xE2]);
             // lea rax, [rsp + frame_align - 1]; and rax, ~(frame_align - 1)
             self.emit(&[0x48, 0x8D, 0x44, 0x24]);
@@ -239,21 +246,21 @@ impl Codegen {
                 t => t,
             };
             // K&R 默认参数提升: float → double
-            if direct.map(|n| self.old_style_funcs.contains(n)).unwrap_or(false)
+            if direct
+                .map(|n| self.old_style_funcs.contains(n))
+                .unwrap_or(false)
                 && matches!(effective_ty, Type::Float)
             {
                 effective_ty = Type::Double;
             }
-            let aggregate = matches!(
-                effective_ty,
-                Type::Int128 | Type::UInt128 | Type::Complex(_)
-            ) || matches!(
-                effective_ty,
-                Type::Struct(_, _, _, _)
-                    | Type::Union(_, _, _, _)
-                    | Type::Array(_, ArraySize::Const(_))
-                    | Type::Atomic(_)
-            );
+            let aggregate = matches!(effective_ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
+                || matches!(
+                    effective_ty,
+                    Type::Struct(_, _, _, _)
+                        | Type::Union(_, _, _, _)
+                        | Type::Array(_, ArraySize::Const(_))
+                        | Type::Atomic(_)
+                );
             if matches!(effective_ty, Type::Vector(_, _)) {
                 // vector 实参: 按 GP 8 字节块传递 (dcc 内部标量化约定)
                 // 1. 取 vector 数据地址到 rax
@@ -287,7 +294,7 @@ impl Codegen {
                                 self.emit(&[0x0F, 0xB6, 0x88]);
                                 self.emit(&disp.to_le_bytes());
                             }
-                        }
+                        },
                         2 => {
                             // movzx ecx, word [rax+disp]
                             if disp < 128 {
@@ -296,7 +303,7 @@ impl Codegen {
                                 self.emit(&[0x0F, 0xB7, 0x88]);
                                 self.emit(&disp.to_le_bytes());
                             }
-                        }
+                        },
                         4 => {
                             // mov ecx, dword [rax+disp] (自动 zero-extend 到 64 位)
                             if disp < 128 {
@@ -305,7 +312,7 @@ impl Codegen {
                                 self.emit(&[0x8B, 0x88]);
                                 self.emit(&disp.to_le_bytes());
                             }
-                        }
+                        },
                         _ => {
                             // 8字节块: mov rcx, [rax+disp]
                             if disp < 128 {
@@ -314,7 +321,7 @@ impl Codegen {
                                 self.emit(&[0x48, 0x8B, 0x88]);
                                 self.emit(&disp.to_le_bytes());
                             }
-                        }
+                        },
                     }
                     match *loc {
                         ArgLoc::Stack(off) => self.store_rsp_qword(1, off),
@@ -322,7 +329,7 @@ impl Codegen {
                             self.store_rsp_qword(1, stage);
                             staged.push((*loc, stage, false));
                             stage += 8;
-                        }
+                        },
                     }
                 }
             } else if aggregate {
@@ -373,12 +380,12 @@ impl Codegen {
                         match *loc {
                             ArgLoc::Stack(off) => {
                                 self.emit_xmm_store_rsp(pfx, 0, off);
-                            }
+                            },
                             _ => {
                                 self.emit_xmm_store_rsp(pfx, 0, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
-                            }
+                            },
                         }
                     }
                 } else if let Expr::Ident { name, .. } = arg {
@@ -423,7 +430,7 @@ impl Codegen {
                                 self.store_rsp_qword(11, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
-                            }
+                            },
                         }
                     }
                 } else if matches!(arg, Expr::CompoundLit { .. }) {
@@ -451,11 +458,13 @@ impl Codegen {
                                 self.store_rsp_qword(0, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
-                            }
+                            },
                         }
                     }
-                } else if matches!(arg, Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. })
-                    && self.gen_lvalue_addr(arg, 1)
+                } else if matches!(
+                    arg,
+                    Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. }
+                ) && self.gen_lvalue_addr(arg, 1)
                 {
                     // Lvalue 聚合实参 (a[2] / s.f / *p): gen_expr 会加载
                     // 元素值 (pr44575: 全局数组元素被当 4 字节标量读),
@@ -479,7 +488,7 @@ impl Codegen {
                                 self.store_rsp_qword(0, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
-                            }
+                            },
                         }
                     }
                 } else {
@@ -492,9 +501,15 @@ impl Codegen {
                         && !matches!(arg.ty(), Type::Int128 | Type::UInt128)
                     {
                         if matches!(effective_ty, Type::UInt128)
-                            || matches!(arg.ty(),
-                                Type::Bool | Type::UChar | Type::UShort
-                                | Type::UInt | Type::ULong | Type::ULongLong)
+                            || matches!(
+                                arg.ty(),
+                                Type::Bool
+                                    | Type::UChar
+                                    | Type::UShort
+                                    | Type::UInt
+                                    | Type::ULong
+                                    | Type::ULongLong
+                            )
                         {
                             self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
                         } else {
@@ -503,9 +518,15 @@ impl Codegen {
                     }
                     for (chunk, loc) in arg_locs.iter().enumerate() {
                         let store_reg = if matches!(effective_ty, Type::Int128 | Type::UInt128) {
-                            if chunk == 0 { 0u8 } else { 2u8 } // rax for low, rdx for high
+                            if chunk == 0 {
+                                0u8
+                            } else {
+                                2u8
+                            } // rax for low, rdx for high
                         } else {
-                            if chunk == 1 { self.mov(0, 2); } // rdx = rax (non-int128 aggregate)
+                            if chunk == 1 {
+                                self.mov(0, 2);
+                            } // rdx = rax (non-int128 aggregate)
                             0u8 // always store rax
                         };
                         match *loc {
@@ -514,7 +535,7 @@ impl Codegen {
                                 self.store_rsp_qword(store_reg, stage);
                                 staged.push((*loc, stage, false));
                                 stage += 8;
-                            }
+                            },
                         }
                     }
                 }
@@ -601,7 +622,7 @@ impl Codegen {
                         self.emit_xmm_store_rsp(pfx, 0, stage);
                         staged.push((loc, stage, is_float));
                         stage += 8;
-                    }
+                    },
                 }
             } else if matches!(effective_ty, Type::Int128 | Type::UInt128) {
                 // SysV：16 字节整数占两个 GP 槽（低 rax / 高 rdx）
@@ -631,7 +652,7 @@ impl Codegen {
                             self.store_rsp_qword(reg, stage);
                             staged.push((loc, stage, false));
                             stage += 8;
-                        }
+                        },
                     }
                 }
             } else {
@@ -656,7 +677,7 @@ impl Codegen {
                         self.store_rsp_qword(0, stage);
                         staged.push((loc, stage, false));
                         stage += 8;
-                    }
+                    },
                 }
             }
         }
@@ -672,7 +693,7 @@ impl Codegen {
                 ArgLoc::Gp(reg) => {
                     self.load_rsp_qword(reg, slot);
                     i += 1;
-                }
+                },
                 ArgLoc::Xmm(reg) => {
                     // 检查下一个 staged 是否也是同一个 xmm 寄存器 (SseUp 延续,
                     // 如 16 字节 vector 参数). 如果是, 合并为一条 movups 加载
@@ -693,14 +714,14 @@ impl Codegen {
                                 }
                                 i += 2; // 跳过下一个 entry
                                 continue;
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                     let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                     self.emit_xmm_load_rsp(pfx, reg, slot);
                     i += 1;
-                }
+                },
                 ArgLoc::Stack(_) => unreachable!(),
             }
         }
@@ -713,7 +734,8 @@ impl Codegen {
             let nested_ref = self.resolve_nested_func_ref(name);
             let effective_name = match &nested_ref {
                 Some((unique, _, _)) => unique.clone(),
-                None => self.nested_func_renames
+                None => self
+                    .nested_func_renames
                     .get(&self.current_func_name)
                     .and_then(|m| m.get(name))
                     .cloned()
@@ -724,9 +746,7 @@ impl Codegen {
                 self.load_static_chain_for_call(*hops, offs);
             }
             // Resolve GNU asm label (e.g., __asm__("real_name")) for call sites
-            let resolved_name = self
-                .resolve_asm_label(&effective_name)
-                .to_string();
+            let resolved_name = self.resolve_asm_label(&effective_name).to_string();
             self.call_label(&resolved_name);
         } else {
             self.load_rsp_qword(11, callee_scratch.unwrap());

@@ -35,11 +35,7 @@ impl Backend for ArmCodegen {
                 decl: None,
             },
             symbols: ObjectSymbols {
-                globals: self
-                    .symbols
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .collect(),
+                globals: self.symbols.iter().map(|s| s.name.clone()).collect(),
                 locals: vec![],
                 imports: vec![],
             },
@@ -105,8 +101,7 @@ fn build_aux_sections(cg: &mut ArmCodegen, input: &CompileInput<'_>) {
             arch: crate::debug::ArchKind::Arm,
             ..crate::debug::DebugOptions::default()
         };
-        let cu =
-            crate::codegen::build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
+        let cu = crate::codegen::build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
         let dbg = crate::debug::build_dwarf_full(&cu, &dbg_opts);
         let extra_secs = crate::debug::dwarf_elf_sections(&dbg);
         // 不再在这里手工 push `.debug_info`：它与 `extra_secs`（来自
@@ -122,10 +117,7 @@ fn build_aux_sections(cg: &mut ArmCodegen, input: &CompileInput<'_>) {
         if !frames.is_empty() {
             cg.push_extra_section(elf::ElfSection {
                 name: ".eh_frame".to_string(),
-                data: crate::debug::build_eh_frame_with_arch(
-                    &frames,
-                    crate::debug::ArchKind::Arm,
-                ),
+                data: crate::debug::build_eh_frame_with_arch(&frames, crate::debug::ArchKind::Arm),
                 ty: elf::SHT_PROGBITS,
                 flags: elf::SHF_ALLOC,
                 align: 4,

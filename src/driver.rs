@@ -10,8 +10,8 @@ use crate::ir;
 use crate::link;
 use crate::lto;
 use crate::mmap_io::MappedInput;
-use crate::parser;
 use crate::parse_profile::ParseProfile;
+use crate::parser;
 use crate::preproc;
 use crate::preproc::LineSpan;
 use crate::profile;
@@ -33,7 +33,7 @@ fn ir_type_uses_float(t: &ir::ValueType) -> bool {
         | ir::ValueType::Complex(i) => ir_type_uses_float(i),
         ir::ValueType::Function { ret, params } => {
             ir_type_uses_float(ret) || params.iter().any(ir_type_uses_float)
-        }
+        },
         _ => false,
     }
 }
@@ -241,14 +241,12 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     })?;
 
     // -x assembler / assembler-with-cpp 以及 .s/.S 使用系统汇编器
-    if matches!(
-        cfg.input_lang,
-        InputLang::Assembler | InputLang::AssemblerWithCpp
-    ) || input
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| matches!(e, "s" | "S"))
-        .unwrap_or(false)
+    if matches!(cfg.input_lang, InputLang::Assembler | InputLang::AssemblerWithCpp)
+        || input
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e, "s" | "S"))
+            .unwrap_or(false)
     {
         return run_assembler_driver(&cfg, input);
     }
@@ -299,7 +297,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             CacheResult::Hit => {
                 // 缓存命中: 输出已是最新, 直接返回
                 return Ok(());
-            }
+            },
             CacheResult::Miss { entry_path } => Some(entry_path),
         }
     } else {
@@ -424,7 +422,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                             p.join(", ")
                         };
                         writeln!(pp_out, "#define {}({}) {}", name, p_str, body).ok()
-                    }
+                    },
                 };
             }
         }
@@ -496,7 +494,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                         crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
                     )]
                 })?)
-            }
+            },
             None => Box::new(io::stdout()),
         };
         let default_target = input
@@ -564,10 +562,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             weak_symbols: weak_symbols.clone(),
             warn_int_truncation: cfg.warn_int_truncation,
             warn_int_conversion: cfg.warn_int_conversion,
-            is_c23: matches!(
-                cfg.std,
-                crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23
-            ),
+            is_c23: matches!(cfg.std, crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23),
             allow_implicit_function_decl,
             allow_implicit_int,
             warn_implicit_decl: cfg.warn_implicit_decl,
@@ -631,12 +626,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // Offloading: 收集 OpenMP target/simd + CUDA/HIP 限定符函数为
     // offload entries, 构造 `.dcc.offload` 节内容。校验错误/警告均带
     // 精确源位置 (经 line_map 映射回源文件)。
-    let (offload_section, mut offload_diags) = collect_offload_section(
-        &prog,
-        &cfg.profile.offload,
-        &pp_out.openmp_pragmas,
-        &line_map,
-    );
+    let (offload_section, mut offload_diags) =
+        collect_offload_section(&prog, &cfg.profile.offload, &pp_out.openmp_pragmas, &line_map);
     // NOTE: collect_offload_section 内部已完成所有 remap:
     //   - CUDA/HIP 诊断使用 AST span (预处理坐标), 在函数内 remap
     //   - OpenMP 诊断使用 openmp_pragmas 的源行号, 已是源坐标
@@ -672,11 +663,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
         if cfg.verbose {
             for (triple, code) in &dcg_result.device_code {
-                eprintln!(
-                    "dcc: offload device codegen: {} -> {} bytes",
-                    triple,
-                    code.len()
-                );
+                eprintln!("dcc: offload device codegen: {} -> {} bytes", triple, code.len());
             }
             for d in &dcg_result.diagnostics {
                 eprintln!("dcc: offload device codegen: {}", d);
@@ -926,7 +913,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // Compute target info for optimizer (VNNI vectorization etc.)
     let opt_has_vnni = cfg.cpu_feature_overrides.avx_vnni == Some(true)
         || cfg.march.as_deref().is_some_and(|m| {
-            matches!(m, "x86-64-v4" | "sapphirerapids" | "granite-rapids" | "icelake-server" | "icelake-client")
+            matches!(
+                m,
+                "x86-64-v4"
+                    | "sapphirerapids"
+                    | "granite-rapids"
+                    | "icelake-server"
+                    | "icelake-client"
+            )
         });
     let opt_vec_bits: u32 = if cfg.cpu_feature_overrides.avx512f == Some(true)
         || (cfg.march.as_deref() == Some("x86-64-v4"))
@@ -1072,7 +1066,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
     let function_sections = cfg.function_sections || lto_enabled;
-    
+
     // Create EmitOptions bundle for unified backend API
     let opts = codegen::EmitOptions {
         relocatable: cfg.relocatable,
@@ -1090,7 +1084,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         line_map: &line_map,
         verbose: cfg.verbose,
     };
-    
+
     let bytes = codegen::emit(&module, &target, opts)?;
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
@@ -1135,10 +1129,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             Ok(report) => {
                 eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
                 eprint!("{}", report.format());
-            }
+            },
             Err(e) => {
                 eprintln!("dcc: bootstrap compare error: {e}");
-            }
+            },
         }
     }
 
@@ -1285,7 +1279,7 @@ fn escape_dep_path(path: &str) -> String {
             ' ' | '\t' | '#' | ':' => {
                 out.push('\\');
                 out.push(ch);
-            }
+            },
             _ => out.push(ch),
         }
     }
@@ -1302,7 +1296,7 @@ fn quote_make_target(target: &str) -> String {
             ' ' | '\t' | '#' | ':' => {
                 out.push('\\');
                 out.push(ch);
-            }
+            },
             _ => out.push(ch),
         }
     }
@@ -1390,11 +1384,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         if matches!(cfg.input_lang, InputLang::Assembler)
             || input.extension().and_then(|e| e.to_str()) == Some("s")
         {
-            (
-                String::from_utf8_lossy(&src).into_owned(),
-                Vec::new(),
-                Vec::new(),
-            )
+            (String::from_utf8_lossy(&src).into_owned(), Vec::new(), Vec::new())
         } else {
             // GCC 兼容: 处理 .S 文件时自动定义 __ASSEMBLER__
             // 内核头文件用 #ifndef __ASSEMBLER__ 保护 C 代码
@@ -1813,12 +1803,12 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                 }
             }
             d
-        }
+        },
         Err(_) => {
             let mut diags = parser.diags.clone();
             enrich_diags(&mut diags, &src, &file_name, input.parent());
             return Err(diags);
-        }
+        },
     };
 
     // -dump-ast: 打印 C++ AST 后退出
@@ -1839,7 +1829,11 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         sorted.sort_by_key(|f| f.name());
         eprintln!("dcc: C++ feature detection: {} features found", sorted.len());
         for f in &sorted {
-            let status = if f.native_supported() { "[native]" } else { "[unsupported]" };
+            let status = if f.native_supported() {
+                "[native]"
+            } else {
+                "[unsupported]"
+            };
             eprintln!("dcc:   {} {}", status, f.name());
         }
     }
@@ -1857,13 +1851,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         eprintln!("dcc: using C++ native backend path");
     }
 
-    return emit_native_program(
-        cfg,
-        native_out.prog,
-        &file_name,
-        pp_out.line_map.clone(),
-    );
-
+    return emit_native_program(cfg, native_out.prog, &file_name, pp_out.line_map.clone());
 }
 
 /// C++ 原生后端: 把 ast::Program 直接走 C 主流水线 (ir::lower → 优化 →
@@ -1882,12 +1870,11 @@ fn emit_native_program(
     let dcfg = diag_cfg(cfg);
 
     // ir::lower (native 路径产出的 AST 已经是展平后的, 直接进 IR)
-    let (mut module, ir_warnings) =
-        ir::lower(prog).map_err(|d| {
-            let mut d = d;
-            remap_diags(&mut d, &line_map);
-            d
-        })?;
+    let (mut module, ir_warnings) = ir::lower(prog).map_err(|d| {
+        let mut d = d;
+        remap_diags(&mut d, &line_map);
+        d
+    })?;
     for w in &ir_warnings {
         w.print_with(&dcfg);
     }
@@ -1915,10 +1902,7 @@ fn emit_native_program(
         512
     } else if cfg.cpu_feature_overrides.avx2 == Some(true)
         || cfg.march.as_deref().is_some_and(|m| {
-            matches!(
-                m,
-                "x86-64-v3" | "x86-64-v4" | "haswell" | "skylake" | "skylake-avx512"
-            )
+            matches!(m, "x86-64-v3" | "x86-64-v4" | "haswell" | "skylake" | "skylake-avx512")
         })
     {
         256
@@ -2041,7 +2025,7 @@ fn emit_native_program(
 
     let lto_enabled = cfg.lto_enabled;
     let function_sections = cfg.function_sections || lto_enabled;
-    
+
     // Create EmitOptions bundle for unified backend API
     let opts = codegen::EmitOptions {
         relocatable: cfg.relocatable,
@@ -2059,7 +2043,7 @@ fn emit_native_program(
         line_map: &line_map,
         verbose: cfg.verbose,
     };
-    
+
     let bytes = codegen::emit(&module, &target, opts)?;
 
     if cfg.verbose {
@@ -2103,10 +2087,10 @@ fn emit_native_program(
             Ok(report) => {
                 eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
                 eprint!("{}", report.format());
-            }
+            },
             Err(e) => {
                 eprintln!("dcc: bootstrap compare error: {e}");
-            }
+            },
         }
     }
 
@@ -2370,14 +2354,10 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         arch: arch_from_target(&cfg.target),
         // PIE/.so 需要 PT_INTERP 让动态链接器处理 GOT/重定位;
         // 支持 -Wl,--dynamic-linker= 覆盖默认路径
-        dynamic_linker: parse_dynamic_linker(&cfg.raw_args)
-            .or_else(|| {
-                matches!(
-                    output_kind,
-                    link::OutputKind::PIE | link::OutputKind::Shared
-                )
+        dynamic_linker: parse_dynamic_linker(&cfg.raw_args).or_else(|| {
+            matches!(output_kind, link::OutputKind::PIE | link::OutputKind::Shared)
                 .then(|| dynamic_linker_path(arch_from_target(&cfg.target)))
-            }),
+        }),
         vdso: cfg.vdso.clone().or_else(|| {
             // 自动检测系统 vDSO (仅 Executable/PIE 需要)
             if matches!(output_kind, link::OutputKind::Executable | link::OutputKind::PIE) {
@@ -2411,10 +2391,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     // P9: 自动检测系统 libc 并将其导出符号加入 allowed_undef,
     // 减少内置链接器对 host cc 的依赖。
-    if matches!(
-        output_kind,
-        link::OutputKind::Executable | link::OutputKind::PIE
-    ) {
+    if matches!(output_kind, link::OutputKind::Executable | link::OutputKind::PIE) {
         if let Ok(libc_info) = link::dso_cache::resolve_and_load(
             &mut link_cfg.dso_cache,
             "c",
@@ -2441,10 +2418,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         // LTO path: read .dcc.lto sections from input .o files,
         // deserialize bitcode, run cross-TU optimization, then link
         if cfg.verbose {
-            eprintln!(
-                "dcc: LTO enabled, extracting bitcode from {} inputs",
-                inputs.len()
-            );
+            eprintln!("dcc: LTO enabled, extracting bitcode from {} inputs", inputs.len());
         }
         let object_bytes: Vec<Vec<u8>> = inputs
             .iter()
@@ -2458,7 +2432,8 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
                     return None;
                 }
                 link::lto_bitcode::deserialize_module(
-                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                    &crate::codegen::shared::elf::read_section_data(obj, ".dcc.lto")
+                        .unwrap_or_default(),
                 )
                 .ok()
             })
@@ -2677,10 +2652,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         .unwrap_or(false);
     if has_ifunc {
         if verbose {
-            eprintln!(
-                "dcc: IFUNC symbols detected in {}, using builtin linker",
-                tmp_o.display()
-            );
+            eprintln!("dcc: IFUNC symbols detected in {}, using builtin linker", tmp_o.display());
         }
         let mut link_cfg = cfg_saved.clone();
         link_cfg.inputs = vec![tmp_o.clone()];
@@ -2743,12 +2715,9 @@ fn elf_has_ifunc_symbols(elf: &[u8]) -> bool {
         if sh_type != SHT_SYMTAB {
             continue;
         }
-        let data_off =
-            u64::from_le_bytes(elf[base + 24..base + 32].try_into().unwrap()) as usize;
-        let data_size =
-            u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
-        let entsize =
-            u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap()) as usize;
+        let data_off = u64::from_le_bytes(elf[base + 24..base + 32].try_into().unwrap()) as usize;
+        let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
+        let entsize = u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap()) as usize;
         if entsize < 24 || data_off + data_size > elf.len() {
             return false;
         }
@@ -2808,14 +2777,7 @@ fn sanitizer_link_deps(cfg: &Config) -> (Vec<String>, Vec<String>, Vec<String>) 
 
     macro_rules! add_lib {
         ($lib:expr, $syms:expr, $flag:expr $(,)?) => {
-            add_runtime_dep(
-                &mut libs,
-                &mut cc_flags,
-                &mut undefs,
-                Some($lib),
-                $syms,
-                $flag,
-            )
+            add_runtime_dep(&mut libs, &mut cc_flags, &mut undefs, Some($lib), $syms, $flag)
         };
     }
 
@@ -2993,7 +2955,7 @@ fn link_with_host_cc(
                 .unwrap_or_default() =>
         {
             v
-        }
+        },
         _ => "cc".to_string(),
     };
     let mut cmd = Command::new(&cc);
@@ -3064,7 +3026,7 @@ fn link_objects_with_host_cc(
                 .unwrap_or_default() =>
         {
             v
-        }
+        },
         _ => "cc".to_string(),
     };
     let mut cmd = Command::new(&cc);
@@ -3072,9 +3034,7 @@ fn link_objects_with_host_cc(
         cmd.arg(obj);
     }
     // 自动包含 dcc C++ 运行时库 (如果存在)
-    let dcc_runtime = std::path::PathBuf::from(
-        "/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c"
-    );
+    let dcc_runtime = std::path::PathBuf::from("/root/dcc/src/cpp/stdlib/runtime/dccpp_runtime.c");
     if dcc_runtime.exists() {
         cmd.arg(&dcc_runtime);
         // dccpp_runtime.c 使用 __cxa_allocate_exception / __cxa_throw
@@ -3210,10 +3170,7 @@ fn collect_offload_section(
     offload: &crate::profile::offload::OffloadConfig,
     omp_pragmas: &[(String, u32, String)],
     line_map: &[LineSpan],
-) -> (
-    Option<crate::profile::offload::OffloadSection>,
-    Vec<Diagnostic>,
-) {
+) -> (Option<crate::profile::offload::OffloadSection>, Vec<Diagnostic>) {
     use crate::ast::Decl;
     use crate::profile::offload::{arch_to_triple, OffloadEntry, OffloadKind, OffloadSection};
 
@@ -3340,7 +3297,7 @@ fn collect_offload_section(
                             arch: None,
                         });
                     }
-                }
+                },
                 (Some(_), None) => {
                     diags.push(Diagnostic::warn(
                         "W0311",
@@ -3350,7 +3307,7 @@ fn collect_offload_section(
                         ),
                         crate::diagnostics::Span::point(pfile, *pline, 1),
                     ));
-                }
+                },
                 (None, Some((name, _, _, _))) => {
                     diags.push(Diagnostic::warn(
                         "W0312",
@@ -3363,7 +3320,7 @@ fn collect_offload_section(
                         // 位置指向 pragma 本身 (而非函数头)
                         crate::diagnostics::Span::point(pfile, *pline, 1),
                     ));
-                }
+                },
                 (None, None) => {
                     diags.push(Diagnostic::warn(
                         "W0313",
@@ -3373,7 +3330,7 @@ fn collect_offload_section(
                         ),
                         crate::diagnostics::Span::point(pfile, *pline, 1),
                     ));
-                }
+                },
             }
         }
     }
@@ -3388,10 +3345,7 @@ mod tests {
 
     #[test]
     fn escape_dep_path_no_special() {
-        assert_eq!(
-            escape_dep_path("/usr/include/stdio.h"),
-            "/usr/include/stdio.h"
-        );
+        assert_eq!(escape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
     }
 
     #[test]
@@ -3444,14 +3398,7 @@ mod tests {
         let mut buf = Vec::new();
         // 构造足够长的路径使行宽超过 72
         let long_dep = format!("{}{}", "/long/path/", "x".repeat(60));
-        write_dep_file(
-            &mut buf,
-            "foo.o",
-            "foo.c",
-            std::slice::from_ref(&long_dep),
-            false,
-        )
-        .unwrap();
+        write_dep_file(&mut buf, "foo.o", "foo.c", std::slice::from_ref(&long_dep), false).unwrap();
         let out = String::from_utf8(buf).unwrap();
         // 应包含续行符
         assert!(out.contains("\\\n"));
@@ -3478,10 +3425,7 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         // 除最后一行外, 每行应以 \ 结尾
         for line in &lines[..lines.len().saturating_sub(1)] {
-            assert!(
-                line.ends_with('\\'),
-                "non-final line should end with \\: {line:?}"
-            );
+            assert!(line.ends_with('\\'), "non-final line should end with \\: {line:?}");
         }
     }
 

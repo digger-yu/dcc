@@ -1,8 +1,8 @@
 // ARM backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::shared::elf::{ElfRela, ElfSection, ElfSym};
 use super::BranchKind;
+use crate::codegen::shared::elf::{ElfRela, ElfSection, ElfSym};
 use crate::ir::ValueType;
 use crate::target::Target;
 use std::collections::HashMap;

@@ -830,16 +830,32 @@ fn build_elf_rel_generic(
     // 范式照搬同文件 ELF32 写者 build_elf32_rel_generic (mips32/arm 早已如此)。
     let is_be = ei_data == ELFDATA2MSB;
     let ew_u16 = |v: u16| -> [u8; 2] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let ew_u32 = |v: u32| -> [u8; 4] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let ew_u64 = |v: u64| -> [u8; 8] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let ew_i64 = |v: i64| -> [u8; 8] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
@@ -893,7 +909,10 @@ fn build_elf_rel_generic(
     // .rela.* 全都不变 ⇒ 本轮之前已经正确的产物零漂移。
     let mut sym_order: Vec<usize> = (0..symbols.len()).collect();
     sym_order.sort_by_key(|&i| symbols[i].bind); // STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
-    let is_identity_order = sym_order.iter().enumerate().all(|(new_i, &old_i)| new_i == old_i);
+    let is_identity_order = sym_order
+        .iter()
+        .enumerate()
+        .all(|(new_i, &old_i)| new_i == old_i);
     // 空符号占据下标 0, 故符号 i 的新下标 = 其在 sym_order 中的位置 + 1。
     let mut sym_index_map = vec![0u32; symbols.len()];
     for (new_i, &old_i) in sym_order.iter().enumerate() {
@@ -941,10 +960,7 @@ fn build_elf_rel_generic(
         if is_identity_order {
             idx
         } else {
-            sym_index_map
-                .get(idx as usize)
-                .copied()
-                .unwrap_or(idx)
+            sym_index_map.get(idx as usize).copied().unwrap_or(idx)
         }
     };
 
@@ -1979,10 +1995,18 @@ fn write_section_header(
     is_be: bool,
 ) {
     let w32 = |v: u32| -> [u8; 4] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let w64 = |v: u64| -> [u8; 8] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     out.extend_from_slice(&w32(sh_name)); // 4
     out.extend_from_slice(&w32(sh_type)); // 4
@@ -1994,7 +2018,7 @@ fn write_section_header(
     out.extend_from_slice(&w32(sh_info)); // 4
     out.extend_from_slice(&w64(sh_addralign)); // 8
     out.extend_from_slice(&w64(sh_entsize)); // 8
-                                                      // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
+                                             // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
 }
 
 /// 从 ET_REL ELF64 目标文件中按节名读取载荷（供 LTO 摘要提取等）。
@@ -2103,13 +2127,7 @@ pub fn referenced_symbol_names(elf: &[u8]) -> Vec<String> {
         let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
         let entsize = u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap());
         let name = read_cstr(shstrtab, name_idx).unwrap_or("").to_string();
-        sections.push((
-            name.clone(),
-            sh_type,
-            data_off as u64,
-            data_size as u64,
-            entsize,
-        ));
+        sections.push((name.clone(), sh_type, data_off as u64, data_size as u64, entsize));
         if name == ".symtab" {
             symtab = Some((data_off, data_size, entsize));
         } else if name == ".strtab" {
@@ -2335,10 +2353,18 @@ fn build_elf32_rel_generic(
 ) -> Vec<u8> {
     let is_be = ei_data == ELFDATA2MSB;
     let ew_u16 = |v: u16| -> [u8; 2] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let ew_u32 = |v: u32| -> [u8; 4] {
-        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+        if is_be {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
     };
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
@@ -2384,7 +2410,10 @@ fn build_elf32_rel_generic(
     // 布局/.rel.* 全不变 ⇒ 只有真正乱序的产物发生 drift。
     let mut sym_order: Vec<usize> = (0..symbols.len()).collect();
     sym_order.sort_by_key(|&i| symbols[i].bind); // STB_LOCAL(0) < STB_GLOBAL(1) < STB_WEAK(2)
-    let is_identity_order = sym_order.iter().enumerate().all(|(new_i, &old_i)| new_i == old_i);
+    let is_identity_order = sym_order
+        .iter()
+        .enumerate()
+        .all(|(new_i, &old_i)| new_i == old_i);
     // 空符号占下标 0, 故符号 i 的新下标 = 其在 sym_order 中的位置 + 1。
     let mut sym_index_map = vec![0u32; symbols.len()];
     for (new_i, &old_i) in sym_order.iter().enumerate() {
@@ -2802,19 +2831,24 @@ fn write_section_header32(
     sh_entsize: u32,
     is_be: bool,
 ) {
-    macro_rules! ew { ($v:expr, $n:literal) => {
-        if is_be { out.extend_from_slice(&$v.to_be_bytes()) }
-        else     { out.extend_from_slice(&$v.to_le_bytes()) }
-    }}
-    ew!(sh_name, 4);       // 4
-    ew!(sh_type, 4);       // 4
-    ew!(sh_flags, 4);      // 4
-    ew!(sh_addr, 4);       // 4
-    ew!(sh_offset, 4);     // 4
-    ew!(sh_size, 4);       // 4
-    ew!(sh_link, 4);       // 4
-    ew!(sh_info, 4);       // 4
-    ew!(sh_addralign, 4);  // 4
-    ew!(sh_entsize, 4);    // 4
-                           // Total: 40 bytes
+    macro_rules! ew {
+        ($v:expr, $n:literal) => {
+            if is_be {
+                out.extend_from_slice(&$v.to_be_bytes())
+            } else {
+                out.extend_from_slice(&$v.to_le_bytes())
+            }
+        };
+    }
+    ew!(sh_name, 4); // 4
+    ew!(sh_type, 4); // 4
+    ew!(sh_flags, 4); // 4
+    ew!(sh_addr, 4); // 4
+    ew!(sh_offset, 4); // 4
+    ew!(sh_size, 4); // 4
+    ew!(sh_link, 4); // 4
+    ew!(sh_info, 4); // 4
+    ew!(sh_addralign, 4); // 4
+    ew!(sh_entsize, 4); // 4
+                        // Total: 40 bytes
 }

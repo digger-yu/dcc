@@ -8,11 +8,8 @@ fn arch_x86_wrapper_preserves_supported_kernel_flags() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/arch_x86_compile.sh");
     let temp = std::env::temp_dir().join(format!("dcc-arch-wrapper-{}", std::process::id()));
     fs::create_dir_all(temp.join("arch/x86/kernel")).expect("create wrapper fixture");
-    fs::write(
-        temp.join("arch/x86/kernel/foo.c"),
-        "int foo(void) { return 0; }\n",
-    )
-    .expect("write wrapper source fixture");
+    fs::write(temp.join("arch/x86/kernel/foo.c"), "int foo(void) { return 0; }\n")
+        .expect("write wrapper source fixture");
     let cmd_file = temp.join("arch/x86/kernel/.foo.o.cmd");
     fs::write(
         &cmd_file,
@@ -28,11 +25,7 @@ fn arch_x86_wrapper_preserves_supported_kernel_flags() {
         .expect("run arch wrapper");
     let log = fs::read_to_string(temp.join("out.log")).unwrap_or_default();
     let _ = fs::remove_dir_all(&temp);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(log.contains("-fstack-clash-protection"), "log: {log}");
     assert!(log.contains("-ftrivial-auto-var-init=zero"), "log: {log}");
     assert!(log.contains("-mrecord-mcount"), "log: {log}");
@@ -157,12 +150,7 @@ fn run_sanitized_binary(
     name: &str,
     source: &str,
     flags: &[&str],
-) -> (
-    std::process::Output,
-    std::process::Output,
-    String,
-    std::path::PathBuf,
-) {
+) -> (std::process::Output, std::process::Output, String, std::path::PathBuf) {
     let (compile, exe_path) = run_compile_and_run_flags(name, source, flags);
     assert!(
         compile.status.success(),
@@ -336,10 +324,7 @@ fn compile_legacy_asm_object(name: &str, source: &str) -> (Vec<u8>, String) {
     let (output, obj_path) = run_object_test(name, source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
 
     let obj = fs::read(&obj_path).expect("read object file");
     let text = elf64_section_data(&obj, ".text")
@@ -364,10 +349,7 @@ fn assert_bytes_present(text: &[u8], needle: &[u8], label: &str) {
 }
 
 fn assert_disasm_present(disasm: &str, needle: &str) {
-    assert!(
-        disasm.contains(needle),
-        "missing disassembly pattern `{needle}`:\n{disasm}"
-    );
+    assert!(disasm.contains(needle), "missing disassembly pattern `{needle}`:\n{disasm}");
 }
 
 fn elf64_dynamic_needed(data: &[u8]) -> Vec<String> {
@@ -596,11 +578,7 @@ fn constant_builtin_and_static_assert_pass_through_typed_ir() {
         "_Static_assert(__builtin_constant_p(((__int128)1 << 100) / 3), \"constant\");\n\
          int main(void) { return __builtin_constant_p(42) == 1 ? 0 : 1; }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -612,19 +590,23 @@ fn failed_static_assert_is_a_hard_error() {
         "_Static_assert(2 * 3 == 7, \"math is broken\");\nint main(void) { return 0; }\n",
     );
     // 编译应该成功（降级为警告）
-    assert!(output.status.success(), "static_assert failure should be a warning, not an error");
+    assert!(
+        output.status.success(),
+        "static_assert failure should be a warning, not an error"
+    );
     // 但应该包含警告信息
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("math is broken") || stderr.contains("W0010"), 
-            "stderr should mention the assertion or warning code: {}", stderr);
+    assert!(
+        stderr.contains("math is broken") || stderr.contains("W0010"),
+        "stderr should mention the assertion or warning code: {}",
+        stderr
+    );
 }
 
 #[test]
 fn unknown_typedef_is_not_coerced_to_int() {
-    let output = run_syntax_test(
-        "unknown-type",
-        "missing_typedef value;\nint main(void) { return 0; }\n",
-    );
+    let output =
+        run_syntax_test("unknown-type", "missing_typedef value;\nint main(void) { return 0; }\n");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown type or typedef"));
 }
@@ -640,11 +622,7 @@ fn int128_mul_div_mod_reach_machine_codegen() {
              return result != 0;\n\
          }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let size = fs::metadata(&object).expect("object was emitted").len();
     assert!(size > 64, "ELF object should contain generated code");
     let _ = fs::remove_file(object);
@@ -658,11 +636,7 @@ fn s128_typedef_with_attribute_parses() {
          typedef __s128 s128;\n\
          int main(void) { s128 x = 0; (void)x; return 0; }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -674,11 +648,7 @@ fn struct_comma_separated_field_declarators_parse() {
          struct ids { unsigned short vendor, device; };\n\
          int main(void) { return 0; }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// M7 数组到指针衰减: `*(arr + n)` 与 `arr[n]` 等价.
@@ -703,11 +673,7 @@ fn array_decay_and_nested_block_redecl_compile() {
              return 0;\n\
          }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let size = fs::metadata(&object).expect("object was emitted").len();
     assert!(size > 64, "ELF object should contain generated code");
     let _ = fs::remove_file(object);
@@ -726,9 +692,10 @@ fn libdecnumber_combined_tu_compiles() {
     if !gcc_src.join("libdecnumber").exists() {
         return;
     }
-    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gcc_tools");
-    let combined =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gcc_tools/libdecnumber_combined.c");
+    let stub_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gcc_tools");
+    let combined = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/gcc_tools/libdecnumber_combined.c");
     let dir = std::env::temp_dir();
     let object = dir.join(format!("dcc-libdecnumber-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -910,10 +877,7 @@ fn strict_vmlinux_regress_requires_debug_tools() {
     assert!(stdout.contains("FAIL: pahole not installed"));
     assert!(!stdout.contains("SKIP:"));
 
-    make_executable(
-        &temp.join("pahole"),
-        "#!/bin/sh\nprintf 'STRUCT dcc_probe\\n'\n",
-    );
+    make_executable(&temp.join("pahole"), "#!/bin/sh\nprintf 'STRUCT dcc_probe\\n'\n");
     let missing_objtool = Command::new("/bin/bash")
         .arg(root.join("scripts/vmlinux_regress.sh"))
         .env("VMLINUX", temp.join("vmlinux"))
@@ -939,11 +903,7 @@ fn enum_trailing_comma_parses() {
          };\n\
          int main(void) { return 0; }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// C++ 前端 M7: 简单 class + ctor 降级到 C 后能通过 dcc 编译
@@ -972,11 +932,7 @@ fn typeof_cast_in_statement_expression_parses() {
              });\n\
          }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -990,11 +946,7 @@ fn struct_function_pointer_field_parses() {
          };\n\
          int main(void) { return 0; }\n",
     );
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -1013,11 +965,7 @@ fn s_output_disassembles_function_body() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(asm_text.contains("main:"), "asm output: {asm_text}");
     assert!(
         asm_text.contains("mov") && (asm_text.contains("$5") || asm_text.contains("$0x5")),
@@ -1042,11 +990,7 @@ fn s_output_disassembles_return_thunk_symbol() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         asm_text.contains("jmp __x86_return_thunk"),
         "return thunk target should be symbolic in -S output: {asm_text}"
@@ -1079,11 +1023,7 @@ int main(void) { return custom_function() == 7 ? 0 : 1; }\n";
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         asm_text.contains(".section .init.text"),
         "expected custom section directive: {asm_text}"
@@ -1129,11 +1069,7 @@ int main(void) {\n\
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         asm_text.contains("lock cmpxchg") || asm_text.contains("lock; cmpxchg"),
         "expected lock cmpxchg in disasm, got: {asm_text}"
@@ -1167,11 +1103,7 @@ int main(void) {\n\
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         asm_text.contains(".ascii \"->SIZE_usb_device_id $8 sizeof(struct usb_device_id)\""),
         "asm output: {asm_text}"
@@ -1182,11 +1114,7 @@ int main(void) {\n\
 fn asm_register_planner_avoids_gp_clobbers() {
     let source = "int f(int x) { int out; asm(\".ascii \\\"gp %0 %1\\\"\" : \"=r\"(out) : \"r\"(x) : \"rax\"); return out; }\n";
     let (output, asm_text) = run_asm_output_test("asm-gp-plan", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let ascii_line = asm_text
         .lines()
         .find(|line| line.contains(".ascii \"gp "))
@@ -1201,11 +1129,7 @@ fn asm_register_planner_avoids_gp_clobbers() {
 fn asm_register_planner_avoids_xmm_clobbers() {
     let source = "double f(double x) { double out; asm(\".ascii \\\"xmm %0 %1\\\"\" : \"=x\"(out) : \"x\"(x) : \"xmm0\"); return out; }\n";
     let (output, asm_text) = run_asm_output_test("asm-xmm-plan", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let ascii_line = asm_text
         .lines()
         .find(|line| line.contains(".ascii \"xmm "))
@@ -1220,11 +1144,7 @@ fn asm_register_planner_avoids_xmm_clobbers() {
 fn asm_register_planner_reassigns_early_clobber_outputs() {
     let source = "int f(int x) { int out; asm(\".ascii \\\"early %0 %1\\\"\" : \"=&r\"(out) : \"{rax}\"(x)); return out; }\n";
     let (output, asm_text) = run_asm_output_test("asm-early-plan", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let ascii_line = asm_text
         .lines()
         .find(|line| line.contains(".ascii \"early "))
@@ -1239,11 +1159,7 @@ fn asm_register_planner_reassigns_early_clobber_outputs() {
 fn asm_register_planner_respects_fixed_gp_constraints() {
     let source = "int f(int x) { int out; asm(\".ascii \\\"fixed %0 %1\\\"\" : \"=a\"(out) : \"D\"(x)); return out; }\n";
     let (output, asm_text) = run_asm_output_test("asm-fixed-plan", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let ascii_line = asm_text
         .lines()
         .find(|line| line.contains(".ascii \"fixed "))
@@ -1260,10 +1176,7 @@ fn asm_constraint_type_mismatch_warns_float_gp_input() {
     let (output, object_path) = run_object_test("asm-constraint-float-r-input", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1277,10 +1190,7 @@ fn asm_constraint_type_mismatch_warns_float_gp_input_syntax_only() {
     let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
     let output = run_syntax_test("asm-constraint-float-r-input-syntax", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "syntax-only compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "syntax-only compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1295,10 +1205,7 @@ fn asm_constraint_type_mismatch_warns_float_gp_output() {
     let (output, object_path) = run_object_test("asm-constraint-float-r-output", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1313,10 +1220,7 @@ fn asm_constraint_type_mismatch_warns_float_rm_input() {
     let (output, object_path) = run_object_test("asm-constraint-float-rm-input", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1330,11 +1234,7 @@ fn asm_constraint_type_validation_allows_matching_operands() {
     let source = "int f(int x, double d) { int y; double z; asm(\"\" : \"=r\"(y), \"=x\"(z) : \"r\"(x), \"x\"(d), \"m\"(d)); return y; }\n";
     let (output, object_path) = run_object_test("asm-constraint-matching", source);
     let _ = fs::remove_file(object_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -1343,10 +1243,7 @@ fn asm_constraint_type_mismatch_warns_integer_xmm_input() {
     let (output, object_path) = run_object_test("asm-constraint-int-x-input", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1361,10 +1258,7 @@ fn asm_constraint_type_mismatch_warns_explicit_gp_float_input() {
     let (output, object_path) = run_object_test("asm-constraint-float-explicit-gp", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1379,10 +1273,7 @@ fn asm_constraint_type_mismatch_warns_matching_float_to_gp_output() {
     let (output, object_path) = run_object_test("asm-constraint-float-match-gp", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "compile should warn but succeed: {stderr}"
-    );
+    assert!(output.status.success(), "compile should warn but succeed: {stderr}");
     assert!(
         stderr.contains("W0005")
             && stderr.contains("impossible constraint")
@@ -1409,10 +1300,7 @@ fn mini_asm_invalid_operands_is_hard_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "compile should fail: {stderr}");
     assert!(stderr.contains("E0311"), "stderr: {stderr}");
-    assert!(
-        stderr.contains("rdrand needs register or memory operand"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("rdrand needs register or memory operand"), "stderr: {stderr}");
     assert!(!object_path.exists(), "hard error should not write object");
 }
 
@@ -1432,11 +1320,7 @@ fn o2_dce_preserves_outputless_inline_asm() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(asm_text.contains("nop"), "asm output: {asm_text}");
 }
 
@@ -1465,15 +1349,8 @@ fn mmd_excludes_isystem_headers_from_depfile() {
     let _ = fs::remove_file(src);
     let _ = fs::remove_file(obj);
     let _ = fs::remove_file(dep);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !dep_text.contains("sys.h"),
-        "MMD should skip system header: {dep_text}"
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(!dep_text.contains("sys.h"), "MMD should skip system header: {dep_text}");
 }
 
 #[test]
@@ -1495,16 +1372,9 @@ fn flto_summary_includes_function_size() {
     let obj_bytes = fs::read(&obj_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(obj_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let text = String::from_utf8_lossy(&obj_bytes);
-    assert!(
-        text.contains("helper:"),
-        "LTO summary missing helper: {text}"
-    );
+    assert!(text.contains("helper:"), "LTO summary missing helper: {text}");
 }
 
 #[test]
@@ -1522,11 +1392,7 @@ int main(void) { return 0; }\n";
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -1551,11 +1417,7 @@ int main(void) { return classify('5'); }\n";
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// Switch/case range comparison correctness:
@@ -1569,10 +1431,7 @@ fn switch_range_comparison_correctness() {
     let src = include_str!("fixtures/c/switch_range_correctness.c");
     let (out, exe) = run_compile_and_run("switch-range-correctness", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "switch range correctness compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "switch range correctness compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "switch range correctness test failed (rc={rc})");
@@ -1616,16 +1475,9 @@ fn debug_sections_emitted_with_g_flag() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj_str = String::from_utf8_lossy(&obj);
-    assert!(
-        obj_str.contains(".debug_info"),
-        "missing .debug_info in object"
-    );
+    assert!(obj_str.contains(".debug_info"), "missing .debug_info in object");
     assert!(obj_str.contains(".BTF"), "missing .BTF in object");
 }
 
@@ -1645,11 +1497,7 @@ fn o1_constant_folding_emits_immediate() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // 新编码: REX.W + MOV r/m64, imm32 = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]
     assert!(
         obj.windows(7)
@@ -1685,15 +1533,8 @@ fn md_dependency_file_lists_includes() {
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
     let _ = fs::remove_file(&dep_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        dep_text.contains(&hdr_name),
-        "dep file missing header: {dep_text}"
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(dep_text.contains(&hdr_name), "dep file missing header: {dep_text}");
 }
 
 #[test]
@@ -1714,16 +1555,9 @@ fn m_flag_outputs_deps_to_stdout_includes_system_headers() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let _ = fs::remove_dir_all(&inc);
     let _ = fs::remove_file(&src);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // -M 应包含系统头文件
-    assert!(
-        stdout.contains("sys.h"),
-        "-M should include system headers: {stdout}"
-    );
+    assert!(stdout.contains("sys.h"), "-M should include system headers: {stdout}");
     // 输出应包含目标名 (默认 stem.o)
     let stem = src.file_stem().unwrap().to_str().unwrap();
     assert!(
@@ -1750,16 +1584,9 @@ fn mm_flag_outputs_deps_excludes_system_headers() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let _ = fs::remove_dir_all(&inc);
     let _ = fs::remove_file(&src);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // -MM 应排除系统头文件
-    assert!(
-        !stdout.contains("sys.h"),
-        "-MM should exclude system headers: {stdout}"
-    );
+    assert!(!stdout.contains("sys.h"), "-MM should exclude system headers: {stdout}");
 }
 
 #[test]
@@ -1781,16 +1608,9 @@ fn mq_flag_quotes_dollar_in_target() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dep);
     let _ = fs::remove_file(dir.join(format!("dcc-mq-{}.o", std::process::id())));
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // -MQ: $ 应被转义为 $$, Make 读取时还原为 $
-    assert!(
-        dep_text.contains("foo$$bar.o:"),
-        "-MQ should escape $ to $$: {dep_text}"
-    );
+    assert!(dep_text.contains("foo$$bar.o:"), "-MQ should escape $ to $$: {dep_text}");
 }
 
 #[test]
@@ -1811,11 +1631,7 @@ fn mt_flag_uses_literal_target() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dep);
     let _ = fs::remove_file(dir.join(format!("dcc-mt-{}.o", std::process::id())));
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         dep_text.contains("custom_target.o:"),
         "-MT target should appear literally: {dep_text}"
@@ -1837,11 +1653,7 @@ fn m_flag_with_mf_writes_to_file() {
     let dep_text = fs::read_to_string(&dep).unwrap_or_default();
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dep);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // -M 加 -MF 应写入文件而非 stdout
     assert!(!dep_text.is_empty(), "-M -MF should write deps to file");
     let stem = src.file_stem().unwrap().to_str().unwrap();
@@ -1860,11 +1672,8 @@ fn dep_file_uses_backslash_continuations() {
     let obj_path = dir.join(format!("dcc-depcont-{}.o", std::process::id()));
     let dep_path = dir.join(format!("dcc-depcont-{}.d", std::process::id()));
     fs::write(&hdr_path, "#define V 1\n").unwrap();
-    fs::write(
-        &src_path,
-        format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr),
-    )
-    .unwrap();
+    fs::write(&src_path, format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr))
+        .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-MD", "-MF"])
         .arg(&dep_path)
@@ -1878,19 +1687,12 @@ fn dep_file_uses_backslash_continuations() {
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
     let _ = fs::remove_file(&dep_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // GCC 兼容格式: 所有非末行应以 \ 续行符结尾
     let lines: Vec<&str> = dep_text.lines().collect();
     if lines.len() > 1 {
         for line in &lines[..lines.len() - 1] {
-            assert!(
-                line.ends_with('\\'),
-                "dep line should end with \\: {line:?}"
-            );
+            assert!(line.ends_with('\\'), "dep line should end with \\: {line:?}");
         }
     }
 }
@@ -1904,11 +1706,8 @@ fn dep_file_mp_emits_phony_targets() {
     let obj_path = dir.join(format!("dcc-depmp-{}.o", std::process::id()));
     let dep_path = dir.join(format!("dcc-depmp-{}.d", std::process::id()));
     fs::write(&hdr_path, "#define V 2\n").unwrap();
-    fs::write(
-        &src_path,
-        format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr),
-    )
-    .unwrap();
+    fs::write(&src_path, format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr))
+        .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-MD", "-MP", "-MF"])
         .arg(&dep_path)
@@ -1922,11 +1721,7 @@ fn dep_file_mp_emits_phony_targets() {
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
     let _ = fs::remove_file(&dep_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // -MP: 每个头文件应有 phony 目标 (hdr:)
     assert!(
         dep_text.contains(&format!("{}:", hdr)),
@@ -1950,11 +1745,7 @@ fn sanitizer_metadata_section_emitted() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         String::from_utf8_lossy(&obj).contains(".dcc.san_info"),
         "missing sanitizer metadata section"
@@ -1978,11 +1769,7 @@ fn sanitizer_prologue_in_all_functions() {
     let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(asm.matches("__asan_init").count(), 1, "TU init once: {asm}");
     assert!(
         asm.matches("__sanitizer_cov_trace_pc").count() >= 2,
@@ -2008,19 +1795,9 @@ fn kasan_stack_redzone_poison_unpoison() {
     let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        asm.contains("__asan_poison_memory_region"),
-        "missing poison call: {asm}"
-    );
-    assert!(
-        asm.contains("__asan_unpoison_memory_region"),
-        "missing unpoison call: {asm}"
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm.contains("__asan_poison_memory_region"), "missing poison call: {asm}");
+    assert!(asm.contains("__asan_unpoison_memory_region"), "missing unpoison call: {asm}");
 }
 
 /// KASAN 全局变量红区: -fsanitize=address 时全局变量后应有 32 字节填充
@@ -2051,11 +1828,7 @@ fn kasan_global_redzone_padding() {
             .arg(&source_path)
             .output()
             .expect("run dcc");
-        assert!(
-            o.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&o.stderr)
-        );
+        assert!(o.status.success(), "stderr: {}", String::from_utf8_lossy(&o.stderr));
         fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0)
     };
     let _ = fs::remove_file(&source_path);
@@ -2083,18 +1856,11 @@ fn eh_frame_with_frame_pointer() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj_str = String::from_utf8_lossy(&obj);
     assert!(obj_str.contains(".eh_frame"), "missing .eh_frame");
     // ORC 由 objtool 生成, dcc 只负责 .eh_frame
-    assert!(
-        !obj_str.contains(".orc_unwind_ip"),
-        "dcc should not emit .orc_unwind_ip"
-    );
+    assert!(!obj_str.contains(".orc_unwind_ip"), "dcc should not emit .orc_unwind_ip");
 }
 
 #[test]
@@ -2114,11 +1880,7 @@ fn global_asm_exports_symbol() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         String::from_utf8_lossy(&obj).contains("global_marker"),
         "global asm symbol not exported"
@@ -2141,11 +1903,7 @@ fn flto_section_emitted() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         String::from_utf8_lossy(&obj).contains(".llvm.lto"),
         "missing LTO summary section"
@@ -2167,11 +1925,7 @@ int main(void) { return 0; }\n";
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2193,11 +1947,7 @@ int main(void) { return 0; }\n";
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2212,11 +1962,7 @@ fn hosted_stdio_header_parses() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2237,11 +1983,7 @@ int main(void) { return 0; }\n";
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2263,11 +2005,7 @@ int main(void) { return use_uuid((void *)0); }\n";
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2295,11 +2033,7 @@ int main(void) { return devtable[0].id_size == 24 ? 0 : 1; }\n";
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2308,11 +2042,8 @@ fn stdbool_before_linux_stddef_enum_parses() {
     let hdr_dir = dir.join(format!("dcc-stddef-{}", std::process::id()));
     let linux_dir = hdr_dir.join("linux");
     fs::create_dir_all(&linux_dir).expect("create linux include dir");
-    fs::write(
-        linux_dir.join("stddef.h"),
-        "enum {\n\tfalse = 0,\n\ttrue = 1\n};\n",
-    )
-    .expect("write stddef stub");
+    fs::write(linux_dir.join("stddef.h"), "enum {\n\tfalse = 0,\n\ttrue = 1\n};\n")
+        .expect("write stddef stub");
     let source_path = dir.join(format!("dcc-stdbool-std-{}.c", std::process::id()));
     fs::write(
         &source_path,
@@ -2328,11 +2059,7 @@ fn stdbool_before_linux_stddef_enum_parses() {
         .expect("run dcc");
     let _ = fs::remove_dir_all(hdr_dir);
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -2351,11 +2078,7 @@ fn btf_section_contains_struct_kind() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         obj.windows(4).any(|w| {
             let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
@@ -2381,11 +2104,7 @@ fn eh_frame_larger_than_cie_only() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj_str = String::from_utf8_lossy(&obj);
     let start = obj_str.find(".eh_frame").expect(".eh_frame name");
     let tail = &obj_str[start..start.saturating_add(256).min(obj_str.len())];
@@ -2412,11 +2131,7 @@ fn flto_relocatable_link_merges_section() {
             .arg(src)
             .output()
             .expect("compile lto object");
-        assert!(
-            out.status.success(),
-            "compile: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     }
     let link = Command::new(dcc)
         .args(["-r", "-flto", "-o"])
@@ -2431,11 +2146,7 @@ fn flto_relocatable_link_merges_section() {
     let _ = fs::remove_file(&a_o);
     let _ = fs::remove_file(&b_o);
     let _ = fs::remove_file(&out_o);
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     assert!(
         String::from_utf8_lossy(&merged).contains(".llvm.lto"),
         "linked object missing merged .llvm.lto"
@@ -2449,11 +2160,7 @@ fn generic_with_ternary_controlling_expr_compiles() {
     let source = include_str!("fixtures/c/generic_tern.c");
     let (output, obj) = run_object_test("generic-ternary", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// `_Generic` 指针按 pointee 精确匹配，char* 与 int* 不得互匹配。
@@ -2462,11 +2169,7 @@ fn generic_pointer_precise_match_compiles() {
     let source = include_str!("fixtures/c/generic_ptr.c");
     let (output, obj) = run_object_test("generic-pointer", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 内联 asm 约束 (=r / +m / memory clobber) 编译通过。
@@ -2475,11 +2178,7 @@ fn asm_constraints_compile() {
     let source = include_str!("../examples/assembly/constraints.c");
     let (output, obj) = run_object_test("asm-constraints", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// SysV va_list GP + SSE 浮点路径编译通过。
@@ -2488,11 +2187,7 @@ fn va_list_sse_compiles() {
     let source = include_str!("../examples/advanced/va_list.c");
     let (output, obj) = run_object_test("va-list-sse", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// -O2 常量分支折叠后 main 直接返回常量。
@@ -2510,11 +2205,7 @@ fn o2_constant_branch_fold() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let _ = fs::remove_file(object_path);
 }
 
@@ -2541,11 +2232,7 @@ void use_it(void) { (void)slot_after_return(0, 1); }
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let _ = fs::remove_file(asm_path);
 }
 
@@ -2569,11 +2256,7 @@ fn aarch64_hello_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -2600,11 +2283,7 @@ fn aarch64_ir_add_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -2655,26 +2334,15 @@ fn parallel_codegen_o2_multi_function() {
         "parallel stderr: {}",
         String::from_utf8_lossy(&par.stderr)
     );
-    assert!(
-        ser.status.success(),
-        "serial stderr: {}",
-        String::from_utf8_lossy(&ser.stderr)
-    );
+    assert!(ser.status.success(), "serial stderr: {}", String::from_utf8_lossy(&ser.stderr));
     let par_bytes = fs::read(&parallel_path).expect("read parallel");
     let ser_bytes = fs::read(&serial_path).expect("read serial");
     let _ = fs::remove_file(&parallel_path);
     let _ = fs::remove_file(&serial_path);
     assert_eq!(&par_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(&ser_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
-    assert_eq!(
-        par_bytes.len(),
-        ser_bytes.len(),
-        "parallel/serial .text size mismatch"
-    );
-    assert_eq!(
-        par_bytes, ser_bytes,
-        "parallel and serial objects must match"
-    );
+    assert_eq!(par_bytes.len(), ser_bytes.len(), "parallel/serial .text size mismatch");
+    assert_eq!(par_bytes, ser_bytes, "parallel and serial objects must match");
 }
 
 #[test]
@@ -2821,11 +2489,7 @@ fn aarch64_if_while_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -2864,10 +2528,7 @@ fn aarch64_nested_sret_cross_compile() {
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
     // 验证代码尺寸 > 200 字节 (多层 sret 需要足够的 memcpy 指令)
-    assert!(
-        bytes.len() > 200,
-        "expected substantial code for nested sret"
-    );
+    assert!(bytes.len() > 200, "expected substantial code for nested sret");
 }
 
 /// AArch64: TLS 变量交叉编译 (TLSDESC 重定位).
@@ -2964,11 +2625,7 @@ fn riscv64_hello_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3024,11 +2681,7 @@ fn riscv64_ir_global_cross_compile() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-rv-global-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-rv-global-{}.o", std::process::id()));
-    fs::write(
-        &source_path,
-        "int g = 7;\nint main(void) { return 10 + 32 + g; }\n",
-    )
-    .expect("write");
+    fs::write(&source_path, "int g = 7;\nint main(void) { return 10 + 32 + g; }\n").expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "--target",
@@ -3042,11 +2695,7 @@ fn riscv64_ir_global_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3074,11 +2723,7 @@ fn mips_hello_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3110,11 +2755,7 @@ fn mips_if_while_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3140,11 +2781,7 @@ fn arm_hello_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3176,11 +2813,7 @@ fn arm_if_while_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3206,11 +2839,7 @@ fn mips64_hello_cross_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -3234,11 +2863,7 @@ fn stmt_expr_trailing_call_compiles() {
     let source = include_str!("fixtures/c/stmt_call.c");
     let (output, obj) = run_object_test("stmt-expr-call", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// __typeof__(struct T) 类型推导
@@ -3247,11 +2872,7 @@ fn typeof_struct_compiles() {
     let source = include_str!("fixtures/c/typeof_struct.c");
     let (output, obj) = run_object_test("typeof-struct", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// percpu 声明: section 字符串拼接 + __aligned__((expr))
@@ -3260,11 +2881,7 @@ fn percpu_decl_compiles() {
     let source = include_str!("fixtures/c/percpu.c");
     let (output, obj) = run_object_test("percpu-decl", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// Per-CPU 变量完整支持: __percpu 限定符, __seg_gs/__seg_fs 指针,
@@ -3280,10 +2897,7 @@ fn percpu_access_runtime() {
     let src = include_str!("fixtures/c/percpu_access.c");
     let (out, exe) = run_compile_and_run("percpu-access", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "percpu access compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "percpu access compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "percpu access runtime check failed");
@@ -3304,10 +2918,7 @@ fn percpu_full_support_compiles() {
     let src = include_str!("fixtures/c/percpu_full.c");
     let (out, exe) = run_compile_and_run("percpu-full", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "percpu full compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "percpu full compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "percpu full runtime check failed");
@@ -3321,10 +2932,7 @@ fn percpu_offset_compiles() {
     let src = include_str!("fixtures/c/percpu_offset.c");
     let (out, obj) = run_object_test("percpu-offset", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "percpu offset compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "percpu offset compile failed: {stderr}");
     let _ = fs::remove_file(obj);
 }
 
@@ -3334,11 +2942,7 @@ fn section_concat_attribute_compiles() {
     let source = include_str!("fixtures/c/section.c");
     let (output, obj) = run_object_test("section-concat", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 指定初始化器 + asm inline（内核 GDT/jump_label 常见模式）
@@ -3347,11 +2951,7 @@ fn gdt_designated_init_and_asm_inline_compiles() {
     let source = include_str!("fixtures/c/designated.c");
     let (output, obj) = run_object_test("gdt-designated-init", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 逗号分隔位域: u16 a:8, b:4, c:1（desc_struct 模式）
@@ -3360,11 +2960,7 @@ fn bitfield_comma_separated_compiles() {
     let source = include_str!("fixtures/c/bitfield.c");
     let (output, obj) = run_object_test("bitfield-comma", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// asm __inline volatile(...) 限定符
@@ -3373,11 +2969,7 @@ fn asm_inline_qualifier_compiles() {
     let source = include_str!("fixtures/c/asm_inline.c");
     let (output, obj) = run_object_test("asm-inline-qual", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 结构体空字段: struct { int a; ; }（lockdep class 宏）
@@ -3386,11 +2978,7 @@ fn struct_empty_field_compiles() {
     let source = include_str!("fixtures/c/struct_empty.c");
     let (output, obj) = run_object_test("struct-empty-field", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// GNU __auto_type 类型推导
@@ -3399,11 +2987,7 @@ fn auto_type_decl_compiles() {
     let source = include_str!("fixtures/c/auto_type.c");
     let (output, obj) = run_object_test("auto-type", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// _Static_assert + __builtin_offsetof 编译期求值
@@ -3411,11 +2995,7 @@ fn auto_type_decl_compiles() {
 fn static_assert_offsetof_compiles() {
     let source = include_str!("fixtures/c/sassert_off.c");
     let output = run_syntax_test("static-assert-offsetof", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// object-like 宏别名 + 函数式宏链式展开
@@ -3423,11 +3003,7 @@ fn static_assert_offsetof_compiles() {
 fn div_round_up_macro_expands() {
     let source = include_str!("fixtures/c/div_round_up.c");
     let output = run_syntax_test("div-round-up", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 结构体多维数组字段
@@ -3435,11 +3011,7 @@ fn div_round_up_macro_expands() {
 fn multidim_array_field_compiles() {
     let source = include_str!("fixtures/c/multidim.c");
     let output = run_syntax_test("multidim-array-field", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// void __attribute__(...) *fn(): 属性在返回类型与指针声明符之间
@@ -3447,11 +3019,7 @@ fn multidim_array_field_compiles() {
 fn attr_ptr_func_decl_compiles() {
     let source = include_str!("fixtures/c/attr_ptr.c");
     let output = run_syntax_test("attr-ptr-func", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// __attribute__ propagation: function-pointer, enum, struct, typedef positions
@@ -3508,10 +3076,7 @@ fn noreturn_trap_emits_ud2_compiles() {
         .find("\n\tret")
         .expect("ret not found in regular fn");
     let pre = &regular_body[..ret_pos];
-    assert!(
-        !pre.contains("ud2"),
-        "regular_add should NOT have ud2 but does; pre=\n{pre}"
-    );
+    assert!(!pre.contains("ud2"), "regular_add should NOT have ud2 but does; pre=\n{pre}");
 }
 
 /// 从汇编文本中提取 `funcname:` 到下一个 `.size funcname, .-funcname` 的内容
@@ -3534,11 +3099,7 @@ fn extract_function_body(asm: &str, name: &str) -> String {
 fn vfs_pressure_stmt_expr_compiles() {
     let source = include_str!("fixtures/c/stmt_vfs.c");
     let output = run_syntax_test("vfs-pressure", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// GNU 省略中间操作数的三元运算符 x ?: y
@@ -3546,11 +3107,7 @@ fn vfs_pressure_stmt_expr_compiles() {
 fn gnu_elvis_operator_compiles() {
     let source = include_str!("fixtures/c/elvis.c");
     let output = run_syntax_test("gnu-elvis", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 零参 function-like 宏 current_thread_info() + bitop 链
@@ -3558,11 +3115,7 @@ fn gnu_elvis_operator_compiles() {
 fn current_thread_info_macro_compiles() {
     let source = include_str!("fixtures/c/thread_info.c");
     let output = run_syntax_test("current-thread-info", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 三元表达式指针分支可被解引用
@@ -3570,11 +3123,7 @@ fn current_thread_info_macro_compiles() {
 fn ternary_ptr_deref_compiles() {
     let source = include_str!("fixtures/c/ternary_ptr.c");
     let output = run_syntax_test("ternary-ptr-deref", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 三元表达式中 post-increment 副作用须正确;
@@ -3612,11 +3161,7 @@ fn chained_assignment_value_truncated_to_lvalue_type() {
 fn asm_local_label_compiles() {
     let source = include_str!("fixtures/c/asm_local.c");
     let (output, _obj) = run_object_test("asm-local-label", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 同行局部标签 N:insn（如 1:jmp 2f）
@@ -3624,11 +3169,7 @@ fn asm_local_label_compiles() {
 fn asm_label_insn_same_line_compiles() {
     let source = include_str!("fixtures/c/asm_label.c");
     let (output, _obj) = run_object_test("asm-label-insn", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// struct __attribute__((__may_alias__)) name
@@ -3636,11 +3177,7 @@ fn asm_label_insn_same_line_compiles() {
 fn may_alias_struct_compiles() {
     let source = include_str!("fixtures/c/may_alias.c");
     let (output, _obj) = run_object_test("may-alias-struct", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// __seg_fs / __seg_gs (and __seg_{cs,ds,es,ss}) 地址空间限定符解析
@@ -3667,14 +3204,8 @@ fn seg_qualifier_compiles_and_runs() {
         "seg_qualifier asm compile failed: {}",
         String::from_utf8_lossy(&asm_out.stderr)
     );
-    assert!(
-        !asm_text.contains("%fs:"),
-        "asm output should not contain %fs: segment prefix"
-    );
-    assert!(
-        !asm_text.contains("%gs:"),
-        "asm output should not contain %gs: segment prefix"
-    );
+    assert!(!asm_text.contains("%fs:"), "asm output should not contain %fs: segment prefix");
+    assert!(!asm_text.contains("%gs:"), "asm output should not contain %gs: segment prefix");
 
     // 然后编译运行, 验证可执行.
     let (output, exe) = run_compile_and_run("seg-qualifier", source);
@@ -3695,11 +3226,7 @@ fn seg_qualifier_compiles_and_runs() {
 fn nofail_stringify_compiles() {
     let source = include_str!("fixtures/c/stringify.c");
     let (output, _obj) = run_object_test("nofail-stringify", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// GCC 兼容：相同类型的重复 typedef 不报错
@@ -3707,11 +3234,7 @@ fn nofail_stringify_compiles() {
 fn compat_typedef_redefinition_compiles() {
     let source = include_str!("fixtures/c/typedef.c");
     let (output, _obj) = run_object_test("compat-typedef", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 局部变量可遮蔽全局函数名（index/basename 等 libc 符号）
@@ -3719,11 +3242,7 @@ fn compat_typedef_redefinition_compiles() {
 fn local_shadows_libc_function_name() {
     let source = include_str!("fixtures/c/shadow.c");
     let (output, exe) = run_compile_and_run("shadow-libc-name", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -3732,11 +3251,7 @@ fn local_shadows_libc_function_name() {
 fn typeof_generic_read_once_compiles() {
     let source = include_str!("fixtures/c/typeof_generic.c");
     let (output, exe) = run_compile_and_run("typeof-generic-read-once", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -3745,11 +3260,7 @@ fn typeof_generic_read_once_compiles() {
 fn asm_goto_hash_comment_compiles() {
     let source = include_str!("fixtures/c/asm_goto.c");
     let (output, exe) = run_compile_and_run("asm-goto-hash-comment", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -3758,11 +3269,7 @@ fn asm_goto_hash_comment_compiles() {
 fn asm_goto_output_writeback() {
     let source = include_str!("fixtures/c/asm_goto_outputs.c");
     let (output, exe) = run_compile_and_run("asm-goto-output-writeback", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0, "asm goto output writeback test failed");
 }
 
@@ -3771,11 +3278,7 @@ fn asm_goto_output_writeback() {
 fn vector_binop_non_ident_run_returns_zero() {
     let source = include_str!("fixtures/c/vec_binop.c");
     let (output, exe) = run_compile_and_run("vector-binop-non-ident", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -3784,11 +3287,7 @@ fn vector_binop_non_ident_run_returns_zero() {
 fn vector_global_copy_compiles() {
     let source = include_str!("fixtures/c/vec_global.c");
     let (output, _obj) = run_object_test("vector-global", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 全局向量初始化 + 运行时求值（期望 exit 0）
@@ -3839,17 +3338,14 @@ fn vector_small_return_uses_width_aware_xmm_load() {
     assert!(dump.status.success(), "objdump -d failed");
     let disasm = String::from_utf8_lossy(&dump.stdout);
     for func in ["ret_v1qu", "ret_v1hu", "ret_v1ui", "ret_v2hu", "ret_v4qu"] {
-        let start = disasm.find(&format!("<{func}>:")).unwrap_or_else(|| {
-            panic!("missing function {func} in disassembly:\n{disasm}")
-        });
+        let start = disasm
+            .find(&format!("<{func}>:"))
+            .unwrap_or_else(|| panic!("missing function {func} in disassembly:\n{disasm}"));
         let rest = &disasm[start..];
         let end = rest.find("\n\n").unwrap_or(rest.len());
         let body = &rest[..end];
         assert!(body.contains("movd"), "{func} should load via movd:\n{body}");
-        assert!(
-            !body.contains("movsd"),
-            "{func} must not read 8 bytes with movsd:\n{body}"
-        );
+        assert!(!body.contains("movsd"), "{func} must not read 8 bytes with movsd:\n{body}");
     }
 }
 
@@ -3865,16 +3361,13 @@ fn s_output_disassembles_movd_without_desync() {
         String::from_utf8_lossy(&output.stderr)
     );
     for func in ["ret_v1qu", "ret_v1hu", "ret_v1ui", "ret_v2hu", "ret_v4qu"] {
-        let start = asm_text.find(&format!("{func}:")).unwrap_or_else(|| {
-            panic!("missing function {func} in -S output:\n{asm_text}")
-        });
+        let start = asm_text
+            .find(&format!("{func}:"))
+            .unwrap_or_else(|| panic!("missing function {func} in -S output:\n{asm_text}"));
         let rest = &asm_text[start..];
         let end = rest.find("\n\n").unwrap_or(rest.len());
         let body = &rest[..end];
-        assert!(
-            body.contains("movd"),
-            "{func} should disassemble to movd in -S:\n{body}"
-        );
+        assert!(body.contains("movd"), "{func} should disassemble to movd in -S:\n{body}");
         assert!(
             !body.contains("shift"),
             "{func} -S output is desynced (spurious shift):\n{body}"
@@ -3916,11 +3409,7 @@ fn s_output_roundtrips_through_gas_for_small_vector() {
         .arg(&source_path)
         .output()
         .expect("run dcc -S");
-    assert!(
-        s.status.success(),
-        "-S compile stderr: {}",
-        String::from_utf8_lossy(&s.stderr)
-    );
+    assert!(s.status.success(), "-S compile stderr: {}", String::from_utf8_lossy(&s.stderr));
 
     let assemble = Command::new("as")
         .args(["-o"])
@@ -3942,9 +3431,9 @@ fn s_output_roundtrips_through_gas_for_small_vector() {
             .expect("objdump -d");
         assert!(out.status.success(), "objdump -d failed");
         let text = String::from_utf8_lossy(&out.stdout);
-        let start = text.find(&format!("<{func}>:")).unwrap_or_else(|| {
-            panic!("missing {func} in {}:\n{text}", obj.display())
-        });
+        let start = text
+            .find(&format!("<{func}>:"))
+            .unwrap_or_else(|| panic!("missing {func} in {}:\n{text}", obj.display()));
         let rest = &text[start..];
         let end = rest.find("\n\n").unwrap_or(rest.len());
         rest[..end].to_string()
@@ -4200,10 +3689,7 @@ fn vector_size_cast_in_expression_run_returns_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "vector_size_cast_in_expression should return 0, got {rc}"
-    );
+    assert_eq!(rc, 0, "vector_size_cast_in_expression should return 0, got {rc}");
 }
 
 /// __builtin_object_size FORTIFY 模式（数组/成员）
@@ -4211,11 +3697,7 @@ fn vector_size_cast_in_expression_run_returns_zero() {
 fn builtin_object_size_fortify_run_returns_zero() {
     let source = include_str!("fixtures/c/obj_size.c");
     let (output, exe) = run_compile_and_run("builtin-os-fortify", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -4224,11 +3706,7 @@ fn builtin_object_size_fortify_run_returns_zero() {
 fn builtin_apply_return_run_returns_zero() {
     let source = include_str!("fixtures/c/apply_ret.c");
     let (output, exe) = run_compile_and_run("builtin-apply-return", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0);
 }
 
@@ -4237,11 +3715,7 @@ fn builtin_apply_return_run_returns_zero() {
 fn builtin_prefetch_compiles() {
     let source = include_str!("fixtures/c/prefetch.c");
     let (output, _obj) = run_object_test("builtin-prefetch", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// inline asm: lock cmpxchg 内存操作数
@@ -4249,11 +3723,7 @@ fn builtin_prefetch_compiles() {
 fn asm_cmpxchg_mem_compiles() {
     let source = include_str!("fixtures/c/asm_cmpxchg.c");
     let (output, _obj) = run_object_test("asm-cmpxchg-mem", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// inline asm: cmpxchg8b 32-bit atomic (64-bit operand)
@@ -4274,7 +3744,10 @@ fn asm_pushfl_iret_has_opcode_and_disassembly() {
     // iret/iretl 在各自的 asm volatile 中, 之间有 mfence 屏障
     assert_bytes_present(&text, &[0xcf], "iret opcode");
     // 至少两个 iret (0xcf) 存在于 .text 中
-    assert!(text.windows(1).filter(|w| w[0] == 0xcf).count() >= 2, "need at least 2 iret opcodes");
+    assert!(
+        text.windows(1).filter(|w| w[0] == 0xcf).count() >= 2,
+        "need at least 2 iret opcodes"
+    );
     assert_disasm_present(&disasm, "pushf");
     assert_disasm_present(&disasm, "popf");
     assert_disasm_present(&disasm, "iret");
@@ -4287,10 +3760,7 @@ fn asm_cmov_full_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-cmov-full", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
 }
 
 /// inline asm: bare in/out + memory-indirect port forms
@@ -4351,10 +3821,7 @@ fn asm_pushsection_data_compiles_with_sections() {
     let (output, _obj) = run_object_test("asm-pushsection-data", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
 }
 
 /// 可执行 .pushsection (.fixup / .altinstr_replacement): 代码必须汇编进
@@ -4365,20 +3832,14 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
     let (output, obj_path) = run_object_test("asm-pushsection-exec", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
     let obj = std::fs::read(&obj_path).expect("read object file");
     let _ = std::fs::remove_file(&obj_path);
     let secs = elf64_sections(&obj);
     // .fixup 含 mov + ret 机器码, 必须非零且可执行
     let (ty, flags, size) = secs.get(".fixup").copied().expect("missing .fixup section");
     assert_eq!(ty, 1, ".fixup must be SHT_PROGBITS");
-    assert!(
-        flags & 0x4 != 0,
-        ".fixup must have SHF_EXECINSTR (got flags {flags:#x})"
-    );
+    assert!(flags & 0x4 != 0, ".fixup must have SHF_EXECINSTR (got flags {flags:#x})");
     assert!(size >= 5, ".fixup code dropped (size {size})");
     // .altinstr_replacement 含 nop, 非零且可执行
     let (_, flags, size) = secs
@@ -4389,10 +3850,7 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
         flags & 0x4 != 0,
         ".altinstr_replacement must have SHF_EXECINSTR (got flags {flags:#x})"
     );
-    assert!(
-        size >= 1,
-        ".altinstr_replacement code dropped (size {size})"
-    );
+    assert!(size >= 1, ".altinstr_replacement code dropped (size {size})");
     // 数据节引用替换代码标签: .altinstructions 需要重定位节
     assert!(
         secs.contains_key(".rela.altinstructions"),
@@ -4449,10 +3907,7 @@ fn asm_nested_pushsection_compiles_with_sections() {
     let (output, obj_path) = run_object_test("asm-nested-pushsection", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
     let obj = std::fs::read(&obj_path).expect("read object file");
     let _ = std::fs::remove_file(&obj_path);
     let secs = elf64_sections(&obj);
@@ -4462,17 +3917,11 @@ fn asm_nested_pushsection_compiles_with_sections() {
         .copied()
         .expect("missing __ex_table section");
     assert_eq!(ty, 1, "__ex_table must be SHT_PROGBITS");
-    assert!(
-        size >= 12,
-        "__ex_table too small (size {size}), expected at least 12 bytes"
-    );
+    assert!(size >= 12, "__ex_table too small (size {size}), expected at least 12 bytes");
     assert_eq!(size % 12, 0, "__ex_table size {size} not a multiple of 12");
     // .fixup should be executable
     let (_, flags, size) = secs.get(".fixup").copied().expect("missing .fixup section");
-    assert!(
-        flags & 0x4 != 0,
-        ".fixup must have SHF_EXECINSTR (got flags {flags:#x})"
-    );
+    assert!(flags & 0x4 != 0, ".fixup must have SHF_EXECINSTR (got flags {flags:#x})");
     assert!(size >= 5, ".fixup code dropped (size {size})");
 }
 
@@ -4536,11 +3985,7 @@ fn orc_unwind_sections_not_emitted_by_dcc() {
         .arg(&source_path)
         .output()
         .expect("run dcc");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
@@ -4575,11 +4020,7 @@ fn orc_sections_not_emitted_when_unwind_tables_disabled() {
         .arg(&source_path)
         .output()
         .expect("run dcc");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
@@ -4615,10 +4056,7 @@ fn func_symbol_size_non_zero_for_defined_functions() {
     let obj_data = std::fs::read(&obj_path).expect("read object file");
     let obj_str = String::from_utf8_lossy(&obj_data);
     assert!(obj_str.contains("weak_func"), "missing weak_func symbol");
-    assert!(
-        obj_str.contains("static_func"),
-        "missing static_func symbol"
-    );
+    assert!(obj_str.contains("static_func"), "missing static_func symbol");
     assert!(obj_str.contains("real_func"), "missing real_func symbol");
     assert!(obj_str.contains("alias_func"), "missing alias_func symbol");
     // 定义型函数符号 (weak/static/global/alias) st_size 必须非零
@@ -4714,10 +4152,7 @@ fn asm_section_previous_vdso_pattern() {
     let (output, obj_path) = run_object_test("asm-section-previous-vdso", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
     let obj_data = std::fs::read(&obj_path).expect("read object file");
     // .altinstr_replacement 必须存在且包含可执行代码
     let alt_sec = elf64_section_data(&obj_data, ".altinstr_replacement")
@@ -4728,8 +4163,7 @@ fn asm_section_previous_vdso_pattern() {
         .expect("missing .altinstructions (previous directive dropped)");
     assert!(alt_instr.len() >= 8, ".altinstructions too small: {}", alt_instr.len());
     // __bug_table 必须存在
-    let bug_table = elf64_section_data(&obj_data, "__bug_table")
-        .expect("missing __bug_table");
+    let bug_table = elf64_section_data(&obj_data, "__bug_table").expect("missing __bug_table");
     assert!(!bug_table.is_empty(), "__bug_table empty");
     // __ex_table 必须存在 (嵌套 pushsection 在 section 上下文中)
     let ex_table = elf64_section_data(&obj_data, "__ex_table")
@@ -4742,13 +4176,10 @@ fn asm_section_previous_vdso_pattern() {
         .output()
         .expect("objdump -r");
     let relocs = String::from_utf8_lossy(&dump.stdout);
-    let has_abs32 = relocs.lines().any(|line| {
-        line.contains("R_X86_64_32") && !line.contains("R_X86_64_32S")
-    });
-    assert!(
-        !has_abs32,
-        "found R_X86_64_32 absolute relocation (PIC incompatible): {relocs}"
-    );
+    let has_abs32 = relocs
+        .lines()
+        .any(|line| line.contains("R_X86_64_32") && !line.contains("R_X86_64_32S"));
+    assert!(!has_abs32, "found R_X86_64_32 absolute relocation (PIC incompatible): {relocs}");
     let _ = std::fs::remove_file(&obj_path);
 }
 
@@ -4762,11 +4193,8 @@ asm(".globl empty_asm_func\n"
 int normal_return(int x) { return x + 1; }
 void inline_asm_return(void) { asm volatile("ret"); }
 "#;
-    let (output, obj_path) = run_object_test_flags(
-        "function-return-thunk",
-        source,
-        &["-mfunction-return=thunk-extern"],
-    );
+    let (output, obj_path) =
+        run_object_test_flags("function-return-thunk", source, &["-mfunction-return=thunk-extern"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
 
@@ -4781,10 +4209,7 @@ void inline_asm_return(void) { asm volatile("ret"); }
         let insn = line.split('\t').next_back().unwrap_or("").trim();
         insn == "ret" || insn == "retq"
     });
-    assert!(
-        !has_naked_ret,
-        "rethunk .text must not contain naked ret: {disasm}"
-    );
+    assert!(!has_naked_ret, "rethunk .text must not contain naked ret: {disasm}");
     assert!(
         disasm.contains("__x86_return_thunk"),
         "missing return thunk relocation: {disasm}"
@@ -4805,10 +4230,7 @@ fn function_return_keep_preserves_plain_ret() {
     assert!(output.status.success(), "stderr: {stderr}");
     let obj_data = std::fs::read(&obj_path).expect("read object file");
     let text = elf64_section_data(&obj_data, ".text").expect("missing .text");
-    assert!(
-        text.contains(&0xC3),
-        "keep mode should preserve plain ret bytes"
-    );
+    assert!(text.contains(&0xC3), "keep mode should preserve plain ret bytes");
     let _ = std::fs::remove_file(&obj_path);
 }
 
@@ -4819,10 +4241,7 @@ fn asm_extended_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-extended", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// __int128 SysV 双寄存器传参与返回值
@@ -4830,11 +4249,7 @@ fn asm_extended_compiles_without_nop_fallback() {
 fn int128_call_abi_run_returns_zero() {
     let source = include_str!("fixtures/c/int128_abi.c");
     let (output, exe) = run_compile_and_run("int128-call-abi", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "int128_call_abi should return 0, got {rc}");
 }
@@ -4844,11 +4259,7 @@ fn int128_call_abi_run_returns_zero() {
 fn int128_mul_div_mod_run_returns_zero() {
     let source = include_str!("fixtures/c/int128_arith.c");
     let (output, exe) = run_compile_and_run("int128-mul-div-mod", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "int128_mul_div_mod should return 0, got {rc}");
 }
@@ -4858,11 +4269,7 @@ fn int128_mul_div_mod_run_returns_zero() {
 fn float_mod_run_returns_zero() {
     let source = include_str!("fixtures/c/float_mod.c");
     let (output, _exe) = run_compile_and_run("float-mod", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -4875,11 +4282,7 @@ fn float_mod_run_returns_zero() {
 fn int128_logical_run_returns_zero() {
     let source = include_str!("fixtures/c/int128_log.c");
     let (output, _exe) = run_compile_and_run("int128-logical", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -4892,11 +4295,7 @@ fn int128_logical_run_returns_zero() {
 fn asm_constraints_ext_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_constr.c");
     let (output, _exe) = run_compile_and_run("asm-constraints-ext", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -4909,11 +4308,7 @@ fn asm_constraints_ext_compiles_and_runs() {
 fn asm_constraint_ext2_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_constraint_ext2.c");
     let (output, _exe) = run_compile_and_run("asm-constraint-ext2", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -4926,11 +4321,7 @@ fn asm_constraint_ext2_compiles_and_runs() {
 fn global_indexed_run_returns_zero() {
     let source = include_str!("fixtures/c/global_idx.c");
     let (output, _exe) = run_compile_and_run("global-indexed", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -4943,11 +4334,7 @@ fn global_indexed_run_returns_zero() {
 fn vector_float_scalar_run_returns_zero() {
     let source = include_str!("fixtures/c/vec_fscalar.c");
     let (output, exe) = run_compile_and_run("vector-float-scalar", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "vector_float_scalar should return 0, got {rc}");
 }
@@ -4959,10 +4346,7 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-kernel-extra", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// mini-asm 内核扩展指令：orb/orw/cmova/clwb/invpcid/rdrand/rdseed/
@@ -4974,10 +4358,7 @@ fn asm_kernel_ext_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-kernel-ext", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// Kernel asm features: .byte multi-value, .pushsection skip,
@@ -4988,10 +4369,7 @@ fn asm_kernel_features_byte_pushsection_popcnt() {
     let (output, _obj) = run_object_test("asm-kernel-features", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected nop fallback: {stderr}");
 }
 
 /// mini-asm 补全 (高): 段寄存器 / 系统指令 / 内核启动 / 虚拟化指令
@@ -5001,10 +4379,7 @@ fn asm_paravirt_boot_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-paravirt-boot", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// 完整指令子集 (M13): AVX/AVX2/AVX-VNNI + AES-NI/SHA + FMA/F16C + TSX + AMX
@@ -5014,10 +4389,7 @@ fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-avx-aes-fma-tsx", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// x87 FPU 指令集: 无操作数指令 / 比较 / 加载存储 / 控制 / 算术 / BCD
@@ -5027,10 +4399,7 @@ fn asm_x87_fpu_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-x87-fpu", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// MMX 指令集: emms / 打包解包 / 算术 / 移位 / pshufw
@@ -5040,10 +4409,7 @@ fn asm_mmx_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-mmx", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// 字符串操作 / 循环 / 杂项指令: lodsb-w-l-q / cmpsw-l-q / scasw-l-q / loop / enter
@@ -5053,10 +4419,7 @@ fn asm_string_loop_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-string-loop", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// BMI1/BMI2 扩展: andn/bextr/blsi/blsmsk/blsr/bzhi/mulx/pdep/pext/rorx/sarx/shlx/shrx/adcx/adox
@@ -5066,10 +4429,7 @@ fn asm_bmi_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-bmi", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// Phase 2: 操作数模式补全 — 所有新加的操作数组合
@@ -5079,10 +4439,7 @@ fn asm_operand_patterns_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-operand-patterns", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// Phase 2: 远跳转/远调用 — 所有远跳转指令
@@ -5092,10 +4449,7 @@ fn asm_far_jumps_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-far-jumps", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// Phase 2: GlobalAsm/asm goto 残余 — 所有间接跳转/段前缀组合
@@ -5105,10 +4459,7 @@ fn asm_global_asm_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-global-asm", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// 扩展操作数形式: rdrand/rdseed 内存 / ljmp/lcall 无后缀 / retf/lret imm16 / TSX / AVX-imm 内存源 / pinsr*/pextr* 内存 / vpinsr*/vpextr*/vcvtps2ph 内存 / vextractpd XMM / MMX pshufw / AMX tilezero
@@ -5118,10 +4469,7 @@ fn asm_extended_forms_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-extended-forms", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// 符号操作数形式: rdrand/rdseed Sym / retf/lret Sym / ljmp Sym / AVX-imm SymDisp / MMX pshufw SymDisp / vextractps SymDisp
@@ -5131,10 +4479,7 @@ fn asm_sym_operand_forms_compiles_without_nop_fallback() {
     let (output, _obj) = run_object_test("asm-sym-operand-forms", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected mini-asm nop fallback: {stderr}"
-    );
+    assert!(!stderr.contains("emitted as nop"), "unexpected mini-asm nop fallback: {stderr}");
 }
 
 /// asm 模板修饰符完整支持: %a (地址形式) / %P (原始符号名) / %l (标签)
@@ -5143,11 +4488,7 @@ fn asm_sym_operand_forms_compiles_without_nop_fallback() {
 fn asm_template_modifiers_compile_and_run() {
     let source = include_str!("fixtures/c/asm_template_modifiers.c");
     let (output, exe) = run_compile_and_run("asm-template-modifiers", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(run_exe(&exe), 0, "asm template modifiers test failed");
 }
 
@@ -5205,10 +4546,7 @@ fn asm_warning_location_maps_to_real_source_line() {
     fs::write(&hdr_path, hdr).expect("write header fixture");
     fs::write(
         &src_path,
-        format!(
-            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
-            hdr_path.display()
-        ),
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
     )
     .expect("write C fixture");
     let obj_path = dir.join(format!("{tag}.o"));
@@ -5247,10 +4585,7 @@ fn asm_warning_location_stable_across_header_cache_replay() {
     fs::write(&hdr_path, include_str!("fixtures/c/asm_warn_loc.h")).expect("write header fixture");
     fs::write(
         &src_path,
-        format!(
-            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
-            hdr_path.display()
-        ),
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
     )
     .expect("write C fixture");
     let run = || {
@@ -5270,11 +4605,7 @@ fn asm_warning_location_stable_across_header_cache_replay() {
     assert!(!cold.status.success(), "cold should fail");
     assert!(!hot.status.success(), "hot should fail");
     // 冷/热两条路径的错误必须一致 (缓存回放不丢映射精度)
-    assert_eq!(
-        cold_err.trim(),
-        hot_err.trim(),
-        "cold/hot cache error mismatch"
-    );
+    assert_eq!(cold_err.trim(), hot_err.trim(), "cold/hot cache error mismatch");
     let expect = format!("{}:6", hdr_path.display());
     assert!(
         hot_err.contains("E0311") && hot_err.contains(&expect),
@@ -5298,10 +4629,7 @@ fn asm_unsupported_instructions_error_not_nop() {
     fs::write(&hdr_path, hdr).expect("write header fixture");
     fs::write(
         &src_path,
-        format!(
-            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
-            hdr_path.display()
-        ),
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
     )
     .expect("write C fixture");
     let obj_path = dir.join(format!("{tag}.o"));
@@ -5339,11 +4667,7 @@ fn asm_unsupported_instructions_error_not_nop() {
 fn builtin_constant_p_full_run_returns_zero() {
     let source = include_str!("fixtures/c/constp.c");
     let (output, exe) = run_compile_and_run("builtin-constant-p-full", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "builtin_constant_p_full should return 0, got {rc}");
 }
@@ -5475,11 +4799,7 @@ fn inline_attrs_o1_run_returns_zero() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -5510,22 +4830,13 @@ fn unknown_builtin_is_hard_error_e0018() {
     // Unknown builtins are now hard errors (E0018), not warnings.
     // This prevents silent zero/ud2 fallback that could cause
     // subtle runtime bugs in kernel code.
-    assert!(
-        !output.status.success(),
-        "unknown builtin should fail compilation: {stderr}"
-    );
-    assert!(
-        stderr.contains("E0018"),
-        "expected E0018 error code: {stderr}"
-    );
+    assert!(!output.status.success(), "unknown builtin should fail compilation: {stderr}");
+    assert!(stderr.contains("E0018"), "expected E0018 error code: {stderr}");
     assert!(
         stderr.contains("unsupported __builtin_"),
         "expected unsupported builtin message: {stderr}"
     );
-    assert!(
-        !object_path.exists(),
-        "object file should not be written on E0018"
-    );
+    assert!(!object_path.exists(), "object file should not be written on E0018");
 }
 
 /// P0-6: kernel builtin coverage — verify newly added builtins
@@ -5538,10 +4849,7 @@ fn kernel_builtin_coverage_runtime() {
     let src = include_str!("fixtures/c/builtin_kernel_coverage.c");
     let (out, exe) = run_compile_and_run("kernel-builtin-cov", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "kernel builtin coverage compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "kernel builtin coverage compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "kernel builtin coverage runtime check failed");
@@ -5560,10 +4868,7 @@ fn kernel_asm_instr_coverage_runtime() {
     let src = include_str!("fixtures/c/asm_kernel_instr_coverage.c");
     let (out, exe) = run_compile_and_run("kernel-asm-cov", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "kernel asm coverage compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "kernel asm coverage compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "kernel asm coverage runtime check failed");
@@ -5579,10 +4884,7 @@ fn asm_seg_prefix_and_modifiers_runtime() {
     let src = include_str!("fixtures/c/asm_seg_prefix_percpu.c");
     let (out, exe) = run_compile_and_run("asm-seg-prefix", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "seg prefix + modifiers compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "seg prefix + modifiers compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "seg prefix + modifiers runtime check failed");
@@ -5620,11 +4922,7 @@ fn run_compile_o(
 fn always_inline_o0_run_returns_zero() {
     let source = include_str!("fixtures/c/always_inline.c");
     let (output, exe) = run_compile_o("always-inline-o0", source, "-O0");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "always_inline_o0 should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5636,11 +4934,7 @@ fn always_inline_o0_run_returns_zero() {
 fn opt_gvn_o2_run_returns_zero() {
     let source = include_str!("fixtures/opt/gvn.c");
     let (output, exe) = run_compile_o("opt-gvn", source, "-O2");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "opt_gvn should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5652,11 +4946,7 @@ fn opt_gvn_o2_run_returns_zero() {
 fn opt_loop_unroll_o3_run_returns_zero() {
     let source = include_str!("fixtures/opt/unroll.c");
     let (output, exe) = run_compile_o("opt-loop-unroll", source, "-O3");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "opt_loop_unroll should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5668,11 +4958,7 @@ fn opt_loop_unroll_o3_run_returns_zero() {
 fn opt_loop_vectorize_o3_run_returns_zero() {
     let source = include_str!("fixtures/opt/vecopt.c");
     let (output, exe) = run_compile_o("opt-loop-vectorize", source, "-O3");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "opt_loop_vectorize should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5683,33 +4969,21 @@ fn opt_loop_vectorize_o3_run_returns_zero() {
 fn static_key_maybe_compiles() {
     let source = include_str!("fixtures/c/skey_maybe.c");
     let output = run_syntax_test("static-key-maybe", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
 fn static_key_chain_compiles() {
     let source = include_str!("fixtures/c/skey_chain.c");
     let output = run_syntax_test("static-key-chain", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
 fn static_key_decl_compiles() {
     let source = include_str!("fixtures/c/skey_decl.c");
     let output = run_syntax_test("static-key-decl", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 跨 TU LTO 链接后 dead static 函数从合并 .o 剔除
@@ -5743,11 +5017,7 @@ fn lto_link_strips_unreferenced_static() {
             .arg(src)
             .output()
             .expect("compile");
-        assert!(
-            out.status.success(),
-            "compile: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     }
     let link = Command::new(dcc)
         .args(["-r", "-flto", "-o"])
@@ -5756,11 +5026,7 @@ fn lto_link_strips_unreferenced_static() {
         .arg(&b_o)
         .output()
         .expect("link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let readelf = Command::new("readelf")
         .args(["-s"])
         .arg(&out_o)
@@ -5772,14 +5038,8 @@ fn lto_link_strips_unreferenced_static() {
     let _ = fs::remove_file(&a_o);
     let _ = fs::remove_file(&b_o);
     let _ = fs::remove_file(&out_o);
-    assert!(
-        symtab.contains("exported"),
-        "exported must survive link: {symtab}"
-    );
-    assert!(
-        !symtab.contains("dead_fn"),
-        "dead_fn should be stripped: {symtab}"
-    );
+    assert!(symtab.contains("exported"), "exported must survive link: {symtab}");
+    assert!(!symtab.contains("dead_fn"), "dead_fn should be stripped: {symtab}");
 }
 
 // =================== C 前端补洞: 新增特性 ===================
@@ -5790,11 +5050,7 @@ fn lto_link_strips_unreferenced_static() {
 fn ms_extensions_compile_and_run() {
     let source = include_str!("fixtures/c/ms_ext.c");
     let (output, exe) = run_compile_and_run("ms-extensions", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "ms_extensions should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5806,11 +5062,7 @@ fn ms_extensions_compile_and_run() {
 fn attr_cleanup_compile_and_run() {
     let source = include_str!("fixtures/c/attr_cleanup.c");
     let (output, exe) = run_compile_and_run("attr-cleanup", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_cleanup should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5822,11 +5074,7 @@ fn attr_cleanup_compile_and_run() {
 fn attr_target_clones_compile_and_run() {
     let source = include_str!("fixtures/c/attr_clones.c");
     let (output, exe) = run_compile_and_run("attr-target-clones", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_target_clones should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5838,11 +5086,7 @@ fn attr_target_clones_compile_and_run() {
 fn attr_no_sanitize_compile_and_run() {
     let source = include_str!("fixtures/c/attr_nosan.c");
     let (output, exe) = run_compile_and_run("attr-no-sanitize", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_no_sanitize should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -5860,20 +5104,13 @@ __attribute__((__section__(".kernel_alias_test"))) int canonical_var = 7;
 int sum(void) { return kernel_var + canonical_var; }
 "#;
     let (out, obj) = run_object_test("attr-alias", source);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let objdump_out = Command::new("objdump")
         .args(["-h", obj.to_str().unwrap()])
         .output()
         .expect("objdump");
     let sec = String::from_utf8_lossy(&objdump_out.stdout);
-    assert!(
-        sec.contains(".kernel_alias_test"),
-        "section .kernel_alias_test missing: {sec}"
-    );
+    assert!(sec.contains(".kernel_alias_test"), "section .kernel_alias_test missing: {sec}");
     let _ = fs::remove_file(obj);
 }
 
@@ -5948,10 +5185,7 @@ fn host_wrapper_fixdep_failure_does_not_write_stub_depfile() {
         .output()
         .expect("run dcc-host-wrapper.sh");
     assert!(!output.status.success());
-    assert!(
-        !depfile.exists(),
-        "failed fixdep must not create stub depfile"
-    );
+    assert!(!depfile.exists(), "failed fixdep must not create stub depfile");
     let _ = fs::remove_dir_all(&temp);
 }
 #[test]
@@ -6032,24 +5266,11 @@ fn dM_flag_emits_all_macros() {
         .output()
         .expect("run dcc -dM");
     let _ = fs::remove_file(&src);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("#define __DCC__ 1"),
-        "missing __DCC__: {text}"
-    );
-    assert!(
-        text.contains("#define __GNUC__"),
-        "missing __GNUC__: {text}"
-    );
-    assert!(
-        text.contains("#define USER_MACRO 42"),
-        "missing USER_MACRO: {text}"
-    );
+    assert!(text.contains("#define __DCC__ 1"), "missing __DCC__: {text}");
+    assert!(text.contains("#define __GNUC__"), "missing __GNUC__: {text}");
+    assert!(text.contains("#define USER_MACRO 42"), "missing USER_MACRO: {text}");
 }
 
 /// ISO C 6.10.2: `#include pp-tokens` 形式应先做宏展开.
@@ -6081,16 +5302,9 @@ int main(void) { return inc_target_value; }
         ])
         .output()
         .expect("run dcc -E");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("inc_target_value"),
-        "include macro expansion failed: {text}"
-    );
+    assert!(text.contains("inc_target_value"), "include macro expansion failed: {text}");
     let _ = fs::remove_file(&header);
     let _ = fs::remove_file(&main_src);
     let _ = fs::remove_dir(&dir);
@@ -6128,24 +5342,14 @@ int main(void) { return (int)(__savesegment_ds() + __savesegment_cs()); }
         .write_all(src.as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
     // #ds / #cs 应被字符串化为 "ds" / "cs"
     assert!(text.contains("\"ds\""), "stringify 'ds' missing: {text}");
     assert!(text.contains("\"cs\""), "stringify 'cs' missing: {text}");
     // ## 应被令牌拼接
-    assert!(
-        text.contains("__savesegment_ds"),
-        "paste 'ds' missing: {text}"
-    );
-    assert!(
-        text.contains("__savesegment_cs"),
-        "paste 'cs' missing: {text}"
-    );
+    assert!(text.contains("__savesegment_ds"), "paste 'ds' missing: {text}");
+    assert!(text.contains("__savesegment_cs"), "paste 'cs' missing: {text}");
 }
 
 /// 链式 designated initializer (ISO C99 6.7.8/19: `.a.b.c` 或 `[0].field`).
@@ -6257,10 +5461,7 @@ int main(void) {
         .lines()
         .filter(|l| l.contains("helper") && l.contains("DEFAULT"))
         .count();
-    assert_eq!(
-        helper_und, 0,
-        "fwd declaration should not emit UND sym; got:\n{syms}"
-    );
+    assert_eq!(helper_und, 0, "fwd declaration should not emit UND sym; got:\n{syms}");
     assert!(
         helper_defined >= 1,
         "definition should emit at least one DEFAULT sym; got:\n{syms}"
@@ -6274,11 +5475,7 @@ int main(void) {
 fn attr_copy_returns_nonnull_compile_and_run() {
     let source = include_str!("fixtures/c/attr_copy.c");
     let (output, exe) = run_compile_and_run("attr-copy-returns-nonnull", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_copy_returns_nonnull should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6290,11 +5487,7 @@ fn attr_copy_returns_nonnull_compile_and_run() {
 fn attr_copy_full_symbol_alias() {
     let src = include_str!("fixtures/c/attr_copy_full.c");
     let (output, exe) = run_compile_and_run("attr-copy-full", src);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_copy_full should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6306,11 +5499,7 @@ fn attr_copy_full_symbol_alias() {
 fn attr_returns_nonnull_runtime_check() {
     let src = include_str!("fixtures/c/attr_returns_nonnull.c");
     let (output, exe) = run_compile_and_run("attr-returns-nonnull", src);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "returns_nonnull should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6348,10 +5537,7 @@ fn visibility_attr_elf_symbols() {
         .lines()
         .find(|l| l.contains("hidden_func"))
         .unwrap_or_else(|| panic!("missing hidden_func: {symtab}"));
-    assert!(
-        hidden_line.contains("HIDDEN"),
-        "hidden_func should be HIDDEN: {hidden_line}"
-    );
+    assert!(hidden_line.contains("HIDDEN"), "hidden_func should be HIDDEN: {hidden_line}");
     // protected_func: PROTECTED visibility
     let prot_line = symtab
         .lines()
@@ -6379,11 +5565,7 @@ fn visibility_attr_elf_symbols() {
 fn pragma_family_compile_and_run() {
     let source = include_str!("fixtures/c/pragma_fam.c");
     let (output, exe) = run_compile_and_run("pragma-family", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "pragma_family should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6395,11 +5577,7 @@ fn pragma_family_compile_and_run() {
 fn pragma_operator_compile_and_run() {
     let source = include_str!("fixtures/c/pragma_op.c");
     let (output, exe) = run_compile_and_run("pragma-operator", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "pragma_operator should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6411,11 +5589,7 @@ fn pragma_operator_compile_and_run() {
 fn gcc_system_header_compile_and_run() {
     let source = include_str!("fixtures/c/system_header.c");
     let (output, exe) = run_compile_and_run("gcc-system-header", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // 只有 pragma 前的 #warning 应出现在 stderr,
     // pragma 后的 #warning 应被 system_header 抑制
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -6438,11 +5612,7 @@ fn gcc_system_header_compile_and_run() {
 fn gcc_poison_compile_and_run() {
     let source = include_str!("fixtures/c/gcc_poison.c");
     let (output, exe) = run_compile_and_run("gcc-poison", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "gcc_poison test should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -6453,11 +5623,7 @@ fn gcc_poison_compile_and_run() {
 fn user_warning_does_not_break_compile() {
     let source = include_str!("fixtures/c/user_diag.c");
     let output = run_syntax_test("user-warning", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 // ============================================================
@@ -6567,11 +5733,7 @@ fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
     let path = root.join("tests/fixtures/corpus").join(rel);
     let obj = fs::read(&path).unwrap_or_else(|e| panic!("missing corpus object {path:?}: {e}"));
     assert!(obj.len() >= 64, "object too small: {path:?}");
-    assert_eq!(
-        &obj[0..4],
-        &[0x7f, b'E', b'L', b'F'],
-        "bad ELF magic: {path:?}"
-    );
+    assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "bad ELF magic: {path:?}");
     assert_eq!(obj[4], 2, "expected ELF64 class: {path:?}");
     assert_eq!(obj[5], 1, "expected little-endian ELF: {path:?}");
     let kind = u16::from_le_bytes([obj[16], obj[17]]);
@@ -6774,10 +5936,7 @@ fn byte_level_asm_nop_encoding() {
         .output()
         .expect("objdump");
     let disasm = String::from_utf8_lossy(&dump.stdout);
-    assert!(
-        disasm.contains("nop"),
-        "objdump should disassemble nop: {disasm}"
-    );
+    assert!(disasm.contains("nop"), "objdump should disassemble nop: {disasm}");
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(obj_path);
 }
@@ -6810,10 +5969,7 @@ fn byte_level_asm_mov_eax_encoding() {
     // mov $1, %eax = B8 01 00 00 00
     let expected = vec![0xB8, 0x01, 0x00, 0x00, 0x00];
     let found = text.windows(expected.len()).any(|w| w == expected);
-    assert!(
-        found,
-        "expected mov $1, %eax bytes {expected:02x?} in .text: {text:02x?}"
-    );
+    assert!(found, "expected mov $1, %eax bytes {expected:02x?} in .text: {text:02x?}");
 }
 
 /// byte-level asm: `ret` 指令编码为 0xC3.
@@ -6877,10 +6033,7 @@ fn byte_level_asm_frame_header_encoding() {
     );
     let mov_seq = [0x48, 0x89, 0xE5];
     let found = text.windows(mov_seq.len()).any(|w| w == mov_seq);
-    assert!(
-        found,
-        "expected mov %rsp, %rbp bytes {mov_seq:02x?} in .text: {text:02x?}"
-    );
+    assert!(found, "expected mov %rsp, %rbp bytes {mov_seq:02x?} in .text: {text:02x?}");
 }
 
 // ---------- ORC consumer objtool strict ----------
@@ -6950,11 +6103,7 @@ fn orc_consumer_objtool_strict_single_object() {
 fn orc_consumer_function_boundaries_objtool() {
     let source = include_str!("fixtures/c/func_symbol_size.c");
     let (output, obj_path) = run_object_test("orc-consumer-func-boundaries", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let obj_data = std::fs::read(&obj_path).expect("read object file");
     let funcs = elf64_func_symbols(&obj_data);
     let names: std::collections::HashMap<String, u64> =
@@ -6969,10 +6118,7 @@ fn orc_consumer_function_boundaries_objtool() {
         let sz = names
             .get(want)
             .unwrap_or_else(|| panic!("missing STT_FUNC symbol {want}"));
-        assert!(
-            *sz > 0,
-            "function {want} has zero st_size (breaks objtool function boundary)"
-        );
+        assert!(*sz > 0, "function {want} has zero st_size (breaks objtool function boundary)");
     }
     let _ = std::fs::remove_file(&obj_path);
 }
@@ -7139,8 +6285,7 @@ void __dcc_trapv_overflow(void) {\n\
 int negate(int x) { return -x; }\n\
 int get_int_min(void) { return -2147483647 - 1; }\n\
 int main(void) { return negate(get_int_min()); }\n";
-    let (_, run, log, exe_path) =
-        run_sanitized_binary("trapv-neg", source, &["-ftrapv"]);
+    let (_, run, log, exe_path) = run_sanitized_binary("trapv-neg", source, &["-ftrapv"]);
     assert_exit_code(&run, 99, &log);
     let _ = fs::remove_file(&exe_path);
 }
@@ -7480,11 +6625,7 @@ int main(void) { int x = 7; return hot_path(&x) ? 0 : 1; }\n";
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let hot_start = asm_text.find("hot_path:").expect("hot_path label");
     let main_start = asm_text.find("main:").expect("main label");
     let hot_asm = &asm_text[hot_start..main_start];
@@ -7548,11 +6689,7 @@ fn unknown_sanitizer_negative_diagnostic() {
 fn static_assert_stringification_succeeds() {
     let source = include_str!("fixtures/c/sassert_msg.c");
     let output = run_syntax_test("static-assert-msg", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 单输入 -r 仍可注入合并 .llvm.lto（单 .o 重打包）
@@ -7583,11 +6720,7 @@ fn lto_single_object_relocatable_link() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&out);
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     assert!(
         String::from_utf8_lossy(&merged).contains(".llvm.lto"),
         "single-object -r must preserve .llvm.lto"
@@ -7599,11 +6732,7 @@ fn lto_single_object_relocatable_link() {
 fn thread_local_exec_returns_15() {
     let src = include_str!("fixtures/c/tls_simple.c");
     let (out, exe) = run_compile_and_run("tls", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 15, "tls counter");
     let _ = fs::remove_file(&exe);
 }
@@ -7613,11 +6742,7 @@ fn thread_local_exec_returns_15() {
 fn kr_old_style_function() {
     let src = include_str!("fixtures/c/kr_func.c");
     let (out, exe) = run_compile_and_run("kr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 7);
     let _ = fs::remove_file(&exe);
 }
@@ -7628,10 +6753,7 @@ fn format_attr_warns_on_missing_arg() {
                int main(void) { p(\"%d %d\", 1); return 0; }\n";
     let output = run_syntax_test("fmt-warn", src);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("W0003"),
-        "expected format warning: {stderr}"
-    );
+    assert!(stderr.contains("W0003"), "expected format warning: {stderr}");
 }
 
 #[test]
@@ -7640,10 +6762,7 @@ fn format_attr_comprehensive_no_warn() {
     let src = include_str!("fixtures/c/format_attr_full.c");
     let output = run_syntax_test("fmt-full", src);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("W0003"),
-        "expected no format warnings, got: {stderr}"
-    );
+    assert!(!stderr.contains("W0003"), "expected no format warnings, got: {stderr}");
 }
 
 #[test]
@@ -7653,14 +6772,8 @@ fn format_attr_type_mismatch_warns() {
                int main(void) { p(\"%f\", 42); return 0; }\n";
     let output = run_syntax_test("fmt-type", src);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("W0003"),
-        "expected type mismatch warning: {stderr}"
-    );
-    assert!(
-        stderr.contains("floating-point"),
-        "expected floating-point hint: {stderr}"
-    );
+    assert!(stderr.contains("W0003"), "expected type mismatch warning: {stderr}");
+    assert!(stderr.contains("floating-point"), "expected floating-point hint: {stderr}");
 }
 
 #[test]
@@ -7694,11 +6807,7 @@ fn format_attr_scanf_non_pointer_warns() {
 fn stdatomic_macros_hosted() {
     let src = include_str!("fixtures/c/atomic.c");
     let (out, exe) = run_compile_and_run("atomic", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 7);
     let _ = fs::remove_file(&exe);
 }
@@ -7715,14 +6824,8 @@ fn permissive_unknown_typedef_warns() {
         .expect("run dcc");
     let _ = fs::remove_file(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "permissive should not error: {stderr}"
-    );
-    assert!(
-        stderr.contains("W0002"),
-        "expected permissive warning: {stderr}"
-    );
+    assert!(output.status.success(), "permissive should not error: {stderr}");
+    assert!(stderr.contains("W0002"), "expected permissive warning: {stderr}");
 }
 
 #[test]
@@ -7802,10 +6905,7 @@ fn gnu89_implicit_function_decl_warns_and_continues() {
         .expect("run dcc");
     let _ = fs::remove_file(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gnu89 implicit function should not error: {stderr}"
-    );
+    assert!(output.status.success(), "gnu89 implicit function should not error: {stderr}");
     assert!(stderr.contains("W1000"), "expected W1000: {stderr}");
 }
 
@@ -7816,10 +6916,7 @@ fn compiler_builtin_atomic_call_is_not_implicit_function_error() {
         "int x;\nint main(void) { __atomic_store_n(&x, 7, __ATOMIC_SEQ_CST); return __atomic_load_n(&x, __ATOMIC_SEQ_CST); }\n",
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "atomic builtin should compile: {stderr}"
-    );
+    assert!(output.status.success(), "atomic builtin should compile: {stderr}");
     assert!(
         !stderr.contains("E0017") && !stderr.contains("W1000"),
         "atomic builtin should not be an implicit function diagnostic: {stderr}"
@@ -7828,10 +6925,8 @@ fn compiler_builtin_atomic_call_is_not_implicit_function_error() {
 
 #[test]
 fn unknown_variable_read_is_not_implicit_function_warning() {
-    let output = run_syntax_test(
-        "unknown-variable-read",
-        "int main(void) { return missing_variable; }\n",
-    );
+    let output =
+        run_syntax_test("unknown-variable-read", "int main(void) { return missing_variable; }\n");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
@@ -7848,11 +6943,7 @@ fn unknown_variable_read_is_not_implicit_function_warning() {
 fn exec_elf_has_symtab() {
     let src = "int g = 1; int main(void) { return g; }\n";
     let (out, exe) = run_compile_and_run("symtab", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let readelf = Command::new("readelf")
         .args(["-s", exe.to_str().unwrap()])
         .output()
@@ -7871,11 +6962,7 @@ fn exec_elf_has_symtab() {
 fn m15_float_const_eval() {
     let src = include_str!("fixtures/c/float_const.c");
     let (out, exe) = run_compile_and_run("m15-float-const", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -7887,11 +6974,7 @@ fn m15_float_const_eval() {
 fn m15_string_literal_and_concat() {
     let src = include_str!("fixtures/c/string_const.c");
     let (out, exe) = run_compile_and_run("m15-string-concat", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -7903,11 +6986,7 @@ fn m15_string_literal_and_concat() {
 fn m15_address_const() {
     let src = include_str!("fixtures/c/address_const.c");
     let (out, exe) = run_compile_and_run("m15-addr-const", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -7919,11 +6998,7 @@ fn m15_address_const() {
 fn m15_builtin_fold() {
     let src = include_str!("fixtures/c/builtin_fold.c");
     let (out, exe) = run_compile_and_run("m15-builtin-fold", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -7935,11 +7010,7 @@ fn m15_builtin_fold() {
 fn math_builtin_sqrt_inline_sse() {
     let src = include_str!("fixtures/c/math_builtin_sqrt.c");
     let (out, exe) = run_compile_and_run("math-builtin-sqrt", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "sqrt test should return 0");
     let _ = fs::remove_file(&exe);
@@ -7951,11 +7022,7 @@ fn math_builtin_sqrt_inline_sse() {
 fn math_builtin_rounding_inline_sse() {
     let src = include_str!("fixtures/c/math_builtin_rounding.c");
     let (out, exe) = run_compile_and_run("math-builtin-rounding", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "rounding test should return 0");
     let _ = fs::remove_file(&exe);
@@ -7967,11 +7034,7 @@ fn math_builtin_rounding_inline_sse() {
 fn math_builtin_fmin_fmax_inline_sse() {
     let src = include_str!("fixtures/c/math_builtin_fmin_fmax.c");
     let (out, exe) = run_compile_and_run("math-builtin-fmin-fmax", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "fmin/fmax test should return 0");
     let _ = fs::remove_file(&exe);
@@ -7983,11 +7046,7 @@ fn math_builtin_fmin_fmax_inline_sse() {
 fn math_builtin_copysign_libc() {
     let src = include_str!("fixtures/c/math_builtin_copysign.c");
     let (out, exe) = run_compile_and_run("math-builtin-copysign", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "copysign test should return 0");
     let _ = fs::remove_file(&exe);
@@ -7999,11 +7058,7 @@ fn math_builtin_copysign_libc() {
 fn math_builtin_libm_forwarding() {
     let src = include_str!("fixtures/c/math_builtin_libm.c");
     let (out, exe) = run_compile_and_run_flags("math-builtin-libm", src, &["-lm"]);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "libm math test should return 0");
     let _ = fs::remove_file(&exe);
@@ -8015,11 +7070,7 @@ fn math_builtin_libm_forwarding() {
 fn const_eval_comprehensive_bitfield_sizeof_ternary() {
     let src = include_str!("fixtures/c/const_eval_comprehensive.c");
     let (out, exe) = run_compile_and_run("const-eval-comprehensive", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "runtime exit code should be 0");
     let _ = fs::remove_file(&exe);
@@ -8061,11 +7112,7 @@ fn m15_bounds_check_inrange() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8090,11 +7137,7 @@ fn m15_bounds_check_oob_diag() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     // 诊断在运行时的 stderr: 手动执行捕获 (run_exe 只返回码)
@@ -8117,11 +7160,8 @@ struct Big load_big(struct Big *p) {
     return *p;
 }
 "#;
-    let (output, object_path) = run_object_test_flags(
-        "sanitizer-large-asan-generic",
-        source,
-        &["-fsanitize=address"],
-    );
+    let (output, object_path) =
+        run_object_test_flags("sanitizer-large-asan-generic", source, &["-fsanitize=address"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
     let object_data = std::fs::read(&object_path).expect("read object");
@@ -8161,11 +7201,7 @@ fn sanitizer_host_link_adds_runtime_flags() {
     );
     let run = Command::new(&exe_path).output().expect("run sanitizer exe");
     let _ = fs::remove_file(&exe_path);
-    assert!(
-        run.status.success(),
-        "runtime status: {:?}",
-        run.status.code()
-    );
+    assert!(run.status.success(), "runtime status: {:?}", run.status.code());
 }
 
 #[test]
@@ -8206,11 +7242,7 @@ fn sanitizer_builtin_pie_records_runtime_needed() {
 fn m15_abi16_struct_passing() {
     let src = include_str!("fixtures/c/abi16_struct.c");
     let (out, exe) = run_compile_and_run("m15-abi16-struct", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8223,11 +7255,7 @@ fn m15_abi16_struct_passing() {
 fn struct_abi_comprehensive() {
     let src = include_str!("fixtures/c/struct_abi_comprehensive.c");
     let (out, exe) = run_compile_and_run("struct-abi-comprehensive", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8240,11 +7268,7 @@ fn struct_abi_comprehensive() {
 fn struct_abi_extended() {
     let src = include_str!("fixtures/c/struct_abi_extended.c");
     let (out, exe) = run_compile_and_run("struct-abi-extended", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8257,11 +7281,7 @@ fn struct_abi_extended() {
 fn m15_float_store_paths() {
     let src = include_str!("fixtures/c/abi16_struct_extra.c");
     let (out, exe) = run_compile_and_run("m15-float-store-paths", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8273,11 +7293,7 @@ fn m15_float_store_paths() {
 fn m15_constexpr_function() {
     let src = include_str!("fixtures/c/constexpr.c");
     let (out, exe) = run_compile_and_run("m15-constexpr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8291,11 +7307,7 @@ fn m15_constexpr_function() {
 fn m16_ssa_ir() {
     let src = include_str!("fixtures/opt/ssa_ir.c");
     let (out, exe) = run_compile_and_run("m16-ssa-ir", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8307,11 +7319,7 @@ fn m16_ssa_ir() {
 fn m16_strength_reduction() {
     let src = include_str!("fixtures/opt/strength_reduction.c");
     let (out, exe) = run_compile_and_run("m16-strength", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8323,11 +7331,7 @@ fn m16_strength_reduction() {
 fn m16_cross_function_dce() {
     let src = include_str!("fixtures/opt/cross_function_dce.c");
     let (out, exe) = run_compile_and_run("m16-dce", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8339,11 +7343,7 @@ fn m16_cross_function_dce() {
 fn m16_sccp() {
     let src = include_str!("fixtures/opt/sccp.c");
     let (out, exe) = run_compile_and_run("m16-sccp", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8355,11 +7355,7 @@ fn m16_sccp() {
 fn m16_loop_opt() {
     let src = include_str!("fixtures/opt/loop_opt.c");
     let (out, exe) = run_compile_and_run("m16-loop-opt", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8371,11 +7367,7 @@ fn m16_loop_opt() {
 fn m16_tco() {
     let src = include_str!("fixtures/opt/tco.c");
     let (out, exe) = run_compile_and_run("m16-tco", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8387,11 +7379,7 @@ fn m16_tco() {
 fn m16_function_attr() {
     let src = include_str!("fixtures/opt/function_attr.c");
     let (out, exe) = run_compile_and_run("m16-attr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -8405,11 +7393,7 @@ fn m16_function_attr() {
 fn cpp_auto_deduce() {
     let src = include_str!("fixtures/cpp/auto_deduce.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-auto-deduce", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8419,11 +7403,7 @@ fn cpp_auto_deduce() {
 fn cpp_decltype() {
     let src = include_str!("fixtures/cpp/decltype.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-decltype", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8433,11 +7413,7 @@ fn cpp_decltype() {
 fn cpp_decltype_auto() {
     let src = include_str!("fixtures/cpp/decltype_auto.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-decltype-auto", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8447,11 +7423,7 @@ fn cpp_decltype_auto() {
 fn cpp_explicit_ctor() {
     let src = include_str!("fixtures/cpp/explicit_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-explicit-ctor", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8461,11 +7433,7 @@ fn cpp_explicit_ctor() {
 fn cpp_final_override() {
     let src = include_str!("fixtures/cpp/final_override.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-final-override", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8475,11 +7443,7 @@ fn cpp_final_override() {
 fn cpp_friend() {
     let src = include_str!("fixtures/cpp/friend.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-friend", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8489,11 +7453,7 @@ fn cpp_friend() {
 fn cpp_if_constexpr() {
     let src = include_str!("fixtures/cpp/if_constexpr.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-if-constexpr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8503,11 +7463,7 @@ fn cpp_if_constexpr() {
 fn cpp_inheriting_ctor() {
     let src = include_str!("fixtures/cpp/inheriting_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-inheriting-ctor", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8517,11 +7473,7 @@ fn cpp_inheriting_ctor() {
 fn cpp_member_ptr() {
     let src = include_str!("fixtures/cpp/member_ptr.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-member-ptr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8531,11 +7483,7 @@ fn cpp_member_ptr() {
 fn cpp_mutable() {
     let src = include_str!("fixtures/cpp/mutable.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-mutable", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8545,11 +7493,7 @@ fn cpp_mutable() {
 fn cpp_mutable_const_method() {
     let src = include_str!("fixtures/cpp/mutable.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-mutable-const", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8559,11 +7503,7 @@ fn cpp_mutable_const_method() {
 fn cpp_member_ptr_deref() {
     let src = include_str!("fixtures/cpp/member_ptr_deref.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-member-ptr-deref", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8574,11 +7514,7 @@ fn cpp_member_ptr_deref() {
 fn cpp_typeid_dynamic_rtti() {
     let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-typeid-dynamic-rtti", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8588,11 +7524,7 @@ fn cpp_typeid_dynamic_rtti() {
 fn cpp_template_specialization() {
     let src = include_str!("fixtures/cpp/template_specialization.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-template-spec", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8602,11 +7534,7 @@ fn cpp_template_specialization() {
 fn cpp_modules_odr() {
     let src = include_str!("fixtures/cpp/modules_odr.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-modules-odr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8616,11 +7544,7 @@ fn cpp_modules_odr() {
 fn cpp_new_array() {
     let src = include_str!("fixtures/cpp/new_array.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-new-array", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8630,11 +7554,7 @@ fn cpp_new_array() {
 fn cpp_noexcept() {
     let src = include_str!("fixtures/cpp/noexcept.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-noexcept", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8644,11 +7564,7 @@ fn cpp_noexcept() {
 fn cpp_placement_new() {
     let src = include_str!("fixtures/cpp/placement_new.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-placement-new", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8658,11 +7574,7 @@ fn cpp_placement_new() {
 fn cpp_smoke() {
     let src = include_str!("fixtures/cpp/smoke.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-smoke", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8672,11 +7584,7 @@ fn cpp_smoke() {
 fn cpp_typeid() {
     let src = include_str!("fixtures/cpp/typeid.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-typeid", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8686,11 +7594,7 @@ fn cpp_typeid() {
 fn cpp_volatile_member() {
     let src = include_str!("fixtures/cpp/volatile_member.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-volatile-member", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8701,27 +7605,16 @@ fn cpp_volatile_member() {
 fn cpp_ssa_control_flow() {
     let src = include_str!("fixtures/cpp/ssa_control_flow.cpp");
     let (out, obj) = run_cpp_object_test("cpp-ssa-control-flow", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!(
-        "dcc-cpp-ssa-control-flow-{}",
-        std::process::id()
-    ));
+    let exe = dir.join(format!("dcc-cpp-ssa-control-flow-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run control-flow binary");
@@ -8743,27 +7636,16 @@ fn cpp_ssa_control_flow() {
 fn cpp_ssa_volatile_semantics() {
     let src = include_str!("fixtures/cpp/ssa_volatile_semantics.cpp");
     let (out, obj) = run_cpp_object_test("cpp-ssa-volatile-semantics", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!(
-        "dcc-cpp-ssa-volatile-semantics-{}",
-        std::process::id()
-    ));
+    let exe = dir.join(format!("dcc-cpp-ssa-volatile-semantics-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run volatile binary");
@@ -8821,11 +7703,7 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
         .output()
         .expect("dcc");
     let _ = fs::remove_file(&p1);
-    assert!(
-        c1.status.success(),
-        "tu1 compile: {}",
-        String::from_utf8_lossy(&c1.stderr)
-    );
+    assert!(c1.status.success(), "tu1 compile: {}", String::from_utf8_lossy(&c1.stderr));
     // 编译 TU2
     let c2 = Command::new(dcc)
         .args(["-c", "-o"])
@@ -8834,11 +7712,7 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
         .output()
         .expect("dcc");
     let _ = fs::remove_file(&p2);
-    assert!(
-        c2.status.success(),
-        "tu2 compile: {}",
-        String::from_utf8_lossy(&c2.stderr)
-    );
+    assert!(c2.status.success(), "tu2 compile: {}", String::from_utf8_lossy(&c2.stderr));
     // Compile-only: verify compilation succeeds without linking
     // The actual weak vtable multi-file linking is still TODO (Phase 2)
 }
@@ -8853,11 +7727,7 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
 fn cpp_chrono() {
     let src = include_str!("fixtures/cpp/chrono.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-chrono", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8866,11 +7736,7 @@ fn cpp_chrono() {
 fn cpp_thread_mutex() {
     let src = include_str!("fixtures/cpp/thread_mutex.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-thread-mutex", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8886,11 +7752,7 @@ namespace std {
 int main() { return 0; }  // Compile-only smoke test
 "#;
     let (out, _obj) = run_cpp_object_test("cpp-condition-variable", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8899,11 +7761,7 @@ int main() { return 0; }  // Compile-only smoke test
 fn cpp_filesystem() {
     let src = include_str!("fixtures/cpp/filesystem.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-filesystem", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8912,11 +7770,7 @@ fn cpp_filesystem() {
 fn cpp_expected() {
     let src = include_str!("fixtures/cpp/expected.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-expected", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8925,11 +7779,7 @@ fn cpp_expected() {
 fn cpp_flat_map() {
     let src = include_str!("fixtures/cpp/flat_map.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-flat-map", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8938,11 +7788,7 @@ fn cpp_flat_map() {
 fn cpp_multi_index() {
     let src = include_str!("fixtures/cpp/multi_index.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-multi-index", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8951,11 +7797,7 @@ fn cpp_multi_index() {
 fn cpp_regex() {
     let src = include_str!("fixtures/cpp/regex.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-regex", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8965,11 +7807,7 @@ fn cpp_regex() {
 fn cpp_ranges() {
     let src = include_str!("fixtures/cpp/ranges.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-ranges", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8979,11 +7817,7 @@ fn cpp_ranges() {
 fn cpp_concept() {
     let src = include_str!("fixtures/cpp/concept.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-concept", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -8992,11 +7826,7 @@ fn cpp_concept() {
 fn cpp_modules() {
     let src = include_str!("fixtures/cpp/modules.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-modules", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -9007,11 +7837,7 @@ fn cpp_modules() {
 fn m19_counter_monotonic() {
     let src = include_str!("fixtures/c/counter.c");
     let (out, exe) = run_compile_and_run("m19-counter", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__COUNTER__ should produce 0,1,2");
     let _ = fs::remove_file(exe);
@@ -9023,11 +7849,7 @@ fn m19_counter_monotonic() {
 fn m19_counter_in_function_macro() {
     let src = include_str!("fixtures/c/counter_in_macro.c");
     let (out, exe) = run_compile_and_run("m19-counter-macro", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__COUNTER__ in macro should be 0,1,2");
     let _ = fs::remove_file(exe);
@@ -9039,16 +7861,9 @@ fn m19_counter_in_function_macro() {
 fn m19_va_opt_empty_and_nonempty() {
     let src = include_str!("fixtures/c/va_opt.c");
     let (out, exe) = run_compile_and_run("m19-va-opt", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "__VA_OPT__ should expand to comma list when non-empty"
-    );
+    assert_eq!(rc, 0, "__VA_OPT__ should expand to comma list when non-empty");
     let _ = fs::remove_file(exe);
 }
 
@@ -9058,11 +7873,7 @@ fn m19_va_opt_empty_and_nonempty() {
 fn m19_predefined_macros_available() {
     let src = include_str!("fixtures/c/predefined_macros.c");
     let (out, exe) = run_compile_and_run_flags("m19-predef", src, &["-O1"]);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "all GCC predefined macros must be defined");
     let _ = fs::remove_file(exe);
@@ -9074,16 +7885,9 @@ fn m19_predefined_macros_available() {
 fn base_file_macro_available() {
     let src = include_str!("fixtures/c/base_file.c");
     let (out, exe) = run_compile_and_run("base-file", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "__BASE_FILE__ macro must be defined and contain filename"
-    );
+    assert_eq!(rc, 0, "__BASE_FILE__ macro must be defined and contain filename");
     let _ = fs::remove_file(exe);
 }
 
@@ -9122,11 +7926,7 @@ fn include_level_macro_available() {
         .arg(&source_path)
         .output()
         .expect("run dcc");
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let status = Command::new(&exe_path).status().expect("run exe");
     assert_eq!(
         status.code(),
@@ -9142,16 +7942,9 @@ fn include_level_macro_available() {
 fn timestamp_macro_available() {
     let src = include_str!("fixtures/c/timestamp.c");
     let (out, exe) = run_compile_and_run("timestamp", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "__TIMESTAMP__ must be defined and contain valid date string"
-    );
+    assert_eq!(rc, 0, "__TIMESTAMP__ must be defined and contain valid date string");
     let _ = fs::remove_file(exe);
 }
 
@@ -9161,11 +7954,7 @@ fn timestamp_macro_available() {
 fn m19_pragma_locale_accepted() {
     let src = include_str!("fixtures/c/pragma_locale.c");
     let (out, exe) = run_compile_and_run("m19-pragma-locale", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(exe);
@@ -9178,11 +7967,7 @@ fn m19_pragma_locale_accepted() {
 fn asm_clobber_full_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_clobber.c");
     let (output, _exe) = run_compile_and_run("asm-clobber-full", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -9195,11 +7980,7 @@ fn asm_clobber_full_compiles_and_runs() {
 fn asm_advanced_features_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_advanced_features.c");
     let (output, _exe) = run_compile_and_run("asm-advanced-features", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&_exe);
@@ -9231,11 +8012,7 @@ fn asm_diag_validation_compiles_with_warnings() {
 fn asm_optimizer_preservation_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_optimizer_preservation.c");
     let (output, exe) = run_compile_and_run_flags("asm-optimizer-preservation", source, &["-O2"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&exe);
@@ -9248,11 +8025,7 @@ fn asm_optimizer_preservation_compiles_and_runs() {
 fn asm_debug_info_compiles_with_g() {
     let source = include_str!("fixtures/c/asm_debug_info.c");
     let (output, exe) = run_compile_and_run_flags("asm-debug-info", source, &["-g"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     #[cfg(unix)]
     {
         let rc = run_exe(&exe);
@@ -9306,11 +8079,7 @@ fn asm_per_insn_debug_insn_entries() {
 fn m26_elifdef_elifndef_runs() {
     let src = include_str!("fixtures/c/elifdef.c");
     let (out, exe) = run_compile_and_run("m26-elifdef", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "#elifdef/#elifndef branch selection");
     let _ = fs::remove_file(exe);
@@ -9323,11 +8092,7 @@ fn m26_elifdef_elifndef_runs() {
 fn m26_has_macros_c23_runs() {
     let src = include_str!("fixtures/c/has_macros.c");
     let (out, exe) = run_compile_and_run("m26-has-macros", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__has_* family + endian macros");
     let _ = fs::remove_file(exe);
@@ -9352,11 +8117,7 @@ fn m26_embed_limit_prefix_suffix_runs() {
     );
     let (out, exe) = run_compile_and_run("m26-embed", &src);
     let _ = fs::remove_file(data);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "#embed limit/prefix/suffix bytes");
     let _ = fs::remove_file(exe);
@@ -9381,11 +8142,7 @@ fn m26_embed_if_empty_runs() {
     );
     let (out, exe) = run_compile_and_run("m26-embed-empty", &src);
     let _ = fs::remove_file(data);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "#embed if_empty bytes");
     let _ = fs::remove_file(exe);
@@ -9418,11 +8175,7 @@ fn m26_has_embed_selects_branch() {
     );
     let (out, exe) = run_compile_and_run("m26-has-embed", &src);
     let _ = fs::remove_file(data);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__has_embed branch selection");
     let _ = fs::remove_file(exe);
@@ -9444,11 +8197,7 @@ fn m26_pragma_once_dedupes_include() {
     );
     let (out, exe) = run_compile_and_run("m26-pragma-once", &src);
     let _ = fs::remove_file(hdr);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "#pragma once dedup");
     let _ = fs::remove_file(exe);
@@ -9483,11 +8232,7 @@ fn m26_include_next_chain() {
         .arg(&source_path)
         .output()
         .expect("run dcc");
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe_path);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(rc, 0, "#include_next chain");
@@ -9500,11 +8245,7 @@ fn m26_include_next_chain() {
 fn m23_attr_retain_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_retain.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "retain_var + retain_func(0) = 41+1 = 42");
     let _ = fs::remove_file(exe);
@@ -9516,11 +8257,7 @@ fn m23_attr_retain_compiles_and_runs() {
 fn m23_attr_used_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-used", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "used_helper(21) = 42");
     let _ = fs::remove_file(exe);
@@ -9532,11 +8269,7 @@ fn m23_attr_used_compiles_and_runs() {
 fn m23_attr_flatten_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_flatten.c");
     let (out, exe) = run_compile_and_run("m23-attr-flatten", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "outer(20) = (20+1)*2 = 42");
     let _ = fs::remove_file(exe);
@@ -9549,11 +8282,7 @@ fn attr_flatten_comprehensive_at_all_opt_levels() {
     let src = include_str!("fixtures/c/attr_flatten_full.c");
     for opt in &["-O0", "-O1", "-O2", "-O3"] {
         let (out, exe) = run_compile_and_run_flags("flatten-full", src, &[opt]);
-        assert!(
-            out.status.success(),
-            "compile {opt}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        assert!(out.status.success(), "compile {opt}: {}", String::from_utf8_lossy(&out.stderr));
         let rc = run_exe(&exe);
         assert_eq!(rc, 0, "flatten_full should return 0 at {opt}, got {rc}");
         let _ = fs::remove_file(exe);
@@ -9574,10 +8303,7 @@ fn attr_flatten_asm_no_call_to_inlined() {
     );
     // The outer function body should not contain 'call inner'
     // since inner should be inlined due to flatten
-    assert!(
-        !asm.contains("call inner"),
-        "flatten should inline inner(): {asm}"
-    );
+    assert!(!asm.contains("call inner"), "flatten should inline inner(): {asm}");
 }
 
 // __attribute__((target_clones(...)))): 验证 IFUNC 符号和变体符号生成
@@ -9595,11 +8321,7 @@ fn attr_target_clones_ifunc_symbols() {
         .arg(&src_path)
         .output()
         .expect("run dcc -c for target_clones");
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     // 验证 ELF 符号: compute/multiply 应为 IFUNC (type 10),
     // 变体符号 (compute.sse4.2, compute.default 等) 应为 FUNC
     let readelf = Command::new("readelf")
@@ -9618,26 +8340,11 @@ fn attr_target_clones_ifunc_symbols() {
         "multiply should be IFUNC: {syms}"
     );
     // 变体符号
-    assert!(
-        syms.contains("compute.sse4.2"),
-        "missing compute.sse4.2: {syms}"
-    );
-    assert!(
-        syms.contains("compute.default"),
-        "missing compute.default: {syms}"
-    );
-    assert!(
-        syms.contains("multiply.avx"),
-        "missing multiply.avx: {syms}"
-    );
-    assert!(
-        syms.contains("multiply.sse4.2"),
-        "missing multiply.sse4.2: {syms}"
-    );
-    assert!(
-        syms.contains("multiply.default"),
-        "missing multiply.default: {syms}"
-    );
+    assert!(syms.contains("compute.sse4.2"), "missing compute.sse4.2: {syms}");
+    assert!(syms.contains("compute.default"), "missing compute.default: {syms}");
+    assert!(syms.contains("multiply.avx"), "missing multiply.avx: {syms}");
+    assert!(syms.contains("multiply.sse4.2"), "missing multiply.sse4.2: {syms}");
+    assert!(syms.contains("multiply.default"), "missing multiply.default: {syms}");
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj);
 }
@@ -9648,11 +8355,7 @@ fn attr_target_clones_ifunc_symbols() {
 fn m23_attr_deprecated_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_deprecated.c");
     let (out, exe) = run_compile_and_run("m23-attr-deprecated", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 42);
     let _ = fs::remove_file(exe);
@@ -9665,11 +8368,7 @@ fn m23_attr_deprecated_compiles_and_runs() {
 fn m23_attr_ctor_priority_orders_correctly() {
     let src = include_str!("fixtures/c/attr_ctor_priority.c");
     let (out, exe) = run_compile_and_run("m23-attr-ctor-priority", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     // init_100 (prio=100) 先, order=0*10+2=2; init_300 (prio=300) 后, order=2*10+1=21
     assert_eq!(rc, 21, "constructor priority 100 should run before 300");
@@ -9682,11 +8381,7 @@ fn m23_attr_ctor_priority_orders_correctly() {
 fn m23_builtin_dbg_compiles_and_runs() {
     let src = include_str!("fixtures/c/builtin_dbg.c");
     let (out, exe) = run_compile_and_run("m23-builtin-dbg", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     // alloca 4 个 int, 写 10/11/12/9, sum=42
     assert_eq!(rc, 42, "alloca + assume_aligned + (dead)debugtrap");
@@ -9699,11 +8394,7 @@ fn m23_builtin_dbg_compiles_and_runs() {
 fn m23_attr_retain_used_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_retain_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain-used", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "combo_var + combo_fn(0) = 7+35 = 42");
     let _ = fs::remove_file(exe);
@@ -9729,11 +8420,7 @@ fn m27_fortify_memcpy_chk_links_correctly() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     // 汇编中应出现 call __memcpy_chk (不带 __builtin_ 前缀)
     assert!(
         asm_text.contains("call __memcpy_chk"),
@@ -9762,16 +8449,8 @@ fn m27_builtin_trap_emits_ud2() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        asm_text.contains("ud2"),
-        "trap should emit ud2: {}",
-        asm_text
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm_text.contains("ud2"), "trap should emit ud2: {}", asm_text);
 }
 
 /// __builtin_debugtrap 应发射 int3 指令 (0xcc)
@@ -9793,11 +8472,7 @@ fn m27_builtin_debugtrap_emits_int3() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     assert!(
         asm_text.contains("0xcc") || asm_text.contains("int3"),
         "debugtrap should emit int3 (0xcc): {}",
@@ -9824,16 +8499,8 @@ fn m27_builtin_unreachable_emits_ud2() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        asm_text.contains("ud2"),
-        "unreachable should emit ud2: {}",
-        asm_text
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm_text.contains("ud2"), "unreachable should emit ud2: {}", asm_text);
 }
 
 /// low-level builtins: assume_aligned, alloca, frame_address, return_address 运行时测试
@@ -9842,11 +8509,7 @@ fn m27_builtin_unreachable_emits_ud2() {
 fn m27_lowlevel_builtins_runtime() {
     let src = include_str!("fixtures/c/m27_lowlevel_builtins.c");
     let (out, exe) = run_compile_and_run("m27-lowlevel-builtins", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "low-level builtins runtime test failed");
     let _ = fs::remove_file(exe);
@@ -9859,11 +8522,7 @@ fn m27_lowlevel_builtins_runtime() {
 fn m27_attr_alias_runtime() {
     let src = include_str!("fixtures/c/m27_attr_alias.c");
     let (out, exe) = run_compile_and_run("m27-attr-alias", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "alias attribute test failed");
     let _ = fs::remove_file(exe);
@@ -9875,11 +8534,7 @@ fn m27_attr_alias_runtime() {
 fn m27_attr_alias_symbol_exists() {
     let src = include_str!("fixtures/c/m27_attr_alias.c");
     let (out, obj) = run_object_test("m27-attr-alias-obj", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -9975,11 +8630,7 @@ fn m27_attr_ifunc_with_builtin_linker() {
 fn m27_attr_ifunc_symbol_type_is_ifunc() {
     let src = include_str!("fixtures/c/m27_attr_ifunc.c");
     let (out, obj) = run_object_test("m27-attr-ifunc-obj", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -10034,11 +8685,7 @@ fn m27_attr_alias_target_missing_compiles() {
 fn m27_attr_alias_var_runtime() {
     let src = include_str!("fixtures/c/m27_attr_alias_var.c");
     let (out, exe) = run_compile_and_run("m27-attr-alias-var", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "variable alias test failed");
     let _ = fs::remove_file(exe);
@@ -10050,11 +8697,7 @@ fn m27_attr_alias_var_runtime() {
 fn m27_attr_alias_var_symbol_exists() {
     let src = include_str!("fixtures/c/m27_attr_alias_var.c");
     let (out, obj) = run_object_test("m27-attr-alias-var-obj", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let obj_data = std::fs::read(&obj).expect("read object file");
     let obj_str = String::from_utf8_lossy(&obj_data);
     assert!(obj_str.contains("alias_var"), "missing alias_var symbol");
@@ -10068,11 +8711,7 @@ fn m27_attr_alias_var_symbol_exists() {
 fn m27_attr_alias_weak_runtime() {
     let src = include_str!("fixtures/c/m27_attr_alias_weak.c");
     let (out, exe) = run_compile_and_run("m27-attr-alias-weak", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "weak + alias test failed");
     let _ = fs::remove_file(exe);
@@ -10084,11 +8723,7 @@ fn m27_attr_alias_weak_runtime() {
 fn m27_attr_retain_symbol_exists() {
     let src = include_str!("fixtures/c/attr_retain.c");
     let (out, obj) = run_object_test("m27-attr-retain-obj", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -10108,11 +8743,7 @@ fn m27_attr_retain_symbol_exists() {
 fn m27_attr_used_symbol_exists() {
     let src = include_str!("fixtures/c/attr_used.c");
     let (out, obj) = run_object_test("m27-attr-used-obj", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -10120,11 +8751,7 @@ fn m27_attr_used_symbol_exists() {
         .expect("run readelf");
     let sym_text = String::from_utf8_lossy(&output.stdout);
     // used 静态函数应保留在符号表中
-    assert!(
-        sym_text.contains("used_helper"),
-        "used symbol should exist: {}",
-        sym_text
-    );
+    assert!(sym_text.contains("used_helper"), "used symbol should exist: {}", sym_text);
 }
 
 /// __attribute__((deprecated)): 调用应触发警告但不阻断编译
@@ -10180,11 +8807,7 @@ fn m27_attr_ctor_priority_invalid_compiles() {
 fn m26_char16_char32_compiles_and_runs() {
     let src = include_str!("fixtures/c/char16_char32.c");
     let (out, exe) = run_compile_and_run("m26-char16-char32", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "char16_t/char32_t size and value checks");
     let _ = fs::remove_file(exe);
@@ -10619,10 +9242,7 @@ fn va_arg_x86_64_fixture_compiles() {
         "sum_ld3",
     ] {
         let needle = fname.as_bytes();
-        assert!(
-            obj.windows(needle.len()).any(|w| w == needle),
-            "fixture should define {fname}"
-        );
+        assert!(obj.windows(needle.len()).any(|w| w == needle), "fixture should define {fname}");
     }
 }
 
@@ -10859,7 +9479,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("va-dbl-prec", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(exe);
     assert_eq!(rc, 0, "double precision should return 0, got {rc}");
@@ -11137,11 +9761,7 @@ fn pch_missing_include_warns_and_compiles() {
         .expect("run dcc -fpch-include missing");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "missing PCH must not fail; stderr: {}",
-        stderr
-    );
+    assert!(out.status.success(), "missing PCH must not fail; stderr: {}", stderr);
     assert!(stderr.contains("W0401"), "stderr: {stderr}");
     assert!(object_path.exists(), "object should be produced");
 
@@ -11173,11 +9793,7 @@ fn pch_create_write_failure_warns_and_compiles() {
         .expect("run dcc -fpch-create write failure");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "PCH write failure must not fail; stderr: {}",
-        stderr
-    );
+    assert!(out.status.success(), "PCH write failure must not fail; stderr: {}", stderr);
     assert!(stderr.contains("W0402"), "stderr: {stderr}");
     assert!(object_path.exists(), "object should be produced");
     assert!(!pch_path.exists(), "PCH file should not be created");
@@ -11208,10 +9824,7 @@ fn pch_create_preproc_error_warns_without_pch() {
         .expect("run dcc -fpch-create with preproc error");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "original preprocessor error should still fail"
-    );
+    assert!(!out.status.success(), "original preprocessor error should still fail");
     assert!(stderr.contains("E0203"), "stderr: {stderr}");
     assert!(stderr.contains("W0403"), "stderr: {stderr}");
     assert!(!pch_path.exists(), "PCH file should not be created");
@@ -12013,11 +10626,7 @@ fn m1_1_hello_stdout() {
         .output()
         .expect("run gcc");
     let _ = fs::remove_file(&obj_path);
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -12052,11 +10661,7 @@ fn m1_2_multi_file() {
         .output()
         .expect("dcc");
     let _ = fs::remove_file(&h_path);
-    assert!(
-        c1.status.success(),
-        "helper compile: {}",
-        String::from_utf8_lossy(&c1.stderr)
-    );
+    assert!(c1.status.success(), "helper compile: {}", String::from_utf8_lossy(&c1.stderr));
     let c2 = Command::new(dcc)
         .args(["-c", "-o"])
         .arg(&m_obj)
@@ -12064,11 +10669,7 @@ fn m1_2_multi_file() {
         .output()
         .expect("dcc");
     let _ = fs::remove_file(&m_path);
-    assert!(
-        c2.status.success(),
-        "main compile: {}",
-        String::from_utf8_lossy(&c2.stderr)
-    );
+    assert!(c2.status.success(), "main compile: {}", String::from_utf8_lossy(&c2.stderr));
     let link = Command::new("gcc")
         .args(["-o"])
         .arg(&exe)
@@ -12078,11 +10679,7 @@ fn m1_2_multi_file() {
         .expect("gcc link");
     let _ = fs::remove_file(&h_obj);
     let _ = fs::remove_file(&m_obj);
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -12124,16 +10721,8 @@ fn m1_3_preprocessor() {
         .output()
         .expect("gcc -E");
     let _ = fs::remove_file(&src_path);
-    assert!(
-        dcc_out.status.success(),
-        "dcc -E: {}",
-        String::from_utf8_lossy(&dcc_out.stderr)
-    );
-    assert!(
-        gcc_out.status.success(),
-        "gcc -E: {}",
-        String::from_utf8_lossy(&gcc_out.stderr)
-    );
+    assert!(dcc_out.status.success(), "dcc -E: {}", String::from_utf8_lossy(&dcc_out.stderr));
+    assert!(gcc_out.status.success(), "gcc -E: {}", String::from_utf8_lossy(&gcc_out.stderr));
     // Strip linemarkers (# N ...) and blank lines, then compare
     let strip = |text: &str| -> Vec<String> {
         text.lines()
@@ -12211,10 +10800,7 @@ fn m1_4_elf_format() {
         .expect("readelf -r");
     assert!(rel.status.success(), "readelf -r failed");
     let rel_str = String::from_utf8_lossy(&rel.stdout);
-    assert!(
-        rel_str.contains("R_X86_64"),
-        "missing x86_64 relocations: {rel_str}"
-    );
+    assert!(rel_str.contains("R_X86_64"), "missing x86_64 relocations: {rel_str}");
     let _ = fs::remove_file(&obj);
 }
 
@@ -12702,11 +11288,7 @@ fn m3_11_got_func_addr() {
 fn c23_alignas() {
     let src = include_str!("fixtures/c/c23_alignas.c");
     let (out, exe) = run_compile_and_run("c23-alignas", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_alignas: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12716,11 +11298,7 @@ fn has_extension_macro() {
     // __has_extension: Clang 兼容特性检测宏
     let src = include_str!("fixtures/c/has_extension.c");
     let (out, exe) = run_compile_and_run("has-extension", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "has_extension: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12731,11 +11309,7 @@ fn builtin_typedefs_size_ptrdiff() {
     // 无需系统头文件, 编译器直接提供
     let src = include_str!("fixtures/c/builtin_typedefs.c");
     let (out, exe) = run_compile_and_run("builtin-typedefs", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "builtin_typedefs: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12746,11 +11320,7 @@ fn c23_constexpr_var() {
     // C23 constexpr 变量: 必须常量初始化, 隐含 const
     let src = include_str!("fixtures/c/c23_constexpr_var.c");
     let (out, exe) = run_compile_and_run("c23-constexpr-var", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_constexpr_var: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12760,10 +11330,7 @@ fn c23_constexpr_var_error() {
     // C23 constexpr 变量非常量初始化器应报错 E0011
     let src = include_str!("fixtures/c/c23_constexpr_var_error.c");
     let out = run_syntax_test("c23-constexpr-var-err", src);
-    assert!(
-        !out.status.success(),
-        "should fail: constexpr requires constant initializer"
-    );
+    assert!(!out.status.success(), "should fail: constexpr requires constant initializer");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("constexpr") || stderr.contains("constant"),
@@ -12779,10 +11346,7 @@ fn c23_fallthrough_nodiscard_compile_and_run() {
     let src = include_str!("fixtures/c/c23_fallthrough_nodiscard.c");
     let (out, exe) = run_compile_and_run("c23-fallthrough-nodiscard", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "c23 fallthrough/nodiscard compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "c23 fallthrough/nodiscard compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "c23_fallthrough_nodiscard should return 0, got {rc}");
@@ -12795,10 +11359,7 @@ fn ssa_volatile_semantics_compile_and_run() {
     let src = include_str!("fixtures/c/ssa_volatile_semantics.c");
     let (out, exe) = run_compile_and_run_flags("ssa-volatile-semantics", src, &["-O2"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "ssa volatile semantics compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "ssa volatile semantics compile failed: {stderr}");
     #[cfg(unix)]
     {
         let rc = run_exe(&exe);
@@ -12813,10 +11374,7 @@ fn c23_nodiscard_warn_emits_w0401() {
     let src = include_str!("fixtures/c/c23_nodiscard_warn.c");
     let out = run_syntax_test("c23-nodiscard-warn", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("W0401"),
-        "expected W0401 nodiscard warning: {stderr}"
-    );
+    assert!(stderr.contains("W0401"), "expected W0401 nodiscard warning: {stderr}");
     assert!(
         stderr.contains("nodiscard") || stderr.contains("ignoring"),
         "warning should mention nodiscard/ignoring: {stderr}"
@@ -12829,10 +11387,7 @@ fn ssa_qualifier_fallback_switch_label() {
     let src = include_str!("fixtures/c/ssa_qualifier_fallback.c");
     let (out, exe) = run_compile_and_run("ssa-qualifier-fallback", src);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "ssa qualifier fallback compile failed: {stderr}"
-    );
+    assert!(out.status.success(), "ssa qualifier fallback compile failed: {stderr}");
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "ssa_qualifier_fallback should return 0, got {rc}");
@@ -12844,17 +11399,8 @@ fn ssa_qualifier_fallback_switch_label() {
 fn comdat_weak_functions() {
     let src = include_str!("fixtures/c/comdat_weak.c");
     let (out, exe) = run_compile_and_run("comdat-weak", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        run_exe(&exe),
-        0,
-        "comdat_weak: {}",
-        run_exe(&exe)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "comdat_weak: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
 
@@ -12863,11 +11409,7 @@ fn comdat_weak_functions() {
 fn c23_bool() {
     let src = include_str!("fixtures/c/c23_bool.c");
     let (out, exe) = run_compile_and_run("c23-bool", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_bool: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12877,11 +11419,7 @@ fn c23_bool() {
 fn c23_brace_init() {
     let src = include_str!("fixtures/c/c23_brace_init.c");
     let (out, exe) = run_compile_and_run("c23-brace-init", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_brace_init: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12891,11 +11429,7 @@ fn c23_brace_init() {
 fn c23_enum_under() {
     let src = include_str!("fixtures/c/c23_enum_under.c");
     let (out, exe) = run_compile_and_run("c23-enum-under", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_enum_under: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12905,11 +11439,7 @@ fn c23_enum_under() {
 fn c23_has_c_attribute() {
     let src = include_str!("fixtures/c/c23_has_c_attribute.c");
     let (out, exe) = run_compile_and_run("c23-has-c-attr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_has_c_attribute: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12919,11 +11449,7 @@ fn c23_has_c_attribute() {
 fn c23_nullptr() {
     let src = include_str!("fixtures/c/c23_nullptr.c");
     let (out, exe) = run_compile_and_run("c23-nullptr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_nullptr: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12933,11 +11459,7 @@ fn c23_nullptr() {
 fn c23_printf_b() {
     let src = include_str!("fixtures/c/c23_printf_b.c");
     let (out, exe) = run_compile_and_run("c23-printf-b", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_printf_b: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12947,11 +11469,7 @@ fn c23_printf_b() {
 fn c23_static_assert() {
     let src = include_str!("fixtures/c/c23_static_assert.c");
     let (out, exe) = run_compile_and_run("c23-static-assert", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_static_assert: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12961,11 +11479,7 @@ fn c23_static_assert() {
 fn c23_thread_local() {
     let src = include_str!("fixtures/c/c23_thread_local.c");
     let (out, exe) = run_compile_and_run("c23-thread-local", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_thread_local: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12975,11 +11489,7 @@ fn c23_thread_local() {
 fn c23_typeof_unqual() {
     let src = include_str!("fixtures/c/c23_typeof_unqual.c");
     let (out, exe) = run_compile_and_run("c23-typeof-unqual", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0, "c23_typeof_unqual: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -12991,11 +11501,7 @@ fn c23_typeof_unqual() {
 fn cpp_coroutine_state_machine() {
     let src = include_str!("fixtures/cpp/coroutine_state.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-coroutine-state", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -13005,11 +11511,7 @@ fn cpp_coroutine_state_machine() {
 fn cpp_modules_bmf() {
     let src = include_str!("fixtures/cpp/modules_bmf.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-modules-bmf", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -13019,11 +11521,7 @@ fn cpp_enum_semantics_runtime() {
     // enum 保留枚举值 + scoped + 底层类型; dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/enum_semantics.cpp");
     let (out, obj) = run_cpp_object_test("cpp-enum-semantics", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-cpp-enum-semantics-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13032,11 +11530,7 @@ fn cpp_enum_semantics_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run enum binary");
@@ -13056,11 +11550,7 @@ fn cpp_member_parser_runtime() {
     // 引用成员 + operator new/delete + hex/oct/bin/float/转义字面量.
     let src = include_str!("fixtures/cpp/member_parser.cpp");
     let (out, obj) = run_cpp_object_test("cpp-member-parser", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-cpp-member-parser-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13069,11 +11559,7 @@ fn cpp_member_parser_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run member-parser binary");
@@ -13094,11 +11580,7 @@ fn cpp_auto_deduction_runtime() {
     // auto 从 函数调用 / 成员调用 / 成员访问 / new 推导真实类型.
     let src = include_str!("fixtures/cpp/auto_deduction.cpp");
     let (out, obj) = run_cpp_object_test("cpp-auto-deduction", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-cpp-auto-deduction-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13107,11 +11589,7 @@ fn cpp_auto_deduction_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run auto binary");
@@ -13131,11 +11609,7 @@ fn cpp_noexcept_expr_runtime() {
     // noexcept(expr) 分析表达式抛异常可能性; dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/noexcept_expr.cpp");
     let (out, obj) = run_cpp_object_test("cpp-noexcept-expr", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-cpp-noexcept-expr-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13144,11 +11618,7 @@ fn cpp_noexcept_expr_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run noexcept binary");
@@ -13170,11 +11640,7 @@ fn cpp_coroutine_runtime() {
     // 保持 (文件作用域 static 全局); dcc -c 后 host gcc 链接并运行.
     let src = include_str!("fixtures/cpp/coroutine_runtime.cpp");
     let (out, obj) = run_cpp_object_test("cpp-coroutine-runtime", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-cpp-coroutine-runtime-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13183,11 +11649,7 @@ fn cpp_coroutine_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run coroutine binary");
@@ -13209,27 +11671,16 @@ fn cpp_virtual_inheritance_runtime() {
     // 成员访问与上转型经 vbtable this-adjust; dcc -c + host gcc 链接运行.
     let src = include_str!("fixtures/cpp/virtual_inheritance.cpp");
     let (out, obj) = run_cpp_object_test("cpp-virtual-inheritance", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!(
-        "dcc-cpp-virtual-inheritance-{}",
-        std::process::id()
-    ));
+    let exe = dir.join(format!("dcc-cpp-virtual-inheritance-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run virtual-inheritance binary");
@@ -13280,11 +11731,7 @@ int hidden_helper() { return 1; }
         .arg(format!("--emit-module-file={}", bmf_path.display()))
         .output()
         .expect("run dcc on module TU");
-    assert!(
-        out.status.success(),
-        "module compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
     assert!(bmf_path.exists(), "BMF interface not emitted");
     let bmf_text = fs::read_to_string(&bmf_path).unwrap();
     // 导出记录: 自由函数 + 类布局 + 成员函数/ctor; 私有片段声明不导出
@@ -13311,11 +11758,7 @@ int main() {
         .arg(&main_path)
         .output()
         .expect("run dcc on import TU");
-    assert!(
-        out.status.success(),
-        "import compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
 
     let link = Command::new("gcc")
         .arg(&mod_obj)
@@ -13324,11 +11767,7 @@ int main() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = Command::new(&exe).output().expect("run module binary");
     let _ = fs::remove_dir_all(&dir);
     assert!(
@@ -13360,11 +11799,7 @@ fn cpp_module_partition_import_runtime() {
     let exe = dir.join("main");
 
     // 分区 TU
-    fs::write(
-        &part_path,
-        "export module mymod:part;\nexport int pfn() { return 7; }\n",
-    )
-    .unwrap();
+    fs::write(&part_path, "export module mymod:part;\nexport int pfn() { return 7; }\n").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&part_obj)
@@ -13406,22 +11841,14 @@ fn cpp_module_partition_import_runtime() {
     assert!(prim_text.contains("E F get"), "{}", prim_text);
 
     // 导入 TU
-    fs::write(
-        &main_path,
-        "import mymod;\nint main() { return get() != 7; }\n",
-    )
-    .unwrap();
+    fs::write(&main_path, "import mymod;\nint main() { return get() != 7; }\n").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&main_obj)
         .arg(&main_path)
         .output()
         .expect("run dcc on import TU");
-    assert!(
-        out.status.success(),
-        "import compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
 
     let link = Command::new("gcc")
         .arg(&part_obj)
@@ -13431,11 +11858,7 @@ fn cpp_module_partition_import_runtime() {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = Command::new(&exe).output().expect("run partition binary");
     let _ = fs::remove_dir_all(&dir);
     assert!(
@@ -13456,26 +11879,16 @@ fn cpp_odr_conflict_rejected() {
     fs::create_dir_all(&dir).unwrap();
 
     // 模块 A: foo() 返回 int
-    fs::write(
-        dir.join("moda.cpp"),
-        "export module moda;\nexport int foo() { return 1; }\n",
-    )
-    .unwrap();
+    fs::write(dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n")
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("moda.o"))
         .arg(dir.join("moda.cpp"))
-        .arg(format!(
-            "--emit-module-file={}",
-            dir.join("moda.bmf").display()
-        ))
+        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
         .output()
         .expect("run dcc on moda");
-    assert!(
-        out.status.success(),
-        "moda: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
 
     // 模块 B: foo(int) 接受参数, 与模块 A 的 foo 同名不同定义
     fs::write(
@@ -13487,24 +11900,14 @@ fn cpp_odr_conflict_rejected() {
         .args(["-c", "-o"])
         .arg(dir.join("modb.o"))
         .arg(dir.join("modb.cpp"))
-        .arg(format!(
-            "--emit-module-file={}",
-            dir.join("modb.bmf").display()
-        ))
+        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
         .output()
         .expect("run dcc on modb");
-    assert!(
-        out.status.success(),
-        "modb: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
 
     // 导入 TU 同时 import moda + modb -> ODR 冲突必须被拒绝
-    fs::write(
-        dir.join("main.cpp"),
-        "import moda;\nimport modb;\nint main() { return 0; }\n",
-    )
-    .unwrap();
+    fs::write(dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n")
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("main.o"))
@@ -13516,11 +11919,7 @@ fn cpp_odr_conflict_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
     assert!(stderr.contains("foo"), "stderr: {}", stderr);
-    assert!(
-        stderr.contains("moda") && stderr.contains("modb"),
-        "stderr: {}",
-        stderr
-    );
+    assert!(stderr.contains("moda") && stderr.contains("modb"), "stderr: {}", stderr);
 }
 
 #[test]
@@ -13530,53 +11929,30 @@ fn cpp_odr_identical_imports_ok() {
     let dir = std::env::temp_dir().join(format!("dcc-odr-ok-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
 
-    fs::write(
-        dir.join("moda.cpp"),
-        "export module moda;\nexport int foo() { return 1; }\n",
-    )
-    .unwrap();
+    fs::write(dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n")
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("moda.o"))
         .arg(dir.join("moda.cpp"))
-        .arg(format!(
-            "--emit-module-file={}",
-            dir.join("moda.bmf").display()
-        ))
+        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
         .output()
         .expect("run dcc on moda");
-    assert!(
-        out.status.success(),
-        "moda: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
 
-    fs::write(
-        dir.join("modb.cpp"),
-        "export module modb;\nexport int foo() { return 2; }\n",
-    )
-    .unwrap();
+    fs::write(dir.join("modb.cpp"), "export module modb;\nexport int foo() { return 2; }\n")
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("modb.o"))
         .arg(dir.join("modb.cpp"))
-        .arg(format!(
-            "--emit-module-file={}",
-            dir.join("modb.bmf").display()
-        ))
+        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
         .output()
         .expect("run dcc on modb");
-    assert!(
-        out.status.success(),
-        "modb: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
 
-    fs::write(
-        dir.join("main.cpp"),
-        "import moda;\nimport modb;\nint main() { return 0; }\n",
-    )
-    .unwrap();
+    fs::write(dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n")
+        .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("main.o"))
@@ -13608,11 +11984,7 @@ int main(void) {
 }
 "#;
     let (out, obj) = run_object_test("arrow-member-store", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-arrow-member-store-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
@@ -13621,11 +11993,7 @@ int main(void) {
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run arrow-member-store binary");
@@ -13644,11 +12012,7 @@ int main(void) {
 fn cpp_gcc_compat() {
     let src = include_str!("fixtures/cpp/gcc_compat.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-gcc-compat", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
 
@@ -13658,11 +12022,7 @@ fn sched_barrier_patterns_compiles() {
     let source = include_str!("fixtures/c/sched_barrier_patterns.c");
     let (output, obj) = run_object_test("sched-barrier-patterns", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// kernel/sched rq lock / atomic / seqcount 模式编译测试
@@ -13671,11 +12031,7 @@ fn sched_rq_lock_patterns_compiles() {
     let source = include_str!("fixtures/c/sched_rq_lock_patterns.c");
     let (output, obj) = run_object_test("sched-rq-lock-patterns", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// -E -o 写入指定文件而非 stdout
@@ -13692,11 +12048,7 @@ fn preprocess_only_with_output_file() {
         .output()
         .expect("run dcc -E -o");
     let _ = fs::remove_file(&src);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let content = fs::read_to_string(&out).unwrap_or_default();
     let _ = fs::remove_file(&out);
     assert!(
@@ -13739,11 +12091,7 @@ fn func_type_param_compiles() {
     let source = include_str!("fixtures/c/func_type_param.c");
     let (output, obj) = run_object_test("func-type-param", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 数组维度整型常量表达式折叠: `BITS_PER_LONG + 1` 应折叠为编译期常量,
@@ -13754,11 +12102,7 @@ fn array_dim_const_fold_compiles() {
     let source = include_str!("fixtures/c/array_dim_const_fold.c");
     let (output, obj) = run_object_test("array-dim-const-fold", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 同标签 struct/union 指针重声明兼容: C11 6.2.5p22 同标签即同一类型.
@@ -13769,11 +12113,7 @@ fn tag_compat_redecl_compiles() {
     let source = include_str!("fixtures/c/tag_compat_redecl.c");
     let (output, obj) = run_object_test("tag-compat-redecl", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 全局静态初始化器链接期地址常量 (E1006 回归): 数组成员隐式数组退化
@@ -13784,11 +12124,7 @@ fn static_addr_const_init_compiles() {
     let source = include_str!("fixtures/c/static_addr_const.c");
     let (output, obj) = run_object_test("static-addr-const", source);
     let _ = fs::remove_file(obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// 多维数组维度从内向外解析 (C11 6.7.6.2p4): char buf[2][8] 是 2 个 char[8].
@@ -13841,10 +12177,7 @@ fn builtin_linker_cleans_tmp_objs_on_failure() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with(&prefix))
         .collect();
-    assert!(
-        leftovers.is_empty(),
-        "builtin linker leaked tmp .o files: {leftovers:?}"
-    );
+    assert!(leftovers.is_empty(), "builtin linker leaked tmp .o files: {leftovers:?}");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&out);
 }
@@ -13977,10 +12310,7 @@ fn cet_ibt_plt_sec_and_gnu_property_sections() {
         .expect("readelf");
     let sections = String::from_utf8_lossy(&readelf.stdout);
     let _ = fs::remove_file(&exe);
-    assert!(
-        sections.contains(".plt.sec"),
-        "expected .plt.sec section in ELF: {sections}"
-    );
+    assert!(sections.contains(".plt.sec"), "expected .plt.sec section in ELF: {sections}");
     assert!(
         sections.contains(".gnu.property"),
         "expected .gnu.property section in ELF: {sections}"
@@ -14009,10 +12339,7 @@ fn cet_no_ibt_plt_sec_empty() {
     let sections = String::from_utf8_lossy(&readelf.stdout);
     let _ = fs::remove_file(&exe);
     // 传统模式: .plt 必须存在且非空 (PLT[0] + 函数条目)
-    assert!(
-        sections.contains(".plt"),
-        "should have .plt section: {sections}"
-    );
+    assert!(sections.contains(".plt"), "should have .plt section: {sections}");
     // .plt.sec 若存在则 size 应为 0
     for line in sections.lines() {
         if line.contains(".plt.sec") {
@@ -14020,10 +12347,7 @@ fn cet_no_ibt_plt_sec_empty() {
             // size 为第 6 个字段 (0-indexed: 5)
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() > 5 {
-                assert_eq!(
-                    fields[5], "000000",
-                    ".plt.sec should be empty without IBT: {line}"
-                );
+                assert_eq!(fields[5], "000000", ".plt.sec should be empty without IBT: {line}");
             }
             break;
         }
@@ -14054,10 +12378,7 @@ fn bind_now_plt_got_section() {
         .expect("readelf");
     let sections = String::from_utf8_lossy(&readelf.stdout);
     let _ = fs::remove_file(&exe);
-    assert!(
-        sections.contains(".plt.got"),
-        "expected .plt.got section in ELF: {sections}"
-    );
+    assert!(sections.contains(".plt.got"), "expected .plt.got section in ELF: {sections}");
 }
 
 // =================== C11 atomic 预置宏 ===================
@@ -14091,10 +12412,7 @@ fn c11_atomic_freestanding_no_atomics() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "freestanding should see __STDC_NO_ATOMICS__=1, got {rc}"
-    );
+    assert_eq!(rc, 0, "freestanding should see __STDC_NO_ATOMICS__=1, got {rc}");
     let _ = fs::remove_file(exe);
 }
 
@@ -14272,11 +12590,7 @@ int main(void) { return 0; }
 fn asm_goto_output_paths_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_goto_output_paths.c");
     let (output, exe) = run_compile_and_run("asm-goto-output-paths", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "asm_goto_output_paths should return 0, got {rc}");
 }
@@ -14287,11 +12601,7 @@ fn asm_goto_output_paths_compiles_and_runs() {
 fn asm_goto_label_addr_mix_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_goto_label_addr_mix.c");
     let (output, exe) = run_compile_and_run("asm-goto-label-addr-mix", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "asm_goto_label_addr_mix should return 0, got {rc}");
 }
@@ -14302,11 +12612,7 @@ fn asm_goto_label_addr_mix_compiles_and_runs() {
 fn asm_nested_macro_rept_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_nested_macro_rept.c");
     let (output, exe) = run_compile_and_run("asm-nested-macro-rept", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "asm_nested_macro_rept should return 0, got {rc}");
 }
@@ -14317,16 +12623,9 @@ fn asm_nested_macro_rept_compiles_and_runs() {
 fn asm_memory_clobber_optimizer_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_memory_clobber_optimizer.c");
     let (output, exe) = run_compile_and_run_flags("asm-memory-clobber-optimizer", source, &["-O2"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
-    assert_eq!(
-        rc, 0,
-        "asm_memory_clobber_optimizer should return 0, got {rc}"
-    );
+    assert_eq!(rc, 0, "asm_memory_clobber_optimizer should return 0, got {rc}");
 }
 
 /// 大规模 AVX-512 EVEX 掩码指令端到端运行
@@ -14335,11 +12634,7 @@ fn asm_memory_clobber_optimizer_compiles_and_runs() {
 fn asm_avx512_runtime_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_avx512_runtime.c");
     let (output, exe) = run_compile_and_run("asm-avx512-runtime", source);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "asm_avx512_runtime should return 0, got {rc}");
 }
@@ -14393,11 +12688,7 @@ int main(void) {
         .output()
         .expect("dcc tu1");
     let _ = std::fs::remove_file(&tu1_path);
-    assert!(
-        c1.status.success(),
-        "tu1 compile: {}",
-        String::from_utf8_lossy(&c1.stderr)
-    );
+    assert!(c1.status.success(), "tu1 compile: {}", String::from_utf8_lossy(&c1.stderr));
     let c2 = std::process::Command::new(dcc)
         .args(["-c", "-o"])
         .arg(&tu2_obj)
@@ -14405,11 +12696,7 @@ int main(void) {
         .output()
         .expect("dcc tu2");
     let _ = std::fs::remove_file(&tu2_path);
-    assert!(
-        c2.status.success(),
-        "tu2 compile: {}",
-        String::from_utf8_lossy(&c2.stderr)
-    );
+    assert!(c2.status.success(), "tu2 compile: {}", String::from_utf8_lossy(&c2.stderr));
     let link = std::process::Command::new("gcc")
         .args(["-o"])
         .arg(&exe)
@@ -14419,11 +12706,7 @@ int main(void) {
         .expect("gcc link");
     let _ = std::fs::remove_file(&tu1_obj);
     let _ = std::fs::remove_file(&tu2_obj);
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -14467,12 +12750,7 @@ fn asm_non_x86_backend_s_mode_compiles() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "target {}: -S mode failed: {}",
-            target,
-            stderr
-        );
+        assert!(output.status.success(), "target {}: -S mode failed: {}", target, stderr);
         // 验证 -S 输出包含 asm 文本
         if asm_path.exists() {
             let asm_content = fs::read_to_string(&asm_path).unwrap_or_default();
@@ -14521,12 +12799,7 @@ fn asm_non_x86_backend_c_mode_no_panic() {
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
         // -c 模式应该成功 (mini-assembler 编码机器码)
-        assert!(
-            output.status.success(),
-            "target {}: -c mode failed: {}",
-            target,
-            stderr
-        );
+        assert!(output.status.success(), "target {}: -c mode failed: {}", target, stderr);
         // -c 模式不应包含旧的 "non-x86_64 target" 警告 (已编码机器码)
         // 对于无法识别的指令可能有 "unrecognized" 警告，但 nop 等常见指令不应有
         let _ = fs::remove_file(&src_path);
@@ -14557,26 +12830,38 @@ fn non_x86_c_mode_produces_valid_elf() {
     // (triple, 期望 ELFCLASS, 期望 e_machine, readelf -h Machine 行应含的名字)
     let targets: [(&str, u8, u16, &str); 5] = [
         ("aarch64-linux-gnu", 2, 183, "AArch64"), // EM_AARCH64
-        ("riscv64-linux-gnu", 2, 243, "RISC-V"),   // EM_RISCV
-        ("mips-linux-gnu", 1, 8, "MIPS R3000"),     // EM_MIPS
-        ("mips64-linux-gnuabi64", 2, 8, "MIPS"),    // EM_MIPS
-        ("arm-linux-gnueabihf", 1, 40, "ARM"),      // EM_ARM
+        ("riscv64-linux-gnu", 2, 243, "RISC-V"),  // EM_RISCV
+        ("mips-linux-gnu", 1, 8, "MIPS R3000"),   // EM_MIPS
+        ("mips64-linux-gnuabi64", 2, 8, "MIPS"),  // EM_MIPS
+        ("arm-linux-gnueabihf", 1, 40, "ARM"),    // EM_ARM
     ];
 
     /// 按指定端序读取 ELF 头里的 u16（e_type/e_machine 在 ELF32/ELF64 里偏移相同）。
     fn elf_u16_at(bytes: &[u8], off: usize, big_endian: bool) -> u16 {
         let raw = [bytes[off], bytes[off + 1]];
-        if big_endian { u16::from_be_bytes(raw) } else { u16::from_le_bytes(raw) }
+        if big_endian {
+            u16::from_be_bytes(raw)
+        } else {
+            u16::from_le_bytes(raw)
+        }
     }
 
     fn elf_u32_at(bytes: &[u8], off: usize, big_endian: bool) -> u32 {
         let raw: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
-        if big_endian { u32::from_be_bytes(raw) } else { u32::from_le_bytes(raw) }
+        if big_endian {
+            u32::from_be_bytes(raw)
+        } else {
+            u32::from_le_bytes(raw)
+        }
     }
 
     fn elf_u64_at(bytes: &[u8], off: usize, big_endian: bool) -> u64 {
         let raw: [u8; 8] = bytes[off..off + 8].try_into().unwrap();
-        if big_endian { u64::from_be_bytes(raw) } else { u64::from_le_bytes(raw) }
+        if big_endian {
+            u64::from_be_bytes(raw)
+        } else {
+            u64::from_le_bytes(raw)
+        }
     }
 
     // 逐目标收集失败原因而不是遇错即停：mips64 已知会红（这正是要暴露的事实），
@@ -14585,16 +12870,10 @@ fn non_x86_c_mode_produces_valid_elf() {
 
     for (target, want_class, want_em, want_machine_name) in &targets {
         let dir = std::env::temp_dir();
-        let src_path = dir.join(format!(
-            "dcc-elf-{}-{}.c",
-            target.replace('/', "-"),
-            std::process::id()
-        ));
-        let obj_path = dir.join(format!(
-            "dcc-elf-{}-{}.o",
-            target.replace('/', "-"),
-            std::process::id()
-        ));
+        let src_path =
+            dir.join(format!("dcc-elf-{}-{}.c", target.replace('/', "-"), std::process::id()));
+        let obj_path =
+            dir.join(format!("dcc-elf-{}-{}.o", target.replace('/', "-"), std::process::id()));
         let mut check = |cond: bool, msg: String| {
             if !cond {
                 failures.push(format!("target {target}: {msg}"));
@@ -14609,10 +12888,7 @@ fn non_x86_c_mode_produces_valid_elf() {
             .expect("run dcc");
         check(
             output.status.success(),
-            format!(
-                "-c mode failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
+            format!("-c mode failed: {}", String::from_utf8_lossy(&output.stderr)),
         );
 
         // ---- 1. magic + 端序/类别自述 ----
@@ -14624,10 +12900,7 @@ fn non_x86_c_mode_produces_valid_elf() {
         if elf_bytes.len() >= 64 {
             check(
                 elf_bytes[4] == *want_class,
-                format!(
-                    "EI_CLASS = {}, expected {want_class} (1=ELF32, 2=ELF64)",
-                    elf_bytes[4]
-                ),
+                format!("EI_CLASS = {}, expected {want_class} (1=ELF32, 2=ELF64)", elf_bytes[4]),
             );
             let is_be = elf_bytes[5] == 2;
             check(
@@ -14691,7 +12964,7 @@ fn non_x86_c_mode_produces_valid_elf() {
                     ),
                 );
                 check(stdout.contains(" .text "), format!("objdump -h has no .text: {stdout}"));
-            }
+            },
             Err(e) => check(false, format!("cannot run objdump: {e}")),
         }
 
@@ -14722,7 +12995,7 @@ fn non_x86_c_mode_produces_valid_elf() {
                     kind.contains("REL") && !kind.contains("<unknown>"),
                     format!("readelf -h Type: {kind}"),
                 );
-            }
+            },
             Err(e) => check(false, format!("cannot run readelf: {e}")),
         }
 
@@ -14774,18 +13047,33 @@ fn non_x86_c_mode_produces_valid_elf() {
 fn elf64_symtab_matches_gabi_layout() {
     fn u16_at(b: &[u8], off: usize, be: bool) -> u16 {
         let r = [b[off], b[off + 1]];
-        if be { u16::from_be_bytes(r) } else { u16::from_le_bytes(r) }
+        if be {
+            u16::from_be_bytes(r)
+        } else {
+            u16::from_le_bytes(r)
+        }
     }
     fn u32_at(b: &[u8], off: usize, be: bool) -> u32 {
         let r: [u8; 4] = b[off..off + 4].try_into().unwrap();
-        if be { u32::from_be_bytes(r) } else { u32::from_le_bytes(r) }
+        if be {
+            u32::from_be_bytes(r)
+        } else {
+            u32::from_le_bytes(r)
+        }
     }
     fn u64_at(b: &[u8], off: usize, be: bool) -> u64 {
         let r: [u8; 8] = b[off..off + 8].try_into().unwrap();
-        if be { u64::from_be_bytes(r) } else { u64::from_le_bytes(r) }
+        if be {
+            u64::from_be_bytes(r)
+        } else {
+            u64::from_le_bytes(r)
+        }
     }
     fn cstr(b: &[u8], off: usize) -> String {
-        let end = b[off..].iter().position(|&c| c == 0).unwrap_or(b.len() - off);
+        let end = b[off..]
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(b.len() - off);
         String::from_utf8_lossy(&b[off..off + end]).to_string()
     }
 
@@ -14829,10 +13117,7 @@ fn elf64_symtab_matches_gabi_layout() {
                     u32_at(elf, o + 44, be),
                 ));
             } else if name == ".strtab" {
-                strtab = Some((
-                    u64_at(elf, o + 24, be) as usize,
-                    u64_at(elf, o + 32, be) as usize,
-                ));
+                strtab = Some((u64_at(elf, o + 24, be) as usize, u64_at(elf, o + 32, be) as usize));
             }
         }
         let Some((sym_off, sym_size, sym_entsize, sym_link, sym_info)) = sym else {
@@ -14945,7 +13230,11 @@ fn elf64_symtab_matches_gabi_layout() {
     // `.debug_*` 相关节符号、`-O2` 会改变发射顺序, 这两条通道才是真能把"LOCAL 必须排在
     // 前面 + sh_info 必须实算"压弯的地方 (本轮 drift 实测: aarch64 的 .strtab 只在
     // `-g -c`/`-O2 -c` 下重排)。只锁 `-c` 等于只锁了最容易对的那一格。
-    let modes: [&[&str]; 3] = [["-c"].as_slice(), ["-g", "-c"].as_slice(), ["-O2", "-c"].as_slice()];
+    let modes: [&[&str]; 3] = [
+        ["-c"].as_slice(),
+        ["-g", "-c"].as_slice(),
+        ["-O2", "-c"].as_slice(),
+    ];
     let mut failures: Vec<String> = Vec::new();
 
     for (tag, src_text, want_names) in &cases {
@@ -14990,7 +13279,9 @@ fn elf64_symtab_matches_gabi_layout() {
                         let so = String::from_utf8_lossy(&r.stdout).into_owned();
                         let se = String::from_utf8_lossy(&r.stderr).into_owned();
                         if !se.trim().is_empty() {
-                            failures.push(format!("{target} [{tag} {mtag}]: readelf -sW 有输出到 stderr: {se}"));
+                            failures.push(format!(
+                                "{target} [{tag} {mtag}]: readelf -sW 有输出到 stderr: {se}"
+                            ));
                         }
                         if so.contains("BAD[") {
                             failures.push(format!(
@@ -15009,19 +13300,24 @@ fn elf64_symtab_matches_gabi_layout() {
                         // 变量符号; mips64 与 arm/mips32 同属“不发全局变量符号”的
                         // 另一条缺口 (已单独记录), 故只在这三个 target 上断言。
                         if *tag == "mixed"
-                            && matches!(*target, "x86_64-linux-gnu" | "aarch64-linux-gnu" | "riscv64-linux-gnu")
+                            && matches!(
+                                *target,
+                                "x86_64-linux-gnu" | "aarch64-linux-gnu" | "riscv64-linux-gnu"
+                            )
                         {
-                            let gsrv_local = so
-                                .lines()
-                                .any(|l| l.contains(" gsrv") && l.contains("LOCAL") && l.contains("OBJECT"));
+                            let gsrv_local = so.lines().any(|l| {
+                                l.contains(" gsrv") && l.contains("LOCAL") && l.contains("OBJECT")
+                            });
                             if !gsrv_local {
                                 failures.push(format!(
                                     "{target} [{tag} {mtag}]: 文件作用域 static 变量 gsrv 未以 LOCAL OBJECT 出现: {so}"
                                 ));
                             }
                         }
-                    }
-                    Err(e) => failures.push(format!("{target} [{tag} {mtag}]: 无法运行 readelf: {e}")),
+                    },
+                    Err(e) => {
+                        failures.push(format!("{target} [{tag} {mtag}]: 无法运行 readelf: {e}"))
+                    },
                 }
                 // objdump -t 是第二个独立读者: 它对同一张表做同样的 24 字节步进解析,
                 // 两个工具都干净才算真的干净 (单工具可能只是自身宽容)。
@@ -15034,7 +13330,9 @@ fn elf64_symtab_matches_gabi_layout() {
                     Ok(r) => {
                         let so = String::from_utf8_lossy(&r.stdout).into_owned();
                         if so.contains("<bad>") || so.contains("FILE 0x") && so.contains(".o") {
-                            failures.push(format!("{target} [{tag} {mtag}]: objdump -t 读符号表异常: {so}"));
+                            failures.push(format!(
+                                "{target} [{tag} {mtag}]: objdump -t 读符号表异常: {so}"
+                            ));
                         }
                         for want in *want_names {
                             if !so.contains(want) {
@@ -15043,8 +13341,10 @@ fn elf64_symtab_matches_gabi_layout() {
                                 ));
                             }
                         }
-                    }
-                    Err(e) => failures.push(format!("{target} [{tag} {mtag}]: 无法运行 objdump: {e}")),
+                    },
+                    Err(e) => {
+                        failures.push(format!("{target} [{tag} {mtag}]: 无法运行 objdump: {e}"))
+                    },
                 }
                 let _ = fs::remove_file(&src_path);
                 let _ = fs::remove_file(&obj_path);
@@ -15083,17 +13383,28 @@ fn elf64_symtab_matches_gabi_layout() {
 fn elf32_symtab_matches_gabi_layout() {
     fn u16_at(b: &[u8], off: usize, be: bool) -> u16 {
         let r = [b[off], b[off + 1]];
-        if be { u16::from_be_bytes(r) } else { u16::from_le_bytes(r) }
+        if be {
+            u16::from_be_bytes(r)
+        } else {
+            u16::from_le_bytes(r)
+        }
     }
     fn u32_at(b: &[u8], off: usize, be: bool) -> u32 {
         let r: [u8; 4] = b[off..off + 4].try_into().unwrap();
-        if be { u32::from_be_bytes(r) } else { u32::from_le_bytes(r) }
+        if be {
+            u32::from_be_bytes(r)
+        } else {
+            u32::from_le_bytes(r)
+        }
     }
     fn cstr(b: &[u8], off: usize) -> String {
         if off >= b.len() {
             return String::new();
         }
-        let end = b[off..].iter().position(|&c| c == 0).unwrap_or(b.len() - off);
+        let end = b[off..]
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(b.len() - off);
         String::from_utf8_lossy(&b[off..off + end]).to_string()
     }
 
@@ -15137,10 +13448,7 @@ fn elf32_symtab_matches_gabi_layout() {
                     u32_at(elf, o + 28, be),
                 ));
             } else if name == ".strtab" {
-                strtab = Some((
-                    u32_at(elf, o + 16, be) as usize,
-                    u32_at(elf, o + 20, be) as usize,
-                ));
+                strtab = Some((u32_at(elf, o + 16, be) as usize, u32_at(elf, o + 20, be) as usize));
             } else if name == ".text" {
                 text_size = u32_at(elf, o + 20, be);
             }
@@ -15152,7 +13460,10 @@ fn elf32_symtab_matches_gabi_layout() {
             return Err(format!(".symtab sh_entsize = {sym_entsize} != sizeof(Elf32_Sym) 16"));
         }
         if sym_size % 16 != 0 {
-            return Err(format!(".symtab sh_size = {sym_size} 不是 16 的倍数 (余 {})", sym_size % 16));
+            return Err(format!(
+                ".symtab sh_size = {sym_size} 不是 16 的倍数 (余 {})",
+                sym_size % 16
+            ));
         }
         let Some((str_off, str_size)) = strtab else {
             return Err("没有 .strtab 节".to_string());
@@ -15194,13 +13505,16 @@ fn elf32_symtab_matches_gabi_layout() {
             }
             // 字段顺序反了的铁证: 若按 ELF64 顺序落地, +4 处是 info/other/shndx 拼出的
             // >=0x10000 巨值。定义在 .text 的 FUNC, 其 st_value 必是节内偏移 (< text_size)。
-            if ty == 2 /* STT_FUNC */ && st_shndx == 1 && text_size != u32::MAX && st_value > text_size {
+            if ty == 2 /* STT_FUNC */ && st_shndx == 1 && text_size != u32::MAX && st_value > text_size
+            {
                 return Err(format!(
                     "符号 #{i} 是 .text 内 FUNC 但 st_value={st_value:#x} 超出 .text 大小 {text_size:#x}; Elf32_Sym 字段顺序可疑"
                 ));
             }
             if st_name != 0 && st_name >= str_size {
-                return Err(format!("符号 #{i} st_name = {st_name} 越出 .strtab (大小 {str_size})"));
+                return Err(format!(
+                    "符号 #{i} st_name = {st_name} 越出 .strtab (大小 {str_size})"
+                ));
             }
             if st_name != 0 {
                 saw_named = true;
@@ -15246,7 +13560,11 @@ fn elf32_symtab_matches_gabi_layout() {
         ),
     ];
     let targets = ["arm-linux-gnueabi", "mips-linux-gnu"];
-    let modes: [&[&str]; 3] = [["-c"].as_slice(), ["-g", "-c"].as_slice(), ["-O2", "-c"].as_slice()];
+    let modes: [&[&str]; 3] = [
+        ["-c"].as_slice(),
+        ["-g", "-c"].as_slice(),
+        ["-O2", "-c"].as_slice(),
+    ];
     let mut failures: Vec<String> = Vec::new();
 
     for (tag, src_text, want_names) in &cases {
@@ -15289,10 +13607,14 @@ fn elf32_symtab_matches_gabi_layout() {
                         let so = String::from_utf8_lossy(&r.stdout).into_owned();
                         let se = String::from_utf8_lossy(&r.stderr).into_owned();
                         if !se.trim().is_empty() {
-                            failures.push(format!("{target} [{tag} {mtag}]: readelf -sW stderr 非空: {se}"));
+                            failures.push(format!(
+                                "{target} [{tag} {mtag}]: readelf -sW stderr 非空: {se}"
+                            ));
                         }
                         if so.contains("BAD[") {
-                            failures.push(format!("{target} [{tag} {mtag}]: readelf -sW 读出 BAD[: {so}"));
+                            failures.push(format!(
+                                "{target} [{tag} {mtag}]: readelf -sW 读出 BAD[: {so}"
+                            ));
                         }
                         for want in *want_names {
                             if !so.contains(&format!(" {want}")) {
@@ -15303,17 +13625,19 @@ fn elf32_symtab_matches_gabi_layout() {
                         }
                         // static 函数 helper 必须以 LOCAL 出现 (item 4 的可见症状)。
                         if *tag == "mixed" {
-                            let helper_local = so
-                                .lines()
-                                .any(|l| l.contains(" helper") && l.contains("LOCAL") && l.contains("FUNC"));
+                            let helper_local = so.lines().any(|l| {
+                                l.contains(" helper") && l.contains("LOCAL") && l.contains("FUNC")
+                            });
                             if !helper_local {
                                 failures.push(format!(
                                     "{target} [{tag} {mtag}]: static 函数 helper 未以 LOCAL FUNC 出现: {so}"
                                 ));
                             }
                         }
-                    }
-                    Err(e) => failures.push(format!("{target} [{tag} {mtag}]: 无法运行 readelf: {e}")),
+                    },
+                    Err(e) => {
+                        failures.push(format!("{target} [{tag} {mtag}]: 无法运行 readelf: {e}"))
+                    },
                 }
                 match Command::new("objdump")
                     .args(["-t"])
@@ -15324,7 +13648,9 @@ fn elf32_symtab_matches_gabi_layout() {
                     Ok(r) => {
                         let so = String::from_utf8_lossy(&r.stdout).into_owned();
                         if so.contains("<bad>") {
-                            failures.push(format!("{target} [{tag} {mtag}]: objdump -t 读符号表异常: {so}"));
+                            failures.push(format!(
+                                "{target} [{tag} {mtag}]: objdump -t 读符号表异常: {so}"
+                            ));
                         }
                         for want in *want_names {
                             if !so.contains(want) {
@@ -15333,8 +13659,10 @@ fn elf32_symtab_matches_gabi_layout() {
                                 ));
                             }
                         }
-                    }
-                    Err(e) => failures.push(format!("{target} [{tag} {mtag}]: 无法运行 objdump: {e}")),
+                    },
+                    Err(e) => {
+                        failures.push(format!("{target} [{tag} {mtag}]: 无法运行 objdump: {e}"))
+                    },
                 }
                 let _ = fs::remove_file(&src_path);
                 let _ = fs::remove_file(&obj_path);
@@ -15377,16 +13705,17 @@ fn aarch64_cross_call_runs_under_qemu() {
     let pid = std::process::id();
     // _start: bl main; exit(w0) via svc (aarch64 exit 组调用号 94, 单线程 exit=93)。
     let start = dir.join(format!("dcc-xrun-{pid}.s"));
-    std::fs::write(
-        &start,
-        ".globl _start\n_start:\n bl main\n mov x8, #93\n svc #0\n",
-    )
-    .expect("write start");
+    std::fs::write(&start, ".globl _start\n_start:\n bl main\n mov x8, #93\n svc #0\n")
+        .expect("write start");
     let start_o = dir.join(format!("dcc-xrun-{pid}-start.o"));
     assert!(
         Command::new("aarch64-linux-gnu-as")
-            .arg(&start).arg("-o").arg(&start_o)
-            .status().unwrap().success(),
+            .arg(&start)
+            .arg("-o")
+            .arg(&start_o)
+            .status()
+            .unwrap()
+            .success(),
         "交叉 as 失败"
     );
 
@@ -15397,18 +13726,26 @@ fn aarch64_cross_call_runs_under_qemu() {
             let of = dir.join(format!("dcc-xrun-{pid}-{name}-{k}.o"));
             std::fs::write(&cf, s).expect("write src");
             let c = Command::new(dcc)
-                .args(["--target", "aarch64-linux-gnu", "-c"]).arg(&cf).arg("-o").arg(&of)
-                .output().expect("run dcc");
+                .args(["--target", "aarch64-linux-gnu", "-c"])
+                .arg(&cf)
+                .arg("-o")
+                .arg(&of)
+                .output()
+                .expect("run dcc");
             assert!(c.status.success(), "{name} 编译失败: {}", String::from_utf8_lossy(&c.stderr));
             objs.push(of);
         }
         let exe = dir.join(format!("dcc-xrun-{pid}-{name}.bin"));
         let mut ld = Command::new("aarch64-linux-gnu-ld");
         ld.arg("-static");
-        for o in &objs { ld.arg(o); }
+        for o in &objs {
+            ld.arg(o);
+        }
         ld.arg("-o").arg(&exe);
         assert!(ld.status().unwrap().success(), "{name} 交叉链接失败");
-        let st = Command::new("qemu-aarch64-static").arg(&exe).status()
+        let st = Command::new("qemu-aarch64-static")
+            .arg(&exe)
+            .status()
             .expect("run qemu");
         assert_eq!(st.code(), Some(expect), "{name}: qemu 退出码不符");
     };
@@ -15600,10 +13937,7 @@ int main(void) {{
     let _ = fs::remove_file(&out);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "rwonce.h preprocess must succeed; stderr: {stderr}"
-    );
+    assert!(output.status.success(), "rwonce.h preprocess must succeed; stderr: {stderr}");
 }
 
 /// Linux 内核 generated/autoconf.h 预处理 E2E: 验证 CONFIG_* 宏可被解析
@@ -15648,10 +13982,7 @@ int main(void) {{ return mtrr_enabled(); }}
     let _ = fs::remove_file(&out);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "autoconf.h preprocess must succeed; stderr: {stderr}"
-    );
+    assert!(output.status.success(), "autoconf.h preprocess must succeed; stderr: {stderr}");
 }
 
 /// Linux 内核头依赖图 E2E: 多文件包含闭包验证依赖追踪
@@ -15708,10 +14039,7 @@ int main(void) {{
     let _ = fs::remove_file(dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "header graph compile must succeed; stderr: {stderr}"
-    );
+    assert!(output.status.success(), "header graph compile must succeed; stderr: {stderr}");
     // 依赖文件应包含至少 autoconf.h 和 compiler_types.h 的路径
     assert!(
         dep_text.contains("autoconf.h") || dep_text.contains("compiler_types.h"),
@@ -15771,14 +14099,8 @@ fn pch_negative_hash_mismatch_with_define() {
     let _ = fs::remove_file(&pch);
     let _ = fs::remove_file(dir.join(format!("dcc-pch-neg-{}.o", std::process::id())));
 
-    assert!(
-        out.status.success(),
-        "hash mismatch must not be fatal; stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("W0400"),
-        "expected W0400 for hash mismatch: {stderr}"
-    );
+    assert!(out.status.success(), "hash mismatch must not be fatal; stderr: {stderr}");
+    assert!(stderr.contains("W0400"), "expected W0400 for hash mismatch: {stderr}");
 }
 
 /// PCH 损坏内容 (非合法 PCH 格式): 验证 W0401 warning 回退
@@ -15807,14 +14129,8 @@ fn pch_negative_corrupted_content() {
     let _ = fs::remove_file(&pch);
     let _ = fs::remove_file(dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())));
 
-    assert!(
-        out.status.success(),
-        "corrupted PCH must not be fatal; stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("W0401"),
-        "expected W0401 for corrupted PCH: {stderr}"
-    );
+    assert!(out.status.success(), "corrupted PCH must not be fatal; stderr: {stderr}");
+    assert!(stderr.contains("W0401"), "expected W0401 for corrupted PCH: {stderr}");
 }
 
 /// PCH 版本不兼容 (模拟旧版本 PCH 魔数): 验证回退路径
@@ -15843,14 +14159,8 @@ fn pch_negative_version_incompatibility() {
     let _ = fs::remove_file(&pch);
     let _ = fs::remove_file(dir.join(format!("dcc-pch-ver-{}.o", std::process::id())));
 
-    assert!(
-        out.status.success(),
-        "version mismatch must not be fatal; stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("W0401"),
-        "expected W0401 for version mismatch: {stderr}"
-    );
+    assert!(out.status.success(), "version mismatch must not be fatal; stderr: {stderr}");
+    assert!(stderr.contains("W0401"), "expected W0401 for version mismatch: {stderr}");
 }
 
 /// PCH 写入失败 snapshot: 父目录不存在时写 PCH 应发 warning 但不阻塞编译
@@ -15881,18 +14191,9 @@ fn pch_negative_write_failure_snapshot() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(dir.join(format!("dcc-pch-wf-{}.o", std::process::id())));
 
-    assert!(
-        out.status.success(),
-        "PCH write failure must not be fatal; stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("W0402"),
-        "expected W0402 for write failure: {stderr}"
-    );
-    assert!(
-        !pch.exists(),
-        "PCH file should not be created on write failure"
-    );
+    assert!(out.status.success(), "PCH write failure must not be fatal; stderr: {stderr}");
+    assert!(stderr.contains("W0402"), "expected W0402 for write failure: {stderr}");
+    assert!(!pch.exists(), "PCH file should not be created on write failure");
 }
 
 // ============================================================================
@@ -15945,10 +14246,7 @@ fn fixdep_skips_mp_phony_targets() {
     assert!(result.contains("baz.h"), "result: {result}");
     // phony 条目本身不应产生额外的 source_ 前缀
     let source_count = result.matches("source_").count();
-    assert_eq!(
-        source_count, 1,
-        "should have exactly one source entry: {result}"
-    );
+    assert_eq!(source_count, 1, "should have exactly one source entry: {result}");
 }
 
 /// depfile 反斜杠续行 + 转义路径综合测试
@@ -15968,11 +14266,8 @@ fn depfile_backslash_continuation_with_escaped_paths() {
     // 头文件名含特殊字符
     let hdr = inc.join("my header.h");
     fs::write(&hdr, "#define VAL 42\n").expect("write header");
-    fs::write(
-        &src,
-        "#include \"my header.h\"\nint main(void) { return VAL; }\n",
-    )
-    .expect("write source");
+    fs::write(&src, "#include \"my header.h\"\nint main(void) { return VAL; }\n")
+        .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-MMD", "-MF"])
@@ -15997,10 +14292,7 @@ fn depfile_backslash_continuation_with_escaped_paths() {
         "depfile with escaped paths must succeed; stderr: {stderr}"
     );
     // depfile 应追踪头文件
-    assert!(
-        dep_text.contains("header.h"),
-        "depfile should track header: {dep_text}"
-    );
+    assert!(dep_text.contains("header.h"), "depfile should track header: {dep_text}");
 }
 
 /// fixdep 反解析含 # 注释的 depfile 应正确跳过注释行
@@ -16035,10 +14327,7 @@ fn fixdep_file_open_failure_exits_nonzero() {
 
     let _ = fs::remove_dir_all(&temp);
 
-    assert!(
-        !output.status.success(),
-        "fixdep must exit non-zero on missing file"
-    );
+    assert!(!output.status.success(), "fixdep must exit non-zero on missing file");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("error opening file"),
         "stderr should mention open error: {}",
@@ -16070,15 +14359,9 @@ fn error_diag_github_format_caret_and_source() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "#error must fail");
     // GitHub 默认格式: 应有 --> 指向源码行
-    assert!(
-        stderr.contains("-->"),
-        "github format should have caret: {stderr}"
-    );
+    assert!(stderr.contains("-->"), "github format should have caret: {stderr}");
     assert!(stderr.contains("E0203"), "should have E0203 code: {stderr}");
-    assert!(
-        stderr.contains("this is a test error"),
-        "msg should be included: {stderr}"
-    );
+    assert!(stderr.contains("this is a test error"), "msg should be included: {stderr}");
 }
 
 /// #error 诊断: --diagnostics-format=msvc 应输出 file(line,col): error 格式
@@ -16129,10 +14412,7 @@ fn error_diag_clang_format() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "#error must fail");
     // clang 格式应有 caret 行
-    assert!(
-        stderr.contains('^'),
-        "clang format should have caret: {stderr}"
-    );
+    assert!(stderr.contains('^'), "clang format should have caret: {stderr}");
 }
 
 /// #warning 诊断: 多格式下均为 warning 不阻断编译
@@ -16201,17 +14481,11 @@ fn error_in_header_carries_header_source_line_regression() {
     let hdr = dir.join(format!("dcc-err-hdr-{}.h", std::process::id()));
     let src = dir.join(format!("dcc-err-hdr-src-{}.c", std::process::id()));
 
-    fs::write(
-        &hdr,
-        "#ifndef FOO_H\n#define FOO_H\n#error stop in header\n#endif\n",
-    )
-    .expect("write header");
+    fs::write(&hdr, "#ifndef FOO_H\n#define FOO_H\n#error stop in header\n#endif\n")
+        .expect("write header");
     fs::write(
         &src,
-        format!(
-            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
-            hdr.display()
-        ),
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr.display()),
     )
     .expect("write source");
 
@@ -16441,10 +14715,7 @@ fn aarch64_hfa_asm_output_has_all_functions() {
         "consume_hfa2",
         "main",
     ] {
-        assert!(
-            asm.contains(&format!(".globl {func}")),
-            "asm should contain .globl {func}"
-        );
+        assert!(asm.contains(&format!(".globl {func}")), "asm should contain .globl {func}");
     }
     // HFA 8 (max HFA) and BigFloat (>8, sret fallback) should have
     // different code sizes, confirming distinct codegen paths
@@ -16468,10 +14739,7 @@ fn aarch64_hfa_asm_output_has_all_functions() {
     let hfa8_size = get_size("make_hfa8");
     let big_size = get_size("make_big");
     if let (Some(h8), Some(b)) = (hfa8_size, big_size) {
-        assert_ne!(
-            h8, b,
-            "HFA8 and BigFloat should have different code sizes (HFA vs sret)"
-        );
+        assert_ne!(h8, b, "HFA8 and BigFloat should have different code sizes (HFA vs sret)");
     }
 }
 
@@ -16533,10 +14801,7 @@ fn riscv64_hfa_asm_output_has_all_functions() {
         "consume_hfa2",
         "main",
     ] {
-        assert!(
-            asm.contains(&format!(".globl {func}")),
-            "asm should contain .globl {func}"
-        );
+        assert!(asm.contains(&format!(".globl {func}")), "asm should contain .globl {func}");
     }
 }
 
@@ -16624,10 +14889,7 @@ fn non_x86_asm_minus_c_warns_on_asm_goto() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = fs::remove_file(&obj_path);
         // Compilation should succeed (mini-assembler encodes instructions)
-        assert!(
-            output.status.success(),
-            "target {target}: -c should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "target {target}: -c should succeed; stderr={stderr}");
         // -c mode should NOT contain old "asm goto on non-x86_64 target" warning
         // (instructions are now encoded by mini-assembler)
         assert!(
@@ -16665,10 +14927,7 @@ fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = fs::remove_file(&obj_path);
-        assert!(
-            output.status.success(),
-            "target {target}: -c should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "target {target}: -c should succeed; stderr={stderr}");
         // -c mode should NOT contain old "inline asm on non-x86_64 target" warning
         assert!(
             !stderr.contains("inline asm on non-x86_64 target"),
@@ -16702,10 +14961,7 @@ fn non_x86_asm_constraint_resolution_minus_s() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "target {target}: -S should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "target {target}: -S should succeed; stderr={stderr}");
         let asm = fs::read_to_string(&asm_path).unwrap_or_default();
         let _ = fs::remove_file(&asm_path);
         // The asm output should contain architecture-specific register names
@@ -16787,10 +15043,7 @@ fn non_x86_asm_no_result_zero_warning_in_s_mode() {
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = fs::remove_file(&asm_path);
-        assert!(
-            output.status.success(),
-            "target {target}: -S should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "target {target}: -S should succeed; stderr={stderr}");
         assert!(
             !stderr.contains("result is 0"),
             "target {target}: -S should not emit 'result is 0' warning; stderr={stderr}"
@@ -16823,10 +15076,7 @@ fn non_x86_asm_operand_resolution_produces_register_names() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "target {target}: -S should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "target {target}: -S should succeed; stderr={stderr}");
         let _ = fs::remove_file(&asm_path);
     }
 }
@@ -16856,10 +15106,7 @@ fn unsupported_target_arch_rejected() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "target {triple} should be rejected"
-        );
+        assert!(!output.status.success(), "target {triple} should be rejected");
         assert!(
             stderr.contains(&format!("unknown arch: {arch_name}")),
             "target {triple}: stderr should mention unknown arch; stderr={stderr}"
@@ -16929,11 +15176,7 @@ fn semantic_enum_type_traits_runtime() {
     // Semantic run test: enum values, scoped enum, sizeof type properties
     let src = include_str!("fixtures/cpp/semantic_run.cpp");
     let (out, obj) = run_cpp_object_test("semantic-enum-runtime", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
     // Compile-only: verify compilation succeeds without linking/running
     // The actual enum type traits runtime support is still TODO
@@ -16949,27 +15192,16 @@ fn cpp_coroutine_co_await_runtime() {
     // dcc -c + host gcc link + execute
     let src = include_str!("fixtures/cpp/coroutine_co_await.cpp");
     let (out, obj) = run_cpp_object_test("cpp-coroutine-coawait-runtime", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!(
-        "dcc-cpp-coroutine-coawait-runtime-{}",
-        std::process::id()
-    ));
+    let exe = dir.join(format!("dcc-cpp-coroutine-coawait-runtime-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
         .arg(&exe)
         .output()
         .expect("host gcc link");
-    assert!(
-        link.status.success(),
-        "link: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run coroutine binary");
@@ -17008,18 +15240,9 @@ fn gnu_hash_section_content_valid() {
         .output()
         .expect("readelf");
     let sections = String::from_utf8_lossy(&readelf.stdout);
-    assert!(
-        sections.contains(".dynsym"),
-        "expected .dynsym section: {sections}"
-    );
-    assert!(
-        sections.contains(".dynstr"),
-        "expected .dynstr section: {sections}"
-    );
-    assert!(
-        sections.contains(".dynamic"),
-        "expected .dynamic section: {sections}"
-    );
+    assert!(sections.contains(".dynsym"), "expected .dynsym section: {sections}");
+    assert!(sections.contains(".dynstr"), "expected .dynstr section: {sections}");
+    assert!(sections.contains(".dynamic"), "expected .dynamic section: {sections}");
     // readelf -s 验证 .dynsym 中至少有 main 符号
     let readelf_sym = Command::new("readelf")
         .args(["-s"])
@@ -17027,10 +15250,7 @@ fn gnu_hash_section_content_valid() {
         .output()
         .expect("readelf -s");
     let symbols = String::from_utf8_lossy(&readelf_sym.stdout);
-    assert!(
-        symbols.contains("main"),
-        "expected 'main' symbol in dynsym: {symbols}"
-    );
+    assert!(symbols.contains("main"), "expected 'main' symbol in dynsym: {symbols}");
     // readelf -d 验证 .dynamic 中包含 PLTGOT 条目
     let readelf_dyn = Command::new("readelf")
         .args(["-d"])
@@ -17054,11 +15274,8 @@ fn eh_frame_hdr_content_has_fde() {
     let pid = std::process::id();
     let src = dir.join(format!("dcc-eh-hdr-{pid}.c"));
     let obj = dir.join(format!("dcc-eh-hdr-{pid}.o"));
-    fs::write(
-        &src,
-        "int foo(void) { return 42; }\nint bar(void) { return foo() + 1; }\n",
-    )
-    .expect("write src");
+    fs::write(&src, "int foo(void) { return 42; }\nint bar(void) { return foo() + 1; }\n")
+        .expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-g", "-fno-omit-frame-pointer", "-c", "-o"])
         .arg(&obj)
@@ -17075,10 +15292,7 @@ fn eh_frame_hdr_content_has_fde() {
     let _ = fs::remove_file(&obj);
     // 验证 .eh_frame 节存在
     let obj_str = String::from_utf8_lossy(&data);
-    assert!(
-        obj_str.contains(".eh_frame"),
-        "expected .eh_frame section in object"
-    );
+    assert!(obj_str.contains(".eh_frame"), "expected .eh_frame section in object");
     // 验证 .eh_frame 节数据 > CIE only (至少有一个 FDE)
     if let Some(eh_data) = elf64_section_data(&data, ".eh_frame") {
         // CIE 通常 ~24-60 字节, FDE 至少 ~16 字节
@@ -17100,11 +15314,7 @@ fn eh_frame_hdr_content_has_fde() {
 fn ifunc_resolver_runtime() {
     let src = include_str!("fixtures/c/m27_attr_ifunc.c");
     let (out, obj) = run_object_test("ifunc-resolver-runtime", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
     let exe = dir.join(format!("dcc-ifunc-runtime-{}", std::process::id()));
     let link = Command::new("gcc")
@@ -17174,10 +15384,7 @@ fn relro_pie_has_gnu_relro_segment() {
         .expect("readelf -l");
     let segments = String::from_utf8_lossy(&readelf.stdout);
     let _ = fs::remove_file(&exe);
-    assert!(
-        segments.contains("GNU_RELRO"),
-        "expected GNU_RELRO segment in ELF: {segments}"
-    );
+    assert!(segments.contains("GNU_RELRO"), "expected GNU_RELRO segment in ELF: {segments}");
 }
 
 /// BIND_NOW flags: -z now PIE 应在 .dynamic 中包含 DF_BIND_NOW 标志
@@ -17252,10 +15459,7 @@ fn build_id_sha1_creates_note_section() {
     // build-id 节可能存在也可能被静默忽略, 只验证编译成功
     // 如果节存在, 验证其内容非空
     if sections.contains(".note.gnu.build-id") {
-        assert!(
-            sections.contains("NOTE"),
-            "build-id section should be NOTE type: {sections}"
-        );
+        assert!(sections.contains("NOTE"), "build-id section should be NOTE type: {sections}");
     }
 }
 
@@ -17274,11 +15478,7 @@ fn dwarf_readelf_debug_info_parseable_cu_header() {
         "int my_func(void) { return 42; }\nint main(void) { return my_func(); }\n",
         &["-g"],
     );
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let readelf = Command::new("readelf")
         .args(["--debug-dump=info"])
         .arg(&obj)
@@ -17361,18 +15561,11 @@ fn dwarf_debug_line_section_has_content() {
         "int foo(void) { return 1; }\nint bar(void) { return 2; }\nint main(void) { return foo() + bar(); }\n",
         &["-g"],
     );
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let data = fs::read(&obj).unwrap_or_default();
     let _ = fs::remove_file(&obj);
     let line_data = elf64_section_data(&data, ".debug_line");
-    assert!(
-        line_data.is_some(),
-        ".debug_line section should exist in -g output"
-    );
+    assert!(line_data.is_some(), ".debug_line section should exist in -g output");
     let line = line_data.unwrap();
     // .debug_line 至少包含行号程序头 (version + header_length + ...)
     // 最小行号程序 > 10 字节
@@ -17391,28 +15584,17 @@ fn btf_section_has_valid_header_magic() {
         "struct point { int x; int y; };\nint main(void) { struct point p = {1, 2}; return p.x + p.y; }\n",
         &["-g"],
     );
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let data = fs::read(&obj).unwrap_or_default();
     let _ = fs::remove_file(&obj);
     let btf_data = elf64_section_data(&data, ".BTF");
     assert!(btf_data.is_some(), ".BTF section should exist");
     let btf = btf_data.unwrap();
     // BTF header: magic(2) + version(1) + flags(1) + hdr_len(4) + ...
-    assert!(
-        btf.len() >= 8,
-        ".BTF should have at least 8 bytes header, got {}",
-        btf.len()
-    );
+    assert!(btf.len() >= 8, ".BTF should have at least 8 bytes header, got {}", btf.len());
     // magic = 0xeb9f (little-endian)
     let magic = u16::from_le_bytes([btf[0], btf[1]]);
-    assert_eq!(
-        magic, 0xeb9f,
-        "BTF magic should be 0xeb9f, got 0x{magic:04x}"
-    );
+    assert_eq!(magic, 0xeb9f, "BTF magic should be 0xeb9f, got 0x{magic:04x}");
     // version = 1
     assert_eq!(btf[2], 1, "BTF version should be 1, got {}", btf[2]);
 }
@@ -17431,11 +15613,7 @@ fn btf_full_contains_source_types() {
          int main(void) { return 0; }\n",
         &["-g"],
     );
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let data = fs::read(&obj).unwrap_or_default();
     let _ = fs::remove_file(&obj);
     let btf_data = elf64_section_data(&data, ".BTF");
@@ -17443,19 +15621,12 @@ fn btf_full_contains_source_types() {
     let btf = btf_data.unwrap();
 
     // BTF 应大于最小探测 BTF（24 字节头部 + 少量类型）
-    assert!(
-        btf.len() > 100,
-        "BTF should contain multiple types, got {} bytes",
-        btf.len()
-    );
+    assert!(btf.len() > 100, "BTF should contain multiple types, got {} bytes", btf.len());
 
     // 字符串表应包含源文件中定义的类型名
     let btf_str = String::from_utf8_lossy(btf);
     // 检查 typedef 名（因为 typedef 会被收集）
-    assert!(
-        btf_str.contains("my_size_t"),
-        "BTF should contain typedef name 'my_size_t'"
-    );
+    assert!(btf_str.contains("my_size_t"), "BTF should contain typedef name 'my_size_t'");
 
     // 验证包含 STRUCT 类型
     let has_struct = btf.windows(4).any(|w| {
@@ -17480,18 +15651,11 @@ fn dwarf_debug_str_contains_function_names() {
         "int my_debug_str_test_func(void) { return 0; }\nint main(void) { return my_debug_str_test_func(); }\n",
         &["-g"],
     );
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
     let data = fs::read(&obj).unwrap_or_default();
     let _ = fs::remove_file(&obj);
     let str_data = elf64_section_data(&data, ".debug_str");
-    assert!(
-        str_data.is_some(),
-        ".debug_str section should exist in -g output"
-    );
+    assert!(str_data.is_some(), ".debug_str section should exist in -g output");
     let strings = String::from_utf8_lossy(str_data.unwrap());
     assert!(
         strings.contains("my_debug_str_test_func"),
@@ -17655,10 +15819,7 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        rc, 0,
-        "asm with memory clobber must survive O3, got rc={rc}"
-    );
+    assert_eq!(rc, 0, "asm with memory clobber must survive O3, got rc={rc}");
 }
 
 // ====== SSA pass coverage: alias / SCCP / TCO / DAE / IPA-SRA ======
@@ -17715,10 +15876,7 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        rc, 0,
-        "SCCP should not fold runtime-dependent branch, got rc={rc}"
-    );
+    assert_eq!(rc, 0, "SCCP should not fold runtime-dependent branch, got rc={rc}");
 }
 
 /// TCO: 尾递归应在 O2 下被优化为跳转, 不会栈溢出
@@ -17766,10 +15924,7 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        rc, 42,
-        "DAE should preserve reachable function, got rc={rc}"
-    );
+    assert_eq!(rc, 42, "DAE should preserve reachable function, got rc={rc}");
 }
 
 /// IPA-SRA: 标量参数传播在 O2 下应保持语义正确
@@ -17793,10 +15948,7 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        rc, 0,
-        "scalar propagation through static func should work at O2, got rc={rc}"
-    );
+    assert_eq!(rc, 0, "scalar propagation through static func should work at O2, got rc={rc}");
 }
 
 // ====== xfail harness: expected-fail for known unsupported features ======
@@ -17869,15 +16021,9 @@ fn windows_msvc_output_is_coff() {
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&src);
     // COFF AMD64: first 2 bytes = 0x8664 (IMAGE_FILE_MACHINE_AMD64)
-    assert!(
-        bytes.len() >= 20,
-        "COFF object should have at least 20-byte header"
-    );
+    assert!(bytes.len() >= 20, "COFF object should have at least 20-byte header");
     let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
-    assert_eq!(
-        machine, 0x8664,
-        "MSVC target should output COFF AMD64 format"
-    );
+    assert_eq!(machine, 0x8664, "MSVC target should output COFF AMD64 format");
     // Verify it's NOT ELF
     assert!(
         bytes.len() < 4 || &bytes[0..4] != b"\x7fELF",
@@ -17904,10 +16050,7 @@ fn mips_arm_elf32_object_reader_accepts() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "{label}: -c should succeed; stderr={stderr}"
-        );
+        assert!(output.status.success(), "{label}: -c should succeed; stderr={stderr}");
         let bytes = fs::read(&obj).expect("read object");
         let _ = fs::remove_file(&obj);
         let _ = fs::remove_file(&src);
@@ -17940,10 +16083,7 @@ fn windows_msvc_coff_object_reader_accepts() {
         .output()
         .expect("run dcc");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "Windows MSVC -c should succeed; stderr={stderr}"
-    );
+    assert!(output.status.success(), "Windows MSVC -c should succeed; stderr={stderr}");
     let bytes = fs::read(&obj).expect("read object");
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&src);
@@ -17998,22 +16138,12 @@ fn windows_msvc_output_is_pe_executable() {
         return;
     }
     // Verify PE signature: MZ at start, PE at e_lfanew offset
-    assert!(
-        bytes.len() >= 64,
-        "PE file should have DOS header (64 bytes)"
-    );
+    assert!(bytes.len() >= 64, "PE file should have DOS header (64 bytes)");
     assert_eq!(bytes[0], b'M', "PE should start with 'M'");
     assert_eq!(bytes[1], b'Z', "PE should start with 'MZ'");
     let e_lfanew = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
-    assert!(
-        bytes.len() > e_lfanew + 4,
-        "PE header offset should be within file"
-    );
-    assert_eq!(
-        &bytes[e_lfanew..e_lfanew + 4],
-        b"PE\0\0",
-        "PE signature should be 'PE\\0\\0'"
-    );
+    assert!(bytes.len() > e_lfanew + 4, "PE header offset should be within file");
+    assert_eq!(&bytes[e_lfanew..e_lfanew + 4], b"PE\0\0", "PE signature should be 'PE\\0\\0'");
     // Verify COFF header machine type
     let machine_off = e_lfanew + 4;
     let machine = u16::from_le_bytes(bytes[machine_off..machine_off + 2].try_into().unwrap());
@@ -18095,10 +16225,7 @@ int test_func(int x) { return x + 1; }
     let has_mcount_loc = obj_bytes
         .windows(13)
         .any(|w| w == b"__mcount_loc\0" || w.starts_with(b"__mcount_loc"));
-    assert!(
-        has_mcount_loc,
-        "-mrecord-mcount should generate __mcount_loc section"
-    );
+    assert!(has_mcount_loc, "-mrecord-mcount should generate __mcount_loc section");
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 }
@@ -18204,10 +16331,7 @@ int large_frame(void) {
     let src_path = tmp.join("stack_clash_multi.c");
     fs::write(&src_path, src).unwrap();
     for (triple, expected_machine, is_be) in &targets {
-        let obj_path = tmp.join(format!(
-            "stack_clash_{}.o",
-            triple.split('-').next().unwrap()
-        ));
+        let obj_path = tmp.join(format!("stack_clash_{}.o", triple.split('-').next().unwrap()));
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", triple, "-c", "-fstack-clash-protection", "-o"])
             .arg(&obj_path)
@@ -18224,21 +16348,14 @@ int large_frame(void) {
         // 端序以文件自己声明的 EI_DATA 为准; 同时断言它与该架构应有的端序一致,
         // 否则"按声明读对了"也可能只是把一个自相矛盾的文件读圆了回来。
         let declared = obj[5];
-        assert_eq!(
-            declared,
-            if *is_be { 2 } else { 1 },
-            "EI_DATA mismatch for {triple}"
-        );
+        assert_eq!(declared, if *is_be { 2 } else { 1 }, "EI_DATA mismatch for {triple}");
         // Verify ELF e_machine matches the target architecture
         let machine = if declared == 2 {
             u16::from_be_bytes([obj[18], obj[19]])
         } else {
             u16::from_le_bytes([obj[18], obj[19]])
         };
-        assert_eq!(
-            machine, *expected_machine,
-            "e_machine mismatch for {triple}"
-        );
+        assert_eq!(machine, *expected_machine, "e_machine mismatch for {triple}");
         let _ = fs::remove_file(&obj_path);
     }
     let _ = fs::remove_file(&src_path);
@@ -18494,22 +16611,10 @@ int main(void) {
         .output()
         .expect("run readelf -S");
     let sections = String::from_utf8_lossy(&readelf_output.stdout);
-    assert!(
-        sections.contains(".debug_info"),
-        "missing .debug_info section"
-    );
-    assert!(
-        sections.contains(".debug_abbrev"),
-        "missing .debug_abbrev section"
-    );
-    assert!(
-        sections.contains(".debug_line"),
-        "missing .debug_line section"
-    );
-    assert!(
-        sections.contains(".debug_str"),
-        "missing .debug_str section"
-    );
+    assert!(sections.contains(".debug_info"), "missing .debug_info section");
+    assert!(sections.contains(".debug_abbrev"), "missing .debug_abbrev section");
+    assert!(sections.contains(".debug_line"), "missing .debug_line section");
+    assert!(sections.contains(".debug_str"), "missing .debug_str section");
 
     // Verify .debug_abbrev is zero-terminated (DWARF spec requirement)
     let obj_data = fs::read(&obj_path).unwrap();
@@ -18530,10 +16635,7 @@ int main(void) {
     );
 
     // Verify .BTF section exists
-    assert!(
-        sections.contains(".BTF") || sections.contains(".btf"),
-        "missing .BTF section"
-    );
+    assert!(sections.contains(".BTF") || sections.contains(".btf"), "missing .BTF section");
 
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
@@ -18577,10 +16679,7 @@ int main(void) { return helper(41); }
     let obj = fs::read(&obj_path).expect("read object");
     let has_dcc_lto = String::from_utf8_lossy(&obj).contains(".dcc.lto");
     let has_llvm_lto = String::from_utf8_lossy(&obj).contains(".llvm.lto");
-    assert!(
-        has_dcc_lto || has_llvm_lto,
-        "missing LTO section in object file"
-    );
+    assert!(has_dcc_lto || has_llvm_lto, "missing LTO section in object file");
 
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
@@ -18599,11 +16698,8 @@ fn cross_tu_lto_multiple_tus_compile_and_link() {
 
     fs::write(&a_src, "int add(int a, int b) { return a + b; }\n").expect("write a.c");
 
-    fs::write(
-        &b_src,
-        "extern int add(int, int);\nint main(void) { return add(20, 22); }\n",
-    )
-    .expect("write b.c");
+    fs::write(&b_src, "extern int add(int, int);\nint main(void) { return add(20, 22); }\n")
+        .expect("write b.c");
 
     // Compile both TUs with LTO
     let output_a = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -18888,10 +16984,7 @@ fn jobs_flag_parsing() {
         .expect("run dcc");
     assert!(!out.status.success(), "-j0 should be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("-j must be >= 1"),
-        "expected -j error, got: {stderr}"
-    );
+    assert!(stderr.contains("-j must be >= 1"), "expected -j error, got: {stderr}");
 
     // -j1 must succeed (sequential)
     let out = Command::new(dcc)
@@ -18964,20 +17057,12 @@ fn response_file_at_file_expands_arguments() {
     let rsp = dir.join(format!("dcc-rsp-{}.rsp", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     // Response file contains: -c -o <obj> <src>
-    fs::write(
-        &rsp,
-        format!("-c\n-o\n{}\n{}\n", obj.display(), src.display()),
-    )
-    .expect("write rsp");
+    fs::write(&rsp, format!("-c\n-o\n{}\n{}\n", obj.display(), src.display())).expect("write rsp");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("@{}", rsp.display()))
         .output()
         .expect("run dcc");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(obj.exists(), "response file should produce .o output");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
@@ -18991,25 +17076,15 @@ fn response_file_with_comments_and_quotes() {
     let rsp = dir.join(format!("dcc-rsp-q-{}.rsp", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     // Response file with comments and quoted args
-    fs::write(
-        &rsp,
-        format!(
-            "# This is a comment\n-fsyntax-only\n\"{}\"\n",
-            src.display()
-        ),
-    )
-    .expect("write rsp");
+    fs::write(&rsp, format!("# This is a comment\n-fsyntax-only\n\"{}\"\n", src.display()))
+        .expect("write rsp");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("@{}", rsp.display()))
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&rsp);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -19031,16 +17106,9 @@ fn pipe_input_e_mode_stdin_to_stdout() {
             child.wait_with_output()
         })
         .expect("run dcc -E -");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("int main"),
-        "preprocessed output should contain source"
-    );
+    assert!(stdout.contains("int main"), "preprocessed output should contain source");
 }
 
 #[test]
@@ -19062,11 +17130,7 @@ fn pipe_input_c_mode_stdin_to_stdout() {
             child.wait_with_output()
         })
         .expect("run dcc -c -o - -");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // Verify output is ELF (starts with 0x7f 'E' 'L' 'F')
     let out = &output.stdout;
     assert!(
@@ -19095,11 +17159,7 @@ fn pipe_input_s_mode_stdin_to_stdout() {
             child.wait_with_output()
         })
         .expect("run dcc -S -o - -");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(".text") && stdout.contains("main"),
@@ -19130,11 +17190,7 @@ fn pipe_input_default_output_name_is_a_o() {
             child.wait_with_output()
         })
         .expect("run dcc -c -");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // GCC: `dcc -c -` produces `a.o` in the current directory
     assert!(work.join("a.o").exists(), "default output should be a.o");
     let _ = fs::remove_dir_all(&work);
@@ -19160,11 +17216,7 @@ fn lto_bitcode_verbose_output_shows_section_sizes() {
         .expect("run dcc -flto -v");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(".dcc.lto") && stderr.contains("bytes"),
@@ -19176,11 +17228,7 @@ fn lto_bitcode_verbose_output_shows_section_sizes() {
         "verbose should show .llvm.lto section size, got: {}",
         stderr
     );
-    assert!(
-        stderr.contains("funcs"),
-        "verbose should show function count, got: {}",
-        stderr
-    );
+    assert!(stderr.contains("funcs"), "verbose should show function count, got: {}", stderr);
 }
 
 #[test]
@@ -19195,11 +17243,7 @@ fn lto_bitcode_section_present_in_object() {
         .arg(&src)
         .output()
         .expect("run dcc -flto");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     // Verify .dcc.lto section exists in the object file
     let obj_bytes = fs::read(&obj).expect("read obj");
     let _obj_str = String::from_utf8_lossy(&obj_bytes);
@@ -19293,10 +17337,7 @@ fn incremental_second_compile_skipped() {
 
     // Object should NOT have been rewritten
     let mtime2 = fs::metadata(&obj).unwrap().modified().unwrap();
-    assert_eq!(
-        mtime1, mtime2,
-        "object file should not be rewritten on cache hit"
-    );
+    assert_eq!(mtime1, mtime2, "object file should not be rewritten on cache hit");
 
     let _ = fs::remove_dir_all(&work);
 }
@@ -19403,10 +17444,7 @@ fn incremental_without_flag_always_compiles() {
         .expect("run dcc first");
     assert!(output1.status.success());
     let stderr1 = String::from_utf8_lossy(&output1.stderr);
-    assert!(
-        stderr1.contains("wrote"),
-        "should write output, stderr: {stderr1}"
-    );
+    assert!(stderr1.contains("wrote"), "should write output, stderr: {stderr1}");
 
     // Second compile without -fcached (should always compile)
     let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -19580,11 +17618,7 @@ fn cpu_feature_cli_avx10_512() {
 
 #[test]
 fn cpu_feature_cli_apx() {
-    let args = vec![
-        "-mapx".to_string(),
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-mapx".to_string(), "-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("-mapx should parse");
     assert_eq!(cfg.cpu_feature_overrides.apx_f, Some(true));
 
@@ -19739,10 +17773,7 @@ fn comdat_group_constants_defined() {
         .output()
         .expect("run dcc --version");
     // Just verify dcc runs; the constants are compile-time checked
-    assert!(
-        output.status.success() || true,
-        "dcc binary exists and constants compile"
-    );
+    assert!(output.status.success() || true, "dcc binary exists and constants compile");
 }
 
 #[test]
@@ -19884,11 +17915,7 @@ int main(void) {
 }
 "#;
     let (out, exe) = run_compile_and_run("atomic-fence", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0);
     let _ = fs::remove_file(&exe);
 }
@@ -19908,8 +17935,7 @@ int main(void) {
 }
 "#;
     let (out, exe) = run_compile_and_run("atomic-nand", src);
-    assert!(out.status.success(),
-        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0);
     let _ = fs::remove_file(&exe);
 }
@@ -19930,8 +17956,7 @@ int main(void) {
 }
 "#;
     let (out, exe) = run_compile_and_run("atomic-tas-clear", src);
-    assert!(out.status.success(),
-        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0);
     let _ = fs::remove_file(&exe);
 }
@@ -19945,12 +17970,23 @@ fn aarch64_atomic_tas_clear_cross_compile() {
     let src = "char lock = 0;\nint main(void) {\n  __atomic_test_and_set(&lock, 5);\n  __atomic_clear(&lock, 5);\n  return 0;\n}\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "aarch64 tas/clear failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "aarch64 tas/clear failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_file(&op);
 }
 
@@ -19963,12 +17999,23 @@ fn riscv64_atomic_tas_clear_cross_compile() {
     let src = "char lock = 0;\nint main(void) {\n  __atomic_test_and_set(&lock, 5);\n  __atomic_clear(&lock, 5);\n  return 0;\n}\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "riscv64 tas/clear failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "riscv64 tas/clear failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_file(&op);
 }
 
@@ -19986,8 +18033,7 @@ int main(void) {
 }
 "#;
     let (out, exe) = run_compile_and_run("atomic-lockfree", src);
-    assert!(out.status.success(),
-        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0);
     let _ = fs::remove_file(&exe);
 }
@@ -20001,12 +18047,23 @@ fn aarch64_atomic_is_lock_free_cross() {
     let src = "int main(void) { return !__atomic_is_lock_free(4, 0); }\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "aarch64 is_lock_free failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "aarch64 is_lock_free failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_file(&op);
 }
 
@@ -20018,12 +18075,23 @@ fn riscv64_atomic_is_lock_free_cross() {
     let src = "int main(void) { return !__atomic_is_lock_free(4, 0); }\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "riscv64 is_lock_free failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "riscv64 is_lock_free failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_file(&op);
 }
 
@@ -20052,8 +18120,7 @@ int main(void) {
 }
 "#;
     let (out, exe) = run_compile_and_run("sync-legacy", src);
-    assert!(out.status.success(),
-        "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 0);
     let _ = fs::remove_file(&exe);
 }
@@ -20067,12 +18134,23 @@ fn aarch64_sync_legacy_cross_compile() {
     let src = "int c = 0;\nint main(void) {\n  __sync_fetch_and_add(&c, 1);\n  __sync_fetch_and_sub(&c, 1);\n  __sync_fetch_and_or(&c, 0xFF);\n  __sync_fetch_and_and(&c, 0x0F);\n  __sync_fetch_and_xor(&c, 0x55);\n  __sync_fetch_and_nand(&c, 0xFF);\n  __sync_add_and_fetch(&c, 1);\n  __sync_bool_compare_and_swap(&c, 0, 42);\n  __sync_val_compare_and_swap(&c, 0, 42);\n  __sync_lock_test_and_set(&c, 1);\n  __sync_lock_release(&c);\n  __sync_synchronize();\n  return 0;\n}\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "aarch64 sync compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "aarch64 sync compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&op).expect("read object");
     let _ = fs::remove_file(&op);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20087,12 +18165,23 @@ fn riscv64_sync_legacy_cross_compile() {
     let src = "int c = 0;\nint main(void) {\n  __sync_fetch_and_add(&c, 1);\n  __sync_fetch_and_sub(&c, 1);\n  __sync_fetch_and_or(&c, 0xFF);\n  __sync_fetch_and_and(&c, 0x0F);\n  __sync_fetch_and_xor(&c, 0x55);\n  __sync_fetch_and_nand(&c, 0xFF);\n  __sync_add_and_fetch(&c, 1);\n  __sync_bool_compare_and_swap(&c, 0, 42);\n  __sync_val_compare_and_swap(&c, 0, 42);\n  __sync_lock_test_and_set(&c, 1);\n  __sync_lock_release(&c);\n  __sync_synchronize();\n  return 0;\n}\n";
     fs::write(&sp, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
-               op.to_str().unwrap(), sp.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            op.to_str().unwrap(),
+            sp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(),
-        "riscv64 sync compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "riscv64 sync compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&op).expect("read object");
     let _ = fs::remove_file(&op);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20113,12 +18202,23 @@ int main(void) {
 "#;
     fs::write(&source_path, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
-               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(output.status.success(),
-        "aarch64 nand compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "aarch64 nand compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20139,12 +18239,23 @@ int main(void) {
 "#;
     fs::write(&source_path, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
-               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(output.status.success(),
-        "riscv64 nand compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "riscv64 nand compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20165,12 +18276,23 @@ int main(void) {
 "#;
     fs::write(&source_path, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "-O0", "-o",
-               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(output.status.success(),
-        "aarch64 fence compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "aarch64 fence compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20192,12 +18314,23 @@ int main(void) {
 "#;
     fs::write(&source_path, src).expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "riscv64-linux-gnu", "-c", "-O0", "-o",
-               object_path.to_str().unwrap(), source_path.to_str().unwrap()])
-        .output().expect("run dcc");
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&source_path);
-    assert!(output.status.success(),
-        "riscv64 fence compile failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "riscv64 fence compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -20578,18 +18711,9 @@ int main(void) { return 0; }
     );
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
-    assert!(
-        text.contains("has_aarch64"),
-        "aarch64 target must define __aarch64__"
-    );
-    assert!(
-        !text.contains("has_x86_64"),
-        "aarch64 target must NOT define __x86_64__"
-    );
-    assert!(
-        text.contains("has_lp64"),
-        "aarch64 target must define __LP64__"
-    );
+    assert!(text.contains("has_aarch64"), "aarch64 target must define __aarch64__");
+    assert!(!text.contains("has_x86_64"), "aarch64 target must NOT define __x86_64__");
+    assert!(text.contains("has_lp64"), "aarch64 target must define __LP64__");
 }
 
 /// Verify that --target=arm-linux-gnueabihf defines __arm__ and NOT __LP64__.
@@ -20632,18 +18756,9 @@ int main(void) { return 0; }
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
     assert!(text.contains("has_arm"), "arm target must define __arm__");
-    assert!(
-        !text.contains("has_x86_64"),
-        "arm target must NOT define __x86_64__"
-    );
-    assert!(
-        !text.contains("has_lp64"),
-        "arm target must NOT define __LP64__"
-    );
-    assert!(
-        text.contains("has_ilp32"),
-        "arm target must define __ILP32__"
-    );
+    assert!(!text.contains("has_x86_64"), "arm target must NOT define __x86_64__");
+    assert!(!text.contains("has_lp64"), "arm target must NOT define __LP64__");
+    assert!(text.contains("has_ilp32"), "arm target must define __ILP32__");
 }
 
 /// Verify that --target=mips-linux-gnu defines __mips__ and big-endian macros.
@@ -20685,18 +18800,9 @@ int main(void) { return 0; }
     );
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
-    assert!(
-        text.contains("has_mips"),
-        "mips target must define __mips__"
-    );
-    assert!(
-        !text.contains("has_x86_64"),
-        "mips target must NOT define __x86_64__"
-    );
-    assert!(
-        text.contains("has_mipseb"),
-        "mips target must define __MIPSEB__ (big-endian)"
-    );
+    assert!(text.contains("has_mips"), "mips target must define __mips__");
+    assert!(!text.contains("has_x86_64"), "mips target must NOT define __x86_64__");
+    assert!(text.contains("has_mipseb"), "mips target must define __MIPSEB__ (big-endian)");
 }
 
 /// Verify that --target=riscv64 defines __riscv and __riscv_xlen=64.
@@ -20735,18 +18841,9 @@ int main(void) { return 0; }
     );
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
-    assert!(
-        text.contains("has_riscv"),
-        "riscv64 target must define __riscv"
-    );
-    assert!(
-        text.contains("xlen_is_64"),
-        "riscv64 target must have __riscv_xlen == 64"
-    );
-    assert!(
-        !text.contains("has_x86_64"),
-        "riscv64 target must NOT define __x86_64__"
-    );
+    assert!(text.contains("has_riscv"), "riscv64 target must define __riscv");
+    assert!(text.contains("xlen_is_64"), "riscv64 target must have __riscv_xlen == 64");
+    assert!(!text.contains("has_x86_64"), "riscv64 target must NOT define __x86_64__");
 }
 
 /// Verify that x86-specific macros (__SSE2__, __MMX__) are NOT defined
@@ -20782,15 +18879,9 @@ int main(void) { return 0; }
     assert!(output.status.success());
     let text = fs::read_to_string(&out).expect("read output");
     let _ = fs::remove_file(&out);
-    assert!(
-        !text.contains("has_sse2"),
-        "aarch64 must NOT define __SSE2__"
-    );
+    assert!(!text.contains("has_sse2"), "aarch64 must NOT define __SSE2__");
     assert!(!text.contains("has_mmx"), "aarch64 must NOT define __MMX__");
-    assert!(
-        !text.contains("has_seg_fs"),
-        "aarch64 must NOT define __SEG_FS"
-    );
+    assert!(!text.contains("has_seg_fs"), "aarch64 must NOT define __SEG_FS");
 }
 
 /// Verify ELF e_machine header for cross-compiled objects.
@@ -21139,10 +19230,7 @@ fn builtin_prefetch_emits_instructions() {
         || dump.contains("prefetcht1")
         || dump.contains("prefetcht2")
         || dump.contains("prefetchw");
-    assert!(
-        has_prefetch,
-        "expected prefetch instructions in disassembly:\n{dump}"
-    );
+    assert!(has_prefetch, "expected prefetch instructions in disassembly:\n{dump}");
 }
 
 /// Verify that const/volatile/restrict qualifiers are recognized and
@@ -21268,10 +19356,7 @@ fn m5_bootstrap_selftest() {
     let _ = fs::remove_file(&exe);
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "bootstrap selftest failed: {stdout}");
-    assert!(
-        stdout.contains("ALL 14 TEST GROUPS PASSED"),
-        "unexpected output: {stdout}"
-    );
+    assert!(stdout.contains("ALL 14 TEST GROUPS PASSED"), "unexpected output: {stdout}");
 }
 
 /// M5: Bootstrap determinism — compile the same source twice to .o and
@@ -21341,11 +19426,7 @@ int main(void) { return 0; }
         .arg(&src_path)
         .output()
         .expect("run dcc -c");
-    assert!(
-        output.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
 
     // 用内置链接器链接 (应自动嵌入 vDSO)
     let exe = dir.join("dcc-vdso-integ-test");
@@ -21360,10 +19441,7 @@ int main(void) { return 0; }
     let _ = fs::remove_file(&src_path);
 
     if !link_output.status.success() {
-        eprintln!(
-            "skip: builtin link failed: {}",
-            String::from_utf8_lossy(&link_output.stderr)
-        );
+        eprintln!("skip: builtin link failed: {}", String::from_utf8_lossy(&link_output.stderr));
         return;
     }
 
@@ -21556,10 +19634,7 @@ fn target_clones_resolver_code_generation() {
     assert_eq!(entries[0].0, "my_func", "resolver name should be my_func");
 
     // 验证代码包含 CPUID 指令 (0x0F 0xA2)
-    let cpuid_count = blob
-        .windows(2)
-        .filter(|w| *w == [0x0F, 0xA2])
-        .count();
+    let cpuid_count = blob.windows(2).filter(|w| *w == [0x0F, 0xA2]).count();
     assert!(
         cpuid_count >= 2,
         "expected at least 2 CPUID instructions (leaf 1 + leaf 7), got {}",
@@ -21567,21 +19642,11 @@ fn target_clones_resolver_code_generation() {
     );
 
     // 验证代码包含 XGETBV 指令 (0x0F 0x01 0xD0) 用于 AVX OS 检测
-    let xgetbv_count = blob
-        .windows(3)
-        .filter(|w| *w == [0x0F, 0x01, 0xD0])
-        .count();
-    assert!(
-        xgetbv_count >= 1,
-        "expected XGETBV for AVX OS check, got {}",
-        xgetbv_count
-    );
+    let xgetbv_count = blob.windows(3).filter(|w| *w == [0x0F, 0x01, 0xD0]).count();
+    assert!(xgetbv_count >= 1, "expected XGETBV for AVX OS check, got {}", xgetbv_count);
 
     // 验证代码包含 RET (0xC3) 指令 (可能在 padding 之前)
-    assert!(
-        blob.contains(&0xC3),
-        "resolver code should contain RET instruction"
-    );
+    assert!(blob.contains(&0xC3), "resolver code should contain RET instruction");
 }
 
 /// target_clones resolver vaddr 回填: 验证变体地址正确写入 resolver 代码.
@@ -21611,8 +19676,7 @@ fn target_clones_resolver_vaddr_patching() {
     // 回填 vaddr
     for (variant_idx, patch_off) in &patches {
         let vaddr = tcf.variants[*variant_idx].vaddr;
-        code[*patch_off..*patch_off + 8]
-            .copy_from_slice(&vaddr.to_le_bytes());
+        code[*patch_off..*patch_off + 8].copy_from_slice(&vaddr.to_le_bytes());
     }
 
     // 验证两个 vaddr 都出现在代码中
@@ -21985,10 +20049,7 @@ int main(void) {
 }
 "#;
     let output = run_syntax_test("const-assign-err", src);
-    assert!(
-        !output.status.success(),
-        "Assignment to const variable should fail"
-    );
+    assert!(!output.status.success(), "Assignment to const variable should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("read-only variable") || stderr.contains("E0030"),
@@ -22239,12 +20300,16 @@ int main(void) { return 0; }
 fn c11_stdalign_macros_c11_mode() {
     let dir = std::env::temp_dir();
     let src_path = dir.join(format!("dcc-stdalign-c11-{}.c", std::process::id()));
-    fs::write(&src_path, r#"
+    fs::write(
+        &src_path,
+        r#"
 #include <stddef.h>
 alignas(16) int aligned_var;
 int align_check = alignof(int);
 int main(void) { return 0; }
-"#).expect("write fixture");
+"#,
+    )
+    .expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsyntax-only", "-std=c11"])
         .arg(&src_path)
@@ -22393,10 +20458,7 @@ int c = EMPTY();
         "preprocessing should succeed. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        stdout.contains("int a = 42"),
-        "FOO(42) should expand to 42, got: {stdout}"
-    );
+    assert!(stdout.contains("int a = 42"), "FOO(42) should expand to 42, got: {stdout}");
     assert!(
         stdout.contains("int b = sizeof(int)"),
         "BAR(int) should expand to sizeof(int), got: {stdout}"
@@ -22571,11 +20633,7 @@ fn c89_digraphs_compile_and_run() {
     let run = std::process::Command::new(&exe)
         .output()
         .expect("run digraph test");
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "digraph test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "digraph test should return 0");
     let _ = fs::remove_file(&exe);
 }
 
@@ -22639,11 +20697,7 @@ fn c89_trigraphs_compile_and_run() {
         .output()
         .expect("run trigraph test");
     let _ = fs::remove_file(&exe_path);
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "trigraph test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "trigraph test should return 0");
 }
 
 /// C89 trigraph preprocessing: ??= -> #, ??< -> {, etc.
@@ -22680,11 +20734,7 @@ fn c89_trigraphs_preprocess() {
 fn c89_trigraphs_not_in_strings() {
     let dir = std::env::temp_dir();
     let src_path = dir.join(format!("dcc-trigraph-str-{}.c", std::process::id()));
-    fs::write(
-        &src_path,
-        "const char *s = \"??= ??( ??/\";\n",
-    )
-    .unwrap();
+    fs::write(&src_path, "const char *s = \"??= ??( ??/\";\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-E", "-trigraphs"])
         .arg(&src_path)
@@ -22709,11 +20759,7 @@ fn c89_trigraphs_not_in_strings() {
 fn c89_trigraphs_disabled_by_default() {
     let dir = std::env::temp_dir();
     let src_path = dir.join(format!("dcc-trigraph-off-{}.c", std::process::id()));
-    fs::write(
-        &src_path,
-        "int x = ??<1??>;\n",
-    )
-    .unwrap();
+    fs::write(&src_path, "int x = ??<1??>;\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-E"])
         .arg(&src_path)
@@ -22743,16 +20789,9 @@ fn c99_restrict_compile_and_run() {
         .output()
         .expect("run restrict test");
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "restrict test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "restrict test should return 0");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("PASS"),
-        "restrict test should print PASS. got: {stdout}"
-    );
+    assert!(stdout.contains("PASS"), "restrict test should print PASS. got: {stdout}");
 }
 
 /// C11 _Atomic with non-basic types (struct)
@@ -22769,16 +20808,9 @@ fn c11_atomic_struct_compile_and_run() {
         .output()
         .expect("run atomic struct test");
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "atomic struct test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "atomic struct test should return 0");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("PASS"),
-        "atomic struct test should print PASS. got: {stdout}"
-    );
+    assert!(stdout.contains("PASS"), "atomic struct test should print PASS. got: {stdout}");
 }
 
 /// C11 _Noreturn function qualifier
@@ -22795,16 +20827,9 @@ fn c11_noreturn_compile_and_run() {
         .output()
         .expect("run noreturn test");
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "noreturn test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "noreturn test should return 0");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("PASS"),
-        "noreturn test should print PASS. got: {stdout}"
-    );
+    assert!(stdout.contains("PASS"), "noreturn test should print PASS. got: {stdout}");
 }
 
 /// C23 [[unsequenced]] and [[reproducible]] attributes
@@ -22821,16 +20846,9 @@ fn c23_attributes_compile_and_run() {
         .output()
         .expect("run c23 attrs test");
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        run.status.code(),
-        Some(0),
-        "c23 attrs test should return 0"
-    );
+    assert_eq!(run.status.code(), Some(0), "c23 attrs test should return 0");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("PASS"),
-        "c23 attrs test should print PASS. got: {stdout}"
-    );
+    assert!(stdout.contains("PASS"), "c23 attrs test should print PASS. got: {stdout}");
 }
 
 /// Phase 5.1: C++98 iostream - clog and ws manipulator
@@ -22840,11 +20858,7 @@ fn c23_attributes_compile_and_run() {
 fn cpp98_iostream_clog_ws_compile() {
     let src = include_str!("fixtures/cpp/iostream_basic.cpp");
     let (out, obj) = run_cpp_object_test("cpp98-iostream", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -22854,11 +20868,7 @@ fn cpp98_iostream_clog_ws_compile() {
 fn cpp98_dtor_implicit_noexcept_compile() {
     let src = include_str!("fixtures/cpp/dtor_implicit_noexcept.cpp");
     let (out, obj) = run_cpp_object_test("cpp98-dtor-noexcept", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -22869,11 +20879,7 @@ fn cpp98_dtor_implicit_noexcept_compile() {
 fn cpp98_iterator_traits_compile() {
     let src = include_str!("fixtures/cpp/iterator_traits.cpp");
     let (out, obj) = run_cpp_object_test("cpp98-iterator-traits", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -22883,11 +20889,7 @@ fn cpp98_iterator_traits_compile() {
 fn cpp11_using_type_alias_compile() {
     let src = include_str!("fixtures/cpp/using_type_alias.cpp");
     let (out, obj) = run_cpp_object_test("cpp11-using-alias", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -22897,11 +20899,7 @@ fn cpp11_using_type_alias_compile() {
 fn cpp20_features_compile() {
     let src = include_str!("fixtures/cpp/cpp20_features.cpp");
     let (out, obj) = run_cpp_object_test("cpp20-features", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -22911,11 +20909,7 @@ fn cpp20_features_compile() {
 fn cpp23_features_compile() {
     let src = include_str!("fixtures/cpp/cpp23_features.cpp");
     let (out, obj) = run_cpp_object_test("cpp23-features", src);
-    assert!(
-        out.status.success(),
-        "compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(obj);
 }
 
@@ -23074,10 +21068,7 @@ fn openmp_parallel_for_pragma() {
 #[test]
 fn dir_vector_always() {
     // Verify that #pragma vector always is collected
-    let args = vec![
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 0);
 }
@@ -23085,10 +21076,7 @@ fn dir_vector_always() {
 #[test]
 fn dir_ivdep() {
     // Verify that !DIR$ IVDEP style directives are accepted
-    let args = vec![
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 0);
 }
@@ -23096,10 +21084,7 @@ fn dir_ivdep() {
 #[test]
 fn dir_unroll() {
     // Verify that #pragma unroll is collected
-    let args = vec![
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 0);
 }
@@ -23107,10 +21092,7 @@ fn dir_unroll() {
 #[test]
 fn pragma_simd() {
     // Verify that #pragma simd is collected
-    let args = vec![
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 0);
 }
@@ -23131,11 +21113,7 @@ fn openmp_simd_pragma() {
 fn software_pipelining_simple_loop() {
     // Verify that -O3 enables the software pipelining pass
     // (P16 in SSA pass pipeline)
-    let args = vec![
-        "-O3".to_string(),
-        "-c".to_string(),
-        "input.c".to_string(),
-    ];
+    let args = vec!["-O3".to_string(), "-c".to_string(), "input.c".to_string()];
     let cfg = dcc::cli::parse(&args).expect("should parse");
     assert_eq!(cfg.opt, 3);
 }
@@ -23216,14 +21194,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-regalloc-many-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-regalloc-many-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-regalloc-many-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-regalloc-many-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-O3", "-o"])
@@ -23240,11 +21212,7 @@ int main(void) {
     let run = Command::new(&bin_path).output().expect("run binary");
     let _ = std::fs::remove_file(&bin_path);
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.trim() == "136",
-        "expected sum=136, got: {}",
-        stdout.trim()
-    );
+    assert!(stdout.trim() == "136", "expected sum=136, got: {}", stdout.trim());
 }
 
 /// Verify -O2 with nested loops (high register pressure in loop body)
@@ -23263,14 +21231,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-regalloc-loops-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-regalloc-loops-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-regalloc-loops-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-regalloc-loops-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-O2", "-o"])
@@ -23287,11 +21249,7 @@ int main(void) {
     let run = Command::new(&bin_path).output().expect("run binary");
     let _ = std::fs::remove_file(&bin_path);
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.trim() == "2025",
-        "expected 2025, got: {}",
-        stdout.trim()
-    );
+    assert!(stdout.trim() == "2025", "expected 2025, got: {}", stdout.trim());
 }
 
 // ── Floating-point exception support tests ──
@@ -23320,14 +21278,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-fenv-except-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-fenv-except-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-fenv-except-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-fenv-except-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-o"])
@@ -23367,14 +21319,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-fenv-save-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-fenv-save-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-fenv-save-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-fenv-save-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-o"])
@@ -23391,11 +21337,7 @@ int main(void) {
     let run = Command::new(&bin_path).output().expect("run binary");
     let _ = std::fs::remove_file(&bin_path);
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("before=1 after=0"),
-        "fegetenv/fesetenv: {}",
-        stdout
-    );
+    assert!(stdout.contains("before=1 after=0"), "fegetenv/fesetenv: {}", stdout);
 }
 
 // ── Nested function trampoline tests ──
@@ -23419,14 +21361,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-tramp-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-tramp-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-tramp-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-tramp-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-o"])
@@ -23459,14 +21395,8 @@ int main(void) {
 }
 "#;
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!(
-        "dcc-nested-direct-{}.c",
-        std::process::id()
-    ));
-    let bin_path = dir.join(format!(
-        "dcc-nested-direct-{}",
-        std::process::id()
-    ));
+    let src_path = dir.join(format!("dcc-nested-direct-{}.c", std::process::id()));
+    let bin_path = dir.join(format!("dcc-nested-direct-{}", std::process::id()));
     std::fs::write(&src_path, src).expect("write fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-o"])
@@ -23483,11 +21413,7 @@ int main(void) {
     let run = Command::new(&bin_path).output().expect("run binary");
     let _ = std::fs::remove_file(&bin_path);
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.trim() == "42",
-        "expected 42, got: {}",
-        stdout.trim()
-    );
+    assert!(stdout.trim() == "42", "expected 42, got: {}", stdout.trim());
 }
 
 // =================== static local variable storage ===================
@@ -23721,7 +21647,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-sl-conflict", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "static_local_name_conflict should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23749,7 +21679,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-multidim", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "multidim_array should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23773,7 +21707,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-vla", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "vla_runtime should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23801,7 +21739,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-addr-vs-load", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "addr_vs_load should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23829,7 +21771,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-agg-array", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "aggregate_array should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23859,7 +21805,11 @@ int main(void) {
 }
 "#;
     let (output, exe) = run_compile_and_run("semantic-sl-addr-idx", source);
-    assert!(output.status.success(), "compile stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "static_local_addr_index should return 0, got {rc}");
     let _ = fs::remove_file(exe);
@@ -23893,8 +21843,11 @@ fn riscv64_cross_call_preserves_ra() {
         Command::new("riscv64-linux-gnu-as")
             .arg("-march=rv64gc")
             .arg("-mabi=lp64d")
-            .arg(&start_s).arg("-o").arg(&start_o)
-            .status().map_or(false, |s| s.success()),
+            .arg(&start_s)
+            .arg("-o")
+            .arg(&start_o)
+            .status()
+            .map_or(false, |s| s.success()),
         "as failed"
     );
 
@@ -23905,8 +21858,11 @@ fn riscv64_cross_call_preserves_ra() {
     std::fs::write(&src_f, src).expect("write src.c");
     let c = Command::new(dcc)
         .args(["--target", "riscv64-linux-gnu", "-c"])
-        .arg(&src_f).arg("-o").arg(&obj_f)
-        .output().expect("run dcc");
+        .arg(&src_f)
+        .arg("-o")
+        .arg(&obj_f)
+        .output()
+        .expect("run dcc");
     assert!(c.status.success(), "dcc compile failed: {}", String::from_utf8_lossy(&c.stderr));
 
     let exe = dir.join(format!("dcc-rvv-xrun-{pid}.bin"));
@@ -23915,7 +21871,9 @@ fn riscv64_cross_call_preserves_ra() {
     ld.arg(&start_o).arg(&obj_f).arg("-o").arg(&exe);
     assert!(ld.status().map_or(false, |s| s.success()), "cross link failed");
 
-    let st = Command::new("qemu-riscv64-static").arg(&exe).status()
+    let st = Command::new("qemu-riscv64-static")
+        .arg(&exe)
+        .status()
         .expect("run qemu");
     // NOTE: Cross-execution runtime BLOCKED by separate toolchain quirk:
     // DCC emits NO .riscv section → soft-float; GCC rv64i has f2p0_d2p0 in

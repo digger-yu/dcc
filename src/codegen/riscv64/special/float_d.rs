@@ -1,10 +1,9 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 
 impl Riscv64Codegen {
-
     /// FLD rd, offset(rs1): I 格式, 64-bit 浮点加载 (D 扩展)
     pub(crate) fn emit_fld(&mut self, rd: u8, rs1: u8, off: i32) {
         let imm = off as u32 & 0xfff;
@@ -125,21 +124,13 @@ impl Riscv64Codegen {
 
     /// FCLASS.S rd, fs1: 单精度浮点分类, funct7=1010000, funct3=001
     pub(crate) fn emit_fclass_s(&mut self, rd: u8, fs1: u8) {
-        let insn = (fs1 as u32) << 15
-            | 0b001 << 12
-            | (rd as u32) << 7
-            | 0b1010000 << 25
-            | 0x53;
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1010000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCLASS.D rd, fs1: 双精度浮点分类, funct7=1010001, funct3=001
     pub(crate) fn emit_fclass_d(&mut self, rd: u8, fs1: u8) {
-        let insn = (fs1 as u32) << 15
-            | 0b001 << 12
-            | (rd as u32) << 7
-            | 0b1010001 << 25
-            | 0x53;
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1010001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -222,5 +213,4 @@ impl Riscv64Codegen {
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
-
 }

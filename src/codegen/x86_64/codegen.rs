@@ -3,20 +3,20 @@
 
 use crate::ast::{Decl, Designator, Expr, Field, Program, Type};
 use crate::codegen::shared::elf;
-use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ExtraRelaSection, ElfSym};
+use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ElfSym, ExtraRelaSection};
+use crate::codegen::x86_64::elf::attr_diag::AttrDiagFn;
 use crate::codegen::x86_64::mem::global;
+use crate::codegen::x86_64::FuncDecl;
+use crate::const_eval;
 use crate::diagnostics::Diagnostic;
 use crate::preproc::LineSpan;
 use crate::static_locals::StaticLocalMap;
 use crate::target::Target;
-use crate::const_eval;
-use crate::codegen::x86_64::FuncDecl;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::codegen::x86_64::elf::attr_diag::AttrDiagFn;
 
 /// x86_64 代码生成器主结构体
-/// 
+///
 /// 包含代码生成过程中的所有状态信息，包括：
 /// - 生成的机器码 (code) 和数据段 (data_section, rodata)
 /// - ELF 符号表和重定位信息
@@ -69,7 +69,7 @@ pub struct Codegen {
     /// 已注册固定栈对象占用的 8 字节槽数。
     /// 只记录真实布局用量，不再为大数组创建 __pad_ 占位项。
     pub var_map_total_slots: i64,
-    pub vec_temp_off: i64,  // 向量临时槽区基址 (r13 相对)
+    pub vec_temp_off: i64, // 向量临时槽区基址 (r13 相对)
     pub vla_offsets: HashMap<String, i64>,
     pub vla_total_size: i64,
     /// 局部 variable-sized struct (含 VLA 字段) 的声明时绑定总大小槽:
@@ -97,27 +97,27 @@ pub struct Codegen {
     pub pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
     pub pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转：通用 code relocation
     pub pending_func_addr_rels: Vec<(u64, String, bool)>, // (code_offset, func_name, is_lea: true=PC32, false=GOTPCREL)
-    pub defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
-    pub error_attr_fns: HashSet<String>,       // __attribute__((error)) 函数名 (调用时发射 ud2)
+    pub defined_funcs: HashSet<String>,                   // 本 TU 中有函数体的函数名
+    pub error_attr_fns: HashSet<String>, // __attribute__((error)) 函数名 (调用时发射 ud2)
     pub pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
     pub pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
-    pub data_section: Vec<u8>,             // .data 节 (已初始化全局变量)
-    pub bss_size: u64,                     // .bss 大小
-    pub tdata_section: Vec<u8>,            // .tdata (TLS 初始化)
-    pub tbss_size: u64,                    // .tbss (TLS 未初始化)
+    pub data_section: Vec<u8>,                     // .data 节 (已初始化全局变量)
+    pub bss_size: u64,                             // .bss 大小
+    pub tdata_section: Vec<u8>,                    // .tdata (TLS 初始化)
+    pub tbss_size: u64,                            // .tbss (TLS 未初始化)
     pub tdata_align: u64,
     pub tbss_align: u64,
-    pub exec_text_size: u64,              // ET_EXEC 模式下 .text 大小
+    pub exec_text_size: u64,                  // ET_EXEC 模式下 .text 大小
     pub pending_tls_rels: Vec<(u64, String)>, // TLS fs 相对引用
     pub text_align: u64,
     pub data_align: u64,
     pub bss_align: u64,
     pub extra_sections: Vec<ElfSection>, // 自定义节 (section 属性)
     pub custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
-    pub func_sizes: HashMap<String, u64>,     // 函数名 → 代码大小 (用于符号 size)
-    pub variadic_funcs: HashMap<String, bool>,    // 函数名 → 是否可变参数
+    pub func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
+    pub variadic_funcs: HashMap<String, bool>, // 函数名 → 是否可变参数
     pub old_style_funcs: std::collections::HashSet<String>, // K&R 风格定义函数名
-    pub variadic_named_params: i32,               // 当前可变参数函数的命名参数数量
+    pub variadic_named_params: i32,      // 当前可变参数函数的命名参数数量
     pub variadic_named_gp: i32,
     pub variadic_named_fp: i32,
     pub variadic_overflow_offset: i64,
@@ -135,8 +135,8 @@ pub struct Codegen {
     // 唯一名 → 定义父帧中 trampoline 槽偏移 (后代引用经静态链定位)
     pub nested_chain_offsets: HashMap<String, i64>,
     pub nested_func_rename_counter: u32,
-    pub current_func_name: String, // 当前正在编译的函数名
-    pub current_func_ret_ty: Type, // 当前函数的返回类型
+    pub current_func_name: String,   // 当前正在编译的函数名
+    pub current_func_ret_ty: Type,   // 当前函数的返回类型
     pub current_no_instrument: bool, // 当前函数标了 __attribute__((no_instrument_function))
     /// 静态局部变量分析 pass 的结果 (由 compile() 预计算，后端消费)
     pub static_local_map: StaticLocalMap,
@@ -563,8 +563,8 @@ impl Codegen {
             func_alignments: HashMap::new(),
             // 完整 struct/union 定义映射 (前向引用解析)
             complete_struct_types: HashMap::new(),
+        }
     }
-}
 
     pub fn compile_module(&mut self, module: &crate::ir::Module) {
         let prog = module.source();
@@ -582,7 +582,7 @@ impl Codegen {
                         sd.name.name.clone(),
                         Type::Struct(sd.name.name.clone(), fields, align, false),
                     );
-                }
+                },
                 Decl::UnionDef(sd) if !sd.fields.is_empty() => {
                     let fields: Arc<Vec<Field>> = Arc::new(sd.fields.clone());
                     let align = Type::aggregate_align_from_offsets(&sd.fields);
@@ -590,7 +590,7 @@ impl Codegen {
                         sd.name.name.clone(),
                         Type::Union(sd.name.name.clone(), fields, align, false),
                     );
-                }
+                },
                 Decl::Typedef { ty, .. } => {
                     // typedef struct S { ... } S; 形式: 提取内层 struct/union
                     if let Type::Struct(name, fields, align, _) = ty {
@@ -608,8 +608,8 @@ impl Codegen {
                             );
                         }
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
@@ -646,10 +646,8 @@ impl Codegen {
         self.func_alignments.clear();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
-                self.func_alignments.insert(
-                    f.name.name.clone(),
-                    f.alignment.unwrap_or(8).max(1),
-                );
+                self.func_alignments
+                    .insert(f.name.name.clone(), f.alignment.unwrap_or(8).max(1));
             }
         }
         // 预扫描: 记录哪些函数是可变参数的
@@ -682,20 +680,23 @@ impl Codegen {
             match decl {
                 Decl::Func(f) => {
                     if let Some(ref label) = f.asm_label {
-                        self.asm_label_map.insert(f.name.name.clone(), label.clone());
+                        self.asm_label_map
+                            .insert(f.name.name.clone(), label.clone());
                     }
-                }
+                },
                 Decl::Var(v) => {
                     if let Some(ref label) = v.asm_label {
-                        self.asm_label_map.insert(v.name.name.clone(), label.clone());
+                        self.asm_label_map
+                            .insert(v.name.name.clone(), label.clone());
                     }
                     if v.is_thread_local {
                         if let Some(ref model) = v.tls_model {
-                            self.tls_var_models.insert(v.name.name.clone(), model.clone());
+                            self.tls_var_models
+                                .insert(v.name.name.clone(), model.clone());
                         }
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         if self.relocatable {
@@ -738,7 +739,11 @@ impl Codegen {
                         self.tdata_section.push(0);
                     }
                     let offset = self.tdata_section.len() as u64;
-                    let init_data = if let Some(e) = &v.init { self.eval_global_init(e) } else { None };
+                    let init_data = if let Some(e) = &v.init {
+                        self.eval_global_init(e)
+                    } else {
+                        None
+                    };
                     if let Some(ref data) = init_data {
                         self.tdata_section.extend_from_slice(data);
                         for _ in data.len()..sz {
@@ -761,7 +766,8 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: init_data,
                             section: sec,
-                            is_tls: true, in_data_section: false,
+                            is_tls: true,
+                            in_data_section: false,
                         },
                     );
                     continue;
@@ -798,13 +804,18 @@ impl Codegen {
                                 ty: v.ty.clone(),
                                 init: None,
                                 section: 1,
-                                is_tls: false, in_data_section: false,
+                                is_tls: false,
+                                in_data_section: false,
                             },
                         );
                         continue;
                     }
                 }
-                let init_data = if let Some(e) = &v.init { self.eval_global_init(e) } else { None };
+                let init_data = if let Some(e) = &v.init {
+                    self.eval_global_init(e)
+                } else {
+                    None
+                };
                 if let Some(ref data) = init_data {
                     self.rodata.extend_from_slice(data);
                     for _ in data.len()..sz {
@@ -823,7 +834,8 @@ impl Codegen {
                         ty: v.ty.clone(),
                         init: init_data,
                         section: 1,
-                        is_tls: false, in_data_section: false,
+                        is_tls: false,
+                        in_data_section: false,
                     },
                 );
                 // KASAN 全局变量红区: 追加 32 字节零填充
@@ -899,7 +911,7 @@ impl Codegen {
         self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00]); // mov eax, 0x3c
         self.emit(&[0x0f, 0x05]); // syscall
         self.emit(&[0xeb, 0xfe]); // jmp self
-        // 静态局部变量分析 pass + 预注册到 data/bss
+                                  // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
         self.emit_functions(prog);
@@ -920,10 +932,14 @@ impl Codegen {
         while !self.data_section.len().is_multiple_of(8) {
             self.data_section.push(0);
         }
-        let data_start = self.entry + self.exec_text_size + self.rodata.len() as u64 + self.tdata_section.len() as u64;
+        let data_start = self.entry
+            + self.exec_text_size
+            + self.rodata.len() as u64
+            + self.tdata_section.len() as u64;
         self.code.extend_from_slice(&self.data_section);
         // BSS: 仅记录大小, 不写入文件内容
-        self.code.extend_from_slice(&vec![0u8; self.bss_size as usize]);
+        self.code
+            .extend_from_slice(&vec![0u8; self.bss_size as usize]);
         self.collect_exec_symbols(prog);
         self.resolve(rodata_start, data_start);
     }
@@ -965,7 +981,8 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: crate::codegen::shared::elf::SHN_UNDEF,
-                            is_tls: false, in_data_section: false,
+                            is_tls: false,
+                            in_data_section: false,
                         },
                     );
                     continue;
@@ -993,9 +1010,7 @@ impl Codegen {
                         // 避免 eval 截断为 int
                         let is_float =
                             matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                        if let Some(bytes) =
-                            global::global_init_bytes(init, sz, is_float, &v.ty)
-                            {
+                        if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
                             self.tdata_section.extend_from_slice(&bytes);
                         }
                     }
@@ -1007,7 +1022,8 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: if initialized { 5 } else { 6 },
-                            is_tls: true, in_data_section: false,
+                            is_tls: true,
+                            in_data_section: false,
                         },
                     );
                     continue;
@@ -1022,7 +1038,8 @@ impl Codegen {
                     let is_writable = true;
                     let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
                     // 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
-                    self.extra_sections[sec_idx].flags |= crate::codegen::shared::elf::SHF_GNU_RETAIN;
+                    self.extra_sections[sec_idx].flags |=
+                        crate::codegen::shared::elf::SHF_GNU_RETAIN;
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(align as u64);
                     if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
@@ -1066,7 +1083,7 @@ impl Codegen {
                                     }
                                     has_init = true;
                                 }
-                            }
+                            },
                             Expr::InitList { inits, .. } => {
                                 let base = self.extra_sections[sec_idx].data.len() as u64;
                                 if let Some(init_data) = self.gen_global_init_list(
@@ -1083,7 +1100,7 @@ impl Codegen {
                                     }
                                     has_init = true;
                                 }
-                            }
+                            },
                             Expr::AddrOf { e, .. } => {
                                 // P1-6: 自定义 section 中的符号引用
                                 if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
@@ -1092,8 +1109,11 @@ impl Codegen {
                                     self.extra_sections[sec_idx]
                                         .data
                                         .resize(ref_off as usize + sz.max(width), 0);
-                                    let rel_type =
-                                        if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
                                     self.pending_data64_rels.push((
                                         ref_off,
                                         ref_name.name.clone(),
@@ -1118,8 +1138,11 @@ impl Codegen {
                                         self.extra_sections[sec_idx]
                                             .data
                                             .resize(ref_off as usize + sz.max(width), 0);
-                                        let rel_type =
-                                            if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                        let rel_type = if width == 4 {
+                                            crate::codegen::shared::elf::R_X86_64_32
+                                        } else {
+                                            crate::codegen::shared::elf::R_X86_64_64
+                                        };
                                         let addend = (i as i64) * elem_ty.size().max(1) as i64;
                                         self.pending_data64_rels.push((
                                             ref_off,
@@ -1131,21 +1154,18 @@ impl Codegen {
                                         has_init = true;
                                     }
                                 }
-                            }
+                            },
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                                 let is_float =
                                     matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                                if let Some(bytes) = global::global_init_bytes(
-                                    init,
-                                    sz,
-                                    is_float,
-                                    &v.ty,
-                                ) {
+                                if let Some(bytes) =
+                                    global::global_init_bytes(init, sz, is_float, &v.ty)
+                                {
                                     self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
                                     has_init = true;
                                 }
-                            }
+                            },
                         }
                     }
                     if !has_init {
@@ -1161,7 +1181,8 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: (sec_idx + 7) as u16,
-                            is_tls: false, in_data_section: false,
+                            is_tls: false,
+                            in_data_section: false,
                         },
                     );
                     continue;
@@ -1210,19 +1231,22 @@ impl Codegen {
                                     }
                                 }
                                 has_init = true;
-                            }
+                            },
                             Expr::InitList { inits, .. } => {
                                 let base = self.data_section.len() as u64;
-                                if let Some(init_data) =
-                                    self.gen_global_init_list(&v.ty, inits, Some((base, None)), false)
-                                {
+                                if let Some(init_data) = self.gen_global_init_list(
+                                    &v.ty,
+                                    inits,
+                                    Some((base, None)),
+                                    false,
+                                ) {
                                     self.data_section.extend_from_slice(&init_data);
                                     for _ in init_data.len()..sz {
                                         self.data_section.push(0);
                                     }
                                     has_init = true;
                                 }
-                            }
+                            },
                             Expr::AddrOf { e, .. } => {
                                 // P1-6: .data 节中的符号引用
                                 // Handle &ident, &a[i], &a[i][j], &s.field, etc.
@@ -1233,14 +1257,13 @@ impl Codegen {
                                     let width = if sz <= 4 { 4 } else { 8 };
                                     self.data_section
                                         .resize(ref_off as usize + sz.max(width), 0);
-                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
-                                    self.pending_data64_rels.push((
-                                        ref_off,
-                                        base_name,
-                                        None,
-                                        rel_type,
-                                        byte_off,
-                                    ));
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
+                                    self.pending_data64_rels
+                                        .push((ref_off, base_name, None, rel_type, byte_off));
                                     has_init = true;
                                 } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
                                     // Fallback for function pointers and other symbols not in globals
@@ -1248,7 +1271,11 @@ impl Codegen {
                                     let width = if sz <= 4 { 4 } else { 8 };
                                     self.data_section
                                         .resize(ref_off as usize + sz.max(width), 0);
-                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
                                     self.pending_data64_rels.push((
                                         ref_off,
                                         ref_name.name.clone(),
@@ -1265,29 +1292,29 @@ impl Codegen {
                                     let width = if sz <= 4 { 4 } else { 8 };
                                     self.data_section
                                         .resize(ref_off as usize + sz.max(width), 0);
-                                    let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
-                                    self.pending_data64_rels.push((
-                                        ref_off, anon_name, None, rel_type, 0,
-                                    ));
+                                    let rel_type = if width == 4 {
+                                        crate::codegen::shared::elf::R_X86_64_32
+                                    } else {
+                                        crate::codegen::shared::elf::R_X86_64_64
+                                    };
+                                    self.pending_data64_rels
+                                        .push((ref_off, anon_name, None, rel_type, 0));
                                     has_init = true;
                                 } else {
                                     // No compound literal match
                                 }
-                            }
+                            },
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                                 let is_float =
                                     matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                                if let Some(bytes) = global::global_init_bytes(
-                                    init,
-                                    sz,
-                                    is_float,
-                                    &v.ty,
-                                ) {
+                                if let Some(bytes) =
+                                    global::global_init_bytes(init, sz, is_float, &v.ty)
+                                {
                                     self.data_section.extend_from_slice(&bytes);
                                     has_init = true;
                                 }
-                            }
+                            },
                         }
                     }
                     if !has_init {
@@ -1303,7 +1330,8 @@ impl Codegen {
                             ty: v.ty.clone(),
                             init: None,
                             section: (sec_idx + 7) as u16,
-                            is_tls: false, in_data_section: false,
+                            is_tls: false,
+                            in_data_section: false,
                         },
                     );
                     continue;
@@ -1333,10 +1361,13 @@ impl Codegen {
                         let width = if sz <= 4 { 4 } else { 8 };
                         self.data_section
                             .resize(ref_off as usize + sz.max(width), 0);
-                        let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
-                        self.pending_data64_rels.push((
-                            ref_off, base_name, None, rel_type, byte_off,
-                        ));
+                        let rel_type = if width == 4 {
+                            crate::codegen::shared::elf::R_X86_64_32
+                        } else {
+                            crate::codegen::shared::elf::R_X86_64_64
+                        };
+                        self.pending_data64_rels
+                            .push((ref_off, base_name, None, rel_type, byte_off));
                         true
                     } else {
                         false
@@ -1370,7 +1401,7 @@ impl Codegen {
                                 }
                             }
                             true
-                        }
+                        },
                         Expr::InitList { inits, .. } => {
                             let base = self.data_section.len() as u64;
                             if let Some(init_data) =
@@ -1384,7 +1415,7 @@ impl Codegen {
                             } else {
                                 false
                             }
-                        }
+                        },
                         Expr::AddrOf { e, .. } => {
                             // P1-6: .data 节中的符号引用
                             // Handle &ident, &a[i], &a[i][j], &s.field, etc.
@@ -1395,14 +1426,13 @@ impl Codegen {
                                 let width = if sz <= 4 { 4 } else { 8 };
                                 self.data_section
                                     .resize(ref_off as usize + sz.max(width), 0);
-                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
-                                self.pending_data64_rels.push((
-                                    ref_off,
-                                    base_name,
-                                    None,
-                                    rel_type,
-                                    byte_off,
-                                ));
+                                let rel_type = if width == 4 {
+                                    crate::codegen::shared::elf::R_X86_64_32
+                                } else {
+                                    crate::codegen::shared::elf::R_X86_64_64
+                                };
+                                self.pending_data64_rels
+                                    .push((ref_off, base_name, None, rel_type, byte_off));
                                 true
                             } else if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
                                 // Fallback for function pointers and other symbols not in globals
@@ -1410,7 +1440,11 @@ impl Codegen {
                                 let width = if sz <= 4 { 4 } else { 8 };
                                 self.data_section
                                     .resize(ref_off as usize + sz.max(width), 0);
-                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
+                                let rel_type = if width == 4 {
+                                    crate::codegen::shared::elf::R_X86_64_32
+                                } else {
+                                    crate::codegen::shared::elf::R_X86_64_64
+                                };
                                 self.pending_data64_rels.push((
                                     ref_off,
                                     ref_name.name.clone(),
@@ -1427,26 +1461,31 @@ impl Codegen {
                                 let width = if sz <= 4 { 4 } else { 8 };
                                 self.data_section
                                     .resize(ref_off as usize + sz.max(width), 0);
-                                let rel_type = if width == 4 { crate::codegen::shared::elf::R_X86_64_32 } else { crate::codegen::shared::elf::R_X86_64_64 };
-                                self.pending_data64_rels.push((
-                                    ref_off, anon_name, None, rel_type, 0,
-                                ));
+                                let rel_type = if width == 4 {
+                                    crate::codegen::shared::elf::R_X86_64_32
+                                } else {
+                                    crate::codegen::shared::elf::R_X86_64_64
+                                };
+                                self.pending_data64_rels
+                                    .push((ref_off, anon_name, None, rel_type, 0));
                                 true
                             } else {
                                 false
                             }
-                        }
+                        },
                         _ => {
                             // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                             let is_float =
                                 matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
-                            if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
+                            if let Some(bytes) =
+                                global::global_init_bytes(init, sz, is_float, &v.ty)
+                            {
                                 self.data_section.extend_from_slice(&bytes);
                                 true
                             } else {
                                 false
                             }
-                        }
+                        },
                     }
                 } else {
                     false
@@ -1466,7 +1505,8 @@ impl Codegen {
                         ty: v.ty.clone(),
                         init: None,
                         section: if initialized { 3 } else { 4 },
-                        is_tls: false, in_data_section: false,
+                        is_tls: false,
+                        in_data_section: false,
                     },
                 );
             }
@@ -1611,7 +1651,8 @@ impl Codegen {
                     let sec_idx = self.ensure_custom_section(&sec_name, true, false);
                     // attribute((used)): 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
                     if f.is_used_attr {
-                        self.extra_sections[sec_idx].flags |= crate::codegen::shared::elf::SHF_GNU_RETAIN;
+                        self.extra_sections[sec_idx].flags |=
+                            crate::codegen::shared::elf::SHF_GNU_RETAIN;
                     }
                     let func_align = f.alignment.unwrap_or(16).max(1);
                     self.extra_sections[sec_idx].align =
@@ -1704,8 +1745,18 @@ impl Codegen {
                     continue;
                 }
                 let g = self.globals_raw[&v.name.name].clone();
-                let (section, bind) = if v.is_extern && v.init.is_none() && g.section == crate::codegen::shared::elf::SHN_UNDEF {
-                    (crate::codegen::shared::elf::SHN_UNDEF, if v.is_weak { crate::codegen::shared::elf::STB_WEAK } else { crate::codegen::shared::elf::STB_GLOBAL })
+                let (section, bind) = if v.is_extern
+                    && v.init.is_none()
+                    && g.section == crate::codegen::shared::elf::SHN_UNDEF
+                {
+                    (
+                        crate::codegen::shared::elf::SHN_UNDEF,
+                        if v.is_weak {
+                            crate::codegen::shared::elf::STB_WEAK
+                        } else {
+                            crate::codegen::shared::elf::STB_GLOBAL
+                        },
+                    )
                 } else {
                     (
                         g.section,
@@ -1724,7 +1775,11 @@ impl Codegen {
                     value: g.offset,
                     size: g.size as u64,
                     bind,
-                    ty: if g.is_tls { crate::codegen::shared::elf::STT_TLS } else { crate::codegen::shared::elf::STT_OBJECT },
+                    ty: if g.is_tls {
+                        crate::codegen::shared::elf::STT_TLS
+                    } else {
+                        crate::codegen::shared::elf::STT_OBJECT
+                    },
                     visibility: Self::parse_visibility(&v.visibility),
                 };
                 if v.is_static {
@@ -1737,7 +1792,13 @@ impl Codegen {
         self.collect_exec_symbols(prog);
     }
 
-    pub fn gen_global_init_list(&mut self, _ty: &Type, _inits: &[crate::ast::InitItem], _base: Option<(u64, Option<u64>)>, _use_rodata: bool) -> Option<Vec<u8>> {
+    pub fn gen_global_init_list(
+        &mut self,
+        _ty: &Type,
+        _inits: &[crate::ast::InitItem],
+        _base: Option<(u64, Option<u64>)>,
+        _use_rodata: bool,
+    ) -> Option<Vec<u8>> {
         unimplemented!("gen_global_init_list implementation");
     }
 
@@ -1749,9 +1810,7 @@ impl Codegen {
     /// 统一走 const_eval 的 ConstValue::Addr (符号 + 字节偏移)。
     fn static_addr_parts(init: &Expr) -> Option<(String, i64)> {
         match const_eval::eval_full(init, false) {
-            Ok(const_eval::ConstValue::Addr { name, offset }) => {
-                Some((name, offset as i64))
-            }
+            Ok(const_eval::ConstValue::Addr { name, offset }) => Some((name, offset as i64)),
             _ => None,
         }
     }

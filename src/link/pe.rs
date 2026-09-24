@@ -100,15 +100,12 @@ pub fn write_pe_exec_x86_64(layout: &Layout) -> Vec<u8> {
     let section_table_size = num_sections * 40;
 
     // Calculate section data offsets (file-aligned)
-    let mut data_start = align_up(section_table_offset + section_table_size, PE_FILE_ALIGNMENT as usize);
+    let mut data_start =
+        align_up(section_table_offset + section_table_size, PE_FILE_ALIGNMENT as usize);
 
     let mut pe_secs_with_offsets: Vec<PeSection> = Vec::new();
     for ps in &pe_sections {
-        let file_offset = if ps.raw_size > 0 {
-            data_start
-        } else {
-            0
-        };
+        let file_offset = if ps.raw_size > 0 { data_start } else { 0 };
         pe_secs_with_offsets.push(PeSection {
             name: ps.name.clone(),
             virtual_size: ps.virtual_size,
@@ -148,10 +145,8 @@ pub fn write_pe_exec_x86_64(layout: &Layout) -> Vec<u8> {
         }
     }
     // Ensure at least header + section table fits
-    let headers_size = align_up(
-        section_table_offset + section_table_size,
-        PE_SECTION_ALIGNMENT as usize,
-    );
+    let headers_size =
+        align_up(section_table_offset + section_table_size, PE_SECTION_ALIGNMENT as usize);
     if image_size == 0 {
         image_size = headers_size as u32;
     }
@@ -475,7 +470,8 @@ fn write_optional_header(
 
     // Verify we wrote the correct size
     let written = out.len() - start;
-    let expected = OPTIONAL_HEADER_PE32_PLUS_SIZE + NUM_DATA_DIRECTORIES * DATA_DIRECTORY_ENTRY_SIZE;
+    let expected =
+        OPTIONAL_HEADER_PE32_PLUS_SIZE + NUM_DATA_DIRECTORIES * DATA_DIRECTORY_ENTRY_SIZE;
     debug_assert_eq!(
         written, expected,
         "optional header size mismatch: wrote {} expected {}",
@@ -520,8 +516,8 @@ fn align_up_u32(val: u32, align: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::layout::*;
     use crate::debug::ArchKind;
+    use crate::link::layout::*;
 
     fn minimal_layout() -> Layout {
         Layout {
@@ -623,11 +619,12 @@ mod tests {
         let pe = write_pe_exec_x86_64(&layout);
         let e_lfanew = u32::from_le_bytes(pe[60..64].try_into().unwrap()) as usize;
         let num_secs_off = e_lfanew + 4 + 2; // Machine(2) then NumberOfSections
-        let num_secs =
-            u16::from_le_bytes(pe[num_secs_off..num_secs_off + 2].try_into().unwrap());
+        let num_secs = u16::from_le_bytes(pe[num_secs_off..num_secs_off + 2].try_into().unwrap());
         assert!(num_secs >= 1, "should have at least .text section");
         // Check first section name is .text
-        let sec_table_off = e_lfanew + 4 + COFF_HEADER_SIZE
+        let sec_table_off = e_lfanew
+            + 4
+            + COFF_HEADER_SIZE
             + OPTIONAL_HEADER_PE32_PLUS_SIZE
             + NUM_DATA_DIRECTORIES * DATA_DIRECTORY_ENTRY_SIZE;
         let name = &pe[sec_table_off..sec_table_off + 5];

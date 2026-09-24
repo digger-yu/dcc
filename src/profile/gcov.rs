@@ -95,10 +95,7 @@ impl GcovUnit {
     pub fn read_notes(path: &Path) -> io::Result<Self> {
         let data = fs::read(path)?;
         if data.len() < 12 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gcno file too short",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "gcno file too short"));
         }
         let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
         if magic != GCOV_NOTE_MAGIC {
@@ -115,10 +112,7 @@ impl GcovUnit {
         off = new_off;
         // Read function count
         if off + 4 > data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated gcno func count",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated gcno func count"));
         }
         let n_funcs = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
@@ -135,10 +129,7 @@ impl GcovUnit {
     pub fn read_data(&mut self, path: &Path) -> io::Result<()> {
         let data = fs::read(path)?;
         if data.len() < 12 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "gcda file too short",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "gcda file too short"));
         }
         let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
         if magic != GCOV_DATA_MAGIC {
@@ -354,7 +345,7 @@ fn collect_item_lines(item: &BlockItem, out: &mut Vec<u32>) {
                 Decl::GlobalAsm { span, .. } => span,
             };
             out.push(sp.line);
-        }
+        },
     }
 }
 
@@ -371,15 +362,15 @@ fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
             if let Some(e) = else_ {
                 collect_stmt_lines(e, out);
             }
-        }
+        },
         Stmt::While { cond, body, .. } => {
             out.push(expr_span(cond).line);
             collect_stmt_lines(body, out);
-        }
+        },
         Stmt::Do { body, cond, .. } => {
             collect_stmt_lines(body, out);
             out.push(expr_span(cond).line);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -397,12 +388,12 @@ fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
                 out.push(expr_span(s).line);
             }
             collect_stmt_lines(body, out);
-        }
+        },
         Stmt::Block { b, .. } => {
             for it in &b.items {
                 collect_item_lines(it, out);
             }
-        }
+        },
         Stmt::GotoIndirect { expr, .. } => out.push(expr_span(expr).line),
         Stmt::Label { stmt, .. } => collect_stmt_lines(stmt, out),
         Stmt::Switch { expr, cases, .. } => {
@@ -418,7 +409,7 @@ fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
                     collect_item_lines(it, out);
                 }
             }
-        }
+        },
         Stmt::AsmGoto {
             inputs, outputs, ..
         } => {
@@ -428,8 +419,8 @@ fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
             for e in outputs {
                 out.push(expr_span(e).line);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -755,18 +746,12 @@ fn write_pascal_string(buf: &mut Vec<u8>, s: &str) {
 
 fn read_pascal_string(data: &[u8], off: usize) -> io::Result<(String, usize)> {
     if off + 4 > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated pascal string length",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated pascal string length"));
     }
     let len = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
     let start = off + 4;
     if start + len > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated pascal string body",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated pascal string body"));
     }
     let s = std::str::from_utf8(&data[start..start + len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -777,10 +762,7 @@ fn read_pascal_string(data: &[u8], off: usize) -> io::Result<(String, usize)> {
 fn read_function_record(data: &[u8], off: usize) -> io::Result<(GcovFunction, usize)> {
     let mut pos = off;
     if pos + 12 > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated function record header",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated function record header"));
     }
     let ident = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
@@ -791,10 +773,7 @@ fn read_function_record(data: &[u8], off: usize) -> io::Result<(GcovFunction, us
     let (name, new_pos) = read_pascal_string(data, pos)?;
     pos = new_pos;
     if pos + 4 > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated bb count",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated bb count"));
     }
     let n_bb = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
@@ -1430,7 +1409,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -1457,26 +1436,26 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
                 section: None,
                 alignment: None,
                 alias_name: None,
                 visibility: None,
-            asm_label: None,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1498,7 +1477,11 @@ mod tests {
         let items = f.body.as_ref().unwrap().items.clone();
         let mut calls = Vec::new();
         for item in &items {
-            if let BlockItem::Stmt(Stmt::Expr { e: Expr::Call { callee, args, .. }, .. }) = item {
+            if let BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Call { callee, args, .. },
+                ..
+            }) = item
+            {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     if name.name == "__dcc_gcov_counter_inc" {
                         let Expr::Int { v, .. } = &args[0] else {
@@ -1545,7 +1528,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -1572,26 +1555,26 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
                 section: None,
                 alignment: None,
                 alias_name: None,
                 visibility: None,
-            asm_label: None,
+                asm_label: None,
             })
         };
         let mut prog = Program {

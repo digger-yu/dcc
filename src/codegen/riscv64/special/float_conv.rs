@@ -1,7 +1,7 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 
 impl Riscv64Codegen {
     pub(crate) fn emit_fcvt_s_w_fa0(&mut self) {

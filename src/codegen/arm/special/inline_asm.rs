@@ -1,9 +1,7 @@
 // ARM backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::shared::asm_constraints::{
-    self, resolve_asm_operands,
-};
+use crate::codegen::shared::asm_constraints::{self, resolve_asm_operands};
 
 use crate::codegen::arm::codegen::ArmCodegen;
 

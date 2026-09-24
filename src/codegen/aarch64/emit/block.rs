@@ -25,8 +25,8 @@ impl Aarch64Codegen {
                     self.gen_expr_from_ast(init);
                     self.store_result(off, &v.ty);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -84,14 +84,14 @@ impl Aarch64Codegen {
                 }
                 self.ret();
                 self.emitted_return = true;
-            }
+            },
             Stmt::Expr { e, .. } => {
                 if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
                     self.gen_expr_from_ast(e);
                 }
-            }
+            },
             Stmt::If { then_, else_, .. } => {
                 if let Some(cond) = ir.expressions.first() {
                     self.gen_expr(cond);
@@ -119,7 +119,7 @@ impl Aarch64Codegen {
                     }
                 }
                 self.label(&lbl_end);
-            }
+            },
             Stmt::While { body, .. } | Stmt::Do { body, .. } => {
                 let lbl_loop = self.fresh_label("Lwhile");
                 let lbl_exit = self.fresh_label("Lwend");
@@ -135,7 +135,7 @@ impl Aarch64Codegen {
                 self.b(&lbl_loop);
                 self.label(&lbl_exit);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -170,12 +170,12 @@ impl Aarch64Codegen {
                 self.b(&lbl_loop);
                 self.label(&lbl_exit);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::Block { b, .. } => {
                 for (item, nested_ir) in b.items.iter().zip(ir.nested.iter()) {
                     self.gen_block_item(item, nested_ir);
                 }
-            }
+            },
             Stmt::AsmGoto {
                 asm_str,
                 outputs,
@@ -274,7 +274,7 @@ impl Aarch64Codegen {
                 if clobbers.iter().any(|c| c == "memory") {
                     self.emit_dmb_ish();
                 }
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 // switch: 计算表达式值存入栈临时槽, 逐一比较 case 值
                 let l_end = self.fresh_label("Lsw_end");
@@ -359,20 +359,20 @@ impl Aarch64Codegen {
                 // break 出口
                 self.label(&l_end);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::Break { .. } => {
                 if let Some((l_break, _)) = self.break_continue_stack.last().cloned() {
                     self.b(&l_break);
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 if let Some((_, l_cont)) = self.break_continue_stack.last().cloned() {
                     if !l_cont.is_empty() {
                         self.b(&l_cont);
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

@@ -17,7 +17,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::Codegen;
 
-
 impl Codegen {
     /// x87 浮点比较: fucomip + setcc -> al -> movzx rax, al
     /// 调用前: 需要加载左操作数和右操作数到 x87 栈
@@ -26,7 +25,7 @@ impl Codegen {
         let save_bytes = if is_ld { 16 } else { 8 };
         // 加载左操作数到 st(0)
         self.gen_expr(l, 0); // st(0) = l
-        // 保存到临时栈 (long double 用 tbyte, 否则 qword)
+                             // 保存到临时栈 (long double 用 tbyte, 否则 qword)
         self.emit(&[0x48, 0x83, 0xEC, save_bytes as u8]); // sub rsp, save_bytes
         if is_ld {
             self.emit(&[0xDB, 0x3C, 0x24]); // fstp tbyte [rsp]
@@ -44,10 +43,10 @@ impl Codegen {
             self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp]
         }
         self.emit(&[0x48, 0x83, 0xC4, save_bytes as u8]); // add rsp, save_bytes
-        // 现在 st(0) = l, st(1) = r
-        // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
+                                                          // 现在 st(0) = l, st(1) = r
+                                                          // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
         self.emit(&[0xDF, 0xE9]); // fucomip st(0), st(1)
-        // 设置条件码 (fucomip 设置的是与 ucomisd 相同的标志)
+                                  // 设置条件码 (fucomip 设置的是与 ucomisd 相同的标志)
         let cc = match op {
             BinOp::Lt => 0x92,   // jb (below)
             BinOp::Le => 0x96,   // jbe (below or equal)
@@ -149,7 +148,10 @@ impl Codegen {
         };
         let key = format!(
             "x87f_{}",
-            bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
         );
         let key_bytes = key.into_bytes();
         if !self.string_pool.contains_key(&key_bytes) {
@@ -183,23 +185,23 @@ impl Codegen {
             BinOp::Add => {
                 // faddp st(1), st(0): DE C1
                 self.emit(&[0xDE, 0xC1]);
-            }
+            },
             BinOp::Sub => {
                 // fsubp: st(1) = st(1) - st(0), 然後彈出
                 // 需要交換: st(0) 是右, st(1) 是左
                 // fsubrp st(1), st(0): DE E9 (反向減: st(1) = st(0) - st(1))
                 // 或 fsubp st(1), st(0): DE E9
                 self.emit(&[0xDE, 0xE9]);
-            }
+            },
             BinOp::Mul => {
                 // fmulp st(1), st(0): DE C9
                 self.emit(&[0xDE, 0xC9]);
-            }
+            },
             BinOp::Div => {
                 // fdivrp st(1), st(0): DE F9 (反向除: st(1) = st(0) / st(1))
                 self.emit(&[0xDE, 0xF9]);
-            }
-            _ => {}
+            },
+            _ => {},
         }
         let _ = is_float;
     }
@@ -217,7 +219,6 @@ impl Codegen {
         // fchs: D9 E0
         self.emit(&[0xD9, 0xE0]);
     }
-
 }
 
 /// 将 f64 (IEEE 754 双精度) 转换为 x87 80-bit 扩展精度格式 (10 字节, LE)

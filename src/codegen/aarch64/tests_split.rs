@@ -2,7 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
-use crate::ir::{ExprKind, TypedExpr, ValueType, lower, validate};
+use crate::ir::{lower, validate, ExprKind, TypedExpr, ValueType};
 
 #[test]
 fn aarch64_ir_return_add() {
@@ -37,10 +37,7 @@ fn aarch64_ir_div_mod_emit_sdiv_msub() {
     let obj = cg.build_output();
     // 验证 .text 段含 sdiv 指令 (0x9AC00C20 LE 编码: 20 0c c0 9a)
     let text = obj.windows(4).any(|w| w == [0x20, 0x0c, 0xc0, 0x9a]);
-    assert!(
-        text,
-        "expected sdiv w0, w0, w1 (0x9ac00c20) in aarch64 text"
-    );
+    assert!(text, "expected sdiv w0, w0, w1 (0x9ac00c20) in aarch64 text");
 }
 
 // M7 修复: 移位真实 lslv/lsrv 替代 0
@@ -280,10 +277,7 @@ fn aarch64_tlsdesc_access_emits_expected_sequence() {
     for r in &tlsdesc_rels {
         // 全部引用同一个符号 my_tls_var (确保 ensure_sym 去重)
         let sym = &cg.symbols[r.sym_index as usize - 1];
-        assert_eq!(
-            sym.name, "my_tls_var",
-            "TLSDESC relocation must reference my_tls_var"
-        );
+        assert_eq!(sym.name, "my_tls_var", "TLSDESC relocation must reference my_tls_var");
     }
 }
 
@@ -308,14 +302,8 @@ fn aarch64_tlsdesc_opt_emits_5_relocations() {
     );
     cg.emit_tlsdesc_access_opt("tls_opt_var");
     // movz (0xd2a) + movk (0xf28) 指令检查
-    assert!(
-        cg.code.windows(4).any(|w| w[3] == 0xd2),
-        "missing movz x0 insn"
-    );
-    assert!(
-        cg.code.windows(4).any(|w| w[3] == 0xf2),
-        "missing movk x0 insn"
-    );
+    assert!(cg.code.windows(4).any(|w| w[3] == 0xd2), "missing movz x0 insn");
+    assert!(cg.code.windows(4).any(|w| w[3] == 0xf2), "missing movk x0 insn");
     // 5 个 TLSDESC 重定位
     let tlsdesc_rels: Vec<_> = cg
         .relocations
@@ -369,10 +357,7 @@ fn aarch64_va_save_area_stores_x0_through_x7() {
         .windows(4)
         .filter(|w| w[3] == 0xf9 && (w[2] & 0x80) == 0)
         .count();
-    assert_eq!(
-        str_x_count, 8,
-        "expected 8 str xn, [sp, #off] instructions, got {str_x_count}"
-    );
+    assert_eq!(str_x_count, 8, "expected 8 str xn, [sp, #off] instructions, got {str_x_count}");
     // 验证偏移在 [16, 72] 范围 (va_save_base_off=16, 8 * 8 步进)
     for i in 0..8 {
         let expected_off = 16 + i * 8;
@@ -418,11 +403,7 @@ fn aarch64_va_arg_int_reads_sequentially_from_save_area() {
     });
     assert!(has_bge, "expected b.ge instruction");
     // 验证: 代码非空且长度合理 (> 20 字节)
-    assert!(
-        cg.code.len() > 20,
-        "expected > 20 bytes of code, got {}",
-        cg.code.len()
-    );
+    assert!(cg.code.len() > 20, "expected > 20 bytes of code, got {}", cg.code.len());
 }
 
 // 嵌套 sret: 验证 gen_function 在返回 >16B 聚合时保存 x0 到 <sret_ptr>
@@ -459,10 +440,7 @@ fn aarch64_nested_sret_saves_sret_ptr() {
         "saved_sret_ptr should match allocated offset"
     );
     // 验证 locals 包含 <sret_ptr>
-    assert!(
-        cg.locals.contains_key("<sret_ptr>"),
-        "locals should contain <sret_ptr>"
-    );
+    assert!(cg.locals.contains_key("<sret_ptr>"), "locals should contain <sret_ptr>");
 }
 
 // TLS: 验证 tls_globals 集合正确记录 TLS 变量
@@ -531,10 +509,8 @@ fn mte_emitter_encodings_match_arm_spec() {
 // ldr x19 + and sp,sp,#mask + add sp 恢复序列
 #[test]
 fn hwasan_mte_prologue_emits_tag_frame() {
-    let (program, diags) = crate::parser::parse(
-        b"int main(void) { int a = 1; int b = 2; return a + b; }\n",
-        "mte.c",
-    );
+    let (program, diags) =
+        crate::parser::parse(b"int main(void) { int a = 1; int b = 2; return a + b; }\n", "mte.c");
     assert!(diags.is_empty(), "{diags:?}");
     let (module, _) = crate::ir::lower(program).expect("lower");
     crate::ir::validate(&module).expect("validate");
@@ -544,44 +520,20 @@ fn hwasan_mte_prologue_emits_tag_frame() {
     cg.compile(&module);
     let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == bytes);
     // prologue: irg x16, sp
-    assert!(
-        find([0xf0, 0x13, 0xdf, 0x9a]),
-        "prologue missing irg x16, sp"
-    );
+    assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "prologue missing irg x16, sp");
     // prologue: addg sp, x16, #0, #0
-    assert!(
-        find([0x1f, 0x02, 0x80, 0x91]),
-        "prologue missing addg sp, x16, #0, #0"
-    );
+    assert!(find([0x1f, 0x02, 0x80, 0x91]), "prologue missing addg sp, x16, #0, #0");
     // prologue: stg x16, [sp, #0] 与 stg x16, [sp, #16] (帧 40B, granules = 40/16 = 2)
-    assert!(
-        find([0xf0, 0x0b, 0x20, 0xd9]),
-        "prologue missing stg x16, [sp, #0]"
-    );
-    assert!(
-        find([0xf0, 0x1b, 0x20, 0xd9]),
-        "prologue missing stg x16, [sp, #16]"
-    );
+    assert!(find([0xf0, 0x0b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #0]");
+    assert!(find([0xf0, 0x1b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #16]");
     // prologue: str x19, [sp, #32] (保存入参 x19, <vec_lit> at 16, mte_save at 32)
-    assert!(
-        find([0xf3, 0x13, 0x00, 0xf9]),
-        "prologue missing str x19, [sp, #32]"
-    );
+    assert!(find([0xf3, 0x13, 0x00, 0xf9]), "prologue missing str x19, [sp, #32]");
     // prologue: add x19, sp, #0 (mov x19, sp)
-    assert!(
-        find([0xf3, 0x03, 0x00, 0x91]),
-        "prologue missing add x19, sp, #0"
-    );
+    assert!(find([0xf3, 0x03, 0x00, 0x91]), "prologue missing add x19, sp, #0");
     // epilogue: ldr x19, [sp, #32]
-    assert!(
-        find([0xf3, 0x13, 0x40, 0xf9]),
-        "epilogue missing ldr x19, [sp, #32]"
-    );
+    assert!(find([0xf3, 0x13, 0x40, 0xf9]), "epilogue missing ldr x19, [sp, #32]");
     // epilogue: and sp, sp, #0x00ffffffffffffff (untag)
-    assert!(
-        find([0xff, 0xdf, 0x80, 0x92]),
-        "epilogue missing and sp, sp, #mask"
-    );
+    assert!(find([0xff, 0xdf, 0x80, 0x92]), "epilogue missing and sp, sp, #mask");
     // 记录 tag 栈帧大小 (frame_bytes = (40+15)&!15 = 48)
     assert_eq!(cg.tag_frame_size, 48, "tag_frame_size should be frame size");
 }
@@ -629,14 +581,8 @@ fn no_mte_no_tag_instructions() {
     let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == bytes);
     assert!(!find([0xf0, 0x13, 0xdf, 0x9a]), "unexpected irg x16, sp");
     assert!(!find([0xf0, 0x0b, 0x20, 0xd9]), "unexpected stg");
-    assert!(
-        !find([0xff, 0xdf, 0x80, 0x92]),
-        "unexpected and sp, sp, #mask"
-    );
-    assert_eq!(
-        cg.tag_frame_size, 0,
-        "tag_frame_size should stay 0 without MTE"
-    );
+    assert!(!find([0xff, 0xdf, 0x80, 0x92]), "unexpected and sp, sp, #mask");
+    assert_eq!(cg.tag_frame_size, 0, "tag_frame_size should stay 0 without MTE");
 }
 
 // M25: gen_float_expr 处理 Local float 变量时

@@ -138,9 +138,9 @@ impl std::error::Error for ResolveError {}
 
 /// 在解析阶段追踪每个符号的"候选定义"——同名的多个定义按强弱规则收敛。
 struct Candidate {
-    strong: Vec<usize>, // 强定义在 bundle.symbols 中的索引
-    weak: Vec<usize>,   // 弱定义
-    undef: Vec<usize>,  // 未定义引用 (STB_GLOBAL)
+    strong: Vec<usize>,     // 强定义在 bundle.symbols 中的索引
+    weak: Vec<usize>,       // 弱定义
+    undef: Vec<usize>,      // 未定义引用 (STB_GLOBAL)
     weak_undef: Vec<usize>, // 弱未定义引用 (STB_WEAK, section=0)
 }
 
@@ -163,12 +163,7 @@ pub fn resolve(
     bundle: &InputBundle,
     extra_undef_allowed: &[&str],
 ) -> (Vec<ResolvedSymbol>, Vec<ResolveError>) {
-    resolve_with_config(
-        bundle,
-        extra_undef_allowed,
-        &LinkConfig::default(),
-        &HashSet::new(),
-    )
+    resolve_with_config(bundle, extra_undef_allowed, &LinkConfig::default(), &HashSet::new())
 }
 
 /// 带 LinkConfig 和 COMDAT 丢弃集合的解析。
@@ -214,9 +209,7 @@ pub fn resolve_with_config(
             continue;
         }
         // 跳过定义在被 COMDAT 去重丢弃的节中的符号
-        if sym.section != 0 && !sym.is_common
-            && comdat_discarded.contains(&sym.section)
-        {
+        if sym.section != 0 && !sym.is_common && comdat_discarded.contains(&sym.section) {
             continue;
         }
         let cand = candidates
@@ -259,14 +252,14 @@ pub fn resolve_with_config(
                 use crate::codegen::shared::elf::{STT_NOTYPE, STT_OBJECT};
                 let all_tentative = cand.strong.iter().all(|&i| {
                     let s = &bundle.symbols[i];
-                    s.is_common
-                        || (s.value == 0
-                            && (s.ty == STT_OBJECT || s.ty == STT_NOTYPE))
+                    s.is_common || (s.value == 0 && (s.ty == STT_OBJECT || s.ty == STT_NOTYPE))
                 });
                 if all_tentative {
                     // 所有强定义都是未初始化的 tentative definition
                     // 取 size 最大者 (与 GCC common symbol 合并行为一致)
-                    *cand.strong.iter()
+                    *cand
+                        .strong
+                        .iter()
                         .max_by_key(|&&i| bundle.symbols[i].size)
                         .unwrap()
                 } else {
@@ -278,10 +271,7 @@ pub fn resolve_with_config(
                         .collect();
                     errors.push(ResolveError {
                         name: name.clone(),
-                        msg: format!(
-                            "multiple definition (in objects {})",
-                            names.join(", ")
-                        ),
+                        msg: format!("multiple definition (in objects {})", names.join(", ")),
                     });
                     continue;
                 }
@@ -689,11 +679,7 @@ mod tests {
         std::fs::write(&p2, &b).unwrap();
         let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
-        assert!(
-            errs.is_empty(),
-            "tentative definitions should merge: {:?}",
-            errs
-        );
+        assert!(errs.is_empty(), "tentative definitions should merge: {:?}", errs);
         let x = resolved.iter().find(|r| r.name == "x").expect("x");
         assert!(x.defined);
         assert_eq!(x.size, 4);
@@ -740,10 +726,7 @@ mod tests {
         std::fs::write(&p2, &b).unwrap();
         let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
         let (_resolved, errs) = resolve(&bundle, &[]);
-        assert!(
-            !errs.is_empty(),
-            "real duplicate definitions should error"
-        );
+        assert!(!errs.is_empty(), "real duplicate definitions should error");
         assert!(errs[0].msg.contains("multiple definition"));
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
@@ -752,7 +735,7 @@ mod tests {
     #[test]
     fn common_symbols_resolve_as_strong() {
         // COMMON 符号 (SHN_COMMON) 应作为强定义处理，多个 COMMON 合并取最大 size
-        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{SHN_COMMON, STT_OBJECT};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test8-common-a.o");
         let p2 = dir.join("dcc-resolve-test8-common-b.o");
@@ -788,11 +771,7 @@ mod tests {
         std::fs::write(&p2, &b).unwrap();
         let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
-        assert!(
-            errs.is_empty(),
-            "COMMON symbols should merge without error: {:?}",
-            errs
-        );
+        assert!(errs.is_empty(), "COMMON symbols should merge without error: {:?}", errs);
         let buf = resolved.iter().find(|r| r.name == "buf").expect("buf");
         assert!(buf.defined, "COMMON should be defined");
         assert!(buf.is_common, "COMMON flag should be set");
@@ -804,7 +783,7 @@ mod tests {
     #[test]
     fn common_overrides_weak() {
         // COMMON (treated as strong) should override weak definition
-        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{SHN_COMMON, STT_OBJECT};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test9-common-weak-a.o");
         let p2 = dir.join("dcc-resolve-test9-common-weak-b.o");
@@ -898,8 +877,7 @@ mod tests {
         std::fs::write(&p1, &small).unwrap();
         std::fs::write(&p2, &large).unwrap();
         std::fs::write(&p3, &medium).unwrap();
-        let bundle =
-            InputBundle::from_files(&[p1.clone(), p2.clone(), p3.clone()]).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone(), p3.clone()]).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
         assert!(errs.is_empty(), "weak defs should not error: {:?}", errs);
         let w = resolved.iter().find(|r| r.name == "w").expect("w");
@@ -958,7 +936,7 @@ mod tests {
     #[test]
     fn common_plus_tentative_merge_max_size() {
         // COMMON + tentative (value=0, OBJECT) → merge, take max size
-        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{SHN_COMMON, STT_OBJECT};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test12-com-tent-a.o");
         let p2 = dir.join("dcc-resolve-test12-com-tent-b.o");
@@ -994,11 +972,7 @@ mod tests {
         std::fs::write(&p2, &b).unwrap();
         let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
-        assert!(
-            errs.is_empty(),
-            "COMMON + tentative should merge: {:?}",
-            errs
-        );
+        assert!(errs.is_empty(), "COMMON + tentative should merge: {:?}", errs);
         let arr = resolved.iter().find(|r| r.name == "arr").expect("arr");
         assert!(arr.defined);
         assert_eq!(arr.size, 32, "should take max size");
@@ -1009,7 +983,7 @@ mod tests {
     #[test]
     fn strong_def_overrides_common() {
         // Strong definition (value > 0) should override COMMON
-        use crate::codegen::shared::elf::{STT_OBJECT, SHN_COMMON};
+        use crate::codegen::shared::elf::{SHN_COMMON, STT_OBJECT};
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test13-strong-common-a.o");
         let p2 = dir.join("dcc-resolve-test13-strong-common-b.o");
@@ -1103,10 +1077,7 @@ mod tests {
             input_obj: 0,
         });
         let discarded = super::resolve_comdat_groups(&bundle);
-        assert!(
-            discarded.is_empty(),
-            "unique signatures -> nothing discarded"
-        );
+        assert!(discarded.is_empty(), "unique signatures -> nothing discarded");
         let _ = std::fs::remove_file(p);
     }
 
@@ -1133,11 +1104,7 @@ mod tests {
             input_obj: 0,
         });
         let discarded = super::resolve_comdat_groups(&bundle);
-        assert_eq!(
-            discarded.len(),
-            2,
-            "second group's 2 members should be discarded"
-        );
+        assert_eq!(discarded.len(), 2, "second group's 2 members should be discarded");
         assert!(discarded.contains(&2), "section 2 should be discarded");
         assert!(discarded.contains(&3), "section 3 should be discarded");
         assert!(!discarded.contains(&0), "section 0 should be kept");

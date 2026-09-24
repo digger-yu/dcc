@@ -1,9 +1,9 @@
 // ADL (Argument Dependent Lookup) Implementation for DCC Compiler
-// 
+//
 // This module implements Argument Dependent Lookup as per C++ standard [basic.lookup.argdep]
 // When resolving a function call `f(a, b)`, search namespaces associated with types of a and b.
 
-use crate::cpp::sema::{CxxType, ClassId, SymbolId};
+use crate::cpp::sema::{ClassId, CxxType, SymbolId};
 
 /// Result of ADL lookup
 #[derive(Debug, Clone, Default)]
@@ -41,7 +41,7 @@ pub fn collect_adl_namespaces_for_type(ty: &CxxType) -> Vec<String> {
         // Fundamental types have no namespace
         CxxType::Void | CxxType::Bool | CxxType::Integer { .. } | CxxType::Float { .. } => {
             Vec::new()
-        }
+        },
 
         // Class type - extract its namespace
         CxxType::Class(class_id) => extract_class_namespace(*class_id),
@@ -58,7 +58,7 @@ pub fn collect_adl_namespaces_for_type(ty: &CxxType) -> Vec<String> {
                 }
             }
             Vec::new()
-        }
+        },
 
         // Pointer/Reference/Array - recurse into inner type
         CxxType::Pointer(inner)
@@ -67,9 +67,7 @@ pub fn collect_adl_namespaces_for_type(ty: &CxxType) -> Vec<String> {
         | CxxType::Array(inner, _) => collect_adl_namespaces_for_type(inner),
 
         // Alias and complex types - skip for now
-        CxxType::Alias(_) | CxxType::Function { .. } | CxxType::MemberPointer { .. } => {
-            Vec::new()
-        }
+        CxxType::Alias(_) | CxxType::Function { .. } | CxxType::MemberPointer { .. } => Vec::new(),
     }
 }
 
@@ -83,7 +81,7 @@ fn extract_class_namespace(_class_id: ClassId) -> Vec<String> {
 /// Collect namespaces from multiple argument types
 pub fn collect_adl_namespaces(args: &[(&str, &CxxType)]) -> Vec<String> {
     let mut namespaces = Vec::new();
-    
+
     for (_, arg_ty) in args {
         let arg_ns = collect_adl_namespaces_for_type(arg_ty);
         namespaces.extend(arg_ns);
@@ -92,7 +90,7 @@ pub fn collect_adl_namespaces(args: &[(&str, &CxxType)]) -> Vec<String> {
     // Remove duplicates while preserving order
     namespaces.sort();
     namespaces.dedup();
-    
+
     namespaces
 }
 
@@ -104,13 +102,20 @@ mod tests {
     #[test]
     fn test_fundamental_no_namespace() {
         assert!(collect_adl_namespaces_for_type(&CxxType::Void).is_empty());
-        assert!(collect_adl_namespaces_for_type(&CxxType::Integer { bits: 32, signed: true }).is_empty());
+        assert!(collect_adl_namespaces_for_type(&CxxType::Integer {
+            bits: 32,
+            signed: true
+        })
+        .is_empty());
         assert!(collect_adl_namespaces_for_type(&CxxType::Float { bits: 64 }).is_empty());
     }
 
     #[test]
     fn test_pointer_recurse() {
-        let int_ptr = CxxType::Pointer(Box::new(CxxType::Integer { bits: 32, signed: true }));
+        let int_ptr = CxxType::Pointer(Box::new(CxxType::Integer {
+            bits: 32,
+            signed: true,
+        }));
         assert!(collect_adl_namespaces_for_type(&int_ptr).is_empty());
     }
 

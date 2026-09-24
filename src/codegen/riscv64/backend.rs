@@ -6,8 +6,7 @@
 use crate::cli::Arch;
 use crate::codegen::riscv64::Riscv64Codegen;
 use crate::codegen::shared::backend::{
-    Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs,
-    ObjectSymbols, TlsImage,
+    Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
 };
 use crate::codegen::shared::elf;
 use crate::codegen::shared::features::FeatureSet;
@@ -22,10 +21,7 @@ impl Backend for Riscv64Codegen {
         FeatureSet::tier1_cross()
     }
 
-    fn compile(
-        &mut self,
-        input: &CompileInput<'_>,
-    ) -> Result<CommonImage, Vec<Diagnostic>> {
+    fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
         apply_emit_options(self, input);
         self.compile(input.module);
         if !self.diagnostics.is_empty() {
@@ -34,10 +30,7 @@ impl Backend for Riscv64Codegen {
         Ok(build_image(self))
     }
 
-    fn render_asm(
-        &mut self,
-        input: &CompileInput<'_>,
-    ) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
         apply_emit_options(self, input);
         self.set_asm_text_mode(true);
         self.compile(input.module);
@@ -95,11 +88,7 @@ fn build_image(cg: &Riscv64Codegen) -> CommonImage {
             imports: vec![],
         },
         relocs: ObjectRelocs {
-            rellocs: cg
-                .relocations
-                .iter()
-                .map(|r| format!("{:?}", r))
-                .collect(),
+            rellocs: cg.relocations.iter().map(|r| format!("{:?}", r)).collect(),
         },
         extra_sections: cg
             .extra_sections
@@ -110,10 +99,6 @@ fn build_image(cg: &Riscv64Codegen) -> CommonImage {
             })
             .collect(),
         diagnostics: cg.diagnostics.clone(),
-        func_sizes: cg
-            .func_sizes
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
+        func_sizes: cg.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
     }
 }

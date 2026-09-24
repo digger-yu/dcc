@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::ast::{Field, QualifierFlags, QualType, Type};
+use crate::ast::{Field, QualType, QualifierFlags, Type};
 
 #[test]
 fn struct_size_rounds_up_to_alignment() {
@@ -271,10 +271,7 @@ fn qualtype_display_prefixes_quals() {
     assert_eq!(format!("{}", qt), "const int");
     let qt2 = QualType::with_quals(Type::Int, QualifierFlags::CONST | QualifierFlags::VOLATILE);
     assert_eq!(format!("{}", qt2), "const volatile int");
-    let qt3 = QualType::with_quals(
-        Type::Ptr(Box::new(Type::Int.into())),
-        QualifierFlags::CONST,
-    );
+    let qt3 = QualType::with_quals(Type::Ptr(Box::new(Type::Int.into())), QualifierFlags::CONST);
     assert_eq!(format!("{}", qt3), "const int*");
 }
 
@@ -290,4 +287,3 @@ fn qualtype_partialeq_ignores_quals_when_bases_differ() {
     let e = QualType::new(Type::Int);
     assert_eq!(c, e);
 }
-

@@ -197,10 +197,8 @@ impl OffloadRuntimeLoader {
         } else if triple.contains("amdgcn") {
             probe_rocm_runtime(triple, &mut self.diagnostics)
         } else {
-            self.diagnostics.push(format!(
-                "note: no driver probe defined for triple '{}'",
-                triple
-            ));
+            self.diagnostics
+                .push(format!("note: no driver probe defined for triple '{}'", triple));
             RuntimeStatus::NotFound
         };
         self.runtime_status.insert(triple.to_string(), status);
@@ -223,7 +221,7 @@ impl OffloadRuntimeLoader {
             Some(e) => e.clone(),
             None => {
                 return KernelLaunchResult::KernelNotFound(params.func_name.clone());
-            }
+            },
         };
 
         let triple = entry.device_triple.clone();
@@ -268,7 +266,7 @@ impl OffloadRuntimeLoader {
                      load_device_code_from_file",
                     triple
                 ));
-            }
+            },
         };
         match cuda_launch(&entry.func, &code, params) {
             Ok(()) => KernelLaunchResult::Success,
@@ -291,7 +289,7 @@ impl OffloadRuntimeLoader {
                      load_device_code_from_file",
                     triple
                 ));
-            }
+            },
         };
         match rocm_launch(&entry.func, &code, params) {
             Ok(()) => KernelLaunchResult::Success,
@@ -375,7 +373,7 @@ pub fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatu
                     triple, names
                 ));
                 return RuntimeStatus::NotFound;
-            }
+            },
         };
         let init: Option<unsafe extern "C" fn(u32) -> i32> = unsafe { dlsym_fn(handle, "cuInit") };
         let Some(init) = init else {
@@ -389,10 +387,7 @@ pub fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatu
         let rc = unsafe { init(0) };
         unsafe { ffi::dlclose(handle) };
         if rc == 0 {
-            diags.push(format!(
-                "note: CUDA runtime available for '{}' (cuInit ok)",
-                triple
-            ));
+            diags.push(format!("note: CUDA runtime available for '{}' (cuInit ok)", triple));
             RuntimeStatus::Available
         } else {
             diags.push(format!(
@@ -425,7 +420,7 @@ pub fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatu
                     triple, names
                 ));
                 return RuntimeStatus::NotFound;
-            }
+            },
         };
         let init: Option<unsafe extern "C" fn(u32) -> i32> = unsafe { dlsym_fn(handle, "hipInit") };
         let Some(init) = init else {
@@ -439,10 +434,7 @@ pub fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatu
         let rc = unsafe { init(0) };
         unsafe { ffi::dlclose(handle) };
         if rc == 0 {
-            diags.push(format!(
-                "note: ROCm runtime available for '{}' (hipInit ok)",
-                triple
-            ));
+            diags.push(format!("note: ROCm runtime available for '{}' (hipInit ok)", triple));
             RuntimeStatus::Available
         } else {
             diags.push(format!(
@@ -1019,7 +1011,7 @@ mod tests {
         match result {
             KernelLaunchResult::RuntimeNotAvailable(triple) => {
                 assert_eq!(triple, "nvptx64-nvidia-cuda");
-            }
+            },
             _ => panic!("expected RuntimeNotAvailable, got {:?}", result),
         }
     }
@@ -1067,7 +1059,7 @@ mod tests {
                     msg.contains("CUDA driver") || msg.contains("libcuda"),
                     "分发应到达 driver 层: {msg}"
                 );
-            }
+            },
             other => panic!("expected Failed at driver dispatch, got {:?}", other),
         }
     }
@@ -1096,7 +1088,7 @@ mod tests {
         match result {
             KernelLaunchResult::Failed(msg) => {
                 assert!(msg.contains("no device code (cubin)"), "{msg}");
-            }
+            },
             other => panic!("expected Failed without device code, got {:?}", other),
         }
     }
@@ -1111,7 +1103,7 @@ mod tests {
         match result {
             KernelLaunchResult::KernelNotFound(name) => {
                 assert_eq!(name, "nonexistent_kernel");
-            }
+            },
             _ => panic!("expected KernelNotFound, got {:?}", result),
         }
     }

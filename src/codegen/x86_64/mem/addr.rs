@@ -6,7 +6,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::Codegen;
 
-
 impl Codegen {
     /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
     /// 支持 Ident / Member / Index / Deref / Cast 递归组合, 例如
@@ -17,11 +16,7 @@ impl Codegen {
                 // 嵌套函数 upvar: 对象在定义父帧中 (VLA 二次加载基址,
                 // 其余取父帧+off 地址), 详见 emit_ident_base_addr 注释
                 if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name) {
-                    let parent_off = self
-                        .upvar_offsets
-                        .get(&name.name)
-                        .copied()
-                        .unwrap_or(0);
+                    let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
                     let intermediates: Vec<i64> = self
                         .upvar_intermediate_offsets
                         .get(&name.name)
@@ -64,7 +59,7 @@ impl Codegen {
                     self.emit_lea_r13(dst, off);
                 }
                 true
-            }
+            },
             Expr::Member {
                 expr,
                 field,
@@ -78,11 +73,12 @@ impl Codegen {
                 }
                 // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                 let expr_ty = expr.ty();
-                let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                let target_ty =
+                    self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                 let field_off = match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
-                    }
+                    },
                     _ => None,
                 };
                 // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
@@ -101,7 +97,7 @@ impl Codegen {
                     }
                 }
                 true
-            }
+            },
             Expr::Index {
                 arr,
                 idx,
@@ -109,9 +105,7 @@ impl Codegen {
                 ..
             } => {
                 // 语义层路径: compute_lvalue_address + TakeAddress
-                use crate::semantics::{
-                    compute_lvalue_address, AddressContext, MaterializeAction,
-                };
+                use crate::semantics::{compute_lvalue_address, AddressContext, MaterializeAction};
 
                 let ctx = AddressContext {
                     is_nested: self.current_func_is_nested,
@@ -123,7 +117,7 @@ impl Codegen {
                     && match arr.as_ref() {
                         Expr::Index { idx: inner_idx, .. } => {
                             crate::const_eval::eval(inner_idx).is_err()
-                        }
+                        },
                         _ => false,
                     };
 
@@ -151,10 +145,10 @@ impl Codegen {
                             if !self.gen_lvalue_addr(arr, 0) {
                                 self.gen_expr(arr, 0);
                             }
-                        }
+                        },
                         _ => {
                             self.gen_expr(arr, 0);
-                        }
+                        },
                     }
                 } else {
                     self.gen_expr(arr, 0);
@@ -168,11 +162,11 @@ impl Codegen {
                     self.mov(dst, 0);
                 }
                 true
-            }
+            },
             Expr::Deref { e: inner, .. } => {
                 self.gen_expr(inner, dst);
                 true
-            }
+            },
             Expr::Cast { e: inner, .. } => self.gen_lvalue_addr(inner, dst),
             _ => false,
         }
@@ -220,20 +214,19 @@ impl Codegen {
                     if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
                         // &func: 函数地址
                         // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义)
-                        if let Some((unique, hops, offs)) =
-                            self.resolve_nested_func_ref(&name.name)
+                        if let Some((unique, hops, offs)) = self.resolve_nested_func_ref(&name.name)
                         {
                             self.load_trampoline_addr(dst, &unique, hops, &offs);
                         } else {
-                            let effective_name = self.nested_func_renames
+                            let effective_name = self
+                                .nested_func_renames
                                 .get(&self.current_func_name)
                                 .and_then(|m| m.get(&name.name))
                                 .cloned()
                                 .unwrap_or_else(|| name.name.clone());
                             self.emit_func_addr(dst, &effective_name);
                         }
-                    } else if self.is_global_not_local(&name.name)
-                    {
+                    } else if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
                     } else if let Some(&off) = self.vla_offsets.get(&name.name) {
                         // VLA/VM struct 变量: 取地址 = 数据区基址 (元数
@@ -263,8 +256,7 @@ impl Codegen {
                     if *is_arrow {
                         self.gen_expr(expr, dst);
                     } else if let Expr::Ident { name, .. } = expr.as_ref() {
-                        if self.is_global_not_local(&name.name)
-                        {
+                        if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(dst, &name.name);
                         } else {
                             let off = self.var_offset(&name.name);
@@ -285,7 +277,8 @@ impl Codegen {
                     }
                     // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
                     let expr_ty = expr.ty();
-                    let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                    let target_ty =
+                        self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
                     let field_info = match &target_ty {
                         Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
@@ -293,7 +286,7 @@ impl Codegen {
                                 fc.offset += extra;
                                 fc
                             })
-                        }
+                        },
                         _ => None,
                     };
                     if let Some(ref f) = field_info {
@@ -316,9 +309,13 @@ impl Codegen {
                 {
                     // &arr[i]: 基址 + i * elem_size
                     let es = elem_ty.size() as i32;
-                    if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
-                        if self.is_global_not_local(&arr_name.name)
-                        {
+                    if let Expr::Ident {
+                        name: arr_name,
+                        ty: arr_ty,
+                        ..
+                    } = arr.as_ref()
+                    {
+                        if self.is_global_not_local(&arr_name.name) {
                             // 全局数组 → 取地址; 全局指针 → 加载值
                             if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
                                 self.emit_global_addr(0, &arr_name.name);
@@ -362,8 +359,7 @@ impl Codegen {
                 } else if let Expr::Real { e: inner, .. } = e.as_ref() {
                     // &(__real expr): 实部地址 = 复数变量地址 (实部在偏移 0)
                     if let Expr::Ident { name, .. } = inner.as_ref() {
-                        if self.is_global_not_local(&name.name)
-                        {
+                        if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(dst, &name.name);
                         } else {
                             let off = self.var_offset(&name.name);
@@ -381,8 +377,7 @@ impl Codegen {
                         _ => inner_ty.size() as i64,
                     };
                     if let Expr::Ident { name, .. } = inner.as_ref() {
-                        if self.is_global_not_local(&name.name)
-                        {
+                        if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(dst, &name.name);
                         } else {
                             let off = self.var_offset(&name.name);
@@ -398,8 +393,8 @@ impl Codegen {
                         self.emit(&(inner_sz as i32).to_le_bytes());
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -416,8 +411,8 @@ impl Codegen {
                 self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
                 let disp32_pos = self.pos() - 4;
                 self.label_addr_refs.push((disp32_pos, label_name));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

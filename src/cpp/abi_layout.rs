@@ -307,7 +307,7 @@ fn type_size_align(ty: &CxxType, calc: &ItaniumAbiCalculator) -> (u64, u64) {
                 _ => (*bits as u64 + 7) / 8,
             };
             (bytes, bytes)
-        }
+        },
         CxxType::Float { bits } => {
             let bytes = match bits {
                 32 => 4,
@@ -317,39 +317,39 @@ fn type_size_align(ty: &CxxType, calc: &ItaniumAbiCalculator) -> (u64, u64) {
                 _ => (*bits as u64 + 7) / 8,
             };
             (bytes, bytes)
-        }
+        },
         CxxType::Pointer(_) => (POINTER_SIZE, POINTER_ALIGN),
         CxxType::LValueRef(_) | CxxType::RValueRef(_) => (POINTER_SIZE, POINTER_ALIGN),
         CxxType::Array(elem, Some(count)) => {
             let (elem_size, elem_align) = type_size_align(elem, calc);
             (elem_size * *count as u64, elem_align)
-        }
+        },
         CxxType::Array(elem, None) => {
             // 不完整数组类型，大小为 0
             let (_, elem_align) = type_size_align(elem, calc);
             (0, elem_align)
-        }
+        },
         CxxType::Class(class_id) => {
             let abi = calc.compute_class(*class_id);
             (abi.size, abi.align.max(1))
-        }
+        },
         CxxType::Enum(_) => {
             // 在 Itanium ABI 中，enum 底层类型通常是 int (4 bytes)
             (4, 4)
-        }
+        },
         CxxType::MemberPointer { .. } => {
             // 简化: 成员指针按指针大小处理
             (POINTER_SIZE, POINTER_ALIGN)
-        }
+        },
         CxxType::Function { .. } => {
             // 函数类型本身没有大小（不能实例化）
             (0, 1)
-        }
+        },
         CxxType::Dependent(_) => (0, 1),
         CxxType::Alias(_) => {
             // 此处不解析别名，按 0 处理（实际使用时应先解析）
             (0, 1)
-        }
+        },
     }
 }
 
@@ -571,7 +571,11 @@ impl ItaniumAbiCalculator {
         let mut vtables = Vec::new();
 
         // 找到 primary base（第一个有虚函数的非虚基类）
-        let primary_base = def.bases.iter().copied().find(|&b| self.class_has_virtual(b));
+        let primary_base = def
+            .bases
+            .iter()
+            .copied()
+            .find(|&b| self.class_has_virtual(b));
 
         // 虚基类列表（从 abi 获取，已经计算好偏移）
         let virtual_bases = &abi.virtual_bases;
@@ -626,9 +630,7 @@ impl ItaniumAbiCalculator {
             }
 
             // 计算从 base subobject 到 complete object 的 this 调整
-            let base_offset = self
-                .direct_base_offset(class_id, base_id)
-                .unwrap_or(0);
+            let base_offset = self.direct_base_offset(class_id, base_id).unwrap_or(0);
 
             let base_methods = self.collect_virtual_methods(base_id);
 
@@ -946,7 +948,11 @@ impl ItaniumAbiCalculator {
             max_align = max_align.max(vb_align);
         }
 
-        if size == 0 { 1 } else { align_up(size, max_align) }
+        if size == 0 {
+            1
+        } else {
+            align_up(size, max_align)
+        }
     }
 
     /// 粗略估算类的对齐（用于 direct_base_offset）。
@@ -1074,7 +1080,7 @@ impl AbiCalculator for ItaniumAbiCalculator {
                     class_id: class,
                     ..ClassAbi::default()
                 };
-            }
+            },
         };
 
         let mut abi = ClassAbi {
@@ -1115,13 +1121,13 @@ impl AbiCalculator for ItaniumAbiCalculator {
             let is_primary = i == 0;
 
             // 计算该基类的起始 offset
-            let base_offset = if is_primary && primary_base.is_some() && Some(base_id) == primary_base
-            {
-                // primary base 放在 offset 0，共享 vptr
-                0
-            } else {
-                align_up(current_offset, base_align)
-            };
+            let base_offset =
+                if is_primary && primary_base.is_some() && Some(base_id) == primary_base {
+                    // primary base 放在 offset 0，共享 vptr
+                    0
+                } else {
+                    align_up(current_offset, base_align)
+                };
 
             // 添加基类布局
             abi.bases.push(BaseLayout {
@@ -1131,10 +1137,8 @@ impl AbiCalculator for ItaniumAbiCalculator {
             });
 
             // 记录 this 调整（非虚偏移）
-            abi.this_adjust_map.insert(
-                base_id,
-                ThisAdjust::offset(base_offset as i64),
-            );
+            abi.this_adjust_map
+                .insert(base_id, ThisAdjust::offset(base_offset as i64));
 
             if Some(base_id) == primary_base {
                 abi.primary_base = Some(base_id);
@@ -1150,7 +1154,8 @@ impl AbiCalculator for ItaniumAbiCalculator {
             } else if self.class_has_virtual(base_id) {
                 // 非 primary base 但有虚函数，有自己的 vptr（对应 secondary vtable）
                 // 找到对应的 secondary vtable index
-                let vtable_idx = abi.vtables
+                let vtable_idx = abi
+                    .vtables
                     .iter()
                     .position(|v| v.for_base == Some(base_id))
                     .unwrap_or(0); // 暂时用 0，后面再修正
@@ -1354,7 +1359,13 @@ mod tests {
         let class_id = ClassId(0);
         calc.register_simple_class(
             class_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
 
         let abi = calc.compute_class(class_id);
@@ -1379,8 +1390,20 @@ mod tests {
             class_id,
             vec![
                 ("a".into(), CxxType::Bool),
-                ("b".into(), CxxType::Integer { bits: 32, signed: true }),
-                ("c".into(), CxxType::Integer { bits: 8, signed: false }),
+                (
+                    "b".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    "c".into(),
+                    CxxType::Integer {
+                        bits: 8,
+                        signed: false,
+                    },
+                ),
                 ("d".into(), CxxType::Float { bits: 64 }),
             ],
         );
@@ -1406,13 +1429,25 @@ mod tests {
 
         calc.register_simple_class(
             base_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
         calc.register_class(
             derived_id,
             vec![base_id],
             vec![],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1441,19 +1476,34 @@ mod tests {
         calc.register_simple_class(
             a_id,
             vec![
-                ("a".into(), CxxType::Integer { bits: 32, signed: true }),
-                ("x".into(), CxxType::Integer { bits: 8, signed: false }),
+                (
+                    "a".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    "x".into(),
+                    CxxType::Integer {
+                        bits: 8,
+                        signed: false,
+                    },
+                ),
             ],
         );
-        calc.register_simple_class(
-            b_id,
-            vec![("b".into(), CxxType::Float { bits: 64 })],
-        );
+        calc.register_simple_class(b_id, vec![("b".into(), CxxType::Float { bits: 64 })]);
         calc.register_class(
             c_id,
             vec![a_id, b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1502,7 +1552,13 @@ mod tests {
             class_id,
             vec![(
                 "arr".into(),
-                CxxType::Array(Box::new(CxxType::Integer { bits: 32, signed: true }), Some(5)),
+                CxxType::Array(
+                    Box::new(CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    }),
+                    Some(5),
+                ),
             )],
         );
 
@@ -1521,8 +1577,20 @@ mod tests {
         calc.register_simple_class(
             class_id,
             vec![
-                ("p".into(), CxxType::Pointer(Box::new(CxxType::Integer { bits: 32, signed: true }))),
-                ("x".into(), CxxType::Integer { bits: 32, signed: true }),
+                (
+                    "p".into(),
+                    CxxType::Pointer(Box::new(CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    })),
+                ),
+                (
+                    "x".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
             ],
         );
 
@@ -1540,7 +1608,13 @@ mod tests {
         let class_id = ClassId(0);
         calc.register_simple_class(
             class_id,
-            vec![("ref".into(), CxxType::LValueRef(Box::new(CxxType::Integer { bits: 32, signed: true })))],
+            vec![(
+                "ref".into(),
+                CxxType::LValueRef(Box::new(CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                })),
+            )],
         );
 
         let abi = calc.compute_class(class_id);
@@ -1569,13 +1643,25 @@ mod tests {
         let derived_id = ClassId(1);
         calc.register_simple_class(
             base_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
         calc.register_class(
             derived_id,
             vec![base_id],
             vec![],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1597,19 +1683,34 @@ mod tests {
         calc.register_simple_class(
             a_id,
             vec![
-                ("a".into(), CxxType::Integer { bits: 32, signed: true }),
-                ("x".into(), CxxType::Integer { bits: 8, signed: false }),
+                (
+                    "a".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    "x".into(),
+                    CxxType::Integer {
+                        bits: 8,
+                        signed: false,
+                    },
+                ),
             ],
         );
-        calc.register_simple_class(
-            b_id,
-            vec![("b".into(), CxxType::Float { bits: 64 })],
-        );
+        calc.register_simple_class(b_id, vec![("b".into(), CxxType::Float { bits: 64 })]);
         calc.register_class(
             c_id,
             vec![a_id, b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1627,13 +1728,25 @@ mod tests {
 
         calc.register_simple_class(
             base_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
         calc.register_class(
             derived_id,
             vec![base_id],
             vec![],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1655,17 +1768,26 @@ mod tests {
 
         calc.register_simple_class(
             a_id,
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
-        calc.register_simple_class(
-            b_id,
-            vec![("b".into(), CxxType::Float { bits: 64 })],
-        );
+        calc.register_simple_class(b_id, vec![("b".into(), CxxType::Float { bits: 64 })]);
         calc.register_class(
             c_id,
             vec![a_id, b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1684,20 +1806,38 @@ mod tests {
 
         calc.register_simple_class(
             a_id,
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
         calc.register_class(
             b_id,
             vec![a_id],
             vec![],
-            vec![("b".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "b".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
         calc.register_class(
             c_id,
             vec![b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -1724,7 +1864,13 @@ mod tests {
         calc.register_simple_class(
             class_id,
             vec![
-                ("a".into(), CxxType::Integer { bits: 32, signed: true }),
+                (
+                    "a".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
                 ("b".into(), CxxType::Bool),
                 ("c".into(), CxxType::Float { bits: 64 }),
             ],
@@ -1755,18 +1901,27 @@ mod tests {
 
         calc.register_simple_class(
             a_id,
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
-        calc.register_simple_class(
-            b_id,
-            vec![("b".into(), CxxType::Float { bits: 64 })],
-        );
+        calc.register_simple_class(b_id, vec![("b".into(), CxxType::Float { bits: 64 })]);
         calc.register_class(
             c_id,
             vec![a_id, b_id],
             vec![],
             vec![
-                ("c".into(), CxxType::Integer { bits: 32, signed: true }),
+                (
+                    "c".into(),
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                ),
                 ("d".into(), CxxType::Bool),
             ],
             false,
@@ -1818,7 +1973,13 @@ mod tests {
             class_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(class_id, "foo".into(), true, class_id);
@@ -1863,7 +2024,7 @@ mod tests {
             VTableComponent::Function { symbol, adjustment } => {
                 assert!(symbol.ends_with("::foo"));
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function"),
         }
 
@@ -1872,7 +2033,7 @@ mod tests {
             VTableComponent::Function { symbol, adjustment } => {
                 assert!(symbol.ends_with("::bar"));
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function"),
         }
 
@@ -1891,7 +2052,13 @@ mod tests {
             class_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(class_id, "vfunc".into(), true, class_id);
@@ -1937,30 +2104,39 @@ mod tests {
         // slot 0: foo (被 Derived 重写)
         match &vtable.components[2] {
             VTableComponent::Function { symbol, adjustment } => {
-                assert!(symbol.contains("Class1") && symbol.ends_with("::foo"),
-                    "expected Derived::foo, got {}", symbol);
+                assert!(
+                    symbol.contains("Class1") && symbol.ends_with("::foo"),
+                    "expected Derived::foo, got {}",
+                    symbol
+                );
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function for foo"),
         }
 
         // slot 1: bar (继承自 Base)
         match &vtable.components[3] {
             VTableComponent::Function { symbol, adjustment } => {
-                assert!(symbol.contains("Class0") && symbol.ends_with("::bar"),
-                    "expected Base::bar, got {}", symbol);
+                assert!(
+                    symbol.contains("Class0") && symbol.ends_with("::bar"),
+                    "expected Base::bar, got {}",
+                    symbol
+                );
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function for bar"),
         }
 
         // slot 2: baz (Derived 新增)
         match &vtable.components[4] {
             VTableComponent::Function { symbol, adjustment } => {
-                assert!(symbol.contains("Class1") && symbol.ends_with("::baz"),
-                    "expected Derived::baz, got {}", symbol);
+                assert!(
+                    symbol.contains("Class1") && symbol.ends_with("::baz"),
+                    "expected Derived::baz, got {}",
+                    symbol
+                );
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function for baz"),
         }
 
@@ -1993,7 +2169,13 @@ mod tests {
             a_id,
             vec![],
             vec![],
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(a_id, "a_func".into(), true, a_id);
@@ -2013,7 +2195,13 @@ mod tests {
             c_id,
             vec![a_id, b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(c_id, "a_func".into(), true, a_id); // 重写 A::a_func
@@ -2055,7 +2243,7 @@ mod tests {
             VTableComponent::Function { symbol, adjustment } => {
                 assert!(symbol.ends_with("::a_func"), "expected a_func, got {}", symbol);
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function for a_func"),
         }
 
@@ -2064,7 +2252,7 @@ mod tests {
             VTableComponent::Function { symbol, adjustment } => {
                 assert!(symbol.ends_with("::b_func"), "expected b_func, got {}", symbol);
                 assert!(adjustment.is_zero());
-            }
+            },
             _ => panic!("expected Function for b_func"),
         }
 
@@ -2086,7 +2274,7 @@ mod tests {
                 assert!(symbol.ends_with("::b_func"), "expected b_func, got {}", symbol);
                 assert_eq!(adjustment.non_virtual, -16, "expected thunk adjust -16");
                 assert!(adjustment.vbase_index.is_none());
-            }
+            },
             _ => panic!("expected Function for b_func in secondary"),
         }
 
@@ -2102,7 +2290,13 @@ mod tests {
         let class_id = ClassId(0);
         calc.register_simple_class(
             class_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
 
         let abi = calc.compute_class(class_id);
@@ -2172,7 +2366,7 @@ mod tests {
             VTableComponent::Function { symbol, adjustment } => {
                 assert_eq!(symbol, "Class1::b");
                 assert!(adjustment.is_zero(), "inherited method should have zero adjustment");
-            }
+            },
             _ => panic!("expected Function"),
         }
     }
@@ -2230,7 +2424,13 @@ mod tests {
             base_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base_id, "foo".into(), true, base_id);
@@ -2240,7 +2440,13 @@ mod tests {
             derived_id,
             vec![],
             vec![base_id],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false, // 自身没有新的虚函数，但继承了
         );
 
@@ -2283,7 +2489,7 @@ mod tests {
             VTableComponent::VBaseOffset { target, offset } => {
                 assert_eq!(*target, base_id);
                 assert_eq!(*offset, 16);
-            }
+            },
             _ => panic!("expected VBaseOffset"),
         }
 
@@ -2330,7 +2536,13 @@ mod tests {
             a_id,
             vec![],
             vec![],
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(a_id, "foo".into(), true, a_id);
@@ -2340,7 +2552,13 @@ mod tests {
             b_id,
             vec![],
             vec![a_id],
-            vec![("b".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "b".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2349,7 +2567,13 @@ mod tests {
             c_id,
             vec![],
             vec![a_id],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2358,7 +2582,13 @@ mod tests {
             d_id,
             vec![b_id, c_id],
             vec![],
-            vec![("d".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "d".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2392,7 +2622,7 @@ mod tests {
         match &vbase_offsets[0] {
             VTableComponent::VBaseOffset { target, offset: _ } => {
                 assert_eq!(*target, a_id);
-            }
+            },
             _ => panic!("expected VBaseOffset"),
         }
     }
@@ -2413,7 +2643,13 @@ mod tests {
             base1_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base1_id, "f1".into(), true, base1_id);
@@ -2423,7 +2659,13 @@ mod tests {
             base2_id,
             vec![],
             vec![],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base2_id, "f2".into(), true, base2_id);
@@ -2433,7 +2675,13 @@ mod tests {
             derived_id,
             vec![],
             vec![base1_id, base2_id],
-            vec![("z".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "z".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2463,12 +2711,12 @@ mod tests {
                 VTableComponent::VBaseOffset { .. } => {
                     assert!(!offset_to_top_seen, "VBaseOffset should come before OffsetToTop");
                     vbase_seen = true;
-                }
+                },
                 VTableComponent::OffsetToTop(_) => {
                     assert!(vbase_seen, "OffsetToTop should come after VBaseOffsets");
                     offset_to_top_seen = true;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
@@ -2487,7 +2735,13 @@ mod tests {
             base_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base_id, "foo".into(), true, base_id);
@@ -2496,7 +2750,13 @@ mod tests {
             derived_id,
             vec![],
             vec![base_id],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2516,7 +2776,13 @@ mod tests {
             base_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base_id, "foo".into(), true, base_id);
@@ -2525,7 +2791,13 @@ mod tests {
             derived_id,
             vec![],
             vec![base_id],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2552,7 +2824,13 @@ mod tests {
             base_id,
             vec![],
             vec![],
-            vec![("b".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "b".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base_id, "f".into(), true, base_id);
@@ -2561,7 +2839,13 @@ mod tests {
             vbase_id,
             vec![],
             vec![],
-            vec![("v".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "v".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(vbase_id, "g".into(), true, vbase_id);
@@ -2570,7 +2854,13 @@ mod tests {
             derived_id,
             vec![base_id],
             vec![vbase_id],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2593,7 +2883,13 @@ mod tests {
         let class_id = ClassId(0);
         calc.register_simple_class(
             class_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
 
         let abi = calc.compute_class(class_id);
@@ -2611,13 +2907,25 @@ mod tests {
 
         calc.register_simple_class(
             base_id,
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
         calc.register_class(
             derived_id,
             vec![base_id],
             vec![],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2643,17 +2951,26 @@ mod tests {
 
         calc.register_simple_class(
             a_id,
-            vec![("a".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
         );
-        calc.register_simple_class(
-            b_id,
-            vec![("b".into(), CxxType::Float { bits: 64 })],
-        );
+        calc.register_simple_class(b_id, vec![("b".into(), CxxType::Float { bits: 64 })]);
         calc.register_class(
             c_id,
             vec![a_id, b_id],
             vec![],
-            vec![("c".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 
@@ -2684,7 +3001,13 @@ mod tests {
             base_id,
             vec![],
             vec![],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(base_id, "foo".into(), true, base_id);
@@ -2693,7 +3016,13 @@ mod tests {
             derived_id,
             vec![],
             vec![base_id],
-            vec![("y".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "y".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             false,
         );
 

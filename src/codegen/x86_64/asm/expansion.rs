@@ -12,7 +12,6 @@ pub struct Member {
     pub offset: usize,
 }
 
-
 /// Parse GCC asm constraint flags (=, +, &, %)
 /// Returns: (is_output, is_inout, early_clobber, match_digit)
 pub fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32>) {
@@ -26,19 +25,19 @@ pub fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option
             Some('=') => {
                 is_output = true;
                 s = &s[1..];
-            }
+            },
             Some('+') => {
                 is_output = true;
                 is_inout = true;
                 s = &s[1..];
-            }
+            },
             Some('&') => {
                 early = true;
                 s = &s[1..];
-            }
+            },
             Some('%') => {
                 s = &s[1..];
-            }
+            },
             Some(c) if c.is_ascii_digit() => {
                 let mut val: u32 = 0;
                 while let Some(d) = s.chars().next() {
@@ -49,7 +48,7 @@ pub fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option
                     s = &s[1..];
                 }
                 match_digit = Some(val);
-            }
+            },
             _ => break,
         }
     }
@@ -118,9 +117,9 @@ pub fn asm_constraint_is_gp(constraint: &str) -> bool {
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
         .collect();
-    letters.iter().any(|c| {
-        matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D')
-    })
+    letters
+        .iter()
+        .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'))
 }
 
 /// x87 FPU constraint: "f" → any st, "t" → st(0), "u" → st(1)
@@ -197,7 +196,7 @@ pub fn asm_parse_explicit_reg(constraint: &str) -> Option<ExplicitRegInfo> {
 /// Parse explicit register name
 pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
     use crate::codegen::x86_64::asm::expansion::ExplicitRegKind;
-    
+
     // Segment registers
     match name {
         "gs" => {
@@ -207,7 +206,7 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "gs",
                 kind: ExplicitRegKind::Seg,
             })
-        }
+        },
         "fs" => {
             return Some(ExplicitRegInfo {
                 reg: 4,
@@ -215,7 +214,7 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "fs",
                 kind: ExplicitRegKind::Seg,
             })
-        }
+        },
         "es" => {
             return Some(ExplicitRegInfo {
                 reg: 0,
@@ -223,7 +222,7 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "es",
                 kind: ExplicitRegKind::Seg,
             })
-        }
+        },
         "cs" => {
             return Some(ExplicitRegInfo {
                 reg: 1,
@@ -231,7 +230,7 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "cs",
                 kind: ExplicitRegKind::Seg,
             })
-        }
+        },
         "ss" => {
             return Some(ExplicitRegInfo {
                 reg: 2,
@@ -239,7 +238,7 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "ss",
                 kind: ExplicitRegKind::Seg,
             })
-        }
+        },
         "ds" => {
             return Some(ExplicitRegInfo {
                 reg: 3,
@@ -247,10 +246,10 @@ pub fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
                 att_name: "ds",
                 kind: ExplicitRegKind::Seg,
             })
-        }
-        _ => {}
+        },
+        _ => {},
     }
-    
+
     // GP subregisters
     if let Some((idx, bits, sname)) = parse_reg_name_bits(name) {
         return Some(ExplicitRegInfo {
@@ -389,66 +388,124 @@ pub fn asm_reg_modifier_subst(val: &str, modifier: char) -> Option<String> {
 
 /// Parse ASM register string → (index, size)
 pub fn parse_asm_reg(s: &str) -> Option<(u8, u8)> {
-    use crate::codegen::x86_64::{ASM_REG_CR, ASM_REG_DR, ASM_REG_K, ASM_REG_MMX, ASM_REG_ST, ASM_REG_TMM, ASM_REG_XMM, ASM_REG_YMM, ASM_REG_ZMM};
-    
+    use crate::codegen::x86_64::{
+        ASM_REG_CR, ASM_REG_DR, ASM_REG_K, ASM_REG_MMX, ASM_REG_ST, ASM_REG_TMM, ASM_REG_XMM,
+        ASM_REG_YMM, ASM_REG_ZMM,
+    };
+
     let n = s.strip_prefix('%').unwrap_or(s);
     let result = match n {
         // General purpose registers
-        "rax" => (0, 64), "eax" => (0, 32), "ax" => (0, 16), "al" => (0, 8),
-        "rbx" => (3, 64), "ebx" => (3, 32), "bx" => (3, 16), "bl" => (3, 8),
-        "rcx" => (1, 64), "ecx" => (1, 32), "cx" => (1, 16), "cl" => (1, 8),
-        "rdx" => (2, 64), "edx" => (2, 32), "dx" => (2, 16), "dl" => (2, 8),
-        "rsi" => (6, 64), "esi" => (6, 32), "si" => (6, 16), "sil" => (6, 8),
-        "rdi" => (7, 64), "edi" => (7, 32), "di" => (7, 16), "dil" => (7, 8),
-        "rsp" => (4, 64), "esp" => (4, 32), "sp" => (4, 16), "spl" => (4, 8),
-        "rbp" => (5, 64), "ebp" => (5, 32), "bp" => (5, 16), "bpl" => (5, 8),
-        "r8" => (8, 64), "r8d" => (8, 32), "r8w" => (8, 16), "r8b" => (8, 8),
-        "r9" => (9, 64), "r9d" => (9, 32), "r9w" => (9, 16), "r9b" => (9, 8),
-        "r10" => (10, 64), "r10d" => (10, 32), "r10w" => (10, 16), "r10b" => (10, 8),
-        "r11" => (11, 64), "r11d" => (11, 32), "r11w" => (11, 16), "r11b" => (11, 8),
-        "r12" => (12, 64), "r12d" => (12, 32), "r12w" => (12, 16), "r12b" => (12, 8),
-        "r13" => (13, 64), "r13d" => (13, 32), "r13w" => (13, 16), "r13b" => (13, 8),
-        "r14" => (14, 64), "r14d" => (14, 32), "r14w" => (14, 16), "r14b" => (14, 8),
-        "r15" => (15, 64), "r15d" => (15, 32), "r15w" => (15, 16), "r15b" => (15, 8),
+        "rax" => (0, 64),
+        "eax" => (0, 32),
+        "ax" => (0, 16),
+        "al" => (0, 8),
+        "rbx" => (3, 64),
+        "ebx" => (3, 32),
+        "bx" => (3, 16),
+        "bl" => (3, 8),
+        "rcx" => (1, 64),
+        "ecx" => (1, 32),
+        "cx" => (1, 16),
+        "cl" => (1, 8),
+        "rdx" => (2, 64),
+        "edx" => (2, 32),
+        "dx" => (2, 16),
+        "dl" => (2, 8),
+        "rsi" => (6, 64),
+        "esi" => (6, 32),
+        "si" => (6, 16),
+        "sil" => (6, 8),
+        "rdi" => (7, 64),
+        "edi" => (7, 32),
+        "di" => (7, 16),
+        "dil" => (7, 8),
+        "rsp" => (4, 64),
+        "esp" => (4, 32),
+        "sp" => (4, 16),
+        "spl" => (4, 8),
+        "rbp" => (5, 64),
+        "ebp" => (5, 32),
+        "bp" => (5, 16),
+        "bpl" => (5, 8),
+        "r8" => (8, 64),
+        "r8d" => (8, 32),
+        "r8w" => (8, 16),
+        "r8b" => (8, 8),
+        "r9" => (9, 64),
+        "r9d" => (9, 32),
+        "r9w" => (9, 16),
+        "r9b" => (9, 8),
+        "r10" => (10, 64),
+        "r10d" => (10, 32),
+        "r10w" => (10, 16),
+        "r10b" => (10, 8),
+        "r11" => (11, 64),
+        "r11d" => (11, 32),
+        "r11w" => (11, 16),
+        "r11b" => (11, 8),
+        "r12" => (12, 64),
+        "r12d" => (12, 32),
+        "r12w" => (12, 16),
+        "r12b" => (12, 8),
+        "r13" => (13, 64),
+        "r13d" => (13, 32),
+        "r13w" => (13, 16),
+        "r13b" => (13, 8),
+        "r14" => (14, 64),
+        "r14d" => (14, 32),
+        "r14w" => (14, 16),
+        "r14b" => (14, 8),
+        "r15" => (15, 64),
+        "r15d" => (15, 32),
+        "r15w" => (15, 16),
+        "r15b" => (15, 8),
         // Subregisters (high bytes)
-        "ah" => (0, 8), "bh" => (3, 8), "ch" => (1, 8), "dh" => (2, 8),
+        "ah" => (0, 8),
+        "bh" => (3, 8),
+        "ch" => (1, 8),
+        "dh" => (2, 8),
         // SIMD registers
         x if x.starts_with("xmm") => {
             let idx = x.strip_prefix("xmm")?.parse::<u8>().ok()?;
             (idx, ASM_REG_XMM)
-        }
+        },
         x if x.starts_with("ymm") => {
             let idx = x.strip_prefix("ymm")?.parse::<u8>().ok()?;
             (idx, ASM_REG_YMM)
-        }
+        },
         x if x.starts_with("zmm") => {
             let idx = x.strip_prefix("zmm")?.parse::<u8>().ok()?;
             (idx, ASM_REG_ZMM)
-        }
+        },
         x if x.starts_with("tmm") => {
             let idx = x.strip_prefix("tmm")?.parse::<u8>().ok()?;
             (idx, ASM_REG_TMM)
-        }
+        },
         // Mask registers
         x if x.starts_with("k") => {
             let idx = x.strip_prefix("k")?.parse::<u8>().ok()?;
             (idx, ASM_REG_K)
-        }
+        },
         // Control registers
         x if x.starts_with("cr") => {
             let idx = x.strip_prefix("cr")?.parse::<u8>().ok()?;
             (idx, ASM_REG_CR)
-        }
+        },
         // Debug registers
         x if x.starts_with("dr") || x.starts_with("db") => {
-            let idx = x.strip_prefix("dr").or_else(|| x.strip_prefix("db"))?.parse::<u8>().ok()?;
+            let idx = x
+                .strip_prefix("dr")
+                .or_else(|| x.strip_prefix("db"))?
+                .parse::<u8>()
+                .ok()?;
             (idx, ASM_REG_DR)
-        }
+        },
         // MMX registers
         x if x.starts_with("mm") => {
             let idx = x.strip_prefix("mm")?.parse::<u8>().ok()?;
             (idx, ASM_REG_MMX)
-        }
+        },
         // x87 FPU stack
         "st" | "st(0)" => (0, ASM_REG_ST),
         "st(1)" => (1, ASM_REG_ST),
@@ -482,20 +539,7 @@ pub fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'stati
     if letters.iter().any(|c| {
         matches!(
             c,
-            'i' | 'n'
-                | 'I'
-                | 'J'
-                | 'K'
-                | 'L'
-                | 'M'
-                | 'N'
-                | 'O'
-                | 'X'
-                | 'E'
-                | 'F'
-                | 'G'
-                | 'H'
-                | 's'
+            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'X' | 'E' | 'F' | 'G' | 'H' | 's'
         )
     }) {
         return "i";

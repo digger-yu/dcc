@@ -100,32 +100,51 @@ impl RvEncoder {
     /// Encode ADD rd, rs1, rs2
     pub fn add(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction((((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(
+            (((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP,
+        )
     }
 
     /// Encode SUB rd, rs1, rs2
     pub fn sub(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction(((0x20 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(
+            ((0x20 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15))
+                | ((rd as u32) << 7)
+                | opcode::OP,
+        )
     }
 
     /// Encode MUL rd, rs1, rs2 (M extension)
     pub fn mul(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction(((0x02 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(
+            ((0x02 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15))
+                | ((rd as u32) << 7)
+                | opcode::OP,
+        )
     }
 
     /// Encode DIV rd, rs1, rs2 (M extension)
     pub fn div(rd: u8, rs1: u8, rs2: u8) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32 && rs2 < 32);
-        RvInstruction((0x02 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (4 << 12) | ((rd as u32) << 7) | opcode::OP)
+        RvInstruction(
+            (0x02 << 25)
+                | ((rs2 as u32) << 20)
+                | ((rs1 as u32) << 15)
+                | (4 << 12)
+                | ((rd as u32) << 7)
+                | opcode::OP,
+        )
     }
 
     /// Encode LW rd, rs1, offset
     pub fn lw(rd: u8, rs1: u8, offset: i32) -> RvInstruction {
         assert!(rd < 32 && rs1 < 32);
         let imm = (offset as u32) & 0xFFF;
-        RvInstruction((imm << 20) | ((rs1 as u32) << 15) | (2 << 12) | ((rd as u32) << 7) | opcode::LOAD)
+        RvInstruction(
+            (imm << 20) | ((rs1 as u32) << 15) | (2 << 12) | ((rd as u32) << 7) | opcode::LOAD,
+        )
     }
 
     /// Encode SW rs2, rs1, offset
@@ -134,7 +153,14 @@ impl RvEncoder {
         let imm = (offset as u32) & 0xFFF;
         let imm11_5 = (imm >> 5) & 0x7F;
         let imm4_0 = imm & 0x1F;
-        RvInstruction((imm11_5 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (2 << 12) | (imm4_0 << 7) | opcode::STORE)
+        RvInstruction(
+            (imm11_5 << 25)
+                | ((rs2 as u32) << 20)
+                | ((rs1 as u32) << 15)
+                | (2 << 12)
+                | (imm4_0 << 7)
+                | opcode::STORE,
+        )
     }
 
     /// Encode BEQ rs1, rs2, offset
@@ -146,13 +172,11 @@ impl RvEncoder {
         let bits4_1 = (imm >> 1) & 0xF;
         let bit11 = (imm >> 11) & 1;
 
-        let encoding = ((bit12 << 31)
-            | (bits10_5 << 25)
-            | ((rs2 as u32) << 20)
-            | ((rs1 as u32) << 15))
-            | (bits4_1 << 8)
-            | (bit11 << 7)
-            | opcode::BRANCH;
+        let encoding =
+            ((bit12 << 31) | (bits10_5 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15))
+                | (bits4_1 << 8)
+                | (bit11 << 7)
+                | opcode::BRANCH;
         RvInstruction(encoding)
     }
 

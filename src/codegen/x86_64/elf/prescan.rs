@@ -2,8 +2,8 @@
 // Prescan helpers: nested function collection and signature registration.
 
 use crate::ast::*;
-use std::collections::HashMap;
 use crate::codegen::x86_64::Codegen;
+use std::collections::HashMap;
 
 impl Codegen {
     pub fn collect_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
@@ -34,13 +34,13 @@ impl Codegen {
                         Self::collect_nested_funcs(&b.items, out);
                     }
                 }
-            }
+            },
             Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
                 if let Stmt::Block { b, .. } = body.as_ref() {
                     Self::collect_nested_funcs(&b.items, out);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     pub fn register_func_sig(f: &FuncDecl, map: &mut HashMap<String, Vec<Type>>) {

@@ -113,26 +113,26 @@ impl MangleType {
             Self::Pointer(t) => {
                 out.push('P');
                 t.encode(out);
-            }
+            },
             Self::Reference(t) => {
                 out.push('R');
                 t.encode(out);
-            }
+            },
             // Itanium: A<n>_<element>
             Self::Array(t, n) => {
                 out.push('A');
                 out.push_str(&n.to_string());
                 out.push('_');
                 t.encode(out);
-            }
+            },
             Self::Class(n) => {
                 out.push_str(&format!("{}N{}E", n.len(), n));
-            }
+            },
             Self::Ellipsis => out.push('z'),
             // G11: TemplateParam - encode as class-like reference
             Self::TemplateParam(sym) => {
                 out.push_str(&format!("{}N{}E", sym.0.len(), sym.0));
-            }
+            },
             // M17.0: Auto / DecltypeAuto 由 lower 阶段解析, 不进入 mangle.
             // 显式抛错: 若某条路径未完成 auto 推导, 编译时报错而非输出错符号.
             Self::Auto => out.push_str("__auto_unresolved__"),
@@ -145,7 +145,7 @@ impl MangleType {
                     a.encode(out);
                 }
                 out.push('E');
-            }
+            },
             Self::TplMember { name, args, member } => {
                 out.push_str(&format!("N{}{}I", name.len(), name));
                 for a in args {
@@ -153,7 +153,7 @@ impl MangleType {
                 }
                 out.push('E');
                 out.push_str(&format!("{}{}", member.len(), member));
-            }
+            },
             // M30.1: 非类型实参编码成整数字面量 (Li1E / LiN3E),
             // 与 GCC `int_const` 形式的 Itanium 编码一致.
             Self::NonType(v) => {
@@ -162,13 +162,13 @@ impl MangleType {
                 } else {
                     out.push_str(&format!("Li{}E", v));
                 }
-            }
+            },
             // G12: 参数包展开 - 依次编码包内的每个类型
             Self::VariadicPack(packed) => {
                 for ty in packed {
                     ty.encode(out);
                 }
-            }
+            },
         }
     }
 
@@ -632,10 +632,7 @@ mod tests {
     }
     #[test]
     fn mangle_global() {
-        assert_eq!(
-            mangle_global_function("foo", &[MangleType::Int, MangleType::Int]),
-            "_Z3fooii"
-        );
+        assert_eq!(mangle_global_function("foo", &[MangleType::Int, MangleType::Int]), "_Z3fooii");
     }
 
     // M18.1: 模板实例化 T<U> 编码 — 与 St6vectorIiSaIiEE 一致

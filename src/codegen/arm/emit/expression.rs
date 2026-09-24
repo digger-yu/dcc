@@ -10,19 +10,20 @@ impl ArmCodegen {
         match expr {
             Expr::Int { v, .. } => {
                 self.emit_load_imm(0, *v as i32);
-            }
+            },
             Expr::Char { v, .. } => {
                 self.emit_load_imm(0, *v as i32);
-            }
+            },
             Expr::Float { v, ty, .. } => {
                 // 浮点字面量: 加载到 VFP 寄存器 s0/d0
-                let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_double =
+                    matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_double {
                     self.load_float_d0(*v);
                 } else {
                     self.load_float_s0(*v as f32);
                 }
-            }
+            },
             Expr::String { data, .. } => {
                 // Emit string to .rodata and load address
                 let offset = if let Some(&off) = self.string_pool.get(data) {
@@ -39,7 +40,7 @@ impl ArmCodegen {
                 };
                 // Load string address into r0
                 self.emit_load_imm(0, offset as i32);
-            }
+            },
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.emit_load_r0(off);
@@ -49,16 +50,27 @@ impl ArmCodegen {
                 } else {
                     self.emit_load_imm(0, 0);
                 }
-            }
+            },
             Expr::Binop { op, l, r, ty, .. } => {
                 // 检测浮点运算
-                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
-                let is_float_cmp = is_float && matches!(op, BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
-                let is_float_arith = is_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+                let is_float = matches!(
+                    ty,
+                    crate::ast::Type::Float
+                        | crate::ast::Type::Double
+                        | crate::ast::Type::LongDouble
+                );
+                let is_float_cmp = is_float
+                    && matches!(
+                        op,
+                        BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    );
+                let is_float_arith =
+                    is_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
 
                 if is_float_arith || is_float_cmp {
                     // 浮点二元运算: 使用 VFP 指令
-                    let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                    let is_double =
+                        matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                     // 计算左操作数 -> s0/d0
                     self.gen_expr_from_ast(l);
                     // 保存到 s2/d2
@@ -82,7 +94,7 @@ impl ArmCodegen {
                                             // r0 = rhs, r1 = lhs
                     self.emit_binop(*op);
                 }
-            }
+            },
             Expr::Unary { op, e, .. } => {
                 self.gen_expr_from_ast(e);
                 match op {
@@ -91,11 +103,11 @@ impl ArmCodegen {
                         self.emit_cmp_imm(0, 0);
                         self.emit_mov_imm(0, 0); // mov r0, #0
                         self.emit_moveq(0, 1); // moveq r0, #1
-                    }
+                    },
                     UnOp::BitNot => self.emit_mvn(0, 0), // mvn r0, r0
-                    UnOp::Plus => {}
+                    UnOp::Plus => {},
                 }
-            }
+            },
             Expr::Cast { e, .. } => self.gen_expr_from_ast(e),
             Expr::Call { callee, args, .. } => {
                 // 参数传递: r0-r3
@@ -117,7 +129,7 @@ impl ArmCodegen {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     self.emit_bl(&name.name);
                 }
-            }
+            },
             Expr::Assign { l, r, .. } => {
                 self.gen_expr_from_ast(r);
                 if let Expr::Ident { name, .. } = l.as_ref() {
@@ -125,7 +137,7 @@ impl ArmCodegen {
                         self.emit_store_r0(off);
                     }
                 }
-            }
+            },
             Expr::AsmExpr {
                 asm_str,
                 outputs,
@@ -152,11 +164,17 @@ impl ArmCodegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             // M25: __builtin_va_arg(ap, T) — 从保存区顺序读取变参
             Expr::VaArg { ap, ty, .. } => {
-                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
-                let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_float = matches!(
+                    ty,
+                    crate::ast::Type::Float
+                        | crate::ast::Type::Double
+                        | crate::ast::Type::LongDouble
+                );
+                let is_double =
+                    matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_float {
                     // 浮点变参: 使用 VFP 加载
                     self.gen_va_arg_float("ap", is_double);
@@ -164,7 +182,7 @@ impl ArmCodegen {
                     self.gen_va_arg_int("ap");
                 }
                 let _ = ap;
-            }
+            },
             // 指针操作: 取地址
             Expr::AddrOf { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
@@ -177,36 +195,42 @@ impl ArmCodegen {
                 } else {
                     self.emit_load_imm(0, 0);
                 }
-            }
+            },
             // 指针操作: 解引用
             Expr::Deref { e, .. } => {
                 self.gen_expr_from_ast(e);
                 // r0 现在是指针地址, 加载 [r0] 到 r0
                 self.emit_push(vec![0]); // 保存地址
                 self.emit_pop(vec![1]); // 弹出到 r1
-                // ldr r0, [r1]
+                                        // ldr r0, [r1]
                 let inst = 0xE5910000u32;
                 self.code.extend_from_slice(&inst.to_le_bytes());
-            }
+            },
             // 数组索引: arr[idx]
             Expr::Index { arr, idx, .. } => {
                 self.gen_expr_from_ast(arr);
                 self.emit_push(vec![0]); // 保存基地址
                 self.gen_expr_from_ast(idx);
                 self.emit_pop(vec![1]); // r1 = 基地址
-                // r0 = 索引, r1 = 基地址
-                // 简化: 假设元素大小为 4 字节
+                                        // r0 = 索引, r1 = 基地址
+                                        // 简化: 假设元素大小为 4 字节
                 self.emit_lsl(0, 0, 0); // 先不处理, 假设索引已缩放
-                // add r0, r1, r0 (地址 + 偏移)
+                                        // add r0, r1, r0 (地址 + 偏移)
                 self.emit_add(0, 1, 0);
                 // 加载 [r0] 到 r0
                 self.emit_push(vec![0]);
                 self.emit_pop(vec![1]);
                 let inst = 0xE5910000u32;
                 self.code.extend_from_slice(&inst.to_le_bytes());
-            }
+            },
             // 结构体成员访问
-            Expr::Member { expr, field, ty: _, is_arrow, .. } => {
+            Expr::Member {
+                expr,
+                field,
+                ty: _,
+                is_arrow,
+                ..
+            } => {
                 self.gen_expr_from_ast(expr);
                 // r0 现在是结构体地址 (is_arrow) 或结构体值 (.)
                 // 从 aggregate_fields 查找字段实际偏移
@@ -214,7 +238,9 @@ impl ArmCodegen {
                     // ptr->member: expr.ty() 是指针或数组, 取元素类型
                     match expr.ty() {
                         Type::Ptr(inner) | Type::Array(inner, _) => match &inner.base {
-                            Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => Some(name.clone()),
+                            Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => {
+                                Some(name.clone())
+                            },
                             _ => None,
                         },
                         _ => None,
@@ -222,24 +248,29 @@ impl ArmCodegen {
                 } else {
                     // s.member: expr.ty() 是结构体/联合体本身
                     match expr.ty() {
-                        Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => Some(name.clone()),
+                        Type::Struct(name, _, _, _) | Type::Union(name, _, _, false) => {
+                            Some(name.clone())
+                        },
                         _ => None,
                     }
                 };
-                let field_off = struct_name.as_ref().and_then(|n| {
-                    self.aggregate_fields.get(n).and_then(|(fields, _)| {
-                        find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                let field_off = struct_name
+                    .as_ref()
+                    .and_then(|n| {
+                        self.aggregate_fields.get(n).and_then(|(fields, _)| {
+                            find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                        })
                     })
-                }).unwrap_or(0);
+                    .unwrap_or(0);
 
                 if *is_arrow {
                     // ptr->member: r0 已经是指针地址
                     if field_off != 0 {
                         // r0 += field_off
                         self.emit_push(vec![0]); // 保存指针
-                        self.emit_pop(vec![1]);  // r1 = 指针
+                        self.emit_pop(vec![1]); // r1 = 指针
                         self.emit_load_imm(2, field_off as i32); // r2 = 偏移
-                        self.emit_add(0, 1, 2);  // r0 = 指针 + 偏移
+                        self.emit_add(0, 1, 2); // r0 = 指针 + 偏移
                         self.emit_push(vec![0]); // 保存地址
                         self.emit_pop(vec![1]);
                     } else {
@@ -265,7 +296,7 @@ impl ArmCodegen {
                     }
                     // field_off == 0 时 gen_expr_from_ast 已加载第一个成员
                 }
-            }
+            },
             // 前置自增: ++x
             Expr::PreInc { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
@@ -275,7 +306,7 @@ impl ArmCodegen {
                         self.emit_store_r0(off); // 存回
                     }
                 }
-            }
+            },
             // 前置自减: --x
             Expr::PreDec { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
@@ -285,7 +316,7 @@ impl ArmCodegen {
                         self.emit_store_r0(off); // 存回
                     }
                 }
-            }
+            },
             // 后置自增: x++
             Expr::PostInc { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
@@ -297,7 +328,7 @@ impl ArmCodegen {
                         self.emit_pop(vec![0]); // 恢复原值作为表达式结果
                     }
                 }
-            }
+            },
             // 后置自减: x--
             Expr::PostDec { e, .. } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
@@ -309,9 +340,11 @@ impl ArmCodegen {
                         self.emit_pop(vec![0]);
                     }
                 }
-            }
+            },
             // 条件表达式: cond ? then : else
-            Expr::Cond { cond, then_, else_, .. } => {
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
                 let lbl_else = self.fresh_label("Lcond_else");
                 let lbl_end = self.fresh_label("Lcond_end");
                 self.gen_expr_from_ast(cond);
@@ -322,32 +355,32 @@ impl ArmCodegen {
                 self.set_label(&lbl_else);
                 self.gen_expr_from_ast(else_);
                 self.set_label(&lbl_end);
-            }
+            },
             // sizeof(type)
             Expr::SizeofTy { ty, .. } => {
                 let size = ty.size() as i32;
                 self.emit_load_imm(0, size);
-            }
+            },
             // sizeof(expr)
             Expr::SizeofExpr { e, .. } => {
                 let size = e.ty().size() as i32;
                 self.emit_load_imm(0, size);
-            }
+            },
             // _Alignof(type)
             Expr::AlignofTy { ty, .. } => {
                 let align = ty.align() as i32;
                 self.emit_load_imm(0, align);
-            }
+            },
             // _Alignof(expr)
             Expr::AlignofExpr { e, .. } => {
                 let align = e.ty().align() as i32;
                 self.emit_load_imm(0, align);
-            }
+            },
             // 逗号表达式: (lhs, rhs) -> 求值 lhs 丢弃, 返回 rhs
             Expr::Comma { l, r, .. } => {
                 self.gen_expr_from_ast(l);
                 self.gen_expr_from_ast(r);
-            }
+            },
             // 复合赋值: l += r, l -= r, etc.
             Expr::Assign { op, l, r, .. } => {
                 if *op == BinOp::Add {
@@ -371,7 +404,7 @@ impl ArmCodegen {
                         }
                     }
                 }
-            }
+            },
             // _Complex 字面量
             Expr::ComplexLit { real, imag, ty, .. } => {
                 // 简化: 将实部和虚部存入栈, 返回地址
@@ -397,25 +430,25 @@ impl ArmCodegen {
                 }
                 // 返回复数地址
                 self.emit_add_imm(0, 11, real_off as u32);
-            }
+            },
             // __real__ expr: 取复数实部
             Expr::Real { e, .. } => {
                 self.gen_expr_from_ast(e);
                 // 简化: 假设 r0 已经是实部
-            }
+            },
             // __imag__ expr: 取复数虚部
             Expr::Imag { e, .. } => {
                 self.gen_expr_from_ast(e);
                 // 简化: 返回 0 (标量无虚部)
                 self.emit_load_imm(0, 0);
-            }
+            },
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
                     self.emit_load_imm(0, v as i32);
                 } else {
                     self.emit_load_imm(0, 0);
                 }
-            }
+            },
         }
     }
 }

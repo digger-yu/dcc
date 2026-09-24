@@ -164,13 +164,13 @@ impl OffloadDriverLinker {
                         has_cuda = true;
                         backends.push(OffloadBackend::Cuda);
                     }
-                }
+                },
                 OffloadKind::Hip => {
                     if !has_rocm {
                         has_rocm = true;
                         backends.push(OffloadBackend::Rocm);
                     }
-                }
+                },
                 OffloadKind::OmpTarget | OffloadKind::OmpTargetSimd => {
                     // OpenMP target: determine backend from device triple
                     if entry.device_triple.contains("nvptx") && !has_cuda {
@@ -180,7 +180,7 @@ impl OffloadDriverLinker {
                         has_rocm = true;
                         backends.push(OffloadBackend::Rocm);
                     }
-                }
+                },
             }
         }
 
@@ -357,7 +357,7 @@ impl OffloadDriverLinker {
                             }
                         }
                     }
-                }
+                },
                 OffloadBackend::Rocm => {
                     // ROCm needs -lamd_comgr for compiler library
                     flags.push("-lamd_comgr".to_string());
@@ -376,7 +376,7 @@ impl OffloadDriverLinker {
                             }
                         }
                     }
-                }
+                },
             }
         }
 
@@ -402,7 +402,7 @@ impl OffloadDriverLinker {
                     } else {
                         continue;
                     }
-                }
+                },
             };
 
             let arch = entry
@@ -531,11 +531,7 @@ impl OffloadDriverLinker {
 
         // Device link commands
         for cmd in &result.device_link_commands {
-            script.push_str(&format!(
-                "# {} device link for {}\n",
-                cmd.backend.as_str(),
-                cmd.arch
-            ));
+            script.push_str(&format!("# {} device link for {}\n", cmd.backend.as_str(), cmd.arch));
             script.push_str(&cmd.driver);
             for flag in &cmd.flags {
                 script.push_str(&format!(" {}", flag));

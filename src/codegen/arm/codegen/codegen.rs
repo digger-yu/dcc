@@ -72,34 +72,24 @@ impl ArmCodegen {
 
     /// Encode resolved asm text into machine code and emit to code buffer.
     /// P0-5: unrecognized instructions produce hard errors, not NOPs.
-    pub(crate) fn encode_and_emit_asm(
-        &mut self,
-        resolved: &str,
-        span_file: &str,
-        span_line: u32,
-    ) {
+    pub(crate) fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
         let lines = crate::codegen::shared::mini_asm::parse_asm_lines(resolved);
         match crate::codegen::shared::mini_asm::encode_asm_lines_for_arch(&lines, "arm", false) {
             Ok(bytes) => {
                 self.code.extend_from_slice(&bytes);
-            }
+            },
             Err(unrecognized) => {
                 for mnem in &unrecognized {
                     let span = crate::diagnostics::Span::point(span_file, span_line, 1);
                     let mut diag = crate::diagnostics::Diagnostic::err(
                         "E0311",
-                        format!(
-                            "unsupported inline asm instruction '{}' on arm target",
-                            mnem
-                        ),
+                        format!("unsupported inline asm instruction '{}' on arm target", mnem),
                         span,
                     );
-                    diag.hint = Some(
-                        "add encoding support or use asm text mode (-S)".to_string(),
-                    );
+                    diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
                     self.diagnostics.push(diag);
                 }
-            }
+            },
         }
     }
 
@@ -126,14 +116,16 @@ impl ArmCodegen {
         for decl in &prog.decls {
             match decl {
                 Decl::StructDef(s) => {
-                    self.aggregate_fields
-                        .insert(s.name.name.clone(), (std::sync::Arc::new(s.fields.clone()), false));
-                }
+                    self.aggregate_fields.insert(
+                        s.name.name.clone(),
+                        (std::sync::Arc::new(s.fields.clone()), false),
+                    );
+                },
                 Decl::UnionDef(u) => {
                     self.aggregate_fields
                         .insert(u.name.name.clone(), (std::sync::Arc::new(u.fields.clone()), true));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -189,7 +181,8 @@ impl ArmCodegen {
                             ty: STT_FUNC,
                             visibility: 0,
                         };
-                        self.sym_index.insert(f.name.name.clone(), self.symbols.len() as u32);
+                        self.sym_index
+                            .insert(f.name.name.clone(), self.symbols.len() as u32);
                         self.symbols.push(alias_sym);
                     }
                 }
@@ -204,18 +197,17 @@ impl ArmCodegen {
         match self._target.ftrace_mode {
             crate::cli::FtraceMode::MCount => {
                 self.ensure_sym("mcount");
-            }
+            },
             crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
                 self.ensure_sym("__fentry__");
-            }
-            crate::cli::FtraceMode::None => {}
+            },
+            crate::cli::FtraceMode::None => {},
         }
         // -mrecord-mcount: generate __mcount_loc section with call site addresses
         if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
             && !self.mcount_loc_entries.is_empty()
         {
-            let mut mcount_data =
-                Vec::with_capacity(self.mcount_loc_entries.len() * 4); // ARM: 32-bit addresses
+            let mut mcount_data = Vec::with_capacity(self.mcount_loc_entries.len() * 4); // ARM: 32-bit addresses
             for &(call_pos, _) in &self.mcount_loc_entries {
                 mcount_data.extend_from_slice(&(call_pos as u32).to_le_bytes());
             }
@@ -307,7 +299,7 @@ impl ArmCodegen {
             let val = match (&init_expr.kind, &init_expr.literal) {
                 (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => {
                     Some(*v as i64)
-                }
+                },
                 _ => None,
             };
             if let Some(val) = val {

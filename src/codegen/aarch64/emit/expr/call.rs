@@ -122,8 +122,8 @@ impl Aarch64Codegen {
             {
                 self.gen_fenv_builtin(&callee, args);
                 return;
-            }
-            _ => {}
+            },
+            _ => {},
         }
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)

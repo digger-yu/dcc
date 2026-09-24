@@ -11,11 +11,11 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, QualifierFlags, QualType, Type, UnOp};
-use crate::diagnostics::Span;
+use crate::ast::{BinOp, QualType, QualifierFlags, Type, UnOp};
 use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, ThisAdjust, VTableComponent};
 use crate::cpp::hir::*;
 use crate::cpp::sema::{Access, ClassId, CxxSymbol, CxxSymbolKind, CxxType, SymbolId};
+use crate::diagnostics::Span;
 use crate::ssa::{BasicBlock, Function, Inst, InstKind, Operand, Phi, SsaVar, Terminator};
 
 // === LowerIrOutput ===
@@ -152,14 +152,14 @@ impl<'a> IrLowerer<'a> {
                         VTableComponent::OffsetToTop(v) => entries.push(VTableEntry::Int(*v)),
                         VTableComponent::TypeInfo(sym) => {
                             entries.push(VTableEntry::SymAddr(sym.clone()));
-                        }
+                        },
                         VTableComponent::Function { symbol, .. } => {
                             entries.push(VTableEntry::SymAddr(symbol.clone()));
-                        }
+                        },
                         VTableComponent::VCallOffset(v) => entries.push(VTableEntry::Int(*v)),
                         VTableComponent::VBaseOffset { offset, .. } => {
                             entries.push(VTableEntry::Int(*offset));
-                        }
+                        },
                         VTableComponent::Unused => entries.push(VTableEntry::Int(0)),
                     }
                 }
@@ -202,31 +202,26 @@ impl<'a> IrLowerer<'a> {
             CxxType::Float { bits } => match bits {
                 32 => Ok(Type::Float),
                 64 => Ok(Type::Double),
-                _ => Err(LowerIrError::Unsupported(format!(
-                    "float with {} bits", bits
-                ))),
+                _ => Err(LowerIrError::Unsupported(format!("float with {} bits", bits))),
             },
             CxxType::Pointer(inner) => {
                 let inner_ty = self.lower_type(inner)?;
                 Ok(Type::Ptr(Box::new(QualType::new(inner_ty))))
-            }
+            },
             CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
                 // ABI 降级：引用 → 指针
                 let inner_ty = self.lower_type(inner)?;
                 Ok(Type::Ptr(Box::new(QualType::new(inner_ty))))
-            }
+            },
             CxxType::Array(inner, Some(n)) => {
                 let inner_ty = self.lower_type(inner)?;
-                Ok(Type::Array(
-                    Box::new(QualType::new(inner_ty)),
-                    crate::ast::ArraySize::Const(*n),
-                ))
-            }
+                Ok(Type::Array(Box::new(QualType::new(inner_ty)), crate::ast::ArraySize::Const(*n)))
+            },
             CxxType::Array(inner, None) => {
                 // 未指定大小的数组 → 指针（C 语义退化）
                 let inner_ty = self.lower_type(inner)?;
                 Ok(Type::Ptr(Box::new(QualType::new(inner_ty))))
-            }
+            },
             CxxType::Function { ret: _, params, .. } => {
                 // 函数类型 → 函数指针
                 for _p in params {
@@ -236,29 +231,33 @@ impl<'a> IrLowerer<'a> {
                 // 这里降级为 void* 指针（函数指针的 ABI 表示）
                 // TODO(Stage 4): 引入 Proper function type
                 Ok(Type::Ptr(Box::new(QualType::new(Type::Void))))
-            }
+            },
             CxxType::Class(id) => {
                 let abi = self.abis.get(id).ok_or_else(|| {
-                    eprintln!("ERROR: ABI not found for class {:?}. Available ABIs: {:?}", id, self.abis.keys());
+                    eprintln!(
+                        "ERROR: ABI not found for class {:?}. Available ABIs: {:?}",
+                        id,
+                        self.abis.keys()
+                    );
                     LowerIrError::Internal(format!("ABI for class {} not found", id.0))
                 })?;
                 self.lower_class_type(id, abi)
-            }
+            },
             CxxType::Enum(_id) => {
                 // 枚举 → int
                 // TODO(Stage 4): 根据枚举底层类型选择
                 Ok(Type::Int)
-            }
-            CxxType::MemberPointer { .. } => Err(LowerIrError::Unsupported(
-                "member pointer type".to_string(),
-            )),
-            CxxType::Dependent(s) => Err(LowerIrError::Unsupported(format!(
-                "dependent type: {}", s
-            ))),
+            },
+            CxxType::MemberPointer { .. } => {
+                Err(LowerIrError::Unsupported("member pointer type".to_string()))
+            },
+            CxxType::Dependent(s) => {
+                Err(LowerIrError::Unsupported(format!("dependent type: {}", s)))
+            },
             CxxType::Alias(id) => {
                 let sym = self.get_symbol(*id)?;
                 self.lower_type(&sym.ty)
-            }
+            },
         }
     }
 
@@ -275,16 +274,13 @@ impl<'a> IrLowerer<'a> {
             (128, true) => Ok(Type::Int128),
             (128, false) => Ok(Type::UInt128),
             _ => Err(LowerIrError::Unsupported(format!(
-                "integer with {} bits (signed={})", bits, signed
+                "integer with {} bits (signed={})",
+                bits, signed
             ))),
         }
     }
 
-    fn lower_class_type(
-        &self,
-        id: &ClassId,
-        abi: &ClassAbi,
-    ) -> Result<Type, LowerIrError> {
+    fn lower_class_type(&self, id: &ClassId, abi: &ClassAbi) -> Result<Type, LowerIrError> {
         let is_union = is_union_layout(abi);
 
         let sym_id = id.as_symbol();
@@ -413,11 +409,7 @@ impl<'a> IrLowerer<'a> {
     }
 
     /// 检查字段是否属于某个基类（非当前类自身字段）。
-    fn field_belongs_to_base(
-        &self,
-        _class_id: ClassId,
-        _field_name: &str,
-    ) -> Option<ClassId> {
+    fn field_belongs_to_base(&self, _class_id: ClassId, _field_name: &str) -> Option<ClassId> {
         // Stage 4 简化：字段展平后统一通过 MemberLoad 访问，
         // 不需要区分是否属于基类。
         None
@@ -464,9 +456,7 @@ fn type_size(ty: &Type) -> u64 {
         Type::LongDouble => 16,
         Type::Fract | Type::Accum => 4, // 简化
         Type::Ptr(_) => POINTER_SIZE,
-        Type::Array(inner, crate::ast::ArraySize::Const(n)) => {
-            type_size(&inner.base) * (*n as u64)
-        }
+        Type::Array(inner, crate::ast::ArraySize::Const(n)) => type_size(&inner.base) * (*n as u64),
         Type::Array(_, _) => POINTER_SIZE,
         Type::Vector(inner, n) => type_size(&inner.base) * (*n as u64),
         Type::Struct(_name, fields, _align, _) => {
@@ -479,7 +469,7 @@ fn type_size(ty: &Type) -> u64 {
                 }
             }
             max_end.max(1)
-        }
+        },
         Type::Union(_name, fields, _align, _) => {
             let mut max_size: u64 = 0;
             for f in fields.iter() {
@@ -489,7 +479,7 @@ fn type_size(ty: &Type) -> u64 {
                 }
             }
             max_size.max(1)
-        }
+        },
         Type::Enum(_, _, Some(underlying)) => type_size(&underlying.base),
         Type::Enum(_, _, None) => 4,
         Type::Func(_, _) => POINTER_SIZE,
@@ -528,31 +518,26 @@ struct FuncLowerer<'a, 'b> {
 }
 
 impl<'a, 'b> FuncLowerer<'a, 'b> {
-    fn new(
-        lowerer: &'a mut IrLowerer<'b>,
-        func: &'a HirFunction,
-    ) -> Result<Self, LowerIrError> {
+    fn new(lowerer: &'a mut IrLowerer<'b>, func: &'a HirFunction) -> Result<Self, LowerIrError> {
         let sym = lowerer.get_symbol(func.symbol)?;
         let fn_name = lowerer.symbol_name(sym);
         let ret_ty = lowerer.lower_type(&func.ret_ty)?;
         let span = dummy_span();
-    
+
         let mut ssa = Function::new(fn_name, ret_ty.clone(), span);
-        
+
         // 返回块 (void 函数或空函数收尾用)
         let return_bb = ssa.unique_bb("return");
-        
+
         let mut locals = HashMap::new();
         let mut versions = HashMap::new();
-    
+
         // 成员函数/构造函数/析构函数：在 ssa.params 前注入隐式 this 形参
         // (sema.build_function 仅把显式形参放入 HirFunction.params,
         // 但 lower_ir 的 this 访问和成员调用都期望 ssa.params[0] == this).
         let needs_this = matches!(
             sym.kind,
-            CxxSymbolKind::Method
-                | CxxSymbolKind::Constructor
-                | CxxSymbolKind::Destructor
+            CxxSymbolKind::Method | CxxSymbolKind::Constructor | CxxSymbolKind::Destructor
         ) && sym.owner.is_some();
         if needs_this {
             let this_class = ClassId::from(sym.owner.unwrap());
@@ -578,15 +563,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                                 sym.owner
                             )
                         ));
-                    }
+                    },
                 }
             } else {
                 this_class
             };
-            
-            let this_ty = lowerer.lower_type(&CxxType::Pointer(Box::new(
-                CxxType::Class(actual_this_class),
-            )))?;
+
+            let this_ty = lowerer
+                .lower_type(&CxxType::Pointer(Box::new(CxxType::Class(actual_this_class))))?;
             let this_var = SsaVar {
                 base: "this".to_string(),
                 version: 0,
@@ -596,7 +580,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             ssa.params.push(this_var.clone());
             ssa.local_types.insert("this".to_string(), this_ty);
             ssa.original_locals.insert("this".to_string());
-            ssa.local_quals.insert("this".to_string(), QualifierFlags::NONE);
+            ssa.local_quals
+                .insert("this".to_string(), QualifierFlags::NONE);
             locals.insert("this".to_string(), this_var);
             versions.insert("this".to_string(), 0);
         }
@@ -682,11 +667,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Terminator::Ret { .. } | Terminator::Unreachable => Vec::new(),
                 Terminator::Jump(t) => vec![t.clone()],
                 Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
-                Terminator::SwitchTable { idx: _, values: _, targets, default } => {
+                Terminator::SwitchTable {
+                    idx: _,
+                    values: _,
+                    targets,
+                    default,
+                } => {
                     let mut v = targets.clone();
                     v.push(default.clone());
                     v
-                }
+                },
             };
 
             let bb_clone = bb.clone();
@@ -694,7 +684,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             for succ in succs {
                 if self.ssa.blocks.contains_key(&succ) {
-                    self.ssa.blocks.get_mut(&succ).unwrap().preds.push(bb_clone.clone());
+                    self.ssa
+                        .blocks
+                        .get_mut(&succ)
+                        .unwrap()
+                        .preds
+                        .push(bb_clone.clone());
                 }
             }
         }
@@ -761,7 +756,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::FloatLiteral(s) => {
                 let val: f64 = s.parse().unwrap_or(0.0);
                 Ok(Operand::Float(val, Type::Double))
-            }
+            },
 
             HirExprKind::BoolLiteral(b) => Ok(Operand::Int(if *b { 1 } else { 0 })),
 
@@ -802,12 +797,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     if sym_is_volatile {
                         let ty = self.lowerer.lower_type(&sym_ty)?;
                         match ty {
-                            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                            Type::Array(_, _)
+                            | Type::Struct(_, _, _, _)
+                            | Type::Union(_, _, _, _) => {
                                 return Ok(Operand::Var(var.clone()));
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
-                        let addr = self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                        let addr =
+                            self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
                         let addr_inst = Inst {
                             dest: Some(addr.clone()),
                             kind: InstKind::AddrOf { base: name.clone() },
@@ -829,11 +827,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                     Ok(Operand::Var(var.clone()))
                 } else {
-                    Err(LowerIrError::Internal(format!(
-                        "local variable '{}' not found", name
-                    )))
+                    Err(LowerIrError::Internal(format!("local variable '{}' not found", name)))
                 }
-            }
+            },
 
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
@@ -841,7 +837,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let ty = self.lowerer.lower_type(&sym.ty)?;
                 // 全局变量地址
                 Ok(Operand::SymAddr(name, ty))
-            }
+            },
 
             HirExprKind::This => {
                 // this 参数是函数的第一个隐式参数
@@ -851,70 +847,58 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     ));
                 }
                 Ok(Operand::Var(self.ssa.params[0].clone()))
-            }
+            },
 
             HirExprKind::BinaryOp { op, lhs, rhs } => {
                 self.lower_binary_op(*op, *lhs, *rhs, &expr_ty)
-            }
+            },
 
-            HirExprKind::UnaryOp { op, operand } => {
-                self.lower_unary_op(*op, *operand, &expr_ty)
-            }
+            HirExprKind::UnaryOp { op, operand } => self.lower_unary_op(*op, *operand, &expr_ty),
 
-            HirExprKind::Index { array, index } => {
-                self.lower_index(*array, *index, &expr_ty)
-            }
+            HirExprKind::Index { array, index } => self.lower_index(*array, *index, &expr_ty),
 
             HirExprKind::Assign { lhs, rhs } => {
                 let rhs_val = self.lower_expr(*rhs)?;
                 self.lower_assign(*lhs, rhs_val)
-            }
+            },
 
             HirExprKind::CompoundAssign { op, lhs, rhs } => {
                 self.lower_compound_assign(*op, *lhs, *rhs)
-            }
+            },
 
-            HirExprKind::Call { callee, args } => {
-                self.lower_call(callee, args, &expr_ty)
-            }
+            HirExprKind::Call { callee, args } => self.lower_call(callee, args, &expr_ty),
 
             HirExprKind::FieldAccess { object, field } => {
                 self.lower_field_access(*object, *field, &expr_ty)
-            }
+            },
 
-            HirExprKind::AddressOf(inner) => {
-                self.lower_address_of(*inner, &expr_ty)
-            }
+            HirExprKind::AddressOf(inner) => self.lower_address_of(*inner, &expr_ty),
 
-            HirExprKind::Dereference(inner) => {
-                self.lower_dereference(*inner, &expr_ty)
-            }
+            HirExprKind::Dereference(inner) => self.lower_dereference(*inner, &expr_ty),
 
-            HirExprKind::Cast { expr, target, kind: _ } => {
-                self.lower_cast(*expr, target)
-            }
+            HirExprKind::Cast {
+                expr,
+                target,
+                kind: _,
+            } => self.lower_cast(*expr, target),
 
             HirExprKind::BaseCast { object, from, to } => {
                 self.lower_base_cast(*object, *from, *to, &expr_ty)
-            }
+            },
 
             HirExprKind::VBaseAdjust { object, from, to } => {
                 self.lower_vbase_adjust(*object, *from, *to, &expr_ty)
-            }
+            },
 
             HirExprKind::TypeInfoRef(class_id) => {
                 // typeid 表达式：返回 typeinfo 符号的地址
                 // type_info* 类型简化为 *const u8（不透明指针）
-                let abi = self
-                    .lowerer
-                    .abis
-                    .get(class_id)
-                    .ok_or_else(|| {
-                        LowerIrError::Internal(format!(
-                            "ABI not found for class {} in TypeInfoRef",
-                            class_id.0
-                        ))
-                    })?;
+                let abi = self.lowerer.abis.get(class_id).ok_or_else(|| {
+                    LowerIrError::Internal(format!(
+                        "ABI not found for class {} in TypeInfoRef",
+                        class_id.0
+                    ))
+                })?;
                 let sym_name = abi.rtti.typeinfo_symbol.clone();
                 let ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
                 // 将 typeinfo 符号加入 rodata 列表
@@ -922,19 +906,24 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     self.lowerer.output.rodata.push(sym_name.clone());
                 }
                 Ok(Operand::SymAddr(sym_name, ty))
-            }
+            },
 
             HirExprKind::DynamicCast { object, src, dst } => {
                 self.lower_dynamic_cast(*object, src, dst, &expr_ty)
-            }
+            },
 
-            HirExprKind::Construct { class, place, args, variant } => {
-                self.lower_construct(*class, *place, args, *variant)
-            }
+            HirExprKind::Construct {
+                class,
+                place,
+                args,
+                variant,
+            } => self.lower_construct(*class, *place, args, *variant),
 
-            HirExprKind::Destroy { class, place, variant } => {
-                self.lower_destroy(*class, *place, *variant)
-            }
+            HirExprKind::Destroy {
+                class,
+                place,
+                variant,
+            } => self.lower_destroy(*class, *place, *variant),
 
             HirExprKind::Throw { object, ty } => self.lower_throw(*object, ty),
 
@@ -945,9 +934,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 is_array,
             } => self.lower_new(ty, args, placement.as_deref(), *is_array),
 
-            HirExprKind::Delete { ptr, is_array } => {
-                self.lower_delete(*ptr, *is_array)
-            }
+            HirExprKind::Delete { ptr, is_array } => self.lower_delete(*ptr, *is_array),
 
             HirExprKind::Conditional {
                 cond,
@@ -969,24 +956,23 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 });
                 Ok(Operand::Var(result))
-            }
+            },
 
             HirExprKind::Comma { lhs, rhs } => {
                 // 逗号表达式: 先求 lhs (丢弃结果), 再求 rhs (作为结果)
                 let _ = self.lower_expr(*lhs)?;
                 self.lower_expr(*rhs)
-            }
+            },
 
-            HirExprKind::InitList { elems, target_ty: _ } => {
-                self.lower_init_list(elems, &expr_ty)
-            }
+            HirExprKind::InitList {
+                elems,
+                target_ty: _,
+            } => self.lower_init_list(elems, &expr_ty),
 
             HirExprKind::SizeOf(cxx_ty) => {
                 // TODO(Stage 4): Add proper support
-                Err(LowerIrError::Unsupported(format!(
-                    "SizeOf({:?}) not implemented", cxx_ty
-                )))
-            }
+                Err(LowerIrError::Unsupported(format!("SizeOf({:?}) not implemented", cxx_ty)))
+            },
 
             _ => Err(LowerIrError::Unsupported(format!(
                 "HIR expression kind: {:?}",
@@ -1037,7 +1023,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         match op {
             LogicalAnd => return self.lower_logical_and(lhs_id, rhs_id),
             LogicalOr => return self.lower_logical_or(lhs_id, rhs_id),
-            _ => {}
+            _ => {},
         }
 
         let lhs = self.lower_expr(lhs_id)?;
@@ -1110,26 +1096,26 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 });
                 Ok(Operand::Var(dest))
-            }
+            },
             PreInc | PreDec | PostInc | PostDec => {
                 let operand_expr = self.get_expr(operand_id)?;
                 match &operand_expr.kind {
                     HirExprKind::Local(sid) => {
                         // 局部变量: 走完整的 SSA 重绑定或 volatile 路径
                         return self.lower_incdec_local(*sid, op, result_ty);
-                    }
+                    },
                     HirExprKind::FieldAccess { object, field } => {
                         // 成员字段: 走 load-op-store 路径 (总是内存路径,
                         // 因为对象可能是 lvalue/const/pointer 等任意形态)
                         return self.lower_incdec_field(*object, *field, op, result_ty);
-                    }
+                    },
                     _ => {
                         return Err(LowerIrError::Unsupported(
                             "increment/decrement of non-local object".to_string(),
                         ))
-                    }
+                    },
                 };
-            }
+            },
         }
     }
 
@@ -1151,12 +1137,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // volatile 标量局部变量: 走内存路径 (load -> op -> store)
         if sym_is_volatile {
             match &ty {
-                Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
+                Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {},
                 _ => {
-                    let addr = self.fresh_var(
-                        "vaddr",
-                        Type::Ptr(Box::new(QualType::new(ty.clone()))),
-                    );
+                    let addr =
+                        self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
                     let addr_inst = Inst {
                         dest: Some(addr.clone()),
                         kind: InstKind::AddrOf { base: name.clone() },
@@ -1215,7 +1199,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         });
                         post
                     }));
-                }
+                },
             }
         }
 
@@ -1223,11 +1207,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let old = match self.locals.get(&name) {
             Some(v) => v.clone(),
             None => {
-                return Err(LowerIrError::Internal(format!(
-                    "local variable '{}' not found",
-                    name
-                )))
-            }
+                return Err(LowerIrError::Internal(format!("local variable '{}' not found", name)))
+            },
         };
         let ast_op = match op {
             PreInc | PostInc => BinOp::Add,
@@ -1347,18 +1328,24 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let phi = Phi {
             dest: result.clone(),
             incoming: vec![
-                (rhs.into_var().unwrap_or_else(|| SsaVar {
-                    base: "false".to_string(),
-                    version: 0,
-                    ty: Type::Bool,
-                    span: dummy_span(),
-                }), then_bb.clone()),
-                (SsaVar {
-                    base: "false".to_string(),
-                    version: 0,
-                    ty: Type::Bool,
-                    span: dummy_span(),
-                }, else_bb.clone()),
+                (
+                    rhs.into_var().unwrap_or_else(|| SsaVar {
+                        base: "false".to_string(),
+                        version: 0,
+                        ty: Type::Bool,
+                        span: dummy_span(),
+                    }),
+                    then_bb.clone(),
+                ),
+                (
+                    SsaVar {
+                        base: "false".to_string(),
+                        version: 0,
+                        ty: Type::Bool,
+                        span: dummy_span(),
+                    },
+                    else_bb.clone(),
+                ),
             ],
         };
         // 简化：直接用 select 代替
@@ -1399,18 +1386,24 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let phi = Phi {
             dest: result.clone(),
             incoming: vec![
-                (SsaVar {
-                    base: "true".to_string(),
-                    version: 0,
-                    ty: Type::Bool,
-                    span: dummy_span(),
-                }, then_bb.clone()),
-                (rhs.into_var().unwrap_or_else(|| SsaVar {
-                    base: "false".to_string(),
-                    version: 0,
-                    ty: Type::Bool,
-                    span: dummy_span(),
-                }), else_bb.clone()),
+                (
+                    SsaVar {
+                        base: "true".to_string(),
+                        version: 0,
+                        ty: Type::Bool,
+                        span: dummy_span(),
+                    },
+                    then_bb.clone(),
+                ),
+                (
+                    rhs.into_var().unwrap_or_else(|| SsaVar {
+                        base: "false".to_string(),
+                        version: 0,
+                        ty: Type::Bool,
+                        span: dummy_span(),
+                    }),
+                    else_bb.clone(),
+                ),
             ],
         };
         self.ssa.blocks.get_mut(&merge_bb).unwrap().phis.push(phi);
@@ -1420,11 +1413,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
     // --- assignment ---
 
-    fn lower_assign(
-        &mut self,
-        lhs_id: HirExprId,
-        rhs: Operand,
-    ) -> Result<Operand, LowerIrError> {
+    fn lower_assign(&mut self, lhs_id: HirExprId, rhs: Operand) -> Result<Operand, LowerIrError> {
         let lhs_expr = self.get_expr(lhs_id)?;
 
         match &lhs_expr.kind {
@@ -1449,9 +1438,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // volatile 标量局部变量: 赋值后写回内存
                 if sym_is_volatile {
                     match &ty {
-                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {}
+                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                        },
                         _ => {
-                            let addr = self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                            let addr = self
+                                .fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
                             let addr_inst = Inst {
                                 dest: Some(addr.clone()),
                                 kind: InstKind::AddrOf { base: name.clone() },
@@ -1468,13 +1459,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                                 span: dummy_span(),
                             };
                             self.push_inst(store_inst);
-                        }
+                        },
                     }
                 }
 
                 self.locals.insert(name, new_var.clone());
                 Ok(Operand::Var(new_var))
-            }
+            },
             HirExprKind::Dereference(inner_id) => {
                 // *ptr = val → Store
                 let ptr = self.lower_expr(*inner_id)?;
@@ -1491,10 +1482,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(inst);
                 Ok(Operand::Void)
-            }
+            },
             HirExprKind::FieldAccess { object, field } => {
                 self.lower_field_store(*object, *field, rhs)
-            }
+            },
             HirExprKind::Index { array, index } => {
                 // a[i] = v → IndexStore
                 let arr = self.lower_expr(*array)?;
@@ -1512,7 +1503,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(inst);
                 Ok(Operand::Void)
-            }
+            },
             // sema 把 `*p` 统一表示为 `UnaryOp { op: Deref }`, 因此
             // `*p = v` 会走到这里而不是上面的 Dereference 分支。
             HirExprKind::UnaryOp {
@@ -1533,7 +1524,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(inst);
                 Ok(Operand::Void)
-            }
+            },
             _ => Err(LowerIrError::Unsupported(format!(
                 "assignment to lvalue kind: {:?}",
                 expr_kind_name(&lhs_expr.kind)
@@ -1573,9 +1564,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // 判断是否为成员方法（有 owner class）
                 let is_member = matches!(
                     sym.kind,
-                    CxxSymbolKind::Method
-                        | CxxSymbolKind::Constructor
-                        | CxxSymbolKind::Destructor
+                    CxxSymbolKind::Method | CxxSymbolKind::Constructor | CxxSymbolKind::Destructor
                 ) && sym.owner.is_some();
 
                 let mut lowered_args = Vec::with_capacity(args.len());
@@ -1614,7 +1603,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                                 CxxType::Class(cid) => Some(*cid),
                                 _ => None,
                             }
-                        }
+                        },
                         CxxType::Class(cid) => Some(*cid),
                         _ => None,
                     };
@@ -1628,7 +1617,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             let target_ty = self.lowerer.lower_type(&CxxType::Pointer(
                                 Box::new(CxxType::Class(this_owner_class)),
                             ))?;
-                            self.adjust_pointer_to_base(object, obj_class, this_owner_class, &target_ty)?
+                            self.adjust_pointer_to_base(
+                                object,
+                                obj_class,
+                                this_owner_class,
+                                &target_ty,
+                            )?
                         } else {
                             object
                         }
@@ -1684,15 +1678,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     self.push_inst(inst);
                     Ok(Operand::Var(dest))
                 }
-            }
+            },
             HirCallee::Virtual {
                 method,
                 slot,
                 this_adjust,
             } => self.lower_virtual_call(*method, *slot, this_adjust, args, ret_ty),
-            _ => Err(LowerIrError::Unsupported(
-                "indirect/ctor/dtor calls".to_string(),
-            )),
+            _ => Err(LowerIrError::Unsupported("indirect/ctor/dtor calls".to_string())),
         }
     }
 
@@ -1713,9 +1705,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
 
         if args.is_empty() {
-            return Err(LowerIrError::Internal(
-                "virtual call missing this argument".to_string(),
-            ));
+            return Err(LowerIrError::Internal("virtual call missing this argument".to_string()));
         }
 
         // 1. 获取 this 指针对象
@@ -1785,7 +1775,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     return Err(LowerIrError::Internal(
                         "virtual call object is not a var".to_string(),
                     ));
-                }
+                },
             };
             if obj_ty == vptr_ptr_ty {
                 object.clone()
@@ -1872,9 +1862,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 5. 构造参数列表：第一个参数是 this（调整后）
         let method_sym = self.lowerer.get_symbol(method)?;
-        let method_owner_class = method_sym
-            .owner
-            .map(ClassId::from);
+        let method_owner_class = method_sym.owner.map(ClassId::from);
         drop(method_sym);
 
         // 构造 this 参数：使用原始对象（非 vptr 指针类型），
@@ -1885,9 +1873,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             // 这里简化：直接用 adjusted_this 作为 this 参数（ABI 层已经是正确偏移）
             // 但类型需要匹配：转成 method 所在类的指针类型
             if let Some(owner_class) = method_owner_class {
-                let owner_ptr_ty = self.lowerer.lower_type(&CxxType::Pointer(
-                    Box::new(CxxType::Class(owner_class)),
-                ))?;
+                let owner_ptr_ty = self
+                    .lowerer
+                    .lower_type(&CxxType::Pointer(Box::new(CxxType::Class(owner_class))))?;
                 let this_var = self.fresh_var("vcall_this", owner_ptr_ty.clone());
                 let cast_this = Inst {
                     dest: Some(this_var.clone()),
@@ -1983,8 +1971,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let object = self.lower_expr(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let (object, obj_ty, object_is_arrow) =
-            self.deref_object_for_member(object_id, object)?;
+        let (object, obj_ty, object_is_arrow) = self.deref_object_for_member(object_id, object)?;
         let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
         let dest = self.fresh_var("field", result_ty.clone());
@@ -2014,8 +2001,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let object = self.lower_expr(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let (object, obj_ty, object_is_arrow) =
-            self.deref_object_for_member(object_id, object)?;
+        let (object, obj_ty, object_is_arrow) = self.deref_object_for_member(object_id, object)?;
         let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
         let inst = Inst {
@@ -2048,11 +2034,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             CxxType::Pointer(inner) if matches!(inner.as_ref(), CxxType::Class(_)) => {
                 let pointee_ty = self.lowerer.lower_type(inner)?;
                 Ok((object, pointee_ty, true))
-            }
+            },
             _ => {
                 let obj_ty = self.lowerer.lower_type(&obj_expr.ty)?;
                 Ok((object, obj_ty, false))
-            }
+            },
         }
     }
 
@@ -2088,18 +2074,16 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(inst);
                 Ok(Operand::Var(dest))
-            }
+            },
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 Ok(Operand::SymAddr(sym.name.clone(), result_ty.clone()))
-            }
+            },
             HirExprKind::Dereference(inner_inner) => {
                 // &*e → e (恒等)
                 self.lower_expr(*inner_inner)
-            }
-            _ => Err(LowerIrError::Unsupported(
-                "address of complex expression".to_string(),
-            )),
+            },
+            _ => Err(LowerIrError::Unsupported("address of complex expression".to_string())),
         }
     }
 
@@ -2145,7 +2129,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::FieldAccess { object, field } => {
                 let _ = field;
                 self.index_is_volatile(*object)
-            }
+            },
             _ => false,
         }
     }
@@ -2373,8 +2357,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         //                                                            address_point (vptr 指向这里)
         // 所以 vbase_offset_i 的地址 = vptr - (vbase_count - i) * 8 - 16
         let vbase_count = from_abi.virtual_bases.len() as i64;
-        let vtable_offset_bytes = -(vbase_count - vbase_idx as i64) * POINTER_SIZE as i64
-            - 2 * POINTER_SIZE as i64;
+        let vtable_offset_bytes =
+            -(vbase_count - vbase_idx as i64) * POINTER_SIZE as i64 - 2 * POINTER_SIZE as i64;
 
         let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
 
@@ -2391,9 +2375,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(cast_obj_to_byte);
 
         // 2. 将对象指针转换为 *const *const u8 (vptr 的类型)
-        let vptr_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(
-            QualType::new(Type::UChar),
-        )))));
+        let vptr_ptr_ty =
+            Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::UChar))))));
         let vptr_ptr = self.fresh_var("vptr_ptr", vptr_ptr_ty.clone());
         let cast_to_vptr_ptr = Inst {
             dest: Some(vptr_ptr.clone()),
@@ -2546,10 +2529,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let (src_class, dst_class) = match (src_class, dst_class) {
             (Some(s), Some(d)) => (s, d),
             _ => {
-                return Err(LowerIrError::Unsupported(
-                    "dynamic_cast on non-class types".into(),
-                ));
-            }
+                return Err(LowerIrError::Unsupported("dynamic_cast on non-class types".into()));
+            },
         };
 
         // 同类转换：直接返回
@@ -2634,14 +2615,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 调用 __dynamic_cast
         let fn_name = CxxRuntimeSymbol::DynamicCast.name().to_string();
-        
+
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" {
+        if fn_name.starts_with("dccpp_")
+            || fn_name.starts_with("__dcc_")
+            || fn_name.starts_with("__cxa_")
+            || fn_name == "__dynamic_cast"
+        {
             if !self.lowerer.output.external_symbols.contains(&fn_name) {
                 self.lowerer.output.external_symbols.push(fn_name.clone());
             }
         }
-        
+
         let fn_addr = Operand::FnAddr(fn_name, dyn_cast_fn_ty);
 
         let result_void_ptr = self.fresh_var("dyn_cast_result", void_ptr_ty.clone());
@@ -2649,12 +2634,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             dest: Some(result_void_ptr.clone()),
             kind: InstKind::Call {
                 callee: fn_addr,
-                args: vec![
-                    Operand::Var(obj_void_ptr),
-                    src_ti_op,
-                    dst_ti_op,
-                    hint_op,
-                ],
+                args: vec![Operand::Var(obj_void_ptr), src_ti_op, dst_ti_op, hint_op],
                 ret_ty: void_ptr_ty.clone(),
             },
             span: dummy_span(),
@@ -2780,10 +2760,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             None => {
                 // rethrow: 调用 __dcc_eh_rethrow
                 let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-                let callee_op = Operand::FnAddr(
-                    "__dcc_eh_rethrow".to_string(),
-                    rethrow_fn_ty,
-                );
+                let callee_op = Operand::FnAddr("__dcc_eh_rethrow".to_string(), rethrow_fn_ty);
                 let inst = Inst {
                     dest: None,
                     kind: InstKind::Call {
@@ -2797,7 +2774,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // throw 不返回，标记当前块为不可达
                 self.set_term(Terminator::Unreachable);
                 Ok(Operand::Void)
-            }
+            },
             Some(obj_id) => {
                 // 计算抛出对象大小
                 let obj_size = self.compute_type_size(ty)?;
@@ -2825,10 +2802,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let obj_val = self.lower_expr(obj_id)?;
                 let obj_ir_ty = self.lowerer.lower_type(ty)?;
                 // 把 void* 转为目标类型指针
-                let typed_ptr_var = self.fresh_var(
-                    "exn_typed",
-                    Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))),
-                );
+                let typed_ptr_var = self
+                    .fresh_var("exn_typed", Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))));
                 let cast_inst = Inst {
                     dest: Some(typed_ptr_var.clone()),
                     kind: InstKind::Cast {
@@ -2858,17 +2833,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                 let throw_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
                 let fn_name = "__dcc_eh_throw".to_string();
-                
+
                 // 如果是 runtime symbol，需要注册为 external
                 if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") {
                     if !self.lowerer.output.external_symbols.contains(&fn_name) {
                         self.lowerer.output.external_symbols.push(fn_name.clone());
                     }
                 }
-                
-                let throw_callee = Operand::FnAddr(fn_name,
-                    throw_fn_ty,
-                );
+
+                let throw_callee = Operand::FnAddr(fn_name, throw_fn_ty);
                 let throw_call = Inst {
                     dest: None,
                     kind: InstKind::Call {
@@ -2883,7 +2856,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // throw 不返回
                 self.set_term(Terminator::Unreachable);
                 Ok(Operand::Void)
-            }
+            },
         }
     }
 
@@ -2904,7 +2877,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         use crate::cpp::runtime::CxxRuntimeSymbol;
 
         let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let ret_ty = self.lowerer.lower_type(&CxxType::Pointer(Box::new(ty.clone())))?;
+        let ret_ty = self
+            .lowerer
+            .lower_type(&CxxType::Pointer(Box::new(ty.clone())))?;
 
         if let Some(place_args) = placement {
             // placement new: 不分配内存，直接在 ptr 上构造
@@ -2938,9 +2913,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             // array new: size = sizeof(T) * count
             // args[0] 是数组大小表达式
             if args.is_empty() {
-                return Err(LowerIrError::Internal(
-                    "array new missing size argument".to_string(),
-                ));
+                return Err(LowerIrError::Internal("array new missing size argument".to_string()));
             }
             let elem_size = self.compute_type_size(ty)?;
             let count_val = self.lower_expr(args[0])?;
@@ -2971,14 +2944,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         let new_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
         let fn_name = op_sym.name().to_string();
-        
+
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" || fn_name.starts_with("_Z") {
+        if fn_name.starts_with("dccpp_")
+            || fn_name.starts_with("__dcc_")
+            || fn_name.starts_with("__cxa_")
+            || fn_name == "__dynamic_cast"
+            || fn_name.starts_with("_Z")
+        {
             if !self.lowerer.output.external_symbols.contains(&fn_name) {
                 self.lowerer.output.external_symbols.push(fn_name.clone());
             }
         }
-        
+
         let new_callee = Operand::FnAddr(fn_name, new_fn_ty.clone());
         let raw_ptr_var = self.fresh_var("raw_new", void_ptr_ty.clone());
         let new_call = Inst {
@@ -3005,9 +2983,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     let cast_inst = Inst {
                         dest: Some(typed_ptr_var.clone()),
                         kind: InstKind::Cast {
-                            ty: Type::Ptr(Box::new(QualType::new(
-                                self.lowerer.lower_type(ty)?,
-                            ))),
+                            ty: Type::Ptr(Box::new(QualType::new(self.lowerer.lower_type(ty)?))),
                             e: Operand::Var(raw_ptr_var.clone()),
                         },
                         span: dummy_span(),
@@ -3071,14 +3047,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
         let delete_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
         let fn_name = op_sym.name().to_string();
-        
+
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") || fn_name.starts_with("__cxa_") || fn_name == "__dynamic_cast" || fn_name.starts_with("_Z") {
+        if fn_name.starts_with("dccpp_")
+            || fn_name.starts_with("__dcc_")
+            || fn_name.starts_with("__cxa_")
+            || fn_name == "__dynamic_cast"
+            || fn_name.starts_with("_Z")
+        {
             if !self.lowerer.output.external_symbols.contains(&fn_name) {
                 self.lowerer.output.external_symbols.push(fn_name.clone());
             }
         }
-        
+
         let delete_callee = Operand::FnAddr(fn_name, delete_fn_ty);
 
         // 把指针转成 void*
@@ -3122,7 +3103,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.init_list_counter += 1;
 
         // 注册为局部变量
-        self.ssa.local_types.insert(tmp_name.clone(), arr_ty.clone());
+        self.ssa
+            .local_types
+            .insert(tmp_name.clone(), arr_ty.clone());
         self.ssa.original_locals.insert(tmp_name.clone());
 
         let var = self.fresh_var(&tmp_name, arr_ty.clone());
@@ -3184,11 +3167,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     self.lowerer.output.rodata.push(sym_name.clone());
                 }
                 Ok(Operand::SymAddr(sym_name, void_ptr_ty))
-            }
+            },
             _ => {
                 // 非类类型：返回 null（简化处理，SJLJ 运行时按类型名匹配）
                 Ok(Operand::Int(0))
-            }
+            },
         }
     }
 
@@ -3201,7 +3184,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirStmtKind::Expr(expr_id) => {
                 let _ = self.lower_expr(*expr_id)?;
                 Ok(())
-            }
+            },
 
             HirStmtKind::Compound(stmts) => {
                 for s in stmts {
@@ -3214,19 +3197,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 Ok(())
-            }
+            },
 
             HirStmtKind::Return(None) => {
                 self.set_term(Terminator::Jump(self.return_bb.clone()));
                 Ok(())
-            }
+            },
 
             HirStmtKind::Return(Some(expr_id)) => {
                 let val = self.lower_expr(*expr_id)?;
                 // ret_val 已移除: 直接在当前块返回, 不经过统一 return_bb.
                 self.set_term(Terminator::Ret { val: Some(val) });
                 Ok(())
-            }
+            },
 
             HirStmtKind::Decl { symbol, init } => {
                 let sym = self.lowerer.get_symbol(*symbol)?;
@@ -3237,9 +3220,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                 // 创建局部变量（version 0）
                 let var = self.fresh_var(&name, ty.clone());
-                self.ssa
-                    .local_types
-                    .insert(name.clone(), ty.clone());
+                self.ssa.local_types.insert(name.clone(), ty.clone());
                 self.ssa.original_locals.insert(name.clone());
                 let decl_quals = if sym_is_volatile {
                     QualifierFlags::VOLATILE
@@ -3264,7 +3245,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                 self.locals.insert(name, var);
                 Ok(())
-            }
+            },
 
             HirStmtKind::StaticDecl {
                 symbol,
@@ -3364,31 +3345,26 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.current_bb = end_bb.clone();
 
                 Ok(())
-            }
+            },
 
             HirStmtKind::If {
                 cond,
                 then_body,
                 else_body,
-            } => {
-                self.lower_if(*cond, *then_body, else_body.as_ref().copied())
-            }
+            } => self.lower_if(*cond, *then_body, else_body.as_ref().copied()),
 
-            HirStmtKind::While { cond, body } => {
-                self.lower_while(*cond, *body)
-            }
+            HirStmtKind::While { cond, body } => self.lower_while(*cond, *body),
 
-            HirStmtKind::DoWhile { body, cond } => {
-                self.lower_do_while(*body, *cond)
-            }
+            HirStmtKind::DoWhile { body, cond } => self.lower_do_while(*body, *cond),
 
-            HirStmtKind::For { init, cond, inc, body } => {
-                self.lower_for(*init, *cond, *inc, *body)
-            }
+            HirStmtKind::For {
+                init,
+                cond,
+                inc,
+                body,
+            } => self.lower_for(*init, *cond, *inc, *body),
 
-            HirStmtKind::Switch { cond, body } => {
-                self.lower_switch(*cond, *body)
-            }
+            HirStmtKind::Switch { cond, body } => self.lower_switch(*cond, *body),
 
             HirStmtKind::Break => self.lower_break(),
 
@@ -3402,17 +3378,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirStmtKind::Fallthrough => Ok(()),
 
-            HirStmtKind::CtorInitBase { base, args } => {
-                self.lower_ctor_init_base(*base, args)
-            }
+            HirStmtKind::CtorInitBase { base, args } => self.lower_ctor_init_base(*base, args),
 
             HirStmtKind::CtorInitMember { member, args } => {
                 self.lower_ctor_init_member(*member, args)
-            }
+            },
 
-            HirStmtKind::SetVTablePtr { class, place } => {
-                self.lower_set_vtable_ptr(*class, *place)
-            }
+            HirStmtKind::SetVTablePtr { class, place } => self.lower_set_vtable_ptr(*class, *place),
 
             HirStmtKind::Try { body, handlers } => self.lower_try(*body, handlers),
 
@@ -3461,11 +3433,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             self.lower_stmt(else_stmt)?;
         } else {
             // 无 else：else_bb 直接跳到 end
-            self.ssa
-                .blocks
-                .get_mut(&else_bb)
-                .unwrap()
-                .term = Terminator::Jump(end_bb.clone());
+            self.ssa.blocks.get_mut(&else_bb).unwrap().term = Terminator::Jump(end_bb.clone());
         }
 
         // All new unreachable blocks added by then/else branches are
@@ -3473,11 +3441,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let after = self.unreachable_blocks();
         for name in after {
             if !before_set.contains(&name) {
-                self.ssa
-                    .blocks
-                    .get_mut(&name)
-                    .unwrap()
-                    .term = Terminator::Jump(end_bb.clone());
+                self.ssa.blocks.get_mut(&name).unwrap().term = Terminator::Jump(end_bb.clone());
             }
         }
 
@@ -3499,10 +3463,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     let s = self.get_stmt(*sid)?;
                     self.collect_cases_from_stmt(&s, &mut cases, &mut default)?;
                 }
-            }
+            },
             _ => {
                 self.collect_cases_from_stmt(stmt, &mut cases, &mut default)?;
-            }
+            },
         }
 
         Ok((cases, default))
@@ -3520,20 +3484,20 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 cases.push((*value, bb));
                 let body_stmt = self.get_stmt(*body)?;
                 self.collect_cases_from_stmt(&body_stmt, cases, default)?;
-            }
+            },
             HirStmtKind::Default(body) => {
                 let bb = self.unique_bb("case_default");
                 *default = Some(bb);
                 let body_stmt = self.get_stmt(*body)?;
                 self.collect_cases_from_stmt(&body_stmt, cases, default)?;
-            }
+            },
             HirStmtKind::Compound(stmts) => {
                 for sid in stmts {
                     let s = self.get_stmt(*sid)?;
                     self.collect_cases_from_stmt(&s, cases, default)?;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         Ok(())
     }
@@ -3552,10 +3516,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 for sid in stmts {
                     self.lower_switch_stmt(*sid)?;
                 }
-            }
+            },
             _ => {
                 self.lower_switch_stmt(body_id)?;
-            }
+            },
         }
         Ok(())
     }
@@ -3571,7 +3535,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 Ok(None)
-            }
+            },
             HirStmtKind::Default(_) => {
                 for (bb_name, _) in &self.ssa.blocks {
                     if bb_name.starts_with("case_default") {
@@ -3579,7 +3543,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 Ok(None)
-            }
+            },
             HirStmtKind::Compound(stmts) => {
                 for sid in stmts {
                     let s = self.get_stmt(*sid)?;
@@ -3588,7 +3552,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 Ok(None)
-            }
+            },
             _ => Ok(None),
         }
     }
@@ -3618,7 +3582,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 }
                 self.current_bb = bb;
                 self.lower_switch_stmt(*body)?;
-            }
+            },
             HirStmtKind::Default(body) => {
                 let bb = self
                     .ssa
@@ -3636,7 +3600,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 }
                 self.current_bb = bb;
                 self.lower_switch_stmt(*body)?;
-            }
+            },
             HirStmtKind::Compound(stmts) => {
                 for sid in stmts {
                     self.lower_switch_stmt(*sid)?;
@@ -3646,22 +3610,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         break;
                     }
                 }
-            }
+            },
             HirStmtKind::Break => {
                 self.lower_break()?;
-            }
+            },
             _ => {
                 self.lower_stmt(stmt_id)?;
-            }
+            },
         }
         Ok(())
     }
 
-    fn lower_while(
-        &mut self,
-        cond_id: HirExprId,
-        body_id: HirStmtId,
-    ) -> Result<(), LowerIrError> {
+    fn lower_while(&mut self, cond_id: HirExprId, body_id: HirStmtId) -> Result<(), LowerIrError> {
         // Snapshot unreachable blocks BEFORE creating structural BBs.
         // BBs whose terminators we set manually are added to the
         // "old" set so the fall-through logic skips them.
@@ -3672,7 +3632,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let body_bb = self.unique_bb("while_body");
         let end_bb = self.unique_bb("while_end");
         before_set.insert(cond_bb.clone()); // we set its Branch
-        before_set.insert(end_bb.clone());  // left as fall-through
+        before_set.insert(end_bb.clone()); // left as fall-through
 
         // 跳到条件块
         self.set_term(Terminator::Jump(cond_bb.clone()));
@@ -3695,11 +3655,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let after_body = self.unreachable_blocks();
         for name in after_body {
             if !before_set.contains(&name) {
-                self.ssa
-                    .blocks
-                    .get_mut(&name)
-                    .unwrap()
-                    .term = Terminator::Jump(cond_bb.clone());
+                self.ssa.blocks.get_mut(&name).unwrap().term = Terminator::Jump(cond_bb.clone());
             }
         }
         self.break_stack.pop();
@@ -3724,7 +3680,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let cond_bb = self.unique_bb("do_cond");
         let end_bb = self.unique_bb("do_end");
         before_set.insert(cond_bb.clone()); // we set its Branch
-        before_set.insert(end_bb.clone());  // left as fall-through
+        before_set.insert(end_bb.clone()); // left as fall-through
 
         self.set_term(Terminator::Jump(body_bb.clone()));
 
@@ -3737,11 +3693,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let after_body = self.unreachable_blocks();
         for name in after_body {
             if !before_set.contains(&name) {
-                self.ssa
-                    .blocks
-                    .get_mut(&name)
-                    .unwrap()
-                    .term = Terminator::Jump(cond_bb.clone());
+                self.ssa.blocks.get_mut(&name).unwrap().term = Terminator::Jump(cond_bb.clone());
             }
         }
         self.break_stack.pop();
@@ -3778,8 +3730,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let inc_bb = self.unique_bb("for_inc");
         let end_bb = self.unique_bb("for_end");
         before_set.insert(cond_bb.clone()); // we set its Branch/Jump
-        before_set.insert(inc_bb.clone());  // we set its Jump to cond
-        before_set.insert(end_bb.clone());  // left as fall-through
+        before_set.insert(inc_bb.clone()); // we set its Jump to cond
+        before_set.insert(end_bb.clone()); // left as fall-through
 
         // init
         if let Some(init_id) = init {
@@ -3810,11 +3762,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let after_body = self.unreachable_blocks();
         for name in after_body {
             if !before_set.contains(&name) {
-                self.ssa
-                    .blocks
-                    .get_mut(&name)
-                    .unwrap()
-                    .term = Terminator::Jump(inc_bb.clone());
+                self.ssa.blocks.get_mut(&name).unwrap().term = Terminator::Jump(inc_bb.clone());
             }
         }
         self.break_stack.pop();
@@ -3832,11 +3780,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     }
 
     fn lower_break(&mut self) -> Result<(), LowerIrError> {
-        let target = self
-            .break_stack
-            .last()
-            .cloned()
-            .ok_or_else(|| LowerIrError::Internal("break without enclosing loop/switch".into()))?;
+        let target =
+            self.break_stack.last().cloned().ok_or_else(|| {
+                LowerIrError::Internal("break without enclosing loop/switch".into())
+            })?;
         self.set_term(Terminator::Jump(target));
         Ok(())
     }
@@ -3881,11 +3828,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         Ok(())
     }
 
-    fn lower_switch(
-        &mut self,
-        cond_id: HirExprId,
-        body_id: HirStmtId,
-    ) -> Result<(), LowerIrError> {
+    fn lower_switch(&mut self, cond_id: HirExprId, body_id: HirStmtId) -> Result<(), LowerIrError> {
         let end_bb = self.unique_bb("switch_end");
         let switch_bb = self.unique_bb("switch_dispatch");
 
@@ -3970,14 +3913,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             .local_types
             .insert("__eh_ctx".to_string(), ctx_ty.clone());
         self.ssa.original_locals.insert("__eh_ctx".to_string());
-        self.ssa.local_quals.insert("__eh_ctx".to_string(), QualifierFlags::NONE);
+        self.ssa
+            .local_quals
+            .insert("__eh_ctx".to_string(), QualifierFlags::NONE);
         self.locals.insert("__eh_ctx".to_string(), ctx_var.clone());
 
         // 获取上下文指针（数组名退化为指针）
-        let ctx_ptr_var = self.fresh_var(
-            "__eh_ctx_ptr",
-            Type::Ptr(Box::new(QualType::new(Type::UChar))),
-        );
+        let ctx_ptr_var =
+            self.fresh_var("__eh_ctx_ptr", Type::Ptr(Box::new(QualType::new(Type::UChar))));
         let ctx_addr_inst = Inst {
             dest: Some(ctx_ptr_var.clone()),
             kind: InstKind::Cast {
@@ -3990,10 +3933,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 调用 __dcc_eh_push_context(ctx)
         let push_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let push_callee = Operand::FnAddr(
-            "__dcc_eh_push_context".to_string(),
-            push_fn_ty.clone(),
-        );
+        let push_callee = Operand::FnAddr("__dcc_eh_push_context".to_string(), push_fn_ty.clone());
         let push_call = Inst {
             dest: None,
             kind: InstKind::Call {
@@ -4007,10 +3947,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 调用 __dcc_eh_setjmp(ctx)，返回值决定是否异常发生
         let setjmp_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
-        let setjmp_callee = Operand::FnAddr(
-            "__dcc_eh_setjmp".to_string(),
-            setjmp_fn_ty.clone(),
-        );
+        let setjmp_callee = Operand::FnAddr("__dcc_eh_setjmp".to_string(), setjmp_fn_ty.clone());
         let setjmp_result = self.fresh_var("__eh_setjmp_res", int_ty.clone());
         let setjmp_call = Inst {
             dest: Some(setjmp_result.clone()),
@@ -4044,10 +3981,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let try_term = self.ssa.blocks[&try_bb].term.clone();
         if matches!(try_term, Terminator::Unreachable) {
             // 调用 __dcc_eh_pop_context
-            let pop_callee = Operand::FnAddr(
-                "__dcc_eh_pop_context".to_string(),
-                push_fn_ty.clone(),
-            );
+            let pop_callee =
+                Operand::FnAddr("__dcc_eh_pop_context".to_string(), push_fn_ty.clone());
             let pop_call = Inst {
                 dest: None,
                 kind: InstKind::Call {
@@ -4058,22 +3993,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 span: dummy_span(),
             };
             self.push_inst(pop_call);
-            self.ssa
-                .blocks
-                .get_mut(&try_bb)
-                .unwrap()
-                .term = Terminator::Jump(end_bb.clone());
+            self.ssa.blocks.get_mut(&try_bb).unwrap().term = Terminator::Jump(end_bb.clone());
         }
 
         // === catch dispatch 块 ===
         self.current_bb = catch_bb.clone();
 
         // 获取异常对象指针
-        let get_exn_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))));
-        let get_exn_callee = Operand::FnAddr(
-            "__dcc_eh_get_exception".to_string(),
-            get_exn_fn_ty.clone(),
-        );
+        let get_exn_fn_ty =
+            Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))));
+        let get_exn_callee =
+            Operand::FnAddr("__dcc_eh_get_exception".to_string(), get_exn_fn_ty.clone());
         let exn_ptr_var = self.fresh_var("__eh_exn_ptr", void_ptr_ty.clone());
         let get_exn_call = Inst {
             dest: Some(exn_ptr_var.clone()),
@@ -4118,19 +4048,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // 调用 __dcc_eh_type_match(exn, typeinfo)
                 let typeinfo_op = self.get_typeinfo_for(&handler.param_ty)?;
                 let type_match_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
-                let type_match_callee = Operand::FnAddr(
-                    "__dcc_eh_type_match".to_string(),
-                    type_match_fn_ty,
-                );
+                let type_match_callee =
+                    Operand::FnAddr("__dcc_eh_type_match".to_string(), type_match_fn_ty);
                 let match_result = self.fresh_var("__eh_type_match", int_ty.clone());
                 let match_call = Inst {
                     dest: Some(match_result.clone()),
                     kind: InstKind::Call {
                         callee: type_match_callee,
-                        args: vec![
-                            Operand::Var(exn_ptr_var.clone()),
-                            typeinfo_op,
-                        ],
+                        args: vec![Operand::Var(exn_ptr_var.clone()), typeinfo_op],
                         ret_ty: int_ty.clone(),
                     },
                     span: dummy_span(),
@@ -4205,10 +4130,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             // catch body 结束后，调用 __dcc_eh_end_catch 并跳到 end
             let handler_term = self.ssa.blocks[&handler_bb].term.clone();
             if matches!(handler_term, Terminator::Unreachable) {
-                let end_catch_callee = Operand::FnAddr(
-                    "__dcc_eh_end_catch".to_string(),
-                    push_fn_ty.clone(),
-                );
+                let end_catch_callee =
+                    Operand::FnAddr("__dcc_eh_end_catch".to_string(), push_fn_ty.clone());
                 let end_catch_call = Inst {
                     dest: None,
                     kind: InstKind::Call {
@@ -4219,11 +4142,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 };
                 self.push_inst(end_catch_call);
-                self.ssa
-                    .blocks
-                    .get_mut(&handler_bb)
-                    .unwrap()
-                    .term = Terminator::Jump(end_bb.clone());
+                self.ssa.blocks.get_mut(&handler_bb).unwrap().term =
+                    Terminator::Jump(end_bb.clone());
             }
 
             current_bb = next_bb.clone();
@@ -4234,10 +4154,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             let rethrow_bb = next_handler_bbs.last().unwrap().clone();
             self.current_bb = rethrow_bb.clone();
             let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-            let rethrow_callee = Operand::FnAddr(
-                "__dcc_eh_rethrow".to_string(),
-                rethrow_fn_ty,
-            );
+            let rethrow_callee = Operand::FnAddr("__dcc_eh_rethrow".to_string(), rethrow_fn_ty);
             let rethrow_call = Inst {
                 dest: None,
                 kind: InstKind::Call {
@@ -4248,11 +4165,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 span: dummy_span(),
             };
             self.push_inst(rethrow_call);
-            self.ssa
-                .blocks
-                .get_mut(&rethrow_bb)
-                .unwrap()
-                .term = Terminator::Unreachable;
+            self.ssa.blocks.get_mut(&rethrow_bb).unwrap().term = Terminator::Unreachable;
         }
 
         self.current_bb = end_bb;
@@ -4275,10 +4188,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let owner_class = match fn_sym.owner {
             Some(owner_id) => ClassId::from(owner_id),
             None => {
-                return Err(LowerIrError::Internal(
-                    "constructor without owning class".to_string(),
-                ));
-            }
+                return Err(LowerIrError::Internal("constructor without owning class".to_string()));
+            },
         };
 
         // 计算基类子对象指针
@@ -4391,14 +4302,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         place_id: HirExprId,
     ) -> Result<(), LowerIrError> {
         let place = self.lower_expr(place_id)?;
-        let abi = self
-            .lowerer
-            .abis
-            .get(&class)
-            .cloned()
-            .ok_or_else(|| {
-                LowerIrError::Internal(format!("ABI for class {} not found", class.0))
-            })?;
+        let abi = self.lowerer.abis.get(&class).cloned().ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", class.0))
+        })?;
 
         let vptr_ptr_ty = self.lowerer.vptr_ptr_type();
 
@@ -4425,7 +4331,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         };
                         self.push_inst(cast);
                         Operand::Var(dest)
-                    }
+                    },
                 }
             } else {
                 let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
@@ -4562,21 +4468,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         return Err(LowerIrError::Internal(
                             "constructor without owning class".to_string(),
                         ));
-                    }
+                    },
                 };
 
                 let member_offset = self.find_member_offset(owner_class, &member_name)?;
                 let this = Operand::Var(self.ssa.params[0].clone());
 
-                let member_ptr_ty =
-                    self.lowerer
-                        .lower_type(&CxxType::Pointer(Box::new(member_ty.clone())))?;
+                let member_ptr_ty = self
+                    .lowerer
+                    .lower_type(&CxxType::Pointer(Box::new(member_ty.clone())))?;
 
-                let member_ptr = self.compute_member_ptr(
-                    this,
-                    member_offset,
-                    &member_ptr_ty,
-                )?;
+                let member_ptr = self.compute_member_ptr(this, member_offset, &member_ptr_ty)?;
 
                 // 调用成员构造函数
                 let class_sym = self.lowerer.get_symbol(member_class.as_symbol())?;
@@ -4600,7 +4502,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 };
                 self.push_inst(inst);
-            }
+            },
             _ => {
                 // 标量成员: 空参数 → 零值初始化; 单参数 → 直接 Store;
                 // 多参数 → 仍报错 (构造函数参数包展开尚未支持)
@@ -4608,29 +4510,37 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     match &member_ty {
                         CxxType::Integer { .. } => Operand::Int(0),
                         CxxType::Float { bits } => {
-                            let v = match bits { 32 => 0.0f32 as f64, _ => 0.0f64 };
+                            let v = match bits {
+                                32 => 0.0f32 as f64,
+                                _ => 0.0f64,
+                            };
                             Operand::Float(v, Type::Double)
-                        }
+                        },
                         CxxType::Bool => Operand::Int(0),
                         CxxType::Pointer(_) => Operand::Int(0),
-                        _ => return Err(LowerIrError::Unsupported(format!(
-                            "empty-arg member init for type: {:?}", member_ty
-                        ))),
+                        _ => {
+                            return Err(LowerIrError::Unsupported(format!(
+                                "empty-arg member init for type: {:?}",
+                                member_ty
+                            )))
+                        },
                     }
                 } else if args.len() == 1 {
                     self.lower_expr(args[0])?
                 } else {
                     return Err(LowerIrError::Unsupported(
                         "multi-arg non-class member init".to_string(),
-                    ))
+                    ));
                 };
                 let this = Operand::Var(self.ssa.params[0].clone());
                 let fn_sym = self.lowerer.get_symbol(self.func.symbol)?;
                 let owner_class = match fn_sym.owner {
                     Some(owner_id) => ClassId::from(owner_id),
-                    None => return Err(LowerIrError::Internal(
-                        "constructor without owning class".to_string()
-                    )),
+                    None => {
+                        return Err(LowerIrError::Internal(
+                            "constructor without owning class".to_string(),
+                        ))
+                    },
                 };
                 let is_volatile = fn_sym.ty.is_volatile();
                 drop(fn_sym);
@@ -4648,7 +4558,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 };
                 self.push_inst(inst);
-            }
+            },
         }
 
         Ok(())
@@ -4674,10 +4584,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 再在基类字段中找（递归）
         for base in &abi.bases {
             let base_abi = self.lowerer.abis.get(&base.base).ok_or_else(|| {
-                LowerIrError::Internal(format!(
-                    "ABI for base class {} not found",
-                    base.base.0
-                ))
+                LowerIrError::Internal(format!("ABI for base class {} not found", base.base.0))
             })?;
             for f in &base_abi.fields {
                 if f.name == member_name {
@@ -4706,7 +4613,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     return Err(LowerIrError::Internal(
                         "compute_member_ptr: base_ptr is not a var".to_string(),
                     ));
-                }
+                },
             };
             if base_ptr_ty == *target_ty {
                 return Ok(base_ptr);
@@ -4810,10 +4717,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let owner_class = match fn_sym.owner {
             Some(owner_id) => ClassId::from(owner_id),
             None => {
-                return Err(LowerIrError::Internal(
-                    "destructor without owning class".to_string(),
-                ));
-            }
+                return Err(LowerIrError::Internal("destructor without owning class".to_string()));
+            },
         };
 
         let abi = self.lowerer.abis.get(&owner_class).ok_or_else(|| {
@@ -4843,9 +4748,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         } else {
                             unreachable!()
                         };
-                        let member_ptr_ty = self.lowerer.lower_type(
-                            &CxxType::Pointer(Box::new(CxxType::Class(member_class))),
-                        )?;
+                        let member_ptr_ty = self.lowerer.lower_type(&CxxType::Pointer(
+                            Box::new(CxxType::Class(member_class)),
+                        ))?;
                         let member_ptr =
                             self.compute_member_ptr(this.clone(), member_offset, &member_ptr_ty)?;
 
@@ -4866,7 +4771,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         };
                         self.push_inst(inst);
                     }
-                }
+                },
                 DtorStep::Base(base_class) => {
                     // 基类析构：调整 this 指针到基类子对象，调用基类 dtor_base
                     let base_layout = self
@@ -4879,13 +4784,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             ))
                         })?;
 
-                    let base_ptr_ty = self.lowerer.lower_type(&CxxType::Pointer(
-                        Box::new(CxxType::Class(*base_class)),
-                    ))?;
+                    let base_ptr_ty = self
+                        .lowerer
+                        .lower_type(&CxxType::Pointer(Box::new(CxxType::Class(*base_class))))?;
 
                     let offset = base_layout.offset;
-                    let base_ptr =
-                        self.compute_member_ptr(this.clone(), offset, &base_ptr_ty)?;
+                    let base_ptr = self.compute_member_ptr(this.clone(), offset, &base_ptr_ty)?;
 
                     let base_sym = self.lowerer.get_symbol(base_class.as_symbol())?;
                     let dtor_name = format!("{}_dtor_base", base_sym.name);
@@ -4902,12 +4806,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         span: dummy_span(),
                     };
                     self.push_inst(inst);
-                }
+                },
                 DtorStep::VirtualBase(_) => {
-                    return Err(LowerIrError::Unsupported(
-                        "virtual base destructor".to_string(),
-                    ));
-                }
+                    return Err(LowerIrError::Unsupported("virtual base destructor".to_string()));
+                },
             }
         }
 
@@ -4936,7 +4838,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             }
         }
         // 兜底：找不到时默认 int（非类类型，跳过析构）
-        Ok(CxxType::Integer { bits: 32, signed: true })
+        Ok(CxxType::Integer {
+            bits: 32,
+            signed: true,
+        })
     }
 }
 
@@ -5033,35 +4938,51 @@ impl<'a> IrLowerer<'a> {
 mod tests {
     use super::*;
     use crate::cpp::abi_layout::AbiCalculator;
-    use crate::cpp::sema::{CxxSymbol, CxxSymbolKind, Sema, Access, CxxType};
+    use crate::cpp::sema::{Access, CxxSymbol, CxxSymbolKind, CxxType, Sema};
 
     fn make_simple_add_hir() -> (HirTranslationUnit, Vec<CxxSymbol>) {
         let mut sema = Sema::new();
 
         // 添加函数 add
         let fn_ty = CxxType::Function {
-            ret: Box::new(CxxType::Integer { bits: 32, signed: true }),
+            ret: Box::new(CxxType::Integer {
+                bits: 32,
+                signed: true,
+            }),
             params: vec![
-                CxxType::Integer { bits: 32, signed: true },
-                CxxType::Integer { bits: 32, signed: true },
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
             ],
             is_const: false,
             is_volatile: false,
             ref_qual: None,
         };
-        let fn_sym = sema.add_symbol("add".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
+        let fn_sym =
+            sema.add_symbol("add".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
 
         // 添加参数 a, b
         let a_sym = sema.add_symbol(
             "a".to_string(),
             CxxSymbolKind::Variable,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
         let b_sym = sema.add_symbol(
             "b".to_string(),
             CxxSymbolKind::Variable,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
 
@@ -5075,13 +4996,19 @@ mod tests {
         let expr_a = HirExpr {
             id: HirExprId(0),
             kind: HirExprKind::Local(a_sym),
-            ty: CxxType::Integer { bits: 32, signed: true },
+            ty: CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
         };
         // expr 1: Local(b)
         let expr_b = HirExpr {
             id: HirExprId(1),
             kind: HirExprKind::Local(b_sym),
-            ty: CxxType::Integer { bits: 32, signed: true },
+            ty: CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
         };
         // expr 2: BinaryOp(Add, a, b)
         let expr_add = HirExpr {
@@ -5091,7 +5018,10 @@ mod tests {
                 lhs: HirExprId(0),
                 rhs: HirExprId(1),
             },
-            ty: CxxType::Integer { bits: 32, signed: true },
+            ty: CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
         };
         hir.exprs.push(expr_a);
         hir.exprs.push(expr_b);
@@ -5117,7 +5047,10 @@ mod tests {
             symbol: fn_sym,
             body: HirBodyId(0),
             params: vec![a_sym, b_sym],
-            ret_ty: CxxType::Integer { bits: 32, signed: true },
+            ret_ty: CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
         };
         hir.functions.push(func);
 
@@ -5162,7 +5095,10 @@ mod tests {
         assert_eq!(func.entry, "entry");
 
         // 验证 return 块存在
-        assert!(func.blocks.iter().any(|(_, bb)| matches!(bb.term, Terminator::Ret { .. })));
+        assert!(func
+            .blocks
+            .iter()
+            .any(|(_, bb)| matches!(bb.term, Terminator::Ret { .. })));
     }
 
     #[test]
@@ -5172,19 +5108,39 @@ mod tests {
         let lowerer = IrLowerer::new(&hir, &symbols);
 
         assert_eq!(
-            lowerer.lower_type(&CxxType::Integer { bits: 32, signed: true }).unwrap(),
+            lowerer
+                .lower_type(&CxxType::Integer {
+                    bits: 32,
+                    signed: true
+                })
+                .unwrap(),
             Type::Int
         );
         assert_eq!(
-            lowerer.lower_type(&CxxType::Integer { bits: 32, signed: false }).unwrap(),
+            lowerer
+                .lower_type(&CxxType::Integer {
+                    bits: 32,
+                    signed: false
+                })
+                .unwrap(),
             Type::UInt
         );
         assert_eq!(
-            lowerer.lower_type(&CxxType::Integer { bits: 64, signed: true }).unwrap(),
+            lowerer
+                .lower_type(&CxxType::Integer {
+                    bits: 64,
+                    signed: true
+                })
+                .unwrap(),
             Type::LongLong
         );
         assert_eq!(
-            lowerer.lower_type(&CxxType::Integer { bits: 8, signed: true }).unwrap(),
+            lowerer
+                .lower_type(&CxxType::Integer {
+                    bits: 8,
+                    signed: true
+                })
+                .unwrap(),
             Type::SChar
         );
     }
@@ -5205,14 +5161,8 @@ mod tests {
         let hir = HirTranslationUnit::new();
         let lowerer = IrLowerer::new(&hir, &symbols);
 
-        assert_eq!(
-            lowerer.lower_type(&CxxType::Float { bits: 32 }).unwrap(),
-            Type::Float
-        );
-        assert_eq!(
-            lowerer.lower_type(&CxxType::Float { bits: 64 }).unwrap(),
-            Type::Double
-        );
+        assert_eq!(lowerer.lower_type(&CxxType::Float { bits: 32 }).unwrap(), Type::Float);
+        assert_eq!(lowerer.lower_type(&CxxType::Float { bits: 64 }).unwrap(), Type::Double);
     }
 
     #[test]
@@ -5221,12 +5171,15 @@ mod tests {
         let hir = HirTranslationUnit::new();
         let lowerer = IrLowerer::new(&hir, &symbols);
 
-        let ptr_ty = CxxType::Pointer(Box::new(CxxType::Integer { bits: 32, signed: true }));
+        let ptr_ty = CxxType::Pointer(Box::new(CxxType::Integer {
+            bits: 32,
+            signed: true,
+        }));
         let result = lowerer.lower_type(&ptr_ty).unwrap();
         match result {
             Type::Ptr(inner) => {
                 assert_eq!(inner.base, Type::Int);
-            }
+            },
             _ => panic!("expected Ptr"),
         }
     }
@@ -5238,22 +5191,28 @@ mod tests {
         let lowerer = IrLowerer::new(&hir, &symbols);
 
         // 左值引用 → 指针
-        let lref_ty = CxxType::LValueRef(Box::new(CxxType::Integer { bits: 32, signed: true }));
+        let lref_ty = CxxType::LValueRef(Box::new(CxxType::Integer {
+            bits: 32,
+            signed: true,
+        }));
         let result = lowerer.lower_type(&lref_ty).unwrap();
         match result {
             Type::Ptr(inner) => {
                 assert_eq!(inner.base, Type::Int);
-            }
+            },
             _ => panic!("expected Ptr for LValueRef"),
         }
 
         // 右值引用 → 指针
-        let rref_ty = CxxType::RValueRef(Box::new(CxxType::Integer { bits: 32, signed: true }));
+        let rref_ty = CxxType::RValueRef(Box::new(CxxType::Integer {
+            bits: 32,
+            signed: true,
+        }));
         let result = lowerer.lower_type(&rref_ty).unwrap();
         match result {
             Type::Ptr(inner) => {
                 assert_eq!(inner.base, Type::Int);
-            }
+            },
             _ => panic!("expected Ptr for RValueRef"),
         }
     }
@@ -5265,14 +5224,17 @@ mod tests {
         let lowerer = IrLowerer::new(&hir, &symbols);
 
         let arr_ty = CxxType::Array(
-            Box::new(CxxType::Integer { bits: 32, signed: true }),
+            Box::new(CxxType::Integer {
+                bits: 32,
+                signed: true,
+            }),
             Some(10),
         );
         let result = lowerer.lower_type(&arr_ty).unwrap();
         match result {
             Type::Array(_, crate::ast::ArraySize::Const(n)) => {
                 assert_eq!(n, 10);
-            }
+            },
             _ => panic!("expected Array"),
         }
     }
@@ -5288,7 +5250,7 @@ mod tests {
         // 不再先 Jump 到统一 return 块.
         let entry = &func.blocks["entry"];
         match &entry.term {
-            Terminator::Ret { val: Some(_) } => {}
+            Terminator::Ret { val: Some(_) } => {},
             other => panic!("entry terminator should be Ret with value, got {:?}", other),
         }
     }
@@ -5303,7 +5265,8 @@ mod tests {
             is_volatile: false,
             ref_qual: None,
         };
-        let fn_sym = sema.add_symbol("test".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
+        let fn_sym =
+            sema.add_symbol("test".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
 
         // Save symbols BEFORE consuming sema
         let symbols = sema.take_symbols();
@@ -5314,7 +5277,10 @@ mod tests {
         let expr = HirExpr {
             id: HirExprId(0),
             kind: HirExprKind::SizeOf(CxxType::Void),
-            ty: CxxType::Integer { bits: 64, signed: false },
+            ty: CxxType::Integer {
+                bits: 64,
+                signed: false,
+            },
         };
         hir.exprs.push(expr);
 
@@ -5347,7 +5313,7 @@ mod tests {
         match result.unwrap_err() {
             LowerIrError::Unsupported(msg) => {
                 assert!(msg.contains("SizeOf"));
-            }
+            },
             _ => panic!("expected Unsupported error"),
         }
     }
@@ -5356,8 +5322,7 @@ mod tests {
 
     /// 创建一个简单的继承层次：Base { x: int }, Derived : Base { y: int }
     /// 返回 (hir, symbols, base_class_id, derived_class_id)
-    fn make_inheritance_hierarchy(
-    ) -> (HirTranslationUnit, Vec<CxxSymbol>, ClassId, ClassId) {
+    fn make_inheritance_hierarchy() -> (HirTranslationUnit, Vec<CxxSymbol>, ClassId, ClassId) {
         let mut sema = Sema::new();
 
         // Base 类
@@ -5373,7 +5338,10 @@ mod tests {
         let x_sym = sema.add_symbol(
             "x".to_string(),
             CxxSymbolKind::Field,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
         sema.set_owner(x_sym, base_sym);
@@ -5391,7 +5359,10 @@ mod tests {
         let y_sym = sema.add_symbol(
             "y".to_string(),
             CxxSymbolKind::Field,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
         sema.set_owner(y_sym, derived_sym);
@@ -5405,11 +5376,7 @@ mod tests {
     }
 
     /// 注册 Base 和 Derived 的 ABI 描述符
-    fn register_inheritance_abis(
-        lowerer: &mut IrLowerer,
-        base_id: ClassId,
-        derived_id: ClassId,
-    ) {
+    fn register_inheritance_abis(lowerer: &mut IrLowerer, base_id: ClassId, derived_id: ClassId) {
         use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, FieldLayout};
 
         // Base: { x: int @ 0 }, size=4, align=4
@@ -5460,10 +5427,7 @@ mod tests {
             rtti: Default::default(),
             base_ctor_order: vec![base_id],
             field_init_order: vec!["y".to_string()],
-            dtor_order: vec![
-                DtorStep::Member("y".to_string()),
-                DtorStep::Base(base_id),
-            ],
+            dtor_order: vec![DtorStep::Member("y".to_string()), DtorStep::Base(base_id)],
             this_adjust_map: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(base_id, crate::cpp::abi_layout::ThisAdjust::offset(0));
@@ -5480,9 +5444,7 @@ mod tests {
         register_inheritance_abis(&mut lowerer, base_id, derived_id);
 
         // Derived 的类型应该展平基类字段
-        let derived_ty = lowerer
-            .lower_type(&CxxType::Class(derived_id))
-            .unwrap();
+        let derived_ty = lowerer.lower_type(&CxxType::Class(derived_id)).unwrap();
 
         match derived_ty {
             Type::Struct(name, fields, align, _) => {
@@ -5494,7 +5456,7 @@ mod tests {
                 assert_eq!(fields[0].offset, 0); // base 字段 offset 0
                 assert_eq!(fields[1].name, "y");
                 assert_eq!(fields[1].offset, 4); // 派生字段 offset 4
-            }
+            },
             _ => panic!("expected Struct type"),
         }
     }
@@ -5623,7 +5585,10 @@ mod tests {
         let a_field_sym = sema.add_symbol(
             "a".to_string(),
             CxxSymbolKind::Field,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
         sema.set_owner(a_field_sym, a_sym);
@@ -5659,7 +5624,10 @@ mod tests {
         let c_field_sym = sema.add_symbol(
             "c".to_string(),
             CxxSymbolKind::Field,
-            CxxType::Integer { bits: 32, signed: true },
+            CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
             Access::Public,
         );
         sema.set_owner(c_field_sym, c_sym);
@@ -5848,7 +5816,7 @@ mod tests {
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
         };
-        
+
         // Use take_symbols() from sema
         let mut symbols = symbols;
         symbols.push(param_symbol);
@@ -5867,19 +5835,15 @@ mod tests {
         assert!(entry.insts.len() >= 3);
 
         // 检查是否有 Add 指令（指针加偏移）
-        let has_add = entry.insts.iter().any(|inst| {
-            matches!(inst.kind, InstKind::Bin { op: BinOp::Add, .. })
-        });
+        let has_add = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(inst.kind, InstKind::Bin { op: BinOp::Add, .. }));
         assert!(has_add, "non-primary base cast should have GEP add instruction");
     }
 
     /// 注册 A, B, C 三继承 ABI（辅助函数）
-    fn register_abc_abis(
-        lowerer: &mut IrLowerer,
-        a_id: ClassId,
-        b_id: ClassId,
-        c_id: ClassId,
-    ) {
+    fn register_abc_abis(lowerer: &mut IrLowerer, a_id: ClassId, b_id: ClassId, c_id: ClassId) {
         use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, FieldLayout};
 
         let a_abi = ClassAbi {
@@ -6203,7 +6167,10 @@ mod tests {
         let expr_zero = HirExpr {
             id: HirExprId(0),
             kind: HirExprKind::IntLiteral(0),
-            ty: CxxType::Integer { bits: 32, signed: true },
+            ty: CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
         };
         hir2.exprs.push(expr_zero);
         hir2.stmts[0] = stmt_expr; // 替换 return 为表达式语句
@@ -6272,7 +6239,13 @@ mod tests {
             &mut calc,
             class_id,
             &[("foo", true), ("bar", true)],
-            vec![("x".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "x".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             vec![],
         );
         let abi = calc.compute_class(class_id);
@@ -6347,7 +6320,8 @@ mod tests {
             is_volatile: false,
             ref_qual: None,
         };
-        let method_sym = sema.add_symbol("foo".to_string(), CxxSymbolKind::Method, method_ty, Access::Public);
+        let method_sym =
+            sema.add_symbol("foo".to_string(), CxxSymbolKind::Method, method_ty, Access::Public);
         sema.set_symbol_owner(method_sym, class_sym);
 
         // 测试函数 void test(Foo* obj) { obj->foo(); }
@@ -6358,7 +6332,12 @@ mod tests {
             is_volatile: false,
             ref_qual: None,
         };
-        let fn_sym = sema.add_symbol("test_vcall".to_string(), CxxSymbolKind::Function, fn_ty, Access::Public);
+        let fn_sym = sema.add_symbol(
+            "test_vcall".to_string(),
+            CxxSymbolKind::Function,
+            fn_ty,
+            Access::Public,
+        );
 
         let param_sym = sema.add_symbol(
             "obj".to_string(),
@@ -6417,13 +6396,7 @@ mod tests {
 
         // 构造 ABI
         let mut calc = crate::cpp::abi_layout::ItaniumAbiCalculator::new();
-        make_virtual_class_abi(
-            &mut calc,
-            class_id,
-            &[("foo", true)],
-            vec![],
-            vec![],
-        );
+        make_virtual_class_abi(&mut calc, class_id, &[("foo", true)], vec![], vec![]);
         let abi = calc.compute_class(class_id);
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -6436,9 +6409,10 @@ mod tests {
         let entry = &func.blocks[&func.entry];
 
         // 检查是否有 Load (vptr 加载)
-        let has_vptr_load = entry.insts.iter().any(|inst| {
-            matches!(&inst.kind, InstKind::Load { .. })
-        });
+        let has_vptr_load = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(&inst.kind, InstKind::Load { .. }));
         assert!(has_vptr_load, "virtual call should have a vptr load instruction");
 
         // 检查是否有 Call 且 callee 是 Var（间接调用）
@@ -6523,17 +6497,10 @@ mod tests {
 
         // 构造 ABI
         let mut calc = crate::cpp::abi_layout::ItaniumAbiCalculator::new();
-        make_virtual_class_abi(
-            &mut calc,
-            class_id,
-            &[("vfunc", true)],
-            vec![],
-            vec![],
-        );
+        make_virtual_class_abi(&mut calc, class_id, &[("vfunc", true)], vec![], vec![]);
         let abi = calc.compute_class(class_id);
-        
-        for (_i, _v) in abi.vptrs.iter().enumerate() {
-        }
+
+        for (_i, _v) in abi.vptrs.iter().enumerate() {}
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(class_id, abi);
@@ -6545,20 +6512,19 @@ mod tests {
         let entry = &func.blocks[&func.entry];
 
         // 检查是否有 Store 指令（vptr 写入）
-        let has_store = entry.insts.iter().any(|inst| {
-            matches!(&inst.kind, InstKind::Store { .. })
-        });
+        let has_store = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(&inst.kind, InstKind::Store { .. }));
         assert!(has_store, "SetVTablePtr should generate a store instruction for vptr");
 
         // vptr 应该指向 vtable 的 address point（不是 vtable 起点）
         // 因此应该有 Add 指令（vtable_base + address_point）
-        let has_addr_point_add = entry.insts.iter().any(|inst| {
-            matches!(&inst.kind, InstKind::Bin { op: BinOp::Add, .. })
-        });
-        assert!(
-            has_addr_point_add,
-            "vptr should point to address point (vtable_base + offset)"
-        );
+        let has_addr_point_add = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(&inst.kind, InstKind::Bin { op: BinOp::Add, .. }));
+        assert!(has_addr_point_add, "vptr should point to address point (vtable_base + offset)");
     }
 
     #[test]
@@ -6577,21 +6543,45 @@ mod tests {
         let c_id = ClassId(2);
 
         // A
-        calc.register_class(a_id, vec![], vec![], vec![
-            ("a".into(), CxxType::Integer { bits: 32, signed: true }),
-        ], true);
+        calc.register_class(
+            a_id,
+            vec![],
+            vec![],
+            vec![(
+                "a".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
+            true,
+        );
         calc.register_method(a_id, "a_func".into(), true, a_id);
 
         // B
-        calc.register_class(b_id, vec![], vec![], vec![
-            ("b".into(), CxxType::Float { bits: 64 }),
-        ], true);
+        calc.register_class(
+            b_id,
+            vec![],
+            vec![],
+            vec![("b".into(), CxxType::Float { bits: 64 })],
+            true,
+        );
         calc.register_method(b_id, "b_func".into(), true, b_id);
 
         // C : A, B
-        calc.register_class(c_id, vec![a_id, b_id], vec![], vec![
-            ("c".into(), CxxType::Integer { bits: 32, signed: true }),
-        ], true);
+        calc.register_class(
+            c_id,
+            vec![a_id, b_id],
+            vec![],
+            vec![(
+                "c".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
+            true,
+        );
         calc.register_method(c_id, "a_func".into(), true, a_id); // override A
         calc.register_method(c_id, "b_func".into(), true, b_id); // override B
 
@@ -6602,9 +6592,12 @@ mod tests {
         assert_eq!(b_offset, 16, "B subobject should be at offset 16");
 
         let mut sema = Sema::new();
-        let _a_sym = sema.add_symbol("A".into(), CxxSymbolKind::Class, CxxType::Class(a_id), Access::Public);
-        let _b_sym = sema.add_symbol("B".into(), CxxSymbolKind::Class, CxxType::Class(b_id), Access::Public);
-        let _c_sym = sema.add_symbol("C".into(), CxxSymbolKind::Class, CxxType::Class(c_id), Access::Public);
+        let _a_sym =
+            sema.add_symbol("A".into(), CxxSymbolKind::Class, CxxType::Class(a_id), Access::Public);
+        let _b_sym =
+            sema.add_symbol("B".into(), CxxSymbolKind::Class, CxxType::Class(b_id), Access::Public);
+        let _c_sym =
+            sema.add_symbol("C".into(), CxxSymbolKind::Class, CxxType::Class(c_id), Access::Public);
 
         // b_func 方法（属于 B）
         let b_func_ty = CxxType::Function {
@@ -6614,7 +6607,8 @@ mod tests {
             is_volatile: false,
             ref_qual: None,
         };
-        let b_func_sym = sema.add_symbol("b_func".into(), CxxSymbolKind::Method, b_func_ty, Access::Public);
+        let b_func_sym =
+            sema.add_symbol("b_func".into(), CxxSymbolKind::Method, b_func_ty, Access::Public);
         sema.set_symbol_owner(b_func_sym, SymbolId(1)); // B
 
         // 测试函数: void test(C* obj) { obj->b_func(); }
@@ -6627,7 +6621,8 @@ mod tests {
             is_volatile: false,
             ref_qual: None,
         };
-        let fn_sym = sema.add_symbol("test_adjust".into(), CxxSymbolKind::Function, fn_ty, Access::Public);
+        let fn_sym =
+            sema.add_symbol("test_adjust".into(), CxxSymbolKind::Function, fn_ty, Access::Public);
 
         let param_sym = sema.add_symbol(
             "obj".into(),
@@ -6697,15 +6692,17 @@ mod tests {
         let entry = &func.blocks[&func.entry];
 
         // 应该有 Add 指令（调整 this 指针到 B subobject）
-        let has_add = entry.insts.iter().any(|inst| {
-            matches!(&inst.kind, InstKind::Bin { op: BinOp::Add, .. })
-        });
+        let has_add = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(&inst.kind, InstKind::Bin { op: BinOp::Add, .. }));
         assert!(has_add, "virtual call with non-zero this_adjust should have pointer add (GEP)");
 
         // 应该有 vptr load
-        let has_load = entry.insts.iter().any(|inst| {
-            matches!(&inst.kind, InstKind::Load { .. })
-        });
+        let has_load = entry
+            .insts
+            .iter()
+            .any(|inst| matches!(&inst.kind, InstKind::Load { .. }));
         assert!(has_load, "should load vptr");
 
         // 应该有间接调用
@@ -6716,7 +6713,9 @@ mod tests {
 
         // vtables: 应该有 C 的 primary vtable + secondary vtable for B
         // 还有 A 和 B 自己的 vtable
-        let c_vtables: Vec<_> = out.vtables.iter()
+        let c_vtables: Vec<_> = out
+            .vtables
+            .iter()
             .filter(|(name, _)| name.contains("Class2"))
             .collect();
         assert!(c_vtables.len() >= 1, "C should have at least primary vtable");

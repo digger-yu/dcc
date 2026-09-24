@@ -97,11 +97,7 @@ impl Interner {
         // 因此即便短暂持有 MutexGuard, 最终返回的 &str 也不借用 guard.
         let guard = self.inner.lock().expect("interner mutex poisoned");
         // 通过 copied() 把 &&'static str 转为 &'static str, 跳出 guard 借用.
-        guard
-            .symbols
-            .get(id.0 as usize)
-            .copied()
-            .unwrap_or("")
+        guard.symbols.get(id.0 as usize).copied().unwrap_or("")
     }
 
     /// 当前已驻留字符串总数 (含 ID=0 占位).

@@ -12,10 +12,7 @@ pub const MAX_TEMPLATE_DEPTH: u32 = 900;
 
 /// 深度超限错误消息。
 pub fn depth_error_msg(depth: u32) -> String {
-    format!(
-        "template nesting depth {} exceeds limit {}",
-        depth, MAX_TEMPLATE_DEPTH
-    )
+    format!("template nesting depth {} exceeds limit {}", depth, MAX_TEMPLATE_DEPTH)
 }
 
 #[cfg(test)]

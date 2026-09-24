@@ -52,11 +52,15 @@ impl Backend for Codegen {
                     .filter(|s| s.bind == elf::STB_GLOBAL)
                     .map(|s| s.name.clone())
                     .collect(),
-                locals: vec![], // TODO: track local symbols
+                locals: vec![],  // TODO: track local symbols
                 imports: vec![], // TODO: extract import symbols
             },
             relocs: ObjectRelocs {
-                rellocs: self.relocations.iter().map(|r| format!("{:?}", r)).collect(),
+                rellocs: self
+                    .relocations
+                    .iter()
+                    .map(|r| format!("{:?}", r))
+                    .collect(),
             },
             extra_sections: self
                 .extra_sections
@@ -67,7 +71,11 @@ impl Backend for Codegen {
                 })
                 .collect(),
             diagnostics: self.diagnostics.clone(),
-            func_sizes: self.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            func_sizes: self
+                .func_sizes
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         })
     }
 
@@ -332,8 +340,7 @@ fn build_debug_sections(
     }
     // 按 PC 排序, 同 PC 时 is_stmt=true 优先
     combined_line_entries.sort_by(|a, b| {
-        a.pc
-            .cmp(&b.pc)
+        a.pc.cmp(&b.pc)
             .then_with(|| b.is_stmt.cmp(&a.is_stmt))
             .then_with(|| a.discriminator.cmp(&b.discriminator))
     });
@@ -346,8 +353,7 @@ fn build_debug_sections(
         ..Default::default()
     };
     let dbg = debug::build_dwarf_full(&cu, &debug_opts);
-    cg.extra_sections
-        .extend(debug::dwarf_elf_sections(&dbg));
+    cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
 
     // .rela.debug_* —— 为 debug 节里的函数地址生成绝对重定位
     let relocs: [(&[(u64, String)], &str, u32); 3] = [

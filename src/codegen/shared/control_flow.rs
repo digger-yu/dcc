@@ -4,7 +4,7 @@
 // 第一性原理：IF/ELSE/WHILE/DO/FOR/SWITCH 的控制流模式在所有 ISA 后端中相同
 // 目标：提取通用控制流生成逻辑，智能选择最佳实现策略
 
-use crate::ast::{Stmt, Block, Expr, Type, UnOp};
+use crate::ast::{Block, Expr, Stmt, Type, UnOp};
 
 /// Extract the source span of an expression.
 fn expr_span(expr: &Expr) -> crate::diagnostics::Span {
@@ -108,7 +108,7 @@ pub enum BranchCond {
 // TODO: Consolidate to shared module
 
 /// Control flow builder trait (ISA-specific implementation)
-/// 
+///
 /// This trait defines the interface that each ISA backend must implement.
 /// The shared logic calls these methods to generate architecture-specific code.
 pub trait ControlFlowBackend {
@@ -136,7 +136,7 @@ pub trait ControlFlowBackend {
     fn create_state(&self) -> ControlFlowState;
 
     // === ISA-SPECIFIC HOOKS (Critical for Phase 2 Migration) ===
-    
+
     /// Emit jump with explicit kind (Je, Jne, Jl, Jb, etc.)
     /// This replaces the generic conditional_jump for complex cases
     fn emit_jump_kind(&self, target: &str, kind: JumpKind);
@@ -212,7 +212,7 @@ pub struct ControlFlowLoweringEngine<'a, CF: ControlFlowBackend> {
     backend: &'a mut CF,
     state: ControlFlowState,
     module: &'a crate::ir::Module,
-    
+
     // ISA-specific context tracking
     pub loop_continue: Option<String>,
     pub loop_break: Option<String>,
@@ -233,12 +233,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
     /// Lower if-else statement with advanced optimizations
     #[inline]
-    pub fn lower_if_statement(
-        &mut self,
-        cond: &Expr,
-        then_: &Stmt,
-        else_: Option<&Stmt>,
-    ) {
+    pub fn lower_if_statement(&mut self, cond: &Expr, then_: &Stmt, else_: Option<&Stmt>) {
         // Constant condition optimization (critical for __compiletime_assert):
         // if(1) → only generate then branch
         // if(0) → only generate else branch, BUT preserve labels in dead branch
@@ -273,26 +268,26 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
             // Evaluate condition and set flags
             self.backend.gen_expr(cond, 0);
             self.backend.emit_truth_flags(&cond.ty());
-            
+
             // Jump if equal (condition is zero/false)
             self.backend.jmp_rel32(&le, JumpKind::Je);
-            
+
             // Then block
             self.lower_stmt(then_);
-            
+
             // Skip past else if then ends with return (optimization)
             let then_ends_ret = CF::stmt_ends_with_return(then_);
             if !then_ends_ret {
                 self.backend.jmp_rel32(&lend, JumpKind::Jmp);
             }
-            
+
             self.backend.label(&le);
-            
+
             // Else block if present
             if let Some(else_stmt) = else_ {
                 self.lower_stmt(else_stmt);
             }
-            
+
             // End label
             self.backend.label(&lend);
         }
@@ -305,10 +300,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let le = self.backend.new_label_name("while_exit");
 
         // Save and restore loop context
-        let (sc, sb) = (
-            self.loop_continue.clone(),
-            self.loop_break.clone()
-        );
+        let (sc, sb) = (self.loop_continue.clone(), self.loop_break.clone());
 
         self.loop_continue = Some(ls.clone());
         self.loop_break = Some(le.clone());
@@ -346,10 +338,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let exit_label = self.backend.new_label_name("do_exit");
 
         // Save and restore loop context
-        let (sc, sb) = (
-            self.loop_continue.clone(),
-            self.loop_break.clone()
-        );
+        let (sc, sb) = (self.loop_continue.clone(), self.loop_break.clone());
 
         self.loop_continue = Some(body_label.clone());
         self.loop_break = Some(exit_label.clone());
@@ -359,10 +348,10 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         self.backend.emit_label(&body_label);
         self.backend.maybe_align_loop();
         self.lower_stmt(body);
-        
+
         // Header label for condition check
         self.backend.emit_label(&header_label);
-        
+
         // Check condition - jump back if true (Jne because while(true) continues)
         self.backend.gen_expr(cond, 0);
         self.backend.emit_truth_flags(&cond.ty());
@@ -394,15 +383,12 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let le = self.backend.new_label_name("for_exit");
 
         // Save and restore loop context
-        let (sc, sb) = (
-            self.loop_continue.clone(),
-            self.loop_break.clone()
-        );
+        let (sc, sb) = (self.loop_continue.clone(), self.loop_break.clone());
 
-        self.loop_continue = Some(lst.clone());  // Continue goes to step
+        self.loop_continue = Some(lst.clone()); // Continue goes to step
         self.loop_break = Some(le.clone());
         self.break_targets.push((le.clone(), false));
-        
+
         self.backend.maybe_align_loop();
 
         // Init phase (execute once)
@@ -412,12 +398,12 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
 
         // Header label - condition check at top
         self.backend.emit_label(&ls);
-        
+
         // Condition check at top (if present)
         if let Some(cond_expr) = cond {
             self.backend.gen_expr(cond_expr, 0);
             self.backend.emit_truth_flags(&cond_expr.ty());
-            self.backend.jmp_rel32(&le, JumpKind::Je);  // Exit if false
+            self.backend.jmp_rel32(&le, JumpKind::Je); // Exit if false
         }
 
         // Body execution
@@ -452,136 +438,139 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
         let l_end = self.backend.new_label_name("switch_end");
         let l_default = self.backend.new_label_name("switch_default");
         let l_break = self.backend.new_label_name("switch_break");
-        
+
         // Save break target
         self.break_targets.push((l_break.clone(), false));
-        
+
         // Evaluate switch expression
         self.backend.gen_expr(scrutinee, 0);
-        
+
         // Check for __int128 type
         let switch_is_int128 = matches!(scrutinee.ty(), Type::Int128 | Type::UInt128);
-        
+
         // Allocate frame slots for switch value (aligned on 16-byte boundary)
         let sw_slot = self.backend.alloc_sret_slot(16); // int128 needs low/high
         let sw_lo_slot = self.backend.alloc_sret_slot(8); // for range comparison
-        
+
         // Store switch value in frame slot (not stack push) to maintain ABI alignment
         if switch_is_int128 {
             // __int128: gen_expr puts low in rax, high in rdx
-            self.backend.store_stack(0, sw_slot);      // low 64 bits
-            self.backend.store_stack(2, sw_slot + 8);  // high 64 bits
+            self.backend.store_stack(0, sw_slot); // low 64 bits
+            self.backend.store_stack(2, sw_slot + 8); // high 64 bits
         } else {
-            self.backend.store_stack(0, sw_slot);      // single 64-bit value
+            self.backend.store_stack(0, sw_slot); // single 64-bit value
         }
-        
+
         // Determine signedness for range comparisons
         let switch_is_signed = Self::determine_signedness(scrutinee);
-        
+
         // Collect case bodies and labels
         let mut case_bodies: Vec<(usize, String)> = Vec::new();
         let mut has_default = false;
-        
+
         for (idx, case) in cases.iter().enumerate() {
             if let Some(ref val) = case.val {
                 let l_case = self.backend.new_label_name(&format!("case_{}", idx));
-                
+
                 if let Some(ref hi) = case.range_end {
                     // GNU extension: case low ... high (range match)
                     let l_next = self.backend.new_label_name(&format!("next_case_{}", idx));
-                    
+
                     // Evaluate low bound
                     self.backend.gen_expr(val, 2);
                     self.backend.store_stack(2, sw_lo_slot);
-                    
+
                     // Evaluate high bound
                     self.backend.gen_expr(hi, 8);
-                    
+
                     // Compare: load switch value back before each comparison
-                    self.backend.load_stack(1, sw_slot);     // rcx = switch value
-                    self.backend.load_stack(2, sw_lo_slot);  // rdx = low
-                    // cmp rcx, rdx - simplified (actual implementation delegates to backend)
-                    
+                    self.backend.load_stack(1, sw_slot); // rcx = switch value
+                    self.backend.load_stack(2, sw_lo_slot); // rdx = low
+                                                            // cmp rcx, rdx - simplified (actual implementation delegates to backend)
+
                     let jk_lo = if switch_is_signed { JumpKind::Jl } else { JumpKind::Jb };
                     self.backend.jmp_rel32(&l_next, jk_lo);
-                    
+
                     // Reload switch value (gen_expr may overwrite rcx)
-                    self.backend.load_stack(1, sw_slot);     // rcx = switch value
-                    // cmp rcx, r8 - simplified
-                    
+                    self.backend.load_stack(1, sw_slot); // rcx = switch value
+                                                         // cmp rcx, r8 - simplified
+
                     let jk_hi = if switch_is_signed { JumpKind::Jg } else { JumpKind::Ja };
                     self.backend.jmp_rel32(&l_next, jk_hi);
-                    
+
                     self.backend.jmp_rel32(&l_case, JumpKind::Jmp);
                     self.backend.label(&l_next);
                 } else {
                     // Simple equality: case N
                     if switch_is_int128 {
                         // __int128 comparison: compare low and high separately
-                        let case_low: u128 = if let Ok(cv) = crate::const_eval::eval_full(val, false) {
-                            cv.as_int().unwrap_or(0) as u128
-                        } else {
-                            0
-                        };
-                        
+                        let case_low: u128 =
+                            if let Ok(cv) = crate::const_eval::eval_full(val, false) {
+                                cv.as_int().unwrap_or(0) as u128
+                            } else {
+                                0
+                            };
+
                         // Compare low 64 bits
-                        self.backend.load_stack(0, sw_slot);   // rax = switch low
-                        
-                        let l_nomatch = self.backend.new_label_name(&format!("nomatch_case{}_low", idx));
+                        self.backend.load_stack(0, sw_slot); // rax = switch low
+
+                        let l_nomatch = self
+                            .backend
+                            .new_label_name(&format!("nomatch_case{}_low", idx));
                         if case_low != 0 {
                             self.backend.load_stack(9, sw_slot + 8); // r9 = switch high
                         }
                         self.backend.jmp_rel32(&l_nomatch, JumpKind::Jne);
-                        
+
                         // Low bits matched, now check high 64 bits
                         // (high bits are always 0 for non-int128 cases)
                         // Simplified: assume matches if low matches
-                        
+
                         self.backend.label(&l_nomatch);
                     } else {
                         // Simple integer comparison
                         self.backend.gen_expr(val, 2);
-                        self.backend.load_stack(1, sw_slot);   // rcx = switch value
-                        // cmp rcx, rdx - delegated to backend
+                        self.backend.load_stack(1, sw_slot); // rcx = switch value
+                                                             // cmp rcx, rdx - delegated to backend
                         self.backend.jmp_rel32(&l_case, JumpKind::Je);
                     }
                 }
-                
+
                 case_bodies.push((idx, l_case));
             } else {
                 // Default case marker
                 has_default = true;
             }
         }
-        
+
         // No match: jump to default or break exit
         if has_default {
             self.backend.jmp_rel32(&l_default, JumpKind::Jmp);
         } else {
             self.backend.jmp_rel32(&l_break, JumpKind::Jmp);
         }
-        
+
         // Emit case bodies in order (fall-through naturally supported)
         for (_, l_case) in case_bodies {
             self.backend.label(&l_case);
             self.backend.gen_block_items(&/* placeholder */Vec::new());
         }
-        
+
         // Emit default body
         if let Some(default_blk) = default_case {
             self.backend.label(&l_default);
             self.lower_block(default_blk);
         }
-        
+
         // Break exit point
         self.backend.label(&l_break);
         self.backend.jmp_rel32(&l_end, JumpKind::Jmp);
         self.backend.label(&l_end);
-        
+
         // Pop break target
         self.break_targets.pop();
     }
-    
+
     /// Determine if switch expression is signed
     fn determine_signedness(expr: &Expr) -> bool {
         // Helper to determine signedness for range comparisons
@@ -710,7 +699,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                 crate::ast::BlockItem::Decl(_decl) => {
                     // Variable declarations - simplified handling
                     eprintln!("TODO: handle variable declaration in block");
-                }
+                },
             }
         }
     }
@@ -724,39 +713,35 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
             Stmt::While { cond, body, .. } => self.lower_while_loop(cond, body),
             Stmt::Do { cond, body, .. } => self.lower_do_loop(cond, body),
             Stmt::For {
-                init, cond, step, body, ..
-            } => self.lower_for_loop(
-                init.as_deref(),
-                cond.as_ref(),
-                step.as_ref(),
+                init,
+                cond,
+                step,
                 body,
-            ),
+                ..
+            } => self.lower_for_loop(init.as_deref(), cond.as_ref(), step.as_ref(), body),
             Stmt::Switch { expr, cases, .. } => {
                 // The default case is represented as the case whose
                 // `val` is None; its body doubles as the default block.
-                let default_case = cases.iter().find_map(|c| {
-                    if c.val.is_none() {
-                        Some(&c.body)
-                    } else {
-                        None
-                    }
-                });
+                let default_case =
+                    cases
+                        .iter()
+                        .find_map(|c| if c.val.is_none() { Some(&c.body) } else { None });
                 self.lower_switch_statement(expr, cases, default_case)
-            }
+            },
             Stmt::Block { b, .. } => self.lower_block(b),
             Stmt::Break { .. } => {
                 // TODO: break handling with outer context
-            }
+            },
             Stmt::Continue { .. } => {
                 // TODO: continue handling
-            }
+            },
             Stmt::Return { val, .. } => {
                 // TODO: return handling
                 if let Some(v) = val {
                     self.emit_expr_stmt(v);
                 }
-            }
-            _ => {} // Other statements need ISA-specific handling
+            },
+            _ => {}, // Other statements need ISA-specific handling
         }
     }
 
@@ -794,11 +779,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
                     // Non-boolean binary ops → implicit true/false
                     BranchCond::True
                 }
-            }
+            },
             Expr::Unary {
-                op: UnOp::Not,
-                e,
-                ..
+                op: UnOp::Not, e, ..
             } => BranchCond::Not(Box::new(self.lower_condition(e))),
             _ => BranchCond::True, // Everything else is truthy
         }
@@ -859,14 +842,8 @@ mod tests {
     #[test]
     fn test_comparison_flip() {
         use super::BranchCond;
-        
-        assert_eq!(
-            BranchCond::flip_comparison(crate::ast::BinOp::EqEq),
-            crate::ast::BinOp::Ne
-        );
-        assert_eq!(
-            BranchCond::flip_comparison(crate::ast::BinOp::Lt),
-            crate::ast::BinOp::Ge
-        );
+
+        assert_eq!(BranchCond::flip_comparison(crate::ast::BinOp::EqEq), crate::ast::BinOp::Ne);
+        assert_eq!(BranchCond::flip_comparison(crate::ast::BinOp::Lt), crate::ast::BinOp::Ge);
     }
 }

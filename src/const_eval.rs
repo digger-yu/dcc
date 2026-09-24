@@ -74,12 +74,14 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
         // 数组名在常量表达式中退化为首元素地址 (C11 6.3.2.1p3):
         // (arr)->field / arr + 1 等地址常量链的基址
-        Expr::Ident { name, ty: Type::Array(_, _), .. } => {
-            Ok(ConstValue::Addr {
-                name: name.name.clone(),
-                offset: 0,
-            })
-        }
+        Expr::Ident {
+            name,
+            ty: Type::Array(_, _),
+            ..
+        } => Ok(ConstValue::Addr {
+            name: name.name.clone(),
+            offset: 0,
+        }),
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
             // 调用方需要确保同源字符串复用同一 label
@@ -88,7 +90,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 data: data.clone(),
                 label,
             })
-        }
+        },
         Expr::AddrOf { e, .. } => match e.as_ref() {
             Expr::Ident { name, .. } => Ok(ConstValue::Addr {
                 name: name.name.clone(),
@@ -100,18 +102,22 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     _ => return Err(ConstEvalError::NotConstant),
                 };
                 let off = eval(idx)?; // 索引必须是编译期整数
-                // addend 按元素大小缩放 (与 codegen 的 R_X86_64_64
-                // addend 计算一致, 否则 &arr[2] 指向 arr[0] 偏移 2 字节)
-                let scale =
-                    pointee_byte_scale(&arr.ty()).ok_or(ConstEvalError::NotConstant)?;
+                                      // addend 按元素大小缩放 (与 codegen 的 R_X86_64_64
+                                      // addend 计算一致, 否则 &arr[2] 指向 arr[0] 偏移 2 字节)
+                let scale = pointee_byte_scale(&arr.ty()).ok_or(ConstEvalError::NotConstant)?;
                 Ok(ConstValue::Addr {
                     name: arr_name,
                     offset: off * scale,
                 })
-            }
+            },
             // &global_struct.member: 地址常量表达式 (C 标准 6.6.9)
             // 用于全局/静态初始化器，如 `const T *p = &global.field;`
-            Expr::Member { expr, field, is_arrow, .. } => {
+            Expr::Member {
+                expr,
+                field,
+                is_arrow,
+                ..
+            } => {
                 if *is_arrow {
                     // Arrow form: ptr->field is (*ptr).field
                     // Evaluate the pointer as an address constant
@@ -133,7 +139,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                             crate::ast::find_field(fields, &field.name)
                                 .map(|(f, extra_off)| f.offset + extra_off)
                                 .ok_or(ConstEvalError::NotConstant)?
-                        }
+                        },
                         _ => return Err(ConstEvalError::NotConstant),
                     };
                     return Ok(ConstValue::Addr {
@@ -142,11 +148,14 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     });
                 }
                 // 递归求基地址: 必须是 &ident.field1.field2... 形式
-                let base_addr = match eval_full(&Expr::AddrOf {
-                    e: expr.clone(),
-                    ty: Type::Ptr(Box::new(crate::ast::QualType::new(expr.ty()))),
-                    span: crate::diagnostics::Span::point("", 0, 0),
-                }, fenv_access)? {
+                let base_addr = match eval_full(
+                    &Expr::AddrOf {
+                        e: expr.clone(),
+                        ty: Type::Ptr(Box::new(crate::ast::QualType::new(expr.ty()))),
+                        span: crate::diagnostics::Span::point("", 0, 0),
+                    },
+                    fenv_access,
+                )? {
                     ConstValue::Addr { name, offset } => (name, offset),
                     _ => return Err(ConstEvalError::NotConstant),
                 };
@@ -156,14 +165,14 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         crate::ast::find_field(fields, &field.name)
                             .map(|(f, extra_off)| f.offset + extra_off)
                             .ok_or(ConstEvalError::NotConstant)?
-                    }
+                    },
                     _ => return Err(ConstEvalError::NotConstant),
                 };
                 Ok(ConstValue::Addr {
                     name: base_addr.0,
                     offset: base_addr.1 + field_offset as i128,
                 })
-            }
+            },
             _ => Err(ConstEvalError::NotConstant),
         },
         Expr::LabelAddr { label, .. } => Ok(ConstValue::Addr {
@@ -191,13 +200,24 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 UnOp::Neg => match v {
                     ConstValue::Int(i) => {
                         // 无符号类型: wrapping neg (如 -1U → 0xFFFFFFFF)
-                        let is_unsigned = matches!(&e.ty(),
-                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
-                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let is_unsigned = matches!(
+                            &e.ty(),
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                                | Type::UInt128
+                        );
                         if is_unsigned {
                             if let Some(bits) = int_type_bits(&e.ty()) {
                                 if bits < 128 {
-                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    let mask = if bits == 64 {
+                                        u64::MAX as i128
+                                    } else {
+                                        (1i128 << bits) - 1
+                                    };
                                     Ok(ConstValue::Int((!i + 1) & mask))
                                 } else {
                                     Ok(ConstValue::Int(i.wrapping_neg()))
@@ -210,7 +230,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                                 .map(ConstValue::Int)
                                 .ok_or(ConstEvalError::Overflow)
                         }
-                    }
+                    },
                     ConstValue::Float(f) => {
                         if fenv_access {
                             return Err(ConstEvalError::NotConstant);
@@ -227,13 +247,24 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     ConstValue::Int(i) => {
                         // 无符号类型: 掩码到类型宽度 (如 ~0U → 0xFFFFFFFF)
                         // 有符号类型: 直接 !i (保留符号扩展, 如 ~0 → -1)
-                        let is_unsigned = matches!(&e.ty(),
-                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
-                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let is_unsigned = matches!(
+                            &e.ty(),
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                                | Type::UInt128
+                        );
                         let result = if is_unsigned {
                             if let Some(bits) = int_type_bits(&e.ty()) {
                                 if bits < 128 {
-                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    let mask = if bits == 64 {
+                                        u64::MAX as i128
+                                    } else {
+                                        (1i128 << bits) - 1
+                                    };
                                     !i & mask
                                 } else {
                                     !i
@@ -245,7 +276,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                             !i
                         };
                         Ok(ConstValue::Int(result))
-                    }
+                    },
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Plus => {
@@ -255,8 +286,14 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     Ok(v)
                 },
             }
-        }
-        Expr::Binop { op, l, r, ty: ref binop_ty, .. } => {
+        },
+        Expr::Binop {
+            op,
+            l,
+            r,
+            ty: ref binop_ty,
+            ..
+        } => {
             // && / || 用整数语义, 不要求两边都是常量
             if matches!(op, BinOp::AndAnd) {
                 let lv = eval(l)?;
@@ -285,8 +322,8 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         let n = eval_full(r, fenv_access)?
                             .as_int()
                             .ok_or(ConstEvalError::NotConstant)?;
-                        let scale = pointee_byte_scale(&l.ty())
-                            .ok_or(ConstEvalError::NotConstant)?;
+                        let scale =
+                            pointee_byte_scale(&l.ty()).ok_or(ConstEvalError::NotConstant)?;
                         let delta = n * scale;
                         return Ok(ConstValue::Addr {
                             name,
@@ -302,8 +339,8 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         let n = eval_full(l, fenv_access)?
                             .as_int()
                             .ok_or(ConstEvalError::NotConstant)?;
-                        let scale = pointee_byte_scale(&r.ty())
-                            .ok_or(ConstEvalError::NotConstant)?;
+                        let scale =
+                            pointee_byte_scale(&r.ty()).ok_or(ConstEvalError::NotConstant)?;
                         return Ok(ConstValue::Addr {
                             name,
                             offset: offset + n * scale,
@@ -320,7 +357,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
                 _ => arith_binop_values(*op, binop_ty, l, r, lv, rv, fenv_access),
             }
-        }
+        },
         Expr::Cast { ty, e, .. } => {
             // 强制类型转换: 数值保留, 指针转换产生 NotConstant
             let v = eval_full(e, fenv_access)?;
@@ -387,7 +424,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             }
             // 浮点 / 指针等: 简化处理, 让 codegen 处理位宽
             Ok(v)
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
@@ -396,11 +433,11 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             } else {
                 eval_full(else_, fenv_access)
             }
-        }
+        },
         Expr::Comma { l, r, .. } => {
             eval(l)?;
             eval_full(r, fenv_access)
-        }
+        },
         Expr::ComplexLit { real, imag, .. } => {
             // 复数字面量: 返回虚部值 (实部在 __real__ 提取时使用)
             // 常量上下文中复数通常通过 __real__/__imag__ 访问;
@@ -414,7 +451,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             } else {
                 Ok(ConstValue::Float(*real))
             }
-        }
+        },
         Expr::Real { e, .. } => {
             // __real__ expr: 提取实部
             match eval_full(e, false)? {
@@ -427,11 +464,11 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         // 标量的 __real__ 返回自身
                         Ok(ConstValue::Float(f))
                     }
-                }
+                },
                 v @ ConstValue::Int(_) => Ok(v), // 标量的 __real__ 返回自身
                 _ => Err(ConstEvalError::NotConstant),
             }
-        }
+        },
         Expr::Imag { e, .. } => {
             // __imag__ expr: 提取虚部
             match eval_full(e, false)? {
@@ -443,14 +480,12 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         let _ = f;
                         Ok(ConstValue::Int(0))
                     }
-                }
+                },
                 ConstValue::Int(_) => Ok(ConstValue::Int(0)), // 标量虚部为 0
                 _ => Err(ConstEvalError::NotConstant),
             }
-        }
-        Expr::Offsetof { ty, member, .. } => {
-            Ok(ConstValue::Int(eval_offsetof(ty, member) as i128))
-        }
+        },
+        Expr::Offsetof { ty, member, .. } => Ok(ConstValue::Int(eval_offsetof(ty, member) as i128)),
         Expr::StmtExpr { block, .. } => eval_stmt_expr_block(block),
         // 编译期可求值的 GCC/LLVM 内建函数: 参数是常量时返回常量结果。
         // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
@@ -462,14 +497,20 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             }
             // constexpr 函数调用在 parser 层不展开, 走 NotConstant
             Err(ConstEvalError::NotConstant)
-        }
-        Expr::Assign { l: _, r, op: _, ty: _, span: _ } => {
+        },
+        Expr::Assign {
+            l: _,
+            r,
+            op: _,
+            ty: _,
+            span: _,
+        } => {
             // Assignment expression as sub-expression: return the value of RHS
             // after evaluation, so that parent expression can continue constant folding.
             // Side effects (storing to LValue) cannot be done in compile-time constant evaluation,
             // so they will be handled at runtime. We just need to return the value of RHS.
             return eval_full(&*r, fenv_access);
-        }
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
@@ -493,22 +534,26 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
                     } else {
                         32
                     }
-                }
+                },
                 _ => 64,
             };
             // 截断到对应类型宽度, 避免超宽零扩展影响前导零计数
             let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
             let truncated = (v as u128) & mask;
-            let lz = if truncated == 0 { bits as u32 } else { 128 - truncated.leading_zeros() };
+            let lz = if truncated == 0 {
+                bits as u32
+            } else {
+                128 - truncated.leading_zeros()
+            };
             Ok(Some(bits as i128 - lz as i128))
-        }
+        },
         "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" if argc == 1 => {
             let v = take1(args)?;
             if v == 0 {
                 return Ok(Some(0));
             } // GCC 约定: 输入 0 时结果未定义, 取 0
             Ok(Some((v as u64).trailing_zeros() as i128))
-        }
+        },
         "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" if argc == 1 => {
             let v = take1(args)?;
             if v == 0 {
@@ -517,31 +562,45 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
             // 截断到对应类型宽度, 避免超宽零扩展影响
             let bits = match name {
                 "__builtin_ffs" => 32,
-                "__builtin_ffsl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                "__builtin_ffsl" => {
+                    if cfg!(target_pointer_width = "64") {
+                        64
+                    } else {
+                        32
+                    }
+                },
                 _ => 64,
             };
             let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
             let truncated = (v as u128) & mask;
-            if truncated == 0 { return Ok(Some(0)); }
+            if truncated == 0 {
+                return Ok(Some(0));
+            }
             Ok(Some(truncated.trailing_zeros() as i128 + 1))
-        }
+        },
         "__builtin_bswap16" if argc == 1 => {
             let v = take1(args)?;
             Ok(Some((v as u16).swap_bytes() as i128))
-        }
+        },
         "__builtin_bswap32" if argc == 1 => {
             let v = take1(args)?;
             Ok(Some((v as u32).swap_bytes() as i128))
-        }
+        },
         "__builtin_bswap64" if argc == 1 => {
             let v = take1(args)?;
             Ok(Some((v as u64).swap_bytes() as i128))
-        }
+        },
         // __builtin_clrsb/clrsbl/clrsbll: 计算符号位冗余位数
         "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" if argc == 1 => {
             let bits = match name {
                 "__builtin_clrsb" => 32,
-                "__builtin_clrsbl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                "__builtin_clrsbl" => {
+                    if cfg!(target_pointer_width = "64") {
+                        64
+                    } else {
+                        32
+                    }
+                },
                 _ => 64,
             };
             let v = take1(args)?;
@@ -558,31 +617,43 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
                 let lz = 128 - xored.leading_zeros();
                 Ok(Some((bits as u32 - lz) as i128 - 1))
             }
-        }
+        },
         // __builtin_parity/parityl/parityll
         "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" if argc == 1 => {
             let bits = match name {
                 "__builtin_parity" => 32,
-                "__builtin_parityl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                "__builtin_parityl" => {
+                    if cfg!(target_pointer_width = "64") {
+                        64
+                    } else {
+                        32
+                    }
+                },
                 _ => 64,
             };
             let v = take1(args)?;
             let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
             let truncated = (v as u128) & mask;
             Ok(Some((truncated.count_ones() as i128) & 1))
-        }
+        },
         // __builtin_popcount/popcountl/popcountll
         "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" if argc == 1 => {
             let bits = match name {
                 "__builtin_popcount" => 32,
-                "__builtin_popcountl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                "__builtin_popcountl" => {
+                    if cfg!(target_pointer_width = "64") {
+                        64
+                    } else {
+                        32
+                    }
+                },
                 _ => 64,
             };
             let v = take1(args)?;
             let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
             let truncated = (v as u128) & mask;
             Ok(Some(truncated.count_ones() as i128))
-        }
+        },
         _ => {
             // Unknown __builtin_* functions are not silently ignored;
             // return a distinct error so callers can differentiate from
@@ -591,7 +662,7 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
                 return Err(ConstEvalError::NotConstant);
             }
             Ok(None)
-        }
+        },
     }
 }
 
@@ -611,14 +682,14 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
             BlockItem::Stmt(Stmt::Expr { e, .. }) => {
                 // 中间语句: 必须是可求值的常量表达式 (结果丢弃)
                 eval_with_env(e, &env, false)?;
-            }
+            },
             BlockItem::Decl(Decl::Var(v)) => {
                 // Track variable binding: evaluate init and store in env
                 if let Some(init) = &v.init {
                     let val = eval_with_env(init, &env, false)?;
                     env.insert(v.name.name.clone(), val);
                 }
-            }
+            },
             _ => return Err(ConstEvalError::NotConstant),
         }
     }
@@ -631,7 +702,11 @@ fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
 
 /// Like eval_full but with a variable environment for looking up
 /// identifiers bound within statement expressions.
-fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn eval_with_env(
+    expr: &Expr,
+    ctx: &HashMap<String, ConstValue>,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     // Check if this is a simple identifier lookup in the ctx
     if let Expr::Ident { name, .. } = expr {
         if let Some(val) = ctx.get(&name.name) {
@@ -645,29 +720,43 @@ fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bo
             let lv = eval_with_env(l, ctx, fenv_access)?;
             let rv = eval_with_env(r, ctx, fenv_access)?;
             match op {
-                BinOp::AndAnd => {
-                    Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 { 0 }
-                        else if rv.as_int().unwrap_or(0) != 0 { 1 } else { 0 }))
-                }
+                BinOp::AndAnd => Ok(ConstValue::Int(if lv.as_int().unwrap_or(0) == 0 {
+                    0
+                } else if rv.as_int().unwrap_or(0) != 0 {
+                    1
+                } else {
+                    0
+                })),
                 BinOp::OrOr => Ok(ConstValue::Int(
                     (lv.as_int().unwrap_or(0) != 0 || rv.as_int().unwrap_or(0) != 0) as i128,
                 )),
                 // 算术/比较统一走类型感知路径 (与 eval_binop 共用)
                 _ => arith_binop_values(*op, ty, l, r, lv, rv, fenv_access),
             }
-        }
+        },
         Expr::Unary { op, e, .. } => {
             let v = eval_with_env(e, ctx, fenv_access)?;
             match op {
                 UnOp::Neg => match v {
                     ConstValue::Int(i) => {
-                        let is_unsigned = matches!(&e.ty(),
-                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
-                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let is_unsigned = matches!(
+                            &e.ty(),
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                                | Type::UInt128
+                        );
                         if is_unsigned {
                             if let Some(bits) = int_type_bits(&e.ty()) {
                                 if bits < 128 {
-                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    let mask = if bits == 64 {
+                                        u64::MAX as i128
+                                    } else {
+                                        (1i128 << bits) - 1
+                                    };
                                     Ok(ConstValue::Int((!i + 1) & mask))
                                 } else {
                                     Ok(ConstValue::Int(i.wrapping_neg()))
@@ -676,9 +765,11 @@ fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bo
                                 Ok(ConstValue::Int(i.wrapping_neg()))
                             }
                         } else {
-                            i.checked_neg().map(ConstValue::Int).ok_or(ConstEvalError::Overflow)
+                            i.checked_neg()
+                                .map(ConstValue::Int)
+                                .ok_or(ConstEvalError::Overflow)
                         }
-                    }
+                    },
                     ConstValue::Float(f) => {
                         if fenv_access {
                             return Err(ConstEvalError::NotConstant);
@@ -693,13 +784,24 @@ fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bo
                 },
                 UnOp::BitNot => match v {
                     ConstValue::Int(i) => {
-                        let is_unsigned = matches!(&e.ty(),
-                            Type::Bool | Type::UChar | Type::UShort | Type::UInt
-                            | Type::ULong | Type::ULongLong | Type::UInt128);
+                        let is_unsigned = matches!(
+                            &e.ty(),
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                                | Type::UInt128
+                        );
                         let result = if is_unsigned {
                             if let Some(bits) = int_type_bits(&e.ty()) {
                                 if bits < 128 {
-                                    let mask = if bits == 64 { u64::MAX as i128 } else { (1i128 << bits) - 1 };
+                                    let mask = if bits == 64 {
+                                        u64::MAX as i128
+                                    } else {
+                                        (1i128 << bits) - 1
+                                    };
                                     !i & mask
                                 } else {
                                     !i
@@ -711,7 +813,7 @@ fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bo
                             !i
                         };
                         Ok(ConstValue::Int(result))
-                    }
+                    },
                     _ => Err(ConstEvalError::NotConstant),
                 },
                 UnOp::Plus => {
@@ -721,7 +823,7 @@ fn eval_with_env(expr: &Expr, ctx: &HashMap<String, ConstValue>, fenv_access: bo
                     Ok(v)
                 },
             }
-        }
+        },
         Expr::Cast { e, .. } => eval_with_env(e, ctx, fenv_access),
         _ => eval_full(expr, fenv_access),
     }
@@ -828,7 +930,7 @@ fn arith_binop_values(
             } else {
                 mod_values(lv, rv, fenv_access)
             }
-        }
+        },
         BinOp::And => match (lv, rv) {
             (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(normalize_int_value(
                 normalize_int_value(a, binop_ty) & normalize_int_value(b, binop_ty),
@@ -852,15 +954,12 @@ fn arith_binop_values(
         },
         BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv.as_int().unwrap_or(-1)) => {
             Err(ConstEvalError::InvalidShift(rv.as_int().unwrap_or(0)))
-        }
+        },
         BinOp::Shl => match (lv, rv) {
             (ConstValue::Int(a), ConstValue::Int(b)) => {
                 let a = normalize_int_value(a, binop_ty);
-                Ok(ConstValue::Int(normalize_int_value(
-                    a.wrapping_shl(b as u32),
-                    binop_ty,
-                )))
-            }
+                Ok(ConstValue::Int(normalize_int_value(a.wrapping_shl(b as u32), binop_ty)))
+            },
             _ => Err(ConstEvalError::NotConstant),
         },
         BinOp::Shr => match (lv, rv) {
@@ -869,7 +968,7 @@ fn arith_binop_values(
                 // 规范化 (掩码) 后逻辑右移。
                 let a = normalize_int_value(a, binop_ty);
                 Ok(ConstValue::Int(normalize_int_value(a >> b, binop_ty)))
-            }
+            },
             _ => Err(ConstEvalError::NotConstant),
         },
         BinOp::Lt => cmp_binop_values(l, r, lv, rv, |a, b| (a < b) as i128),
@@ -895,13 +994,9 @@ fn cmp_binop_values<F: Fn(i128, i128) -> i128>(
     f: F,
 ) -> Result<ConstValue, ConstEvalError> {
     if let (&ConstValue::Int(a), &ConstValue::Int(b)) = (&lv, &rv) {
-        let unsigned_cmp = matches!(
-            &l.ty(),
-            Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128
-        ) || matches!(
-            &r.ty(),
-            Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128
-        );
+        let unsigned_cmp =
+            matches!(&l.ty(), Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128)
+                || matches!(&r.ty(), Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128);
         let a = normalize_int_value(a, &l.ty());
         let b = normalize_int_value(b, &r.ty());
         let res = if unsigned_cmp {
@@ -924,7 +1019,11 @@ fn pointee_byte_scale(ty: &Type) -> Option<i128> {
     }
 }
 
-fn add_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn add_values(
+    l: ConstValue,
+    r: ConstValue,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_add(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
@@ -948,7 +1047,11 @@ fn add_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstVa
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn sub_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn sub_values(
+    l: ConstValue,
+    r: ConstValue,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_sub(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
@@ -972,7 +1075,11 @@ fn sub_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstVa
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn mul_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn mul_values(
+    l: ConstValue,
+    r: ConstValue,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_mul(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
@@ -996,7 +1103,11 @@ fn mul_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstVa
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn div_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn div_values(
+    l: ConstValue,
+    r: ConstValue,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
         (ConstValue::Int(a), ConstValue::Int(b)) => a
@@ -1024,7 +1135,11 @@ fn div_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstVa
         _ => Err(ConstEvalError::NotConstant),
     }
 }
-fn mod_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstValue, ConstEvalError> {
+fn mod_values(
+    l: ConstValue,
+    r: ConstValue,
+    fenv_access: bool,
+) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
         (ConstValue::Int(a), ConstValue::Int(b)) => a
@@ -1040,7 +1155,8 @@ fn mod_values(l: ConstValue, r: ConstValue, fenv_access: bool) -> Result<ConstVa
             if b == 0.0 {
                 return Err(ConstEvalError::DivisionByZero);
             }
-            Ok(ConstValue::Float(a % b))        }
+            Ok(ConstValue::Float(a % b))
+        },
         _ => Err(ConstEvalError::NotConstant),
     }
 }
@@ -1117,7 +1233,7 @@ pub fn eval_offsetof(ty: &Type, member: &str) -> usize {
                 }
             }
             offset
-        }
+        },
         _ => 0,
     }
 }
@@ -1144,7 +1260,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                 } else {
                     write!(f, "'\\x{:x}'", *v)
                 }
-            }
+            },
             Expr::Float { v, .. } => write!(f, "{}", v),
             Expr::String { data, .. } => {
                 write!(f, "\"")?;
@@ -1163,7 +1279,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                     }
                 }
                 write!(f, "\"")
-            }
+            },
             Expr::Ident { name, .. } => write!(f, "{}", name.name),
             Expr::Binop { op, l, r, .. } => {
                 let sym = match op {
@@ -1187,7 +1303,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                     BinOp::OrOr => "||",
                 };
                 write!(f, "({} {} {})", ExprDebug(l), sym, ExprDebug(r))
-            }
+            },
             Expr::Unary { op, e, .. } => {
                 let sym = match op {
                     UnOp::Neg => "-",
@@ -1196,7 +1312,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                     UnOp::Plus => "+",
                 };
                 write!(f, "{}{}", sym, ExprDebug(e))
-            }
+            },
             Expr::SizeofTy { ty, .. } => write!(f, "sizeof({})", ty),
             Expr::SizeofExpr { e, .. } => write!(f, "sizeof({})", ExprDebug(e)),
             Expr::AlignofTy { ty, .. } => write!(f, "_Alignof({})", ty),
@@ -1214,7 +1330,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                 } else {
                     write!(f, "{}.{}", ExprDebug(expr), field.name)
                 }
-            }
+            },
             Expr::AddrOf { e, .. } => write!(f, "&{}", ExprDebug(e)),
             Expr::Deref { e, .. } => write!(f, "*{}", ExprDebug(e)),
             Expr::Call { callee, args, .. } => {
@@ -1226,18 +1342,12 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                     write!(f, "{}", ExprDebug(a))?;
                 }
                 write!(f, ")")
-            }
+            },
             Expr::Cond {
                 cond, then_, else_, ..
             } => {
-                write!(
-                    f,
-                    "({} ? {} : {})",
-                    ExprDebug(cond),
-                    ExprDebug(then_),
-                    ExprDebug(else_)
-                )
-            }
+                write!(f, "({} ? {} : {})", ExprDebug(cond), ExprDebug(then_), ExprDebug(else_))
+            },
             Expr::Assign { l, r, .. } => write!(f, "{} = {}", ExprDebug(l), ExprDebug(r)),
             Expr::PostInc { e, .. } => write!(f, "{}++", ExprDebug(e)),
             Expr::PostDec { e, .. } => write!(f, "{}--", ExprDebug(e)),
@@ -1254,11 +1364,11 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                         crate::ast::InitItem::Expr(e) => write!(f, "{}", ExprDebug(e))?,
                         crate::ast::InitItem::Designated { value, .. } => {
                             write!(f, "{}", ExprDebug(value))?
-                        }
+                        },
                     }
                 }
                 write!(f, "}}")
-            }
+            },
             Expr::InitList { inits, .. } => {
                 write!(f, "{{")?;
                 for (i, it) in inits.iter().enumerate() {
@@ -1269,11 +1379,11 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                         crate::ast::InitItem::Expr(e) => write!(f, "{}", ExprDebug(e))?,
                         crate::ast::InitItem::Designated { value, .. } => {
                             write!(f, "{}", ExprDebug(value))?
-                        }
+                        },
                     }
                 }
                 write!(f, "}}")
-            }
+            },
             Expr::Offsetof { ty, member, .. } => write!(f, "offsetof({}, {})", ty, member),
             _ => write!(f, "<expr>"),
         }
@@ -1301,7 +1411,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                 } else {
                     Some(total)
                 }
-            }
+            },
             _ => Some(ty.size() as i128),
         },
         Expr::String { data, .. } => {
@@ -1312,7 +1422,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             } else {
                 Some(total)
             }
-        }
+        },
         Expr::Index {
             arr,
             idx,
@@ -1329,7 +1439,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             } else {
                 Some(parent)
             }
-        }
+        },
         Expr::Member {
             expr,
             field,
@@ -1356,7 +1466,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                 (false, Type::Struct(_, f, _, _) | Type::Union(_, f, _, _)) => lookup(f.as_ref()),
                 _ => None,
             }
-        }
+        },
         Expr::Deref { e, .. } => object_size_of(e, mode),
         // Transparent wrappers: cast and address-of do not change object size
         Expr::Cast { e, .. } => object_size_of(e, mode),
@@ -1365,9 +1475,9 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
         Expr::CompoundLit { ty, .. } => Some(ty.size() as i128),
         // Pointer arithmetic: (ptr + offset) retains base object size
         // Only when the left operand is actually a pointer type
-        Expr::Binop { op: BinOp::Add, l, .. } if matches!(l.ty(), Type::Ptr(_)) => {
-            object_size_of(l, mode)
-        }
+        Expr::Binop {
+            op: BinOp::Add, l, ..
+        } if matches!(l.ty(), Type::Ptr(_)) => object_size_of(l, mode),
         _ => None,
     }
 }
@@ -1398,26 +1508,14 @@ mod tests {
 
     #[test]
     fn evaluates_full_width_mul_div_mod() {
-        assert_eq!(
-            eval(&bin(BinOp::Mul, 1i128 << 80, 17)),
-            Ok((1i128 << 80) * 17)
-        );
-        assert_eq!(
-            eval(&bin(BinOp::Div, (1i128 << 100) + 9, 3)),
-            Ok(((1i128 << 100) + 9) / 3)
-        );
-        assert_eq!(
-            eval(&bin(BinOp::Mod, (1i128 << 100) + 9, 7)),
-            Ok(((1i128 << 100) + 9) % 7)
-        );
+        assert_eq!(eval(&bin(BinOp::Mul, 1i128 << 80, 17)), Ok((1i128 << 80) * 17));
+        assert_eq!(eval(&bin(BinOp::Div, (1i128 << 100) + 9, 3)), Ok(((1i128 << 100) + 9) / 3));
+        assert_eq!(eval(&bin(BinOp::Mod, (1i128 << 100) + 9, 7)), Ok(((1i128 << 100) + 9) % 7));
     }
 
     #[test]
     fn division_by_zero_is_not_zero() {
-        assert_eq!(
-            eval(&bin(BinOp::Div, 4, 0)),
-            Err(ConstEvalError::DivisionByZero)
-        );
+        assert_eq!(eval(&bin(BinOp::Div, 4, 0)), Err(ConstEvalError::DivisionByZero));
     }
 
     #[test]
@@ -1515,7 +1613,7 @@ mod tests {
             Ok(ConstValue::Str { data, label }) => {
                 assert_eq!(data, b"hello\0");
                 assert!(label.starts_with(".L.str.const."));
-            }
+            },
             other => panic!("expected Str, got {:?}", other),
         }
     }
@@ -1539,7 +1637,7 @@ mod tests {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "arr");
                 assert_eq!(offset, 0);
-            }
+            },
             other => panic!("expected Addr, got {:?}", other),
         }
     }
@@ -1570,7 +1668,7 @@ mod tests {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "buf");
                 assert_eq!(offset, 4);
-            }
+            },
             other => panic!("expected Addr, got {:?}", other),
         }
     }
@@ -1589,7 +1687,7 @@ mod tests {
             Ok(ConstValue::Addr { name, offset }) => {
                 assert_eq!(name, "my_label");
                 assert_eq!(offset, 0);
-            }
+            },
             other => panic!("expected Addr, got {:?}", other),
         }
     }

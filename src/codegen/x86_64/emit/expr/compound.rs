@@ -18,8 +18,8 @@ impl Codegen {
                 // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
                 self.gen_expr(l, 0);
                 self.gen_expr(r, dst);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -39,8 +39,8 @@ impl Codegen {
                 self.label(&le);
                 self.gen_expr(else_, dst);
                 self.label(&lend);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -64,8 +64,8 @@ impl Codegen {
                 self.gen_init_list_at(base_offset, ty, inits);
                 // dst = r13 + base_offset (compound lit address)
                 self.emit_lea_r13(dst, base_offset);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -103,8 +103,8 @@ impl Codegen {
                     self.emit(&[0x0F, 0x0B]); // ud2
                     self.mov_imm(dst, 0);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -141,8 +141,8 @@ impl Codegen {
                 // rax = 指向 complex 值 (spill_complex_operand / 整体赋值
                 // 从 rax rep movsb 物化; 浮点路径 rax 已被 imm 加载破坏)
                 self.emit_lea_r13(0, result_off);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

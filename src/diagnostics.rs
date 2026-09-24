@@ -157,7 +157,7 @@ impl ColorPolicy {
             ColorPolicy::Auto => {
                 // std::io::stderr().is_terminal() 在 unix 与 windows 都可用
                 std::io::IsTerminal::is_terminal(&std::io::stderr())
-            }
+            },
         }
     }
     pub fn from_arg(s: &str) -> Result<Self, String> {
@@ -243,11 +243,7 @@ impl fmt::Display for Diagnostic {
 
         if self.span.line > 0 {
             // 第二行:   --> file:line:col
-            writeln!(
-                f,
-                "  --> {}:{}:{}",
-                self.span.file, self.span.line, self.span.col
-            )?;
+            writeln!(f, "  --> {}:{}:{}", self.span.file, self.span.line, self.span.col)?;
 
             if let Some(src) = &self.source_line {
                 let line_no = self.span.line;
@@ -305,10 +301,7 @@ fn msvc_first_line(d: &Diagnostic) -> String {
         Severity::Note => "note",
     };
     if d.span.line > 0 {
-        format!(
-            "{}({},{}): {} {}: {}",
-            d.span.file, d.span.line, d.span.col, s, d.code, d.msg
-        )
+        format!("{}({},{}): {} {}: {}", d.span.file, d.span.line, d.span.col, s, d.code, d.msg)
     } else {
         format!("{} {}: {}", s, d.code, d.msg)
     }
@@ -317,13 +310,7 @@ fn msvc_first_line(d: &Diagnostic) -> String {
 /// vi 风格首行:  `file:line:col: error[E0001]: msg`
 fn vi_first_line(d: &Diagnostic) -> String {
     if d.span.line > 0 {
-        format!(
-            "{}:{}:{}: {}",
-            d.span.file,
-            d.span.line,
-            d.span.col,
-            gh_first_line(d)
-        )
+        format!("{}:{}:{}: {}", d.span.file, d.span.line, d.span.col, gh_first_line(d))
     } else {
         format!("{}: {}", d.span.file, gh_first_line(d))
     }
@@ -381,15 +368,12 @@ pub fn render(d: &Diagnostic, fmt: FormatStyle) -> String {
             // 与原 fmt::Display 一致
             let mut s = format!("{}: {}\n", d.sev_tag(), d.msg);
             if d.span.line > 0 {
-                s.push_str(&format!(
-                    "  --> {}:{}:{}\n",
-                    d.span.file, d.span.line, d.span.col
-                ));
+                s.push_str(&format!("  --> {}:{}:{}\n", d.span.file, d.span.line, d.span.col));
                 s.push_str(&source_caret_block(d));
             }
             s.push_str(&hint_tail(d));
             s
-        }
+        },
         FormatStyle::Clang => {
             let mut s = format!("{}\n", clang_first_line(d));
             if d.span.line > 0 {
@@ -397,17 +381,17 @@ pub fn render(d: &Diagnostic, fmt: FormatStyle) -> String {
             }
             s.push_str(&hint_tail(d));
             s
-        }
+        },
         FormatStyle::Msvc => {
             format!("{}\n", msvc_first_line(d))
-        }
+        },
         FormatStyle::Vi => {
             format!("{}\n", vi_first_line(d))
-        }
+        },
         FormatStyle::Sarif => {
             // 单条 diagnostic 在 SARIF 模式由 render_sarif 统一处理
             String::new()
-        }
+        },
     }
 }
 
@@ -470,7 +454,7 @@ fn sarif_escape_json(s: &str) -> String {
             '\x0c' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
-            }
+            },
             c => out.push(c),
         }
     }
@@ -483,10 +467,7 @@ fn sarif_result(d: &Diagnostic) -> String {
     let msg = sarif_escape_json(&d.msg);
     let file = sarif_escape_json(&d.span.file);
     let hint_part = match &d.hint {
-        Some(h) => format!(
-            ",\n      \"properties\": {{\"hint\": \"{}\"}}",
-            sarif_escape_json(h)
-        ),
+        Some(h) => format!(",\n      \"properties\": {{\"hint\": \"{}\"}}", sarif_escape_json(h)),
         None => String::new(),
     };
     if d.span.line > 0 {
@@ -574,8 +555,8 @@ fn looks_like_template(s: &str) -> bool {
                 if depth < 0 {
                     return false;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     depth == 0
@@ -600,8 +581,8 @@ fn build_template_tree(s: &str) -> String {
                     close = i;
                     break;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     let inside = &rest[..close];
@@ -641,8 +622,8 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
             ',' if depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     out.push(&s[start..]);
@@ -856,10 +837,7 @@ mod tests {
 
     #[test]
     fn color_policy_from_arg_ok() {
-        assert_eq!(
-            ColorPolicy::from_arg("always").unwrap(),
-            ColorPolicy::Always
-        );
+        assert_eq!(ColorPolicy::from_arg("always").unwrap(), ColorPolicy::Always);
         assert_eq!(ColorPolicy::from_arg("never").unwrap(), ColorPolicy::Never);
         assert_eq!(ColorPolicy::from_arg("auto").unwrap(), ColorPolicy::Auto);
         assert!(ColorPolicy::from_arg("maybe").is_err());
@@ -867,10 +845,7 @@ mod tests {
 
     #[test]
     fn format_style_from_arg_ok() {
-        assert_eq!(
-            FormatStyle::from_arg("github").unwrap(),
-            FormatStyle::Github
-        );
+        assert_eq!(FormatStyle::from_arg("github").unwrap(), FormatStyle::Github);
         assert_eq!(FormatStyle::from_arg("clang").unwrap(), FormatStyle::Clang);
         assert_eq!(FormatStyle::from_arg("msvc").unwrap(), FormatStyle::Msvc);
         assert_eq!(FormatStyle::from_arg("vi").unwrap(), FormatStyle::Vi);

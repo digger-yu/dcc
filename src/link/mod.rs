@@ -20,6 +20,7 @@
 //   let r = link::link_shared(&[a.o, b.o], &output, &LinkConfig::default());
 //   let r = link::link_with_lto(&[a.o, b.o], &output, &LinkConfig::default(), &[("a.c", module), ...]);
 
+pub mod ar_archive;
 pub mod build_id;
 pub mod dso_cache;
 pub mod eh_frame;
@@ -33,7 +34,7 @@ pub mod legacy;
 pub mod link_opts;
 pub mod linker_script;
 pub mod lto_bitcode;
-pub mod lto_call_graph_stubs;  // Placeholder for PR-LTO-1 (stub implementation)
+pub mod lto_call_graph_stubs; // Placeholder for PR-LTO-1 (stub implementation)
 pub mod object;
 pub mod pe;
 pub mod plt_got;
@@ -42,7 +43,6 @@ pub mod resolve;
 pub mod symver;
 pub mod target_clones;
 pub mod vdso;
-pub mod ar_archive;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,16 +52,15 @@ use crate::diagnostics::{Diagnostic, Span};
 
 pub use elf_dyn::{
     write_elf_pie_aarch64, write_elf_pie_arm, write_elf_pie_mips64, write_elf_pie_riscv32,
-    write_elf_pie_riscv64, write_elf_pie_x86_64, write_elf_shared_aarch64,
-    write_elf_shared_arm, write_elf_shared_mips64, write_elf_shared_riscv32,
-    write_elf_shared_riscv64, write_elf_shared_x86_64,
+    write_elf_pie_riscv64, write_elf_pie_x86_64, write_elf_shared_aarch64, write_elf_shared_arm,
+    write_elf_shared_mips64, write_elf_shared_riscv32, write_elf_shared_riscv64,
+    write_elf_shared_x86_64,
 };
 pub use elf_exec::{
-    write_elf_exec_aarch64, write_elf_exec_arm, write_elf_exec_mips64,
-    write_elf_exec_riscv32, write_elf_exec_riscv64, write_elf_exec_x86_64,
-    write_elf_relocatable_aarch64, write_elf_relocatable_arm, write_elf_relocatable_mips64,
-    write_elf_relocatable_riscv32, write_elf_relocatable_riscv64,
-    write_elf_relocatable_x86_64,
+    write_elf_exec_aarch64, write_elf_exec_arm, write_elf_exec_mips64, write_elf_exec_riscv32,
+    write_elf_exec_riscv64, write_elf_exec_x86_64, write_elf_relocatable_aarch64,
+    write_elf_relocatable_arm, write_elf_relocatable_mips64, write_elf_relocatable_riscv32,
+    write_elf_relocatable_riscv64, write_elf_relocatable_x86_64,
 };
 pub use layout::LayoutBuilder;
 pub use legacy::link_relocatable;
@@ -300,17 +299,18 @@ pub fn link_multi_tu(
             Ok(members) => {
                 all_inputs.extend(members.clone());
                 members
-            }
+            },
             Err(e) => {
                 return Err(diag("E0320", format!("--whole-archive: {}", e)));
-            }
+            },
         }
     } else {
         Vec::new()
     };
 
     let result = {
-        let bundle = InputBundle::from_files(&all_inputs).map_err(|e| diag("E0301", e.to_string()))?;
+        let bundle =
+            InputBundle::from_files(&all_inputs).map_err(|e| diag("E0301", e.to_string()))?;
         link_from_bundle(&bundle, output, cfg)
     };
 
@@ -328,11 +328,7 @@ pub fn link_from_bundle(
     cfg: &LinkConfig,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
     if cfg.verbose {
-        eprintln!(
-            "dcc-link: {} object(s), output = {}",
-            bundle.objects.len(),
-            output.display()
-        );
+        eprintln!("dcc-link: {} object(s), output = {}", bundle.objects.len(), output.display());
         eprintln!("dcc-link: opts: {}", link_opts::opts_summary(&cfg.opts));
     }
     // 0. 收集 input bundle 中的 .symver / target_clones / destructor 信息
@@ -355,17 +351,14 @@ pub fn link_from_bundle(
                             .add_version_defs(locals, ver_id, true);
                     }
                     script.extract_defined_symbols()
-                }
+                },
                 Err(e) => {
                     return Err(diag("E0310", format!("linker script parse error: {}", e)));
-                }
+                },
             },
             Err(e) => {
-                return Err(diag(
-                    "E0311",
-                    format!("failed to read linker script: {}", e),
-                ));
-            }
+                return Err(diag("E0311", format!("failed to read linker script: {}", e)));
+            },
         }
     } else {
         Vec::new()
@@ -391,15 +384,12 @@ pub fn link_from_bundle(
                 for sym_name in info.dyn_symbols.keys() {
                     dso_symbols.push(sym_name.clone());
                 }
-            }
+            },
             Err(e) => {
                 if cfg_owned.verbose {
-                    eprintln!(
-                        "dcc-link: warning: cannot resolve -l{}: {}",
-                        lib_name, e
-                    );
+                    eprintln!("dcc-link: warning: cannot resolve -l{}: {}", lib_name, e);
                 }
-            }
+            },
         }
     }
     cfg_owned.allowed_undef.extend(dso_symbols);
@@ -407,10 +397,7 @@ pub fn link_from_bundle(
     // 0.9 COMDAT 组去重 (在符号解析之前, 丢弃重复 COMDAT 组的节)
     let comdat_discarded = resolve::resolve_comdat_groups(bundle);
     if cfg.verbose && !comdat_discarded.is_empty() {
-        eprintln!(
-            "dcc-link: COMDAT dedup: {} section(s) discarded",
-            comdat_discarded.len()
-        );
+        eprintln!("dcc-link: COMDAT dedup: {} section(s) discarded", comdat_discarded.len());
     }
     // 1. 符号解析
     let mut undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
@@ -523,8 +510,9 @@ pub fn link_from_bundle(
             }
 
             // 生成 IRELATIVE 重定位 (使用 resolver 真实地址)
-            let (new_syms, irel_relas) =
-                cfg.target_clones.gen_irelative_relas(&layout, &resolver_vaddrs);
+            let (new_syms, irel_relas) = cfg
+                .target_clones
+                .gen_irelative_relas(&layout, &resolver_vaddrs);
             for s in new_syms {
                 layout.symbols.push(s);
             }
@@ -534,8 +522,9 @@ pub fn link_from_bundle(
         } else {
             // 无 resolver 代码 (仅 default 变体), 使用 default 地址
             let empty_vaddrs = HashMap::new();
-            let (new_syms, irel_relas) =
-                cfg.target_clones.gen_irelative_relas(&layout, &empty_vaddrs);
+            let (new_syms, irel_relas) = cfg
+                .target_clones
+                .gen_irelative_relas(&layout, &empty_vaddrs);
             for s in new_syms {
                 layout.symbols.push(s);
             }
@@ -590,17 +579,21 @@ pub fn link_from_bundle(
         let dead_set: std::collections::HashSet<&str> =
             cfg.dead_symbols.iter().map(|s| s.as_str()).collect();
         // 剥离死函数符号
-        layout.symbols.retain(|sym| !dead_set.contains(sym.name.as_str()));
+        layout
+            .symbols
+            .retain(|sym| !dead_set.contains(sym.name.as_str()));
         // 移除死函数对应的 .text.{fn} 节及其 SECTION 符号
-        let dead_section_names: std::collections::HashSet<String> =
-            dead_set.iter().map(|name| format!(".text.{}", name)).collect();
+        let dead_section_names: std::collections::HashSet<String> = dead_set
+            .iter()
+            .map(|name| format!(".text.{}", name))
+            .collect();
         layout.symbols.retain(|sym| {
             !(sym.ty == crate::codegen::shared::elf::STT_SECTION
                 && dead_section_names.contains(sym.name.as_str()))
         });
-        layout.sections.retain(|sec| {
-            !dead_section_names.contains(sec.name.as_str())
-        });
+        layout
+            .sections
+            .retain(|sec| !dead_section_names.contains(sec.name.as_str()));
         if cfg.verbose {
             eprintln!(
                 "dcc-link: LTO DCE: {} dead function(s) stripped from symbol table",
@@ -646,11 +639,7 @@ pub fn link_from_bundle(
         }
     };
     if cfg.verbose {
-        eprintln!(
-            "dcc-link: wrote {} ({} bytes)",
-            output.display(),
-            bytes.len()
-        );
+        eprintln!("dcc-link: wrote {} ({} bytes)", output.display(), bytes.len());
         // DSO 缓存统计
         let (hits, misses) = cfg.dso_cache.stats();
         if hits + misses > 0 {
@@ -719,7 +708,9 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
                     // 设置变体 vaddr (稍后在 layout 中更新)
                     if let Some(tcf) = cfg.target_clones.funcs.get_mut(func_name) {
                         for (sym_name, _arch, vaddr) in &variants {
-                            if let Some(variant) = tcf.variants.iter_mut().find(|v| &v.name == sym_name) {
+                            if let Some(variant) =
+                                tcf.variants.iter_mut().find(|v| &v.name == sym_name)
+                            {
                                 variant.vaddr = *vaddr;
                             }
                         }
@@ -779,10 +770,7 @@ pub fn link_with_lto(
     let bytes = link_multi_tu(inputs, output, &link_cfg)?;
     // 4. 报告被 LTO DCE 删除的函数
     if cfg.verbose && !dead_fns.is_empty() {
-        eprintln!(
-            "dcc-link: LTO DCE: {} function(s) dead, stripped from output",
-            dead_fns.len()
-        );
+        eprintln!("dcc-link: LTO DCE: {} function(s) dead, stripped from output", dead_fns.len());
     }
     Ok(bytes)
 }
@@ -853,7 +841,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             let rel32 = (main_vaddr.wrapping_sub(call_next)) as i32 as u32;
             code[10..14].copy_from_slice(&rel32.to_le_bytes());
             code
-        }
+        },
         ArchKind::AArch64 => {
             // mov x0,xzr; mov x1,xzr; mov x2,xzr; bl main;
             // mov x8,#93; svc #0
@@ -871,7 +859,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             let bl_insn = 0x94000000u32 | ((offset as u32) & 0x03FFFFFF);
             code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
             code
-        }
+        },
         ArchKind::RiscV64 | ArchKind::RiscV32 => {
             // addi a0,x0,0; addi a1,x0,0; addi a2,x0,0;
             // jal ra,main; addi a7,x0,93; ecall
@@ -901,7 +889,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             jal_insn |= bits19_12 << 12;
             code[12..16].copy_from_slice(&jal_insn.to_le_bytes());
             code
-        }
+        },
         ArchKind::Mips | ArchKind::Mips64 => {
             // MIPS _start: addiu $a0-$a2, $zero, 0; jal main; nop;
             //              move $a0, $v0; addiu $v0, $zero, 4001; syscall
@@ -924,7 +912,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             code[12..16].copy_from_slice(&jal_insn.to_be_bytes());
             let _ = pc_plus_4;
             code
-        }
+        },
         ArchKind::Arm => {
             // mov r0,#0; mov r1,#0; mov r2,#0; bl main;
             // mov r7,#1; svc #0
@@ -942,7 +930,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             let bl_insn = 0x0b000000u32 | ((offset as u32) & 0x00FFFFFF);
             code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
             code
-        }
+        },
         ArchKind::RiscV32 => {
             // addi a0,x0,0; addi a1,x0,0; addi a2,x0,0;
             // jal ra,main; addi a7,x0,93; ecall
@@ -972,7 +960,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             jal_insn |= bits19_12 << 12;
             code[12..16].copy_from_slice(&jal_insn.to_le_bytes());
             code
-        }
+        },
     };
 
     // 追加到 .text 节
@@ -1022,10 +1010,7 @@ fn embed_vdso(
 
     // 1. 解析 vDSO ELF
     let info = vdso::parse_vdso(vdso_path).map_err(|e| {
-        diag(
-            "E0305",
-            format!("failed to parse vDSO '{}': {}", vdso_path.display(), e),
-        )
+        diag("E0305", format!("failed to parse vDSO '{}': {}", vdso_path.display(), e))
     })?;
 
     if verbose {
@@ -1174,8 +1159,7 @@ fn inject_lto_section_from_bundle(
     use crate::link::layout::{OutputSection, OutputSectionKind};
 
     // 0. 收集输入 ELF 中的 LOCAL 函数名 (static 函数)
-    let mut local_fn_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut local_fn_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for obj in &bundle.objects {
         for sym in &obj.symbols {
             if sym.bind == crate::codegen::shared::elf::STB_LOCAL
@@ -1211,8 +1195,7 @@ fn inject_lto_section_from_bundle(
     //     DCE pass 只移除 .L / __dcc_local_ 前缀的函数,
     //     这里补充移除 static 且不被引用的函数.
     //     先收集所有模块中被引用的函数名 (避免借用冲突).
-    let mut all_referenced: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut all_referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in bc_modules.iter() {
         for f in &m.functions {
             for stmt in &f.body {
@@ -1224,9 +1207,7 @@ fn inject_lto_section_from_bundle(
     for m in bc_modules.iter_mut() {
         m.functions.retain(|f| {
             // LOCAL 函数且不被引用 → 移除
-            if local_fn_names.contains(&f.name)
-                && !all_referenced.contains(&f.name)
-            {
+            if local_fn_names.contains(&f.name) && !all_referenced.contains(&f.name) {
                 extra_dead.push(f.name.clone());
                 return false;
             }
@@ -1236,10 +1217,7 @@ fn inject_lto_section_from_bundle(
     dead_fns.extend(extra_dead);
 
     if verbose && !dead_fns.is_empty() {
-        eprintln!(
-            "dcc-link: -r LTO: {} dead function(s) stripped",
-            dead_fns.len()
-        );
+        eprintln!("dcc-link: -r LTO: {} dead function(s) stripped", dead_fns.len());
     }
 
     // 3. 序列化合并后的位码
@@ -1275,25 +1253,26 @@ fn inject_lto_section_from_bundle(
         let dead_set: std::collections::HashSet<&str> =
             dead_fns.iter().map(|s| s.as_str()).collect();
         // 5a. 剥离 dead 函数符号
-        layout.symbols.retain(|sym| !dead_set.contains(sym.name.as_str()));
+        layout
+            .symbols
+            .retain(|sym| !dead_set.contains(sym.name.as_str()));
         // 5b. 移除 dead 函数对应的 .text.{fn} 节
-        let dead_section_names: std::collections::HashSet<String> =
-            dead_set.iter().map(|name| format!(".text.{}", name)).collect();
+        let dead_section_names: std::collections::HashSet<String> = dead_set
+            .iter()
+            .map(|name| format!(".text.{}", name))
+            .collect();
         // 5c. 剥离 dead 节的 SECTION 符号
         layout.symbols.retain(|sym| {
             !(sym.ty == crate::codegen::shared::elf::STT_SECTION
                 && dead_section_names.contains(sym.name.as_str()))
         });
-        layout.sections.retain(|sec| {
-            !dead_section_names.contains(sec.name.as_str())
-        });
+        layout
+            .sections
+            .retain(|sec| !dead_section_names.contains(sec.name.as_str()));
     }
 
     if verbose {
-        eprintln!(
-            "dcc-link: -r LTO: embedded .dcc.lto section ({} bytes)",
-            merged_payload.len()
-        );
+        eprintln!("dcc-link: -r LTO: embedded .dcc.lto section ({} bytes)", merged_payload.len());
     }
 }
 
@@ -1512,20 +1491,7 @@ mod tests {
             1,
             0,
         );
-        write_sh(
-            &mut out,
-            2,
-            7,
-            elf::SHT_SYMTAB,
-            0,
-            0,
-            symtab_off as u64,
-            48,
-            3,
-            1,
-            8,
-            24,
-        );
+        write_sh(&mut out, 2, 7, elf::SHT_SYMTAB, 0, 0, symtab_off as u64, 48, 3, 1, 8, 24);
         write_sh(
             &mut out,
             3,
@@ -1618,10 +1584,7 @@ mod tests {
             .symbols
             .iter()
             .find(|s| s.name == "__vdso_clock_gettime");
-        assert!(
-            vdso_sym.is_some(),
-            "__vdso_clock_gettime symbol should exist"
-        );
+        assert!(vdso_sym.is_some(), "__vdso_clock_gettime symbol should exist");
         let vdso_sym = vdso_sym.unwrap();
         assert_eq!(vdso_sym.bind, elf::STB_GLOBAL);
         assert_eq!(vdso_sym.ty, elf::STT_FUNC);

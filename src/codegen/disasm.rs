@@ -102,7 +102,13 @@ impl<'a> Dec<'a> {
 
     /// Compute effective operand width considering 0x66 prefix and REX.W
     fn eff_width(&self, rex: &Rex, pfx: &Prefixes) -> u8 {
-        if rex.w { 8 } else if pfx.o16 { 2 } else { 4 }
+        if rex.w {
+            8
+        } else if pfx.o16 {
+            2
+        } else {
+            4
+        }
     }
 
     fn parse_rex(&mut self) -> Rex {
@@ -220,10 +226,10 @@ impl<'a> Dec<'a> {
             base = self.reg(rex, rm_ext, ADDR_W).to_string();
         }
         match mod_ {
-            0 => {}
+            0 => {},
             1 => disp = self.take_i8()? as i32,
             2 => disp = self.take_i32()?,
-            _ => {}
+            _ => {},
         }
         // RIP-relative 时, data 符号在 disp32 起始位置; 其他情况在指令末尾
         let lookup_off = rip_disp_off.unwrap_or_else(|| self.abs_off());
@@ -283,19 +289,19 @@ impl<'a> Dec<'a> {
                 Some(0xF0) => {
                     pfx.lock = true;
                     self.take();
-                }
+                },
                 Some(0xF3) => {
                     pfx.rep = true;
                     self.take();
-                }
+                },
                 Some(0xF2) => {
                     pfx.repne = true;
                     self.take();
-                }
+                },
                 Some(0x66) => {
                     pfx.o16 = true;
                     self.take();
-                }
+                },
                 _ => break,
             }
         }
@@ -312,22 +318,14 @@ impl<'a> Dec<'a> {
             self.take();
             return Some((
                 self.pos - start,
-                format!(
-                    "{}push {}",
-                    Self::prefix_str(&pfx),
-                    REG64[(b - 0x50) as usize]
-                ),
+                format!("{}push {}", Self::prefix_str(&pfx), REG64[(b - 0x50) as usize]),
             ));
         }
         if (0x58..=0x5F).contains(&b) {
             self.take();
             return Some((
                 self.pos - start,
-                format!(
-                    "{}pop {}",
-                    Self::prefix_str(&pfx),
-                    REG64[(b - 0x58) as usize]
-                ),
+                format!("{}pop {}", Self::prefix_str(&pfx), REG64[(b - 0x58) as usize]),
             ));
         }
 
@@ -335,112 +333,96 @@ impl<'a> Dec<'a> {
             0x90 if pfx.rep => {
                 self.take();
                 Some((self.pos - start, "pause".into()))
-            }
+            },
             0x90 => {
                 self.take();
                 Some((1, "nop".into()))
-            }
+            },
             0xC3 => {
                 self.take();
                 Some((self.pos - start, format!("{}ret", Self::prefix_str(&pfx))))
-            }
+            },
             0xC9 => {
                 self.take();
                 Some((self.pos - start, "leave".into()))
-            }
+            },
             0x55 => {
                 self.take();
                 Some((self.pos - start, "push %rbp".into()))
-            }
+            },
             0x5D => {
                 self.take();
                 Some((self.pos - start, "pop %rbp".into()))
-            }
+            },
             0x99 => {
                 self.take();
                 Some((self.pos - start, "cltd".into()))
-            }
+            },
             0x9B => {
                 self.take();
                 Some((self.pos - start, "fwait".into()))
-            }
+            },
             0xA4 if pfx.rep => {
                 self.take();
                 Some((self.pos - start, "rep movsb".into()))
-            }
+            },
             0xA5 if pfx.rep => {
                 self.take();
                 let rex = self.parse_rex();
                 let mn = if rex.w { "rep movsq" } else { "rep movsl" };
                 Some((self.pos - start, mn.into()))
-            }
+            },
             0xEB => {
                 self.take();
                 let rel = self.take_i8()? as i32;
                 Some((
                     self.pos - start,
-                    format!(
-                        "{}jmp {}",
-                        Self::prefix_str(&pfx),
-                        self.rel_target(rel, off + 2)
-                    ),
+                    format!("{}jmp {}", Self::prefix_str(&pfx), self.rel_target(rel, off + 2)),
                 ))
-            }
+            },
             0xE8 => {
                 self.take();
                 let rel = self.take_i32()?;
                 let sym = self.calls.get(&(off + 1)).cloned();
                 let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
-                Some((
-                    self.pos - start,
-                    format!("{}call {target}", Self::prefix_str(&pfx)),
-                ))
-            }
+                Some((self.pos - start, format!("{}call {target}", Self::prefix_str(&pfx))))
+            },
             0xE9 => {
                 self.take();
                 let rel = self.take_i32()?;
                 let sym = self.calls.get(&(off + 1)).cloned();
                 let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
-                Some((
-                    self.pos - start,
-                    format!("{}jmp {target}", Self::prefix_str(&pfx)),
-                ))
-            }
+                Some((self.pos - start, format!("{}jmp {target}", Self::prefix_str(&pfx))))
+            },
             0x31 if self.code.get(self.pos) == Some(&0xC0) => {
                 self.take();
                 self.take();
                 Some((self.pos - start, "xor %eax, %eax".into()))
-            }
+            },
             0x85 if self.code.get(self.pos) == Some(&0xC0) => {
                 self.take();
                 self.take();
                 Some((self.pos - start, "test %eax, %eax".into()))
-            }
+            },
             0xB8..=0xBF => {
                 let reg = b - 0xB8;
                 self.take();
                 let imm = self.take_i32()?;
-                Some((
-                    self.pos - start,
-                    format!("mov ${imm}, {}", REG32[reg as usize]),
-                ))
-            }
+                Some((self.pos - start, format!("mov ${imm}, {}", REG32[reg as usize])))
+            },
             0xB0..=0xB7 => {
                 let reg = b - 0xB0;
                 self.take();
                 let imm = self.take()? as i32;
-                Some((
-                    self.pos - start,
-                    format!("mov ${imm}, {}", REG8[reg as usize]),
-                ))
-            }
+                Some((self.pos - start, format!("mov ${imm}, {}", REG8[reg as usize])))
+            },
             0x0F => self.decode_two_byte(start, &pfx),
             0x41 | 0x49 | 0x4C | 0x48 => self.decode_rex(start, &pfx),
             // x87 FPU instructions (0xD8-0xDF)
             0xD8..=0xDF => {
                 let opcode = self.take()?; // 先取 opcode
                 self.decode_x87(start, opcode)
-            }
+            },
             _ => self.decode_legacy(start, &pfx),
         }
     }
@@ -455,7 +437,7 @@ impl<'a> Dec<'a> {
             0x1F => {
                 let _ = self.take();
                 Some((self.pos - start, "nop".into()))
-            }
+            },
             0x84..=0x8F => {
                 let cc = match op - 0x80 {
                     0x04 => "je",
@@ -472,32 +454,29 @@ impl<'a> Dec<'a> {
                 };
                 let rel = self.take_i32()?;
                 let end = off + (self.pos - start) as u64;
-                Some((
-                    self.pos - start,
-                    format!("{cc} {}", self.rel_target(rel, end)),
-                ))
-            }
+                Some((self.pos - start, format!("{cc} {}", self.rel_target(rel, end))))
+            },
             0xAE if self.peek() == Some(0xF0) => {
                 self.take();
                 Some((self.pos - start, "mfence".into()))
-            }
+            },
             0xB0 | 0xB1 => {
                 let rex = self.parse_rex();
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
-            }
+            },
             // cmovcc r, r/m (non-REX)
             0x40..=0x4F => {
                 let rex = self.parse_rex();
                 let cc = CC_NAMES[(op - 0x40) as usize];
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
-            }
+            },
             0xC1 => {
                 let rex = self.parse_rex();
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
-            }
+            },
             // setcc r/m8 (无 REX 版本, dcc emit 0F 9x C0)
             0x90..=0x9F => {
                 let rex = self.parse_rex();
@@ -509,15 +488,16 @@ impl<'a> Dec<'a> {
                 let rm = modrm & 7;
                 let r = self.reg(&rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
-            }
+            },
             0x10 | 0x11 | 0x2A | 0x2C | 0x5A | 0x6E | 0x7E => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
-            }
+            },
             0xB6 | 0xB7 | 0xBE | 0xBF => {
                 // movzx/movsx (无 REX): reg 字段是宽目标 (32 位), r/m 是窄源
                 let rex = self.parse_rex();
-                let (src, dst) = self.modrm_ext(&rex, if op == 0xB6 || op == 0xBE { 1 } else { 2 }, 4)?;
+                let (src, dst) =
+                    self.modrm_ext(&rex, if op == 0xB6 || op == 0xBE { 1 } else { 2 }, 4)?;
                 let mn = match (op, rex.w) {
                     (0xB6, true) => "movzbq",
                     (0xB6, false) => "movzbl",
@@ -529,21 +509,22 @@ impl<'a> Dec<'a> {
                     _ => "movswl",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             0xAF => {
                 let rex = self.parse_rex();
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
-            }
+            },
             _ => {
                 let len = decode_unknown_len(self.code, start);
                 self.pos = start + len;
                 // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                let bytes: Vec<String> = self.code[start..self.pos]
+                    .iter()
                     .map(|b| format!("0x{:02x}", b))
                     .collect();
                 Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            }
+            },
         }
     }
 
@@ -565,27 +546,27 @@ impl<'a> Dec<'a> {
                 let (dst, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "movss" } else { "movsd" };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
-            }
+            },
             0x11 => {
                 let (src, dst) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "movss" } else { "movsd" };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
-            }
+            },
             0x2A => {
                 let (xmm, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvtsi2ss" } else { "cvtsi2sd" };
                 Some((self.pos - start, format!("{mn} {src}, {xmm}")))
-            }
+            },
             0x2C => {
                 let (dst, xmm) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvttss2si" } else { "cvttsd2si" };
                 Some((self.pos - start, format!("{mn} {xmm}, {dst}")))
-            }
+            },
             0x5A => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
                 let mn = if scalar == "ss" { "cvtss2sd" } else { "cvtsd2ss" };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
-            }
+            },
             0x6E | 0x7E => {
                 // 66 0F 6E /r: movd r/m32, xmm (REX.W 时为 movq)
                 // 66 0F 7E /r: movd xmm, r/m32 (REX.W 时为 movq)
@@ -597,16 +578,17 @@ impl<'a> Dec<'a> {
                 } else {
                     Some((self.pos - start, format!("{mn} {xmm}, {gp}")))
                 }
-            }
+            },
             _ => {
                 let len = decode_unknown_len(self.code, start);
                 self.pos = start + len;
                 // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                let bytes: Vec<String> = self.code[start..self.pos]
+                    .iter()
                     .map(|b| format!("0x{:02x}", b))
                     .collect();
                 Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            }
+            },
         }
     }
 
@@ -627,143 +609,181 @@ impl<'a> Dec<'a> {
             0x89 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             0x8B => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             0x8A => {
                 let (dst, src) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             0x88 => {
                 let (src, dst) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             0xC6 => {
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
-            }
+            },
             // --- XCHG / LEA ---
             0x87 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
-            }
+            },
             0x8D => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 Some(self.finish(start, pfx, &format!("lea {src}, {dst}")))
-            }
+            },
             // --- ALU r/m, r (reg=src, r/m=dst) ---
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 let mn = match op {
-                    0x01 => "add", 0x09 => "or", 0x21 => "and",
-                    0x29 => "sub", 0x31 => "xor", _ => "?",
+                    0x01 => "add",
+                    0x09 => "or",
+                    0x21 => "and",
+                    0x29 => "sub",
+                    0x31 => "xor",
+                    _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // --- ALU r, r/m (reg=dst, r/m=src) ---
             0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
                 let mn = match op {
-                    0x03 => "add", 0x0B => "or", 0x23 => "and",
-                    0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
+                    0x03 => "add",
+                    0x0B => "or",
+                    0x23 => "and",
+                    0x2B => "sub",
+                    0x33 => "xor",
+                    0x3B => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // --- ALU 8-bit r/m, r ---
             0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
                 let (src, dst) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
-                    0x00 => "add", 0x08 => "or", 0x20 => "and",
-                    0x28 => "sub", 0x30 => "xor", _ => "?",
+                    0x00 => "add",
+                    0x08 => "or",
+                    0x20 => "and",
+                    0x28 => "sub",
+                    0x30 => "xor",
+                    _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // --- ALU 8-bit r, r/m ---
             0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
                 let (dst, src) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
-                    0x02 => "add", 0x0A => "or", 0x22 => "and",
-                    0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",
+                    0x02 => "add",
+                    0x0A => "or",
+                    0x22 => "and",
+                    0x2A => "sub",
+                    0x32 => "xor",
+                    0x3A => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // --- ALU rax/eax, imm32 ---
             0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 let mn = match op {
-                    0x05 => "add", 0x0D => "or", 0x25 => "and",
-                    0x2D => "sub", 0x35 => "xor", 0x3D => "cmp",
+                    0x05 => "add",
+                    0x0D => "or",
+                    0x25 => "and",
+                    0x2D => "sub",
+                    0x35 => "xor",
+                    0x3D => "cmp",
                     _ => "?",
                 };
                 let r = self.reg(&rex, if rex.b { 8 } else { 0 }, width);
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {r}")))
-            }
+            },
             // --- CMP/TEST r/m, r ---
             0x39 | 0x85 => {
                 let (a, b) = self.modrm_gp(&rex, width)?;
                 let mn = if op == 0x39 { "cmp" } else { "test" };
                 Some(self.finish(start, pfx, &format!("{mn} {b}, {a}")))
-            }
+            },
             // --- TEST 8-bit ---
             0x84 => {
                 let (a, b) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("test {b}, {a}")))
-            }
+            },
             // --- XCHG 8-bit ---
             0x86 => {
                 let (src, dst) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
-            }
+            },
             // --- ALU r/m, imm32 ---
             0x81 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // --- ALU r/m, imm8 ---
             0x83 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // --- ALU r/m8, imm8 ---
             0x80 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // --- MOV r/m, imm32 ---
             0xC7 => {
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
-            }
+            },
             // --- MOV r, imm ---
             0xB8..=0xBF => {
                 let reg = op - 0xB8;
@@ -776,82 +796,102 @@ impl<'a> Dec<'a> {
                     self.take_i32()? as i64
                 };
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {r}")))
-            }
+            },
             // --- MOV r8, imm8 ---
             0xB0..=0xB7 => {
                 let reg = op - 0xB0;
                 let r = self.reg(&rex, reg | if rex.b { 8 } else { 0 }, 1);
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {r}")))
-            }
+            },
             // --- MOVSXD r64, r/m32 ---
             0x63 => {
                 let modrm = self.take()?;
                 let mod_ = modrm >> 6;
                 let reg = (modrm >> 3) & 7;
                 let rm = modrm & 7;
-                let dst = self.reg(&rex, reg | if rex.r { 8 } else { 0 }, width).to_string();
+                let dst = self
+                    .reg(&rex, reg | if rex.r { 8 } else { 0 }, width)
+                    .to_string();
                 let src = self.decode_mem(&rex, mod_, rm | if rex.b { 8 } else { 0 }, 4)?;
                 Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
-            }
+            },
             // --- IMUL r, r/m, imm32 ---
             0x69 => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
-            }
+            },
             // --- IMUL r, r/m, imm8 ---
             0x6B => {
                 let (src, dst) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
-            }
+            },
             // --- Shift/Rotate r/m, imm8 ---
             0xC0 | 0xC1 => {
                 let sw = if op == 0xC1 { width } else { 1 };
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
-                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    0 => "rol",
+                    1 => "ror",
+                    2 => "rcl",
+                    3 => "rcr",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
                     _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, sw)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // --- Shift/Rotate r/m, 1 ---
             0xD0 | 0xD1 => {
                 let sw = if op == 0xD1 { width } else { 1 };
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
-                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    0 => "rol",
+                    1 => "ror",
+                    2 => "rcl",
+                    3 => "rcr",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
                     _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, sw)?;
                 Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
-            }
+            },
             // --- Shift/Rotate r/m, cl ---
             0xD2 | 0xD3 => {
                 let sw = if op == 0xD3 { width } else { 1 };
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 2 => "rcl", 3 => "rcr",
-                    4 => "shl", 5 => "shr", 6 => "sal", 7 => "sar",
+                    0 => "rol",
+                    1 => "ror",
+                    2 => "rcl",
+                    3 => "rcr",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
                     _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, sw)?;
                 Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
-            }
+            },
             // --- TEST r/m, imm ---
             0xF6 => {
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
-            }
+            },
             // --- NOT/NEG/MUL/IMUL/DIV/IDIV ---
             0xF7 => {
                 let modrm = self.code.get(self.pos)?;
@@ -861,7 +901,7 @@ impl<'a> Dec<'a> {
                     0 => {
                         let imm = self.take_i32()?;
                         return Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")));
-                    }
+                    },
                     2 => "not",
                     3 => "neg",
                     4 => "mul",
@@ -871,7 +911,7 @@ impl<'a> Dec<'a> {
                     _ => "f7",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
-            }
+            },
             // --- INC/DEC ---
             0xFE => {
                 let modrm = self.code.get(self.pos)?;
@@ -879,35 +919,51 @@ impl<'a> Dec<'a> {
                 let mn = if reg == 0 { "inc" } else { "dec" };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
-            }
+            },
             // --- INC/DEC/ CALL/JMP/PUSH ---
             0xFF => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let mn = match reg {
-                    0 => "inc", 1 => "dec",
-                    2 => "call", 4 => "jmp", 6 => "push",
+                    0 => "inc",
+                    1 => "dec",
+                    2 => "call",
+                    4 => "jmp",
+                    6 => "push",
                     _ => "ff",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
-            }
+            },
             // --- Sign extension ---
-            0x98 => { self.take(); Some((self.pos - start, "cltq".into())) }
-            0x99 => { self.take(); Some((self.pos - start, "cqo".into())) }
+            0x98 => {
+                self.take();
+                Some((self.pos - start, "cltq".into()))
+            },
+            0x99 => {
+                self.take();
+                Some((self.pos - start, "cqo".into()))
+            },
             // --- PUSHF/POPF ---
-            0x9C => { self.take(); Some((self.pos - start, "pushfq".into())) }
-            0x9D => { self.take(); Some((self.pos - start, "popfq".into())) }
+            0x9C => {
+                self.take();
+                Some((self.pos - start, "pushfq".into()))
+            },
+            0x9D => {
+                self.take();
+                Some((self.pos - start, "popfq".into()))
+            },
             // --- Fallback ---
             _ => {
                 let len = decode_unknown_len(self.code, start);
                 self.pos = start + len;
                 // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                let bytes: Vec<String> = self.code[start..self.pos]
+                    .iter()
                     .map(|b| format!("0x{:02x}", b))
                     .collect();
                 Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            }
+            },
         }
     }
 
@@ -924,7 +980,7 @@ impl<'a> Dec<'a> {
             0x10 | 0x11 | 0x2A | 0x2C | 0x5A => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
-            }
+            },
             0x6E | 0x7E => {
                 // REX 前缀版本的 movd/movq：66 48 0F 6E/7E /r
                 let gp_width = if rex.w { 8 } else { 4 };
@@ -936,15 +992,15 @@ impl<'a> Dec<'a> {
                     format!("{mn} {xmm}, {gp}")
                 };
                 Some((self.pos - start, body))
-            }
+            },
             0xB0 | 0xB1 => {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
-            }
+            },
             0xC1 => {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
-            }
+            },
             // movzx/movsx r64, r/m8|r16 (48 0F B6/B7/BE/BF)
             // dcc 用于窄类型加载/提升: *p (char/uchar), (u)short 提升
             0xB6 | 0xB7 | 0xBE | 0xBF => {
@@ -964,12 +1020,12 @@ impl<'a> Dec<'a> {
                     _ => "movswl",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // imul r64, r/m64 (48 0F AF)
             0xAF => {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
-            }
+            },
             // setcc r/m8 带 REX (41 0F 9x C7 → dil 等)
             0x90..=0x9F => {
                 let modrm = self.take()?;
@@ -980,22 +1036,23 @@ impl<'a> Dec<'a> {
                 let rm = modrm & 7;
                 let r = self.reg(rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
-            }
+            },
             // cmovcc r, r/m (REX)
             0x40..=0x4F => {
                 let cc = CC_NAMES[(op - 0x40) as usize];
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
-            }
+            },
             _ => {
                 let len = decode_unknown_len(self.code, start);
                 self.pos = start + len;
                 // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                let bytes: Vec<String> = self.code[start..self.pos]
+                    .iter()
                     .map(|b| format!("0x{:02x}", b))
                     .collect();
                 Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            }
+            },
         }
     }
 
@@ -1007,195 +1064,259 @@ impl<'a> Dec<'a> {
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 let mn = match op {
-                    0x01 => "add", 0x09 => "or", 0x21 => "and",
-                    0x29 => "sub", 0x31 => "xor", _ => "?",
+                    0x01 => "add",
+                    0x09 => "or",
+                    0x21 => "and",
+                    0x29 => "sub",
+                    0x31 => "xor",
+                    _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // ALU r32, r/m32
             0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
                 let mn = match op {
-                    0x03 => "add", 0x0B => "or", 0x23 => "and",
-                    0x2B => "sub", 0x33 => "xor", 0x3B => "cmp",
+                    0x03 => "add",
+                    0x0B => "or",
+                    0x23 => "and",
+                    0x2B => "sub",
+                    0x33 => "xor",
+                    0x3B => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // ALU 8-bit r/m, r
             0x00 | 0x08 | 0x20 | 0x28 | 0x30 => {
                 let (src, dst) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
-                    0x00 => "add", 0x08 => "or", 0x20 => "and",
-                    0x28 => "sub", 0x30 => "xor", _ => "?",
+                    0x00 => "add",
+                    0x08 => "or",
+                    0x20 => "and",
+                    0x28 => "sub",
+                    0x30 => "xor",
+                    _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // ALU 8-bit r, r/m
             0x02 | 0x0A | 0x22 | 0x2A | 0x32 | 0x3A => {
                 let (dst, src) = self.modrm_gp(&rex, 1)?;
                 let mn = match op {
-                    0x02 => "add", 0x0A => "or", 0x22 => "and",
-                    0x2A => "sub", 0x32 => "xor", 0x3A => "cmp",
+                    0x02 => "add",
+                    0x0A => "or",
+                    0x22 => "and",
+                    0x2A => "sub",
+                    0x32 => "xor",
+                    0x3A => "cmp",
                     _ => "?",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
-            }
+            },
             // MOV r/m32, r32
             0x89 => {
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             // MOV r32, r/m32
             0x8B => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             // MOV r8, r/m8
             0x8A => {
                 let (dst, src) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             // MOV r/m8, r8
             0x88 => {
                 let (src, dst) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
-            }
+            },
             // MOV r/m32, imm32
             0xC7 => {
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
-            }
+            },
             // MOV r/m8, imm8
             0xC6 => {
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
-            }
+            },
             // LEA r32, mem
             0x8D => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("lea {src}, {dst}")))
-            }
+            },
             // CMP/TEST r/m32, r32
             0x39 | 0x85 => {
                 let (a, b) = self.modrm_gp(&rex, 4)?;
                 let mn = if op == 0x39 { "cmp" } else { "test" };
                 Some(self.finish(start, pfx, &format!("{mn} {b}, {a}")))
-            }
+            },
             // TEST r/m8, r8
             0x84 => {
                 let (a, b) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("test {b}, {a}")))
-            }
+            },
             // ALU r/m32, imm32
             0x81 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // ALU r/m32, imm8
             0x83 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // ALU r/m8, imm8
             0x80 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                    4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                    0 => "add",
+                    1 => "or",
+                    2 => "adc",
+                    3 => "sbb",
+                    4 => "and",
+                    5 => "sub",
+                    6 => "xor",
+                    7 => "cmp",
                     _ => "alu",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // Shift/Rotate r/m32, imm8
             0xC1 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // Shift/Rotate r/m8, imm8
             0xC0 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
-            }
+            },
             // Shift/Rotate r/m32, 1
             0xD1 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
-            }
+            },
             // Shift/Rotate r/m8, 1
             0xD0 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
-            }
+            },
             // Shift/Rotate r/m32, cl
             0xD3 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
-            }
+            },
             // Shift/Rotate r/m8, cl
             0xD2 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let mn = match reg {
-                    0 => "rol", 1 => "ror", 4 => "shl", 5 => "shr",
-                    6 => "sal", 7 => "sar", _ => "shift",
+                    0 => "rol",
+                    1 => "ror",
+                    4 => "shl",
+                    5 => "shr",
+                    6 => "sal",
+                    7 => "sar",
+                    _ => "shift",
                 };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
-            }
+            },
             // TEST r/m32, imm32
             0xF7 => {
                 let modrm = self.code.get(self.pos)?;
@@ -1206,12 +1327,17 @@ impl<'a> Dec<'a> {
                     Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
                 } else {
                     let mn = match reg {
-                        2 => "not", 3 => "neg", 4 => "mul", 5 => "imul",
-                        6 => "div", 7 => "idiv", _ => "f7",
+                        2 => "not",
+                        3 => "neg",
+                        4 => "mul",
+                        5 => "imul",
+                        6 => "div",
+                        7 => "idiv",
+                        _ => "f7",
                     };
                     Some(self.finish(start, pfx, &format!("{mn} {mem}")))
                 }
-            }
+            },
             // TEST r/m8, imm8
             0xF6 => {
                 let modrm = self.code.get(self.pos)?;
@@ -1222,23 +1348,28 @@ impl<'a> Dec<'a> {
                     Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
                 } else {
                     let mn = match reg {
-                        2 => "not", 3 => "neg", _ => "f6",
+                        2 => "not",
+                        3 => "neg",
+                        _ => "f6",
                     };
                     Some(self.finish(start, pfx, &format!("{mn} {mem}")))
                 }
-            }
+            },
             // INC/DEC/CALL/JMP/PUSH r/m32
             0xFF => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let (_, mem) = self.modrm_gp(&rex, 4)?;
                 let mn = match reg {
-                    0 => "inc", 1 => "dec",
-                    2 => "call", 4 => "jmp", 6 => "push",
+                    0 => "inc",
+                    1 => "dec",
+                    2 => "call",
+                    4 => "jmp",
+                    6 => "push",
                     _ => "ff",
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
-            }
+            },
             // INC/DEC r/m8
             0xFE => {
                 let modrm = self.code.get(self.pos)?;
@@ -1246,12 +1377,12 @@ impl<'a> Dec<'a> {
                 let mn = if reg == 0 { "inc" } else { "dec" };
                 let (_, mem) = self.modrm_gp(&rex, 1)?;
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
-            }
+            },
             // XCHG r/m32, r32
             0x87 => {
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
-            }
+            },
             // MOVSXD r32, r/m32 (without REX, same as MOV r32, r/m32 on 64-bit)
             0x63 => {
                 let modrm = self.take()?;
@@ -1261,38 +1392,43 @@ impl<'a> Dec<'a> {
                 let dst = self.reg(&rex, reg, 4).to_string();
                 let src = self.decode_mem(&rex, mod_, rm, 4)?;
                 Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
-            }
+            },
             // IMUL r32, r/m32, imm32
             0x69 => {
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
-            }
+            },
             // IMUL r32, r/m32, imm8
             0x6B => {
                 let (src, dst) = self.modrm_gp(&rex, 4)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
-            }
+            },
             // ALU eax, imm32
             0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 let mn = match op {
-                    0x05 => "add", 0x0D => "or", 0x25 => "and",
-                    0x2D => "sub", 0x35 => "xor", 0x3D => "cmp",
+                    0x05 => "add",
+                    0x0D => "or",
+                    0x25 => "and",
+                    0x2D => "sub",
+                    0x35 => "xor",
+                    0x3D => "cmp",
                     _ => "?",
                 };
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, %eax")))
-            }
+            },
             _ => {
                 let len = decode_unknown_len(self.code, start);
                 self.pos = start + len;
                 // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos].iter()
+                let bytes: Vec<String> = self.code[start..self.pos]
+                    .iter()
                     .map(|b| format!("0x{:02x}", b))
                     .collect();
                 Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            }
+            },
         }
     }
 
@@ -1329,7 +1465,7 @@ impl<'a> Dec<'a> {
                     0xE8 => return Some((self.pos - start, "fld1".into())),
                     0xEE => return Some((self.pos - start, "fldz".into())),
                     0xD0 => return Some((self.pos - start, "fnop".into())),
-                    _ => {}
+                    _ => {},
                 }
             }
         }
@@ -1412,7 +1548,7 @@ impl<'a> Dec<'a> {
                     } else {
                         0i32
                     }
-                }
+                },
                 1 => self.take_i8()? as i32,
                 2 => self.take_i32()?,
                 _ => 0,
@@ -1434,7 +1570,7 @@ impl<'a> Dec<'a> {
                 } else {
                     0i32
                 }
-            }
+            },
             1 => self.take_i8()? as i32,
             2 => self.take_i32()?,
             _ => return Some(REG64[rm as usize].to_string()),
@@ -1460,8 +1596,9 @@ impl<'a> Dec<'a> {
         // 扫描 legacy prefixes
         while pos < len {
             match code[pos] {
-                0xF0 | 0xF2 | 0xF3 | 0x66 | 0x67 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64
-                | 0x65 => pos += 1,
+                0xF0 | 0xF2 | 0xF3 | 0x66 | 0x67 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 => {
+                    pos += 1
+                },
                 _ => break,
             }
         }
@@ -1491,9 +1628,7 @@ impl<'a> Dec<'a> {
             pos += 1;
             match op2 {
                 // syscall / ud2 / cpuid / rdmsr / wrmsr / rdtsc / etc.
-                0x05 | 0x0B | 0x34 | 0x35 | 0xA0 | 0xA1 | 0xA2 | 0xA8 | 0xA9 => {
-                    (false, 0)
-                }
+                0x05 | 0x0B | 0x34 | 0x35 | 0xA0 | 0xA1 | 0xA2 | 0xA8 | 0xA9 => (false, 0),
                 // 0F 38：三字节 opcode，通常带 ModRM，无立即数
                 0x38 => {
                     if pos >= len {
@@ -1501,7 +1636,7 @@ impl<'a> Dec<'a> {
                     }
                     pos += 1;
                     (true, 0)
-                }
+                },
                 // 0F 3A：三字节 opcode，通常带 ModRM + imm8
                 0x3A => {
                     if pos >= len {
@@ -1509,7 +1644,7 @@ impl<'a> Dec<'a> {
                     }
                     pos += 1;
                     (true, 1)
-                }
+                },
                 // jcc rel32 / near call/jmp rel32
                 0x80..=0x8F | 0xE8 | 0xE9 => (false, 4),
                 _ => (true, 0),
@@ -1539,13 +1674,13 @@ impl<'a> Dec<'a> {
                     if reg == 0 {
                         imm_len = 1;
                     }
-                }
+                },
                 0xF7 => {
                     if reg == 0 {
                         imm_len = 4;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
 
             // SIB
@@ -1568,7 +1703,7 @@ impl<'a> Dec<'a> {
             match mod_ {
                 1 => pos = (pos + 1).min(len),
                 2 => pos = (pos + 4).min(len),
-                _ => {}
+                _ => {},
             }
         }
 
@@ -1619,10 +1754,10 @@ impl<'a> Dec<'a> {
                 if rm == 5 {
                     pos = (pos + 4).min(len);
                 }
-            }
+            },
             1 => pos = (pos + 1).min(len),
             2 => pos = (pos + 4).min(len),
-            _ => {}
+            _ => {},
         }
         (pos - start).max(1)
     }
@@ -1631,14 +1766,13 @@ impl<'a> Dec<'a> {
     fn legacy_opcode_props(op1: u8) -> (bool, usize) {
         match op1 {
             // 无 ModRM，无立即数
-            0x90 | 0xC3 | 0xC9 | 0x99 | 0x9C | 0x9D | 0x98 | 0x37 | 0x3F | 0x27
-            | 0x2F | 0xF5 | 0xF8 | 0xF9 | 0xFA | 0xFB | 0xFC | 0xFD | 0x06 | 0x07
-            | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x60 | 0x61 | 0x9E | 0x9F => {
-                (false, 0)
-            }
+            0x90 | 0xC3 | 0xC9 | 0x99 | 0x9C | 0x9D | 0x98 | 0x37 | 0x3F | 0x27 | 0x2F | 0xF5
+            | 0xF8 | 0xF9 | 0xFA | 0xFB | 0xFC | 0xFD | 0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E
+            | 0x1F | 0x60 | 0x61 | 0x9E | 0x9F => (false, 0),
             // 无 ModRM，imm8
-            0x6A | 0xEB | 0xCD | 0xD4 | 0xD5 | 0xE4 | 0xE5 | 0xE6 | 0xE7
-            | 0x70..=0x7F => (false, 1),
+            0x6A | 0xEB | 0xCD | 0xD4 | 0xD5 | 0xE4 | 0xE5 | 0xE6 | 0xE7 | 0x70..=0x7F => {
+                (false, 1)
+            },
             // 无 ModRM，imm32/rel32
             0x68 | 0xE8 | 0xE9 => (false, 4),
             // mov r, imm
@@ -1696,7 +1830,7 @@ pub fn disassemble_range(
                 out.push_str(&text);
                 out.push('\n');
                 pos += len;
-            }
+            },
             _ => {
                 let len = dec.unknown_len(pos);
                 let bytes: Vec<String> = code[pos..(pos + len).min(code.len())]
@@ -1708,7 +1842,7 @@ pub fn disassemble_range(
                 out.push_str(&bytes.join(", "));
                 out.push('\n');
                 pos += len;
-            }
+            },
         }
     }
     out
@@ -1789,26 +1923,36 @@ fn decode_unknown_len(code: &[u8], start: usize) -> usize {
         return 1;
     }
     let mut pos = start;
-    
+
     // Consume prefix bytes
     loop {
         match code.get(pos) {
-            Some(0xF0) => { pos += 1; }      // lock
-            Some(0xF3) => { pos += 1; }      // rep
-            Some(0xF2) => { pos += 1; }      // repne
-            Some(0x66) => { pos += 1; }      // data16
-            Some(0x40..=0x4F) => { pos += 1; } // REX
+            Some(0xF0) => {
+                pos += 1;
+            }, // lock
+            Some(0xF3) => {
+                pos += 1;
+            }, // rep
+            Some(0xF2) => {
+                pos += 1;
+            }, // repne
+            Some(0x66) => {
+                pos += 1;
+            }, // data16
+            Some(0x40..=0x4F) => {
+                pos += 1;
+            }, // REX
             _ => break,
         }
     }
-    
+
     if pos >= code.len() {
         return pos - start + 1;
     }
-    
+
     let opcode = code[pos];
     pos += 1;
-    
+
     // Two-byte opcode (0x0F)
     if opcode == 0x0F {
         if pos >= code.len() {
@@ -1816,45 +1960,57 @@ fn decode_unknown_len(code: &[u8], start: usize) -> usize {
         }
         let op2 = code[pos];
         pos += 1;
-        
+
         // Instructions with ModRM: most common SSE and general instructions
         // 0F 10-12, 20-2C, 58-5A, 6E, 7E: SSE scalar/vector load/store
         // 0F 40-4F: cmovcc
-        // 0F 90-9F: setcc  
+        // 0F 90-9F: setcc
         // 0F B0-B1: cmpxchg/xadd
         // 0F B6-BF: movzx/movsx
         // 0F AF: imul
         // 0F 80-8F: jcc (rel8)
         if matches!(op2, 0x10..=0x12 | 0x20..=0x2C | 0x58..=0x5A | 0x6E | 0x7E |
-                       0x40..=0x4F | 0x90..=0x9F | 0xB0..=0xB1 | 0xB6..=0xBF | 0xAF | 0x80..=0x8F) {
+                       0x40..=0x4F | 0x90..=0x9F | 0xB0..=0xB1 | 0xB6..=0xBF | 0xAF | 0x80..=0x8F)
+        {
             if pos >= code.len() {
                 return pos - start + 1;
             }
             pos += consume_modrm_and_optional_parts(code, pos);
             return pos - start;
         }
-        
+
         // Other extensions: VEX/EVEX would need longer analysis - conservative estimate
         return pos - start;
     }
-    
+
     // Single-byte opcodes
     match opcode {
         // REG-MEM instructions: need ModRM (+ optional disp/imm)
-        0x00..=0x09 | 0x10..=0x1B | 0x20..=0x29 | 0x30..=0x3B | 0x60..=0x69 | 0x6B | 0x80..=0x8F |
-        0xA0..=0xA5 | 0xA8..=0xAA | 0xB8..=0xBF | 0xC6..=0xC7 | 0xD0..=0xD3 | 0xF0..=0xFF => {
+        0x00..=0x09
+        | 0x10..=0x1B
+        | 0x20..=0x29
+        | 0x30..=0x3B
+        | 0x60..=0x69
+        | 0x6B
+        | 0x80..=0x8F
+        | 0xA0..=0xA5
+        | 0xA8..=0xAA
+        | 0xB8..=0xBF
+        | 0xC6..=0xC7
+        | 0xD0..=0xD3
+        | 0xF0..=0xFF => {
             if pos < code.len() {
                 pos += 1; // ModRM
                 pos += consume_optional_disp_imm(code, pos, opcode);
             }
-        }
+        },
         // PUSH imm8/immm32, CALL/JMP near, RET imm16
         0x6A..=0x6F | 0xCA..=0xCF | 0xC8..=0xC9 => {
             pos += consume_immediate_for_opcode(opcode);
-        }
-        _ => {}
+        },
+        _ => {},
     }
-    
+
     pos - start
 }
 
@@ -1867,7 +2023,7 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
     let modrm = code[pos];
     let mod_ = modrm >> 6;
     let rm = modrm & 7;
-    
+
     // Check for SIB byte
     if rm == 4 && mod_ != 0 {
         if pos + 1 < code.len() {
@@ -1880,7 +2036,7 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
             }
         }
     }
-    
+
     // Displacement
     if mod_ == 1 && pos + len < code.len() {
         len += 1; // disp8
@@ -1889,33 +2045,33 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
     } else if rm == 5 && mod_ == 0 && pos + len < code.len() {
         len += 4; // disp32 (RIP-relative)
     }
-    
+
     len.min(code.len() - pos)
 }
 
 /// Estimate displacement and immediate based on opcode
 fn consume_optional_disp_imm(code: &[u8], pos: usize, opcode: u8) -> usize {
     let mut len = 0;
-    
+
     // Some ALU and MOV instructions have immediate operand
     if matches!(opcode, 0x81 | 0x83 | 0xC7) {
         if pos + 4 <= code.len() {
             len += 4; // imm32
         }
     }
-    
+
     len.min(code.len() - pos)
 }
 
 /// Estimate immediate size for specific opcodes
 fn consume_immediate_for_opcode(opcode: u8) -> usize {
     match opcode {
-        0x6A => 1,   // PUSH imm8
-        0x6B => 1,   // IMUL imm8
+        0x6A => 1,        // PUSH imm8
+        0x6B => 1,        // IMUL imm8
         0xC0..=0xC2 => 1, // ROL/ROR/etc imm8
         0xCA..=0xCF => 2, // RET/CALL/JMP near (imm16 in legacy mode, but usually handled differently)
-        0xC8 => 6,   // LEA w/ imm16 (w/disp16 for lea)
-        _ => 4,      // default: assume imm32
+        0xC8 => 6,        // LEA w/ imm16 (w/disp16 for lea)
+        _ => 4,           // default: assume imm32
     }
 }
 

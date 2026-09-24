@@ -148,36 +148,24 @@ struct MinimalElf {
 
 fn parse_elf_minimal(data: &[u8]) -> io::Result<MinimalElf> {
     if data.len() < 64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "ELF file too small",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF file too small"));
     }
 
     // Check ELF magic
     if &data[0..4] != b"\x7fELF" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not an ELF file",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not an ELF file"));
     }
 
     let is_64bit = data[4] == 2;
     let is_little_endian = data[5] == 1;
 
     if !is_little_endian {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "only little-endian ELF supported",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "only little-endian ELF supported"));
     }
 
     let (phoff, phentsize, phnum) = if is_64bit {
         if data.len() < 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ELF64 header too small",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF64 header too small"));
         }
         let phoff = u64::from_le_bytes(data[32..40].try_into().unwrap());
         let phentsize = u16::from_le_bytes(data[54..56].try_into().unwrap());
@@ -185,10 +173,7 @@ fn parse_elf_minimal(data: &[u8]) -> io::Result<MinimalElf> {
         (phoff, phentsize, phnum as u64)
     } else {
         if data.len() < 52 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ELF32 header too small",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF32 header too small"));
         }
         let phoff = u32::from_le_bytes(data[28..32].try_into().unwrap()) as u64;
         let phentsize = u16::from_le_bytes(data[42..44].try_into().unwrap());
@@ -204,20 +189,52 @@ fn parse_elf_minimal(data: &[u8]) -> io::Result<MinimalElf> {
                 continue;
             }
             ElfSegment {
-                p_type: u32::from_le_bytes(data[offset as usize..(offset + 4) as usize].try_into().unwrap()),
-                p_offset: u64::from_le_bytes(data[(offset + 8) as usize..(offset + 16) as usize].try_into().unwrap()),
-                p_paddr: u64::from_le_bytes(data[(offset + 24) as usize..(offset + 32) as usize].try_into().unwrap()),
-                p_filesz: u64::from_le_bytes(data[(offset + 32) as usize..(offset + 40) as usize].try_into().unwrap()),
+                p_type: u32::from_le_bytes(
+                    data[offset as usize..(offset + 4) as usize]
+                        .try_into()
+                        .unwrap(),
+                ),
+                p_offset: u64::from_le_bytes(
+                    data[(offset + 8) as usize..(offset + 16) as usize]
+                        .try_into()
+                        .unwrap(),
+                ),
+                p_paddr: u64::from_le_bytes(
+                    data[(offset + 24) as usize..(offset + 32) as usize]
+                        .try_into()
+                        .unwrap(),
+                ),
+                p_filesz: u64::from_le_bytes(
+                    data[(offset + 32) as usize..(offset + 40) as usize]
+                        .try_into()
+                        .unwrap(),
+                ),
             }
         } else {
             if data.len() < (offset + 32) as usize {
                 continue;
             }
             ElfSegment {
-                p_type: u32::from_le_bytes(data[offset as usize..(offset + 4) as usize].try_into().unwrap()),
-                p_offset: u32::from_le_bytes(data[(offset + 4) as usize..(offset + 8) as usize].try_into().unwrap()) as u64,
-                p_paddr: u32::from_le_bytes(data[(offset + 12) as usize..(offset + 16) as usize].try_into().unwrap()) as u64,
-                p_filesz: u32::from_le_bytes(data[(offset + 16) as usize..(offset + 20) as usize].try_into().unwrap()) as u64,
+                p_type: u32::from_le_bytes(
+                    data[offset as usize..(offset + 4) as usize]
+                        .try_into()
+                        .unwrap(),
+                ),
+                p_offset: u32::from_le_bytes(
+                    data[(offset + 4) as usize..(offset + 8) as usize]
+                        .try_into()
+                        .unwrap(),
+                ) as u64,
+                p_paddr: u32::from_le_bytes(
+                    data[(offset + 12) as usize..(offset + 16) as usize]
+                        .try_into()
+                        .unwrap(),
+                ) as u64,
+                p_filesz: u32::from_le_bytes(
+                    data[(offset + 16) as usize..(offset + 20) as usize]
+                        .try_into()
+                        .unwrap(),
+                ) as u64,
             }
         };
         segments.push(seg);

@@ -38,10 +38,7 @@ pub enum Operand {
     /// Label reference
     Label(String),
     /// Symbol with displacement
-    SymbolOffset {
-        symbol: String,
-        offset: i64,
-    },
+    SymbolOffset { symbol: String, offset: i64 },
     /// Floating point immediate
     Float(f64),
     /// Custom expression
@@ -113,26 +110,26 @@ impl Instruction {
     fn fmt_att(&self) -> String {
         // AT&T syntax: mnemonic src, dst
         let mut result = self.mnemonic.clone();
-        
+
         for operand in &self.operands {
             result.push_str(", ");
             result.push_str(&operand.fmt_att());
         }
-        
+
         result
     }
 
     fn fmt_intel(&self) -> String {
         // Intel syntax: dst, src
         let mut result = self.mnemonic.clone();
-        
+
         for (idx, operand) in self.operands.iter().enumerate() {
             if idx > 0 {
                 result.push_str(", ");
             }
             result.push_str(&operand.fmt_intel());
         }
-        
+
         result
     }
 }
@@ -142,18 +139,23 @@ impl Operand {
         match self {
             Operand::Register(name, _) => format!("%{}", name),
             Operand::Immediate(val) => format!("{}", val),
-            Operand::Memory { base, index, scale, offset } => {
+            Operand::Memory {
+                base,
+                index,
+                scale,
+                offset,
+            } => {
                 let mut result = String::new();
-                
+
                 if *offset != 0 {
                     result.push_str(&format!("{}", offset));
                 }
-                
+
                 if let Some(b) = base {
                     result.push('[');
                     result.push('%');
                     result.push_str(b);
-                    
+
                     if let Some(i) = index {
                         if *scale != 0 {
                             result.push_str(",%");
@@ -166,13 +168,13 @@ impl Operand {
                     }
                     result.push(']');
                 }
-                
+
                 if result.is_empty() {
                     "0".to_string()
                 } else {
                     result
                 }
-            }
+            },
             Operand::Label(label) => label.clone(),
             Operand::SymbolOffset { symbol, offset } => {
                 if *offset > 0 {
@@ -182,7 +184,7 @@ impl Operand {
                 } else {
                     symbol.clone()
                 }
-            }
+            },
             Operand::Float(val) => format!("{}", val),
             Operand::Expression(expr) => expr.fmt(),
         }
@@ -192,7 +194,12 @@ impl Operand {
         match self {
             Operand::Register(name, _) => format!("{}", name),
             Operand::Immediate(val) => format!("${}", val),
-            Operand::Memory { base, index, scale, offset } => {
+            Operand::Memory {
+                base,
+                index,
+                scale,
+                offset,
+            } => {
                 let mut inner = String::new();
 
                 if *offset != 0 {
@@ -218,7 +225,7 @@ impl Operand {
                 }
 
                 format!("[{}]", inner)
-            }
+            },
             Operand::Label(label) => label.clone(),
             Operand::SymbolOffset { symbol, offset } => {
                 if *offset > 0 {
@@ -228,7 +235,7 @@ impl Operand {
                 } else {
                     symbol.clone()
                 }
-            }
+            },
             Operand::Float(val) => format!("{}", val),
             Operand::Expression(expr) => expr.fmt(),
         }
@@ -252,10 +259,10 @@ impl Expression {
         match self {
             Expression::BinaryOp { op, left, right } => {
                 format!("({} {} {})", left, op, right)
-            }
+            },
             Expression::UnaryOp { op, expr } => {
                 format!("{}{}", op, expr)
-            }
+            },
             Expression::Identifier(name) => name.clone(),
             Expression::Literal(val) => val.to_string(),
         }
@@ -378,7 +385,7 @@ impl Directive {
             Directive::Data(data) => {
                 let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
                 format!(".string \"{}\"", hex)
-            }
+            },
             Directive::String(s) => format!(".string \"{}\"", s),
         }
     }
@@ -390,11 +397,10 @@ mod tests {
 
     #[test]
     fn test_basic_instruction() {
-        let instr = Instruction::new("mov")
-            .with_operands(vec![
-                Operand::Register("RAX".to_string(), false),
-                Operand::Immediate(42),
-            ]);
+        let instr = Instruction::new("mov").with_operands(vec![
+            Operand::Register("RAX".to_string(), false),
+            Operand::Immediate(42),
+        ]);
 
         assert_eq!(instr.mnemonic, "mov");
         assert_eq!(instr.operands.len(), 2);
@@ -415,12 +421,13 @@ mod tests {
     #[test]
     fn test_assembly_builder() {
         let mut builder = AssemblyBuilder::new();
-        
+
         builder.label("my_function");
-        builder.add_instruction(Instruction::new("push").with_operands(vec![
-            Operand::Register("RBX".to_string(), false),
-        ]));
-        
+        builder.add_instruction(
+            Instruction::new("push")
+                .with_operands(vec![Operand::Register("RBX".to_string(), false)]),
+        );
+
         let text = builder.emit_text(EncodingFormat::Intel);
         assert!(text.contains("my_function"));
         assert!(text.contains("push"));

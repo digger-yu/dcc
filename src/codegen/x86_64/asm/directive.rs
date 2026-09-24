@@ -1,6 +1,6 @@
 // src/codegen/x86_64/asm/directive.rs
 /// Advanced directive expansion for inline assembly
-/// 
+///
 /// Extracted from src/codegen/x86_64/mod.rs (Turn 35 ASM module migration)
 /// Implements GNU as-style advanced directives:
 /// - `.rept N ... .endr`: Repeat block N times
@@ -12,21 +12,20 @@
 /// - `.ifdef/.ifndef`: Symbol presence checks (always false/true respectively)
 /// - `.intel_syntax/.att_syntax`: Syntax mode switching
 /// - `.altmacro/.noaltmacro`: Alternate macro mode toggling
-/// 
+///
 /// # Design Notes
 /// - Performs text-level preprocessing before mini-assembler
 /// - Recursive expansion handles nested directives
 /// - Maintains syntax state (Intel/AT&T) throughout expansion
 /// - Macro calls use backslash prefix: `\param`, `\(param)`
-
 use std::collections::HashMap;
 
 /// Advanced directive expander for inline assembly
-/// 
+///
 /// Processes high-level assembly directives before the assembly is emitted.
 /// Provides GCC-compatible macro language support with repetition, iteration,
 /// conditional assembly, and macro definitions.
-/// 
+///
 /// # Features
 /// - **Repetition**: `.rept N` repeats a block N times
 /// - **Iteration**: `.irp` (list), `.irpc` (character string) loop over values
@@ -37,17 +36,17 @@ use std::collections::HashMap;
 pub struct AsmDirectiveExpander {
     /// Defined macros: name -> (parameter_names, body_lines)
     macros: HashMap<String, (Vec<String>, Vec<String>)>,
-    
+
     /// Current syntax mode: true = Intel, false = AT&T
     intel_syntax: bool,
-    
+
     /// Alternate macro mode enabled
     alt_macro: bool,
 }
 
 impl AsmDirectiveExpander {
     /// Create new directive expander with default settings
-    /// 
+    ///
     /// Initial state:
     /// - Empty macro table
     /// - AT&T syntax mode (default for GCC)
@@ -61,23 +60,23 @@ impl AsmDirectiveExpander {
     }
 
     /// Expand all advanced directives in assembly lines
-    /// 
+    ///
     /// This is the main entry point that processes a line-by-line assembly stream.
     /// Handles all directive types recursively and returns expanded instruction lines.
-    /// 
+    ///
     /// # Algorithm
     /// 1. Iterate through lines
     /// 2. Check for directive prefixes (.rept, .irp, etc.)
     /// 3. Expand matched directive recursively
     /// 4. Try macro call expansion
     /// 5. Pass-through non-directive lines
-    /// 
+    ///
     /// # Arguments
     /// * `lines` - Input assembly lines
-    /// 
+    ///
     /// # Returns
     /// Expanded lines with all directives resolved
-    /// 
+    ///
     /// # Examples
     /// ```text
     /// Input:  [".rept 2", "  mov eax, 1", ".endr"]
@@ -86,16 +85,16 @@ impl AsmDirectiveExpander {
     pub fn expand(&mut self, lines: &[String]) -> Vec<String> {
         let mut out = Vec::new();
         let mut i = 0;
-        
+
         while i < lines.len() {
             let line = lines[i].trim().to_string();
-            
+
             // Skip empty lines
             if line.is_empty() {
                 i += 1;
                 continue;
             }
-            
+
             // .rept N ... .endr
             if let Some(count) = Self::parse_rept(&line) {
                 let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
@@ -106,7 +105,7 @@ impl AsmDirectiveExpander {
                 i = end_idx + 1;
                 continue;
             }
-            
+
             // .irp sym, v1, v2, ... ... .endr
             if let Some((sym, vals)) = Self::parse_irp(&line) {
                 let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
@@ -122,7 +121,7 @@ impl AsmDirectiveExpander {
                 i = end_idx + 1;
                 continue;
             }
-            
+
             // .irpc sym, chars ... .endr
             if let Some((sym, chars)) = Self::parse_irpc(&line) {
                 let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
@@ -138,7 +137,7 @@ impl AsmDirectiveExpander {
                 i = end_idx + 1;
                 continue;
             }
-            
+
             // .macro name [args] ... .endm
             if let Some((name, args)) = Self::parse_macro_def(&line) {
                 let (body, end_idx) = Self::collect_block(lines, i + 1, ".endm");
@@ -146,14 +145,14 @@ impl AsmDirectiveExpander {
                 i = end_idx + 1;
                 continue;
             }
-            
+
             // Macro invocation: name [args]
             if let Some(expanded) = self.try_expand_macro_call(&line) {
                 out.extend(expanded);
                 i += 1;
                 continue;
             }
-            
+
             // .include "file"
             if let Some(path) = Self::parse_include(&line) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
@@ -165,7 +164,7 @@ impl AsmDirectiveExpander {
                 i += 1;
                 continue;
             }
-            
+
             // .if/.ifdef/.ifndef ... .elseif/.else ... .endif
             if let Some(cond_result) = Self::parse_conditional(&line) {
                 let (body, end_idx) = Self::collect_conditional_block(lines, i + 1, cond_result);
@@ -174,7 +173,7 @@ impl AsmDirectiveExpander {
                 i = end_idx + 1;
                 continue;
             }
-            
+
             // .intel_syntax noprefix / .intel_syntax
             if &line == ".intel_syntax noprefix" || &line == ".intel_syntax" {
                 self.intel_syntax = true;
@@ -182,7 +181,7 @@ impl AsmDirectiveExpander {
                 i += 1;
                 continue;
             }
-            
+
             // .att_syntax / .att_syntax prefix
             if &line == ".att_syntax" || &line == ".att_syntax prefix" {
                 self.intel_syntax = false;
@@ -190,7 +189,7 @@ impl AsmDirectiveExpander {
                 i += 1;
                 continue;
             }
-            
+
             // .altmacro
             if &line == ".altmacro" {
                 self.alt_macro = true;
@@ -198,7 +197,7 @@ impl AsmDirectiveExpander {
                 i += 1;
                 continue;
             }
-            
+
             // .noaltmacro
             if &line == ".noaltmacro" {
                 self.alt_macro = false;
@@ -206,23 +205,23 @@ impl AsmDirectiveExpander {
                 i += 1;
                 continue;
             }
-            
+
             // Regular line: pass through
             out.push(line);
             i += 1;
         }
-        
+
         out
     }
 
     /// Parse `.rept N` directive, return repeat count
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line that may contain `.rept N`
-    /// 
+    ///
     /// # Returns
     /// Some(count) if valid, None otherwise
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// assert_eq!(AsmDirectiveExpander::parse_rept(".rept 5"), Some(5));
@@ -236,13 +235,13 @@ impl AsmDirectiveExpander {
     }
 
     /// Parse `.irp sym, v1, v2, ...` directive
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line containing `.irp` directive
-    /// 
+    ///
     /// # Returns
     /// Some((symbol_name, value_list))
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let result = AsmDirectiveExpander::parse_irp(".irp x, 1, 2, 3").unwrap();
@@ -261,13 +260,13 @@ impl AsmDirectiveExpander {
     }
 
     /// Parse `.irpc sym, chars` directive
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line containing `.irpc` directive
-    /// 
+    ///
     /// # Returns
     /// Some((symbol_name, character_string))
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let result = AsmDirectiveExpander::parse_irpc(".irpc c, ABC").unwrap();
@@ -285,13 +284,13 @@ impl AsmDirectiveExpander {
     }
 
     /// Parse `.macro name [arg1, arg2, ...]` directive
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line containing `.macro` definition
-    /// 
+    ///
     /// # Returns
     /// Some((macro_name, parameter_names))
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let result = AsmDirectiveExpander::parse_macro_def(".macro ADD a, b").unwrap();
@@ -302,12 +301,12 @@ impl AsmDirectiveExpander {
         let t = line.trim();
         let rest = t.strip_prefix(".macro")?;
         let rest = rest.trim();
-        
+
         // Split macro name from arguments
         let mut parts = rest.splitn(2, |c: char| c.is_whitespace());
         let name = parts.next()?.trim().to_string();
         let args_rest = parts.next().unwrap_or("").trim();
-        
+
         let args: Vec<String> = if args_rest.is_empty() {
             Vec::new()
         } else {
@@ -316,57 +315,59 @@ impl AsmDirectiveExpander {
                 .map(|s| s.trim().trim_start_matches('\\').to_string())
                 .collect()
         };
-        
+
         Some((name, args))
     }
 
     /// Attempt to expand a macro call on a line
-    /// 
+    ///
     /// Checks if line starts with a known macro name and expands it.
     /// Replaces parameters with actual arguments using `\param` or `\param)` syntax.
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Assembly line that may be a macro call
-    /// 
+    ///
     /// # Returns
     /// Some(expanded_lines) if it was a macro call, None otherwise
-    /// 
+    ///
     /// # Macro Call Format
     /// `MACRO_NAME arg1, arg2, ...`
     /// Parameters inside macro body referenced as `\arg1`, `\arg2`, etc.
     fn try_expand_macro_call(&self, line: &str) -> Option<Vec<String>> {
         let t = line.trim();
-        
+
         // Lines starting with '.' are directives, not macro calls
         if t.starts_with('.') {
             return None;
         }
-        
+
         let mut parts = t.splitn(2, |c: char| c.is_whitespace());
         let name = parts.next()?.trim();
-        
+
         if let Some((args_def, body)) = self.macros.get(name) {
             let rest = parts.next().unwrap_or("").trim();
-            
+
             // Parse arguments
             let call_args: Vec<String> = if rest.is_empty() {
                 Vec::new()
             } else {
                 rest.split(',').map(|s| s.trim().to_string()).collect()
             };
-            
+
             // Expand body with argument substitution
             let mut result = Vec::new();
             for l in body {
                 let mut expanded = l.clone();
                 for (i, arg_name) in args_def.iter().enumerate() {
                     let val = call_args.get(i).cloned().unwrap_or_default();
-                    expanded = expanded.replace(&format!("\\{arg_name}", arg_name = arg_name), &val);
-                    expanded = expanded.replace(&format!("\\({arg_name})", arg_name = arg_name), &val);
+                    expanded =
+                        expanded.replace(&format!("\\{arg_name}", arg_name = arg_name), &val);
+                    expanded =
+                        expanded.replace(&format!("\\({arg_name})", arg_name = arg_name), &val);
                 }
                 result.push(expanded);
             }
-            
+
             Some(result)
         } else {
             None
@@ -374,10 +375,10 @@ impl AsmDirectiveExpander {
     }
 
     /// Parse `.include "file"` directive
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line containing `.include` directive
-    /// 
+    ///
     /// # Returns
     /// Some(file_path) if valid include, None otherwise
     fn parse_include(line: &str) -> Option<String> {
@@ -389,46 +390,46 @@ impl AsmDirectiveExpander {
     }
 
     /// Parse conditional directives (.if/.ifdef/.ifndef)
-    /// 
+    ///
     /// Returns condition result (true = include block, false = skip block).
     /// For `.ifdef`, always returns false (no symbol table in asm context).
     /// For `.ifndef`, always returns true.
     /// For `.if`, evaluates simple integer expression.
-    /// 
+    ///
     /// # Arguments
     /// * `line` - Line containing conditional directive
-    /// 
+    ///
     /// # Returns
     /// Some(condition_result) or None if not a conditional directive
     fn parse_conditional(line: &str) -> Option<bool> {
         let t = line.trim();
-        
+
         if let Some(rest) = t.strip_prefix(".ifdef") {
             // .ifdef: always false (no symbol table in asm)
             let _ = rest.trim();
             return Some(false);
         }
-        
+
         if let Some(rest) = t.strip_prefix(".ifndef") {
             // .ifndef: always true
             let _ = rest.trim();
             return Some(true);
         }
-        
+
         if let Some(rest) = t.strip_prefix(".if") {
             let rest = rest.trim();
             // Evaluate simple integer expression
             return Some(Self::eval_simple_expr(rest));
         }
-        
+
         None
     }
 
     /// Evaluate simple integer expression for .if directive
-    /// 
+    ///
     /// Supports: decimal/hex/binary numbers, operators (+, -, *, /, |, &, ^),
     /// comparisons (==, !=, <, >, <=, >=), negation (!).
-    /// 
+    ///
     /// # Returns
     /// True if expression evaluates to non-zero
     fn eval_simple_expr(s: &str) -> bool {
@@ -442,26 +443,26 @@ impl AsmDirectiveExpander {
     }
 
     /// Evaluate integer expression (simplified parser)
-    /// 
+    ///
     /// Supports basic arithmetic and comparison operations.
     /// Operator precedence: () > !,- > *,/ > +,- > | > & > ^ > comparators
-    /// 
+    ///
     /// # Returns
     /// Result<i64, ()> where Err means parse failure
     fn eval_expr_value(s: &str) -> Result<i64, ()> {
         let s = s.trim().trim_end_matches(',');
-        
+
         // Handle parentheses
         if s.starts_with('(') && s.ends_with(')') {
             return Self::eval_expr_value(&s[1..s.len() - 1]);
         }
-        
+
         // Handle unary !
         if let Some(rest) = s.strip_prefix('!') {
             let v = Self::eval_expr_value(rest)?;
             return Ok(if v == 0 { 1 } else { 0 });
         }
-        
+
         // Handle unary -
         if let Some(rest) = s.strip_prefix('-') {
             if !rest.is_empty() && !rest.contains(['+', '-', '*', '/']) {
@@ -469,24 +470,60 @@ impl AsmDirectiveExpander {
                 return Ok(-v);
             }
         }
-        
+
         // Handle comparison operators (lowest priority)
         for op in &["==", "!=", "<=", ">=", "<", ">"] {
             if let Some(pos) = s.find(op) {
                 let left = Self::eval_expr_value(&s[..pos])?;
                 let right = Self::eval_expr_value(&s[pos + op.len()..])?;
                 return Ok(match *op {
-                    "==" => if left == right { 1 } else { 0 },
-                    "!=" => if left != right { 1 } else { 0 },
-                    "<=" => if left <= right { 1 } else { 0 },
-                    ">=" => if left >= right { 1 } else { 0 },
-                    "<" => if left < right { 1 } else { 0 },
-                    ">" => if left > right { 1 } else { 0 },
+                    "==" => {
+                        if left == right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                    "!=" => {
+                        if left != right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                    "<=" => {
+                        if left <= right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                    ">=" => {
+                        if left >= right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                    "<" => {
+                        if left < right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                    ">" => {
+                        if left > right {
+                            1
+                        } else {
+                            0
+                        }
+                    },
                     _ => return Err(()),
                 });
             }
         }
-        
+
         // Handle | & ^ (medium-low priority)
         for op in &['|', '&', '^'] {
             if let Some(pos) = s.rfind(*op) {
@@ -500,7 +537,7 @@ impl AsmDirectiveExpander {
                 });
             }
         }
-        
+
         // Handle + - (medium priority)
         for op in &['+', '-'] {
             if let Some(pos) = s.rfind(*op) {
@@ -515,7 +552,7 @@ impl AsmDirectiveExpander {
                 }
             }
         }
-        
+
         // Handle * / (high priority)
         for op in &['*', '/'] {
             if let Some(pos) = s.rfind(*op) {
@@ -531,7 +568,7 @@ impl AsmDirectiveExpander {
                 });
             }
         }
-        
+
         // Basic number parsing
         Self::parse_number(s)
     }
@@ -549,25 +586,25 @@ impl AsmDirectiveExpander {
     }
 
     /// Collect block until matching end directive (handles nesting)
-    /// 
+    ///
     /// # Arguments
     /// * `lines` - All assembly lines
     /// * `start` - Starting line index (after directive)
     /// * `end_directive` - Ending directive name (e.g., ".endr")
-    /// 
+    ///
     /// # Returns
     /// (body_lines, end_line_index)
-    /// 
+    ///
     /// # Nesting Handling
     /// Counts depth for nested directives (.rept inside .rept, etc.)
     fn collect_block(lines: &[String], start: usize, end_directive: &str) -> (Vec<String>, usize) {
         let mut body = Vec::new();
         let mut depth = 1;
         let mut i = start;
-        
+
         while i < lines.len() {
             let t = lines[i].trim();
-            
+
             // Check for nested directive start
             if t.starts_with(".rept")
                 || t.starts_with(".irp")
@@ -590,20 +627,20 @@ impl AsmDirectiveExpander {
             }
             i += 1;
         }
-        
+
         (body, lines.len())
     }
 
     /// Collect conditional block (.if/.elseif/.else/.endif)
-    /// 
+    ///
     /// # Arguments
     /// * `lines` - All assembly lines
     /// * `start` - Starting line index
     /// * `first_cond` - Whether first block should be included
-    /// 
+    ///
     /// # Returns
     /// (selected_branch_lines, endif_line_index)
-    /// 
+    ///
     /// # Branch Selection Logic
     /// - First branch: included if first_cond=true
     /// - .else branches: included if previous branches were false
@@ -618,10 +655,10 @@ impl AsmDirectiveExpander {
         let mut current_is_true = first_cond;
         let mut depth = 1;
         let mut i = start;
-        
+
         while i < lines.len() {
             let t = lines[i].trim();
-            
+
             if t.starts_with(".if") || t.starts_with(".ifdef") || t.starts_with(".ifndef") {
                 depth += 1;
                 if depth == 2 {
@@ -659,10 +696,10 @@ impl AsmDirectiveExpander {
                     current_branch.push(lines[i].clone());
                 }
             }
-            
+
             i += 1;
         }
-        
+
         // No .endif found, return collected content
         if selected_branch.is_none() && current_is_true {
             (current_branch, i)

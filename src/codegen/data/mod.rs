@@ -1,5 +1,5 @@
 //! Data-driven instruction specification system
-//! 
+//!
 //! This module provides TOML-based strong-typed instruction specifications with:
 //! - Smart encoding format selection based on operands
 //! - Automatic machine code byte emission
@@ -63,14 +63,16 @@ pub use instruction_loader::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_data_module_structure() {
         let mut loader = InstructionLoader::new("src/codegen/data/x86_instructions");
-        
+
         // Test loading
-        let _specs = loader.load_all_instructions().expect("Failed to load specs");
-        
+        let _specs = loader
+            .load_all_instructions()
+            .expect("Failed to load specs");
+
         assert!(loader.has_instruction("add"));
         assert!(loader.has_instruction("mov"));
     }

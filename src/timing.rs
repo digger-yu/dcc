@@ -10,8 +10,8 @@ pub fn now() -> u128 {
 }
 
 /// Measure execution time of a closure
-pub fn measure<F, R>(f: F) -> (R, u128) 
-where 
+pub fn measure<F, R>(f: F) -> (R, u128)
+where
     F: FnOnce() -> R,
 {
     let start = now();

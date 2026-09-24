@@ -17,12 +17,7 @@ pub fn run(module: &mut Module, level: u8) {
 ///
 /// `has_vnni`: 目标是否支持 VNNI 指令 (AVX-VNNI / AVX-512VNNI)
 /// `vec_bits`: 向量寄存器位宽 (256 for AVX2, 512 for AVX-512)
-pub fn run_with_target(
-    module: &mut Module,
-    level: u8,
-    has_vnni: bool,
-    vec_bits: u32,
-) {
+pub fn run_with_target(module: &mut Module, level: u8, has_vnni: bool, vec_bits: u32) {
     if level < 2 {
         return;
     }
@@ -73,7 +68,7 @@ fn licm_block(block: &mut Block) {
                     body,
                     span,
                 }));
-            }
+            },
             BlockItem::Stmt(Stmt::While {
                 cond,
                 mut body,
@@ -83,11 +78,11 @@ fn licm_block(block: &mut Block) {
                 licm_in_stmt(body.as_mut(), &mut hoisted_here, None);
                 hoisted.extend(hoisted_here);
                 kept.push(BlockItem::Stmt(Stmt::While { cond, body, span }));
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 licm_block(&mut b);
                 kept.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
+            },
             other => kept.push(other),
         }
     }
@@ -100,7 +95,7 @@ fn licm_in_stmt(body: &mut Stmt, hoisted: &mut Vec<BlockItem>, loop_var: Option<
         Stmt::Block { b, .. } => {
             licm_block(b);
             hoisted.extend(split_invariants(b, loop_var));
-        }
+        },
         other => {
             let mut pseudo = Block {
                 items: vec![BlockItem::Stmt(other.clone())],
@@ -117,7 +112,7 @@ fn licm_in_stmt(body: &mut Stmt, hoisted: &mut Vec<BlockItem>, loop_var: Option<
                     span: stmt_span(other),
                 },
             };
-        }
+        },
     }
 }
 
@@ -139,7 +134,7 @@ fn is_invariant_item(item: &BlockItem, loop_var: Option<&str>) -> bool {
     match item {
         BlockItem::Decl(Decl::Var(v)) => {
             v.init.as_ref().is_none_or(|e| !expr_mentions(e, loop_var))
-        }
+        },
         BlockItem::Stmt(Stmt::Expr { e, .. }) => match e {
             Expr::Assign { l, r, .. } => !expr_mentions(l, loop_var) && !expr_mentions(r, loop_var),
             _ => !expr_mentions(e, loop_var),
@@ -157,7 +152,7 @@ fn expr_mentions(e: &Expr, name: Option<&str>) -> bool {
         Expr::Assign { l, r, .. } => expr_mentions(l, Some(name)) || expr_mentions(r, Some(name)),
         Expr::Index { arr, idx, .. } => {
             expr_mentions(arr, Some(name)) || expr_mentions(idx, Some(name))
-        }
+        },
         Expr::Cast { e: inner, .. } => expr_mentions(inner, Some(name)),
         Expr::Cond {
             cond, then_, else_, ..
@@ -165,7 +160,7 @@ fn expr_mentions(e: &Expr, name: Option<&str>) -> bool {
             expr_mentions(cond, Some(name))
                 || expr_mentions(then_, Some(name))
                 || expr_mentions(else_, Some(name))
-        }
+        },
         _ => false,
     }
 }
@@ -201,11 +196,11 @@ fn unroll_block(block: &mut Block, max_trip: usize) {
                     body,
                     span,
                 }));
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 unroll_block(&mut b, max_trip);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
+            },
             other => out.push(other),
         }
     }
@@ -280,9 +275,9 @@ fn rewrite_ivars(item: &mut BlockItem, ivar: &str, value: i128) {
             if let Some(init) = &mut v.init {
                 rewrite_expr_ivars(init, ivar, value);
             }
-        }
+        },
         BlockItem::Stmt(s) => rewrite_stmt_ivars(s, ivar, value),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -294,8 +289,8 @@ fn rewrite_stmt_ivars(s: &mut Stmt, ivar: &str, value: i128) {
             for sub in &mut b.items {
                 rewrite_ivars(sub, ivar, value);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -307,21 +302,21 @@ fn rewrite_expr_ivars(e: &mut Expr, ivar: &str, value: i128) {
                 span: span.clone(),
                 ty: ty.clone(),
             };
-        }
+        },
         Expr::Binop { l, r, .. } => {
             rewrite_expr_ivars(l, ivar, value);
             rewrite_expr_ivars(r, ivar, value);
-        }
+        },
         Expr::Unary { e: inner, .. } => rewrite_expr_ivars(inner, ivar, value),
         Expr::Assign { l, r, .. } => {
             rewrite_expr_ivars(l, ivar, value);
             rewrite_expr_ivars(r, ivar, value);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             rewrite_expr_ivars(arr, ivar, value);
             rewrite_expr_ivars(idx, ivar, value);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -351,7 +346,7 @@ fn init_stmt_var(init: &Stmt) -> Option<String> {
                 }
             }
             None
-        }
+        },
         Stmt::Block { b, .. } => {
             if b.items.len() == 1 {
                 if let BlockItem::Decl(Decl::Var(v)) = &b.items[0] {
@@ -361,7 +356,7 @@ fn init_stmt_var(init: &Stmt) -> Option<String> {
                 }
             }
             None
-        }
+        },
         _ => None,
     }
 }
@@ -384,7 +379,7 @@ fn parse_lt_limit(cond: &Expr, ivar: &str, max_trip: usize) -> Option<usize> {
                 }
             }
             None
-        }
+        },
         _ => None,
     }
 }
@@ -393,7 +388,7 @@ fn is_inc_step(step: &Expr, ivar: &str) -> bool {
     match step {
         Expr::PostInc { e, .. } | Expr::PreInc { e, .. } => {
             matches!(e.as_ref(), Expr::Ident { name, .. } if name.name == ivar)
-        }
+        },
         Expr::Assign { l, r, .. } => {
             if !matches!(l.as_ref(), Expr::Ident { name, .. } if name.name == ivar) {
                 return false;
@@ -407,10 +402,10 @@ fn is_inc_step(step: &Expr, ivar: &str) -> bool {
                 } => {
                     matches!(li.as_ref(), Expr::Ident { name, .. } if name.name == ivar)
                         && matches!(rv.as_ref(), Expr::Int { v: 1, .. })
-                }
+                },
                 _ => false,
             }
-        }
+        },
         _ => false,
     }
 }
@@ -458,11 +453,11 @@ fn vectorize_block(block: &mut Block, has_vnni: bool, vec_bits: u32) {
                         span,
                     }));
                 }
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 vectorize_block(&mut b, has_vnni, vec_bits);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
+            },
             other => out.push(other),
         }
     }
@@ -571,7 +566,12 @@ fn try_vectorize_vnni(
         _ => return None,
     };
     let (acc_l, acc_r) = match s {
-        Expr::Assign { op: BinOp::Add, l, r, .. } => (l.as_ref(), r.as_ref()),
+        Expr::Assign {
+            op: BinOp::Add,
+            l,
+            r,
+            ..
+        } => (l.as_ref(), r.as_ref()),
         _ => return None,
     };
 
@@ -582,13 +582,18 @@ fn try_vectorize_vnni(
                 return None;
             }
             name.clone()
-        }
+        },
         _ => return None,
     };
 
     // RHS must be a[i] * b[i] pattern
     let (mul_l, mul_r) = match acc_r {
-        Expr::Binop { op: BinOp::Mul, l, r, .. } => (l.as_ref(), r.as_ref()),
+        Expr::Binop {
+            op: BinOp::Mul,
+            l,
+            r,
+            ..
+        } => (l.as_ref(), r.as_ref()),
         _ => return None,
     };
 
@@ -640,7 +645,7 @@ fn is_array_index_with(e: &Expr, ivar: &str) -> bool {
             } else {
                 false
             }
-        }
+        },
         _ => false,
     }
 }
@@ -659,11 +664,9 @@ fn parse_vector_elem_assign(
     };
     let dst = index_vector_ident(l, ivar)?;
     let (op, src_l, src_r) = match r {
-        Expr::Binop { op, l, r, .. } => (
-            *op,
-            index_vector_ident(l, ivar)?,
-            index_vector_ident(r, ivar)?,
-        ),
+        Expr::Binop { op, l, r, .. } => {
+            (*op, index_vector_ident(l, ivar)?, index_vector_ident(r, ivar)?)
+        },
         _ => return None,
     };
     if dst.1 != src_l.1 || dst.1 != src_r.1 {
@@ -690,7 +693,7 @@ fn index_vector_ident(e: &Expr, ivar: &str) -> Option<NamedVector> {
                 ) if idx_name.name == ivar => Some((name.clone(), Type::Vector(elem.clone(), *n))),
                 _ => None,
             }
-        }
+        },
         _ => None,
     }
 }
@@ -718,7 +721,11 @@ fn tile_block(block: &mut Block, tile_size: usize) {
     for item in block.items.drain(..) {
         match item {
             BlockItem::Stmt(Stmt::For {
-                init, cond, step, body, span,
+                init,
+                cond,
+                step,
+                body,
+                span,
             }) => {
                 // 检测可分块的循环模式
                 if let Some((ivar, lo, hi)) = detect_simple_for(&init, &cond, &step) {
@@ -727,25 +734,35 @@ fn tile_block(block: &mut Block, tile_size: usize) {
                         //   for (j = 0; j < tile_size && ii+j < hi; j++)
                         //     body[i -> ii+j]
                         // + 尾部循环: for (; ii < hi; ii++) body
-                        let tiled = generate_tiled_loop(
-                            &ivar, lo, hi, &body, tile_size, &span,
-                        );
+                        let tiled = generate_tiled_loop(&ivar, lo, hi, &body, tile_size, &span);
                         out.extend(tiled);
                         continue;
                     }
                 }
                 out.push(BlockItem::Stmt(Stmt::For {
-                    init, cond, step, body, span,
+                    init,
+                    cond,
+                    step,
+                    body,
+                    span,
                 }));
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 tile_block(&mut b, tile_size);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
-            BlockItem::Stmt(Stmt::If { cond, then_, else_, span }) => {
+            },
+            BlockItem::Stmt(Stmt::If {
+                cond,
+                then_,
+                else_,
+                span,
+            }) => {
                 let mut then_b = match *then_ {
                     Stmt::Block { b, .. } => b,
-                    s => Block { items: vec![BlockItem::Stmt(s)], span: span.clone() },
+                    s => Block {
+                        items: vec![BlockItem::Stmt(s)],
+                        span: span.clone(),
+                    },
                 };
                 tile_block(&mut then_b, tile_size);
                 let else_b = else_.map(|e| -> Box<Stmt> {
@@ -754,7 +771,7 @@ fn tile_block(block: &mut Block, tile_size: usize) {
                             let mut bb = b;
                             tile_block(&mut bb, tile_size);
                             Box::new(Stmt::Block { b: bb, span })
-                        }
+                        },
                         s => Box::new(s),
                     }
                 });
@@ -767,7 +784,7 @@ fn tile_block(block: &mut Block, tile_size: usize) {
                     else_: else_b,
                     span,
                 }));
-            }
+            },
             other => out.push(other),
         }
     }
@@ -785,22 +802,37 @@ fn detect_simple_for(
     match step.as_ref()? {
         Expr::PostInc { e, .. } => {
             if let Expr::Ident { name, .. } = e.as_ref() {
-                if name.name != ivar { return None; }
-            } else { return None; }
-        }
+                if name.name != ivar {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        },
         _ => return None,
     }
     // Check cond is ivar < hi
     let cond = cond.as_ref()?;
     match cond {
-        Expr::Binop { op: BinOp::Lt, l, r, .. } => {
+        Expr::Binop {
+            op: BinOp::Lt,
+            l,
+            r,
+            ..
+        } => {
             if let Expr::Ident { name, .. } = l.as_ref() {
-                if name.name != ivar { return None; }
-            } else { return None; }
+                if name.name != ivar {
+                    return None;
+                }
+            } else {
+                return None;
+            }
             if let Expr::Int { v, .. } = r.as_ref() {
                 Some((ivar, 0, *v))
-            } else { None }
-        }
+            } else {
+                None
+            }
+        },
         _ => None,
     }
 }
@@ -825,7 +857,11 @@ fn generate_tiled_loop(
         let outer_cond = Expr::Binop {
             op: BinOp::Lt,
             l: Box::new(make_ident("__dcc_ii", span)),
-            r: Box::new(Expr::Int { v: outer_hi, span: sp.clone(), ty: int_ty() }),
+            r: Box::new(Expr::Int {
+                v: outer_hi,
+                span: sp.clone(),
+                ty: int_ty(),
+            }),
             span: sp.clone(),
             ty: int_ty(),
         };
@@ -835,7 +871,11 @@ fn generate_tiled_loop(
             r: Box::new(Expr::Binop {
                 op: BinOp::Add,
                 l: Box::new(make_ident("__dcc_ii", span)),
-                r: Box::new(Expr::Int { v: ts, span: sp.clone(), ty: int_ty() }),
+                r: Box::new(Expr::Int {
+                    v: ts,
+                    span: sp.clone(),
+                    ty: int_ty(),
+                }),
                 span: sp.clone(),
                 ty: int_ty(),
             }),
@@ -843,19 +883,27 @@ fn generate_tiled_loop(
             ty: int_ty(),
         };
         // 内层循环: for (int j = 0; j < ts; j++) body[ivar -> __dcc_ii + j]
-        let inner_body = subst_index_var(body, ivar, &Expr::Binop {
-            op: BinOp::Add,
-            l: Box::new(make_ident("__dcc_ii", span)),
-            r: Box::new(make_ident("j", span)),
-            span: sp.clone(),
-            ty: int_ty(),
-        });
+        let inner_body = subst_index_var(
+            body,
+            ivar,
+            &Expr::Binop {
+                op: BinOp::Add,
+                l: Box::new(make_ident("__dcc_ii", span)),
+                r: Box::new(make_ident("j", span)),
+                span: sp.clone(),
+                ty: int_ty(),
+            },
+        );
         let inner_for = Stmt::For {
             init: Some(Box::new(make_var_decl("j", 0, span))),
             cond: Some(Expr::Binop {
                 op: BinOp::Lt,
                 l: Box::new(make_ident("j", span)),
-                r: Box::new(Expr::Int { v: ts, span: sp.clone(), ty: int_ty() }),
+                r: Box::new(Expr::Int {
+                    v: ts,
+                    span: sp.clone(),
+                    ty: int_ty(),
+                }),
                 span: sp.clone(),
                 ty: int_ty(),
             }),
@@ -884,7 +932,11 @@ fn generate_tiled_loop(
             cond: Some(Expr::Binop {
                 op: BinOp::Lt,
                 l: Box::new(make_ident("__dcc_ii", span)),
-                r: Box::new(Expr::Int { v: hi, span: sp.clone(), ty: int_ty() }),
+                r: Box::new(Expr::Int {
+                    v: hi,
+                    span: sp.clone(),
+                    ty: int_ty(),
+                }),
                 span: sp.clone(),
                 ty: int_ty(),
             }),
@@ -910,7 +962,11 @@ fn parallelize_block(block: &mut Block) {
     for item in block.items.drain(..) {
         match item {
             BlockItem::Stmt(Stmt::For {
-                init, cond, step, body, span,
+                init,
+                cond,
+                step,
+                body,
+                span,
             }) => {
                 if is_parallelizable_for(&init, &cond, &step, &body) {
                     // 插入并行化标注: asm volatile("#pragma omp simd")
@@ -932,13 +988,17 @@ fn parallelize_block(block: &mut Block) {
                     }));
                 }
                 out.push(BlockItem::Stmt(Stmt::For {
-                    init, cond, step, body, span,
+                    init,
+                    cond,
+                    step,
+                    body,
+                    span,
                 }));
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 parallelize_block(&mut b);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
+            },
             other => out.push(other),
         }
     }
@@ -969,10 +1029,10 @@ fn stmt_has_call(s: &Stmt) -> bool {
         }),
         Stmt::If { then_, else_, .. } => {
             stmt_has_call(then_) || else_.as_ref().is_some_and(|e| stmt_has_call(e))
-        }
+        },
         Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Do { body, .. } => {
             stmt_has_call(body)
-        }
+        },
         _ => false,
     }
 }
@@ -980,16 +1040,19 @@ fn stmt_has_call(s: &Stmt) -> bool {
 fn expr_has_call(e: &Expr) -> bool {
     match e {
         Expr::Call { .. } => true,
-        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
-            expr_has_call(l) || expr_has_call(r)
-        }
-        Expr::Unary { e, .. } | Expr::Cast { e, .. } | Expr::AddrOf { e, .. }
-        | Expr::Deref { e, .. } | Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
-        | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => expr_has_call(e),
+        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => expr_has_call(l) || expr_has_call(r),
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. } => expr_has_call(e),
         Expr::Assign { l, r, .. } => expr_has_call(l) || expr_has_call(r),
-        Expr::Cond { cond, then_, else_, .. } => {
-            expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_)
-        }
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_),
         Expr::Index { arr, idx, .. } => expr_has_call(arr) || expr_has_call(idx),
         _ => false,
     }
@@ -1005,7 +1068,11 @@ fn software_pipeline_block(block: &mut Block) {
     for item in block.items.drain(..) {
         match item {
             BlockItem::Stmt(Stmt::For {
-                init, cond, step, body, span,
+                init,
+                cond,
+                step,
+                body,
+                span,
             }) => {
                 if is_pipelineable(&init, &cond, &step, &body) {
                     // 插入流水化标注: 告知后端可做 modulo scheduling
@@ -1027,13 +1094,17 @@ fn software_pipeline_block(block: &mut Block) {
                     }));
                 }
                 out.push(BlockItem::Stmt(Stmt::For {
-                    init, cond, step, body, span,
+                    init,
+                    cond,
+                    step,
+                    body,
+                    span,
                 }));
-            }
+            },
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 software_pipeline_block(&mut b);
                 out.push(BlockItem::Stmt(Stmt::Block { b, span }));
-            }
+            },
             other => out.push(other),
         }
     }
@@ -1063,10 +1134,10 @@ fn stmt_has_store(s: &Stmt) -> bool {
         }),
         Stmt::If { then_, else_, .. } => {
             stmt_has_store(then_) || else_.as_ref().is_some_and(|e| stmt_has_store(e))
-        }
+        },
         Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Do { body, .. } => {
             stmt_has_store(body)
-        }
+        },
         _ => false,
     }
 }
@@ -1076,13 +1147,13 @@ fn expr_has_store(e: &Expr) -> bool {
         Expr::Assign { l, .. } => {
             // 检查是否是 Deref/Index 的赋值 (内存写入)
             matches!(l.as_ref(), Expr::Deref { .. } | Expr::Index { .. })
-        }
+        },
         Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
             expr_has_store(l) || expr_has_store(r)
-        }
-        Expr::Cond { cond, then_, else_, .. } => {
-            expr_has_store(cond) || expr_has_store(then_) || expr_has_store(else_)
-        }
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => expr_has_store(cond) || expr_has_store(then_) || expr_has_store(else_),
         _ => false,
     }
 }
@@ -1091,7 +1162,10 @@ fn expr_has_store(e: &Expr) -> bool {
 
 fn make_ident(name: &str, span: &Span) -> Expr {
     Expr::Ident {
-        name: Ident { name: name.into(), span: span.clone() },
+        name: Ident {
+            name: name.into(),
+            span: span.clone(),
+        },
         span: span.clone(),
         ty: int_ty(),
     }
@@ -1102,11 +1176,18 @@ fn make_var_decl(name: &str, val: i128, span: &Span) -> Stmt {
         e: Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Ident {
-                name: Ident { name: name.into(), span: span.clone() },
+                name: Ident {
+                    name: name.into(),
+                    span: span.clone(),
+                },
                 span: span.clone(),
                 ty: int_ty(),
             }),
-            r: Box::new(Expr::Int { v: val, span: span.clone(), ty: int_ty() }),
+            r: Box::new(Expr::Int {
+                v: val,
+                span: span.clone(),
+                ty: int_ty(),
+            }),
             span: span.clone(),
             ty: int_ty(),
         },
@@ -1135,21 +1216,36 @@ fn subst_stmt(s: &Stmt, old: &str, new_e: &Expr) -> Stmt {
         },
         Stmt::Block { b, span } => Stmt::Block {
             b: Block {
-                items: b.items.iter().map(|i| match i {
-                    BlockItem::Stmt(s) => BlockItem::Stmt(subst_stmt(s, old, new_e)),
-                    other => other.clone(),
-                }).collect(),
+                items: b
+                    .items
+                    .iter()
+                    .map(|i| match i {
+                        BlockItem::Stmt(s) => BlockItem::Stmt(subst_stmt(s, old, new_e)),
+                        other => other.clone(),
+                    })
+                    .collect(),
                 span: b.span.clone(),
             },
             span: span.clone(),
         },
-        Stmt::If { cond, then_, else_, span } => Stmt::If {
+        Stmt::If {
+            cond,
+            then_,
+            else_,
+            span,
+        } => Stmt::If {
             cond: subst_expr(cond, old, new_e),
             then_: Box::new(subst_stmt(then_, old, new_e)),
             else_: else_.as_ref().map(|e| Box::new(subst_stmt(e, old, new_e))),
             span: span.clone(),
         },
-        Stmt::For { init, cond, step, body, span } => Stmt::For {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            span,
+        } => Stmt::For {
             init: init.as_ref().map(|i| Box::new(subst_stmt(i, old, new_e))),
             cond: cond.as_ref().map(|c| subst_expr(c, old, new_e)),
             step: step.as_ref().map(|s| subst_expr(s, old, new_e)),
@@ -1178,10 +1274,10 @@ fn subst_expr(e: &Expr, old: &str, new_e: &Expr) -> Expr {
             match &mut ne {
                 Expr::Ident { span: s, .. } => *s = span.clone(),
                 Expr::Binop { span: s, .. } => *s = span.clone(),
-                _ => {}
+                _ => {},
             }
             ne
-        }
+        },
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op: *op,
             l: Box::new(subst_expr(l, old, new_e)),
@@ -1202,13 +1298,23 @@ fn subst_expr(e: &Expr, old: &str, new_e: &Expr) -> Expr {
             span: span.clone(),
             ty: ty.clone(),
         },
-        Expr::Call { callee, args, span, ty } => Expr::Call {
+        Expr::Call {
+            callee,
+            args,
+            span,
+            ty,
+        } => Expr::Call {
             callee: Box::new(subst_expr(callee, old, new_e)),
             args: args.iter().map(|a| subst_expr(a, old, new_e)).collect(),
             span: span.clone(),
             ty: ty.clone(),
         },
-        Expr::Unary { op, e: inner, span, ty } => Expr::Unary {
+        Expr::Unary {
+            op,
+            e: inner,
+            span,
+            ty,
+        } => Expr::Unary {
             op: *op,
             e: Box::new(subst_expr(inner, old, new_e)),
             span: span.clone(),
@@ -1219,7 +1325,13 @@ fn subst_expr(e: &Expr, old: &str, new_e: &Expr) -> Expr {
             e: Box::new(subst_expr(inner, old, new_e)),
             span: span.clone(),
         },
-        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+        Expr::Cond {
+            cond,
+            then_,
+            else_,
+            span,
+            ty,
+        } => Expr::Cond {
             cond: Box::new(subst_expr(cond, old, new_e)),
             then_: Box::new(subst_expr(then_, old, new_e)),
             else_: Box::new(subst_expr(else_, old, new_e)),
@@ -1254,12 +1366,17 @@ mod tests {
             e: Expr::Assign {
                 op: BinOp::Add, // plain assign uses any BinOp
                 l: Box::new(Expr::Ident {
-                    name: Ident { name: "i".into(), span: sp.clone() },
+                    name: Ident {
+                        name: "i".into(),
+                        span: sp.clone(),
+                    },
                     span: sp.clone(),
                     ty: int_ty(),
                 }),
                 r: Box::new(Expr::Int {
-                    v: 0, span: sp.clone(), ty: int_ty(),
+                    v: 0,
+                    span: sp.clone(),
+                    ty: int_ty(),
                 }),
                 span: sp.clone(),
                 ty: int_ty(),
@@ -1269,19 +1386,27 @@ mod tests {
         let cond = Expr::Binop {
             op: BinOp::Lt,
             l: Box::new(Expr::Ident {
-                name: Ident { name: "i".into(), span: sp.clone() },
+                name: Ident {
+                    name: "i".into(),
+                    span: sp.clone(),
+                },
                 span: sp.clone(),
                 ty: int_ty(),
             }),
             r: Box::new(Expr::Int {
-                v: 10, span: sp.clone(), ty: int_ty(),
+                v: 10,
+                span: sp.clone(),
+                ty: int_ty(),
             }),
             span: sp.clone(),
             ty: int_ty(),
         };
         let step = Expr::PostInc {
             e: Box::new(Expr::Ident {
-                name: Ident { name: "i".into(), span: sp.clone() },
+                name: Ident {
+                    name: "i".into(),
+                    span: sp.clone(),
+                },
                 span: sp.clone(),
                 ty: int_ty(),
             }),
@@ -1290,22 +1415,12 @@ mod tests {
         };
 
         // max_trip=4 should reject trip=10
-        let r_cold = parse_counted_for(
-            Some(&init), Some(&cond), Some(&step), 4,
-        );
-        assert!(
-            r_cold.is_none(),
-            "cold func max_trip=4 should reject trip=10"
-        );
+        let r_cold = parse_counted_for(Some(&init), Some(&cond), Some(&step), 4);
+        assert!(r_cold.is_none(), "cold func max_trip=4 should reject trip=10");
 
         // max_trip=16 should accept trip=10
-        let r_hot = parse_counted_for(
-            Some(&init), Some(&cond), Some(&step), 16,
-        );
-        assert!(
-            r_hot.is_some(),
-            "hot func max_trip=16 should accept trip=10"
-        );
+        let r_hot = parse_counted_for(Some(&init), Some(&cond), Some(&step), 16);
+        assert!(r_hot.is_some(), "hot func max_trip=16 should accept trip=10");
         let (ivar, trip) = r_hot.unwrap();
         assert_eq!(ivar, "i");
         assert_eq!(trip, 10);
@@ -1319,12 +1434,17 @@ mod tests {
             e: Expr::Assign {
                 op: BinOp::Add,
                 l: Box::new(Expr::Ident {
-                    name: Ident { name: "j".into(), span: sp.clone() },
+                    name: Ident {
+                        name: "j".into(),
+                        span: sp.clone(),
+                    },
                     span: sp.clone(),
                     ty: int_ty(),
                 }),
                 r: Box::new(Expr::Int {
-                    v: 0, span: sp.clone(), ty: int_ty(),
+                    v: 0,
+                    span: sp.clone(),
+                    ty: int_ty(),
                 }),
                 span: sp.clone(),
                 ty: int_ty(),
@@ -1334,19 +1454,27 @@ mod tests {
         let cond = Expr::Binop {
             op: BinOp::Lt,
             l: Box::new(Expr::Ident {
-                name: Ident { name: "j".into(), span: sp.clone() },
+                name: Ident {
+                    name: "j".into(),
+                    span: sp.clone(),
+                },
                 span: sp.clone(),
                 ty: int_ty(),
             }),
             r: Box::new(Expr::Int {
-                v: 3, span: sp.clone(), ty: int_ty(),
+                v: 3,
+                span: sp.clone(),
+                ty: int_ty(),
             }),
             span: sp.clone(),
             ty: int_ty(),
         };
         let step = Expr::PostInc {
             e: Box::new(Expr::Ident {
-                name: Ident { name: "j".into(), span: sp.clone() },
+                name: Ident {
+                    name: "j".into(),
+                    span: sp.clone(),
+                },
                 span: sp.clone(),
                 ty: int_ty(),
             }),
@@ -1355,15 +1483,11 @@ mod tests {
         };
 
         // Both cold and hot should accept trip=3
-        let r_cold = parse_counted_for(
-            Some(&init), Some(&cond), Some(&step), 4,
-        );
+        let r_cold = parse_counted_for(Some(&init), Some(&cond), Some(&step), 4);
         assert!(r_cold.is_some());
         assert_eq!(r_cold.unwrap().1, 3);
 
-        let r_hot = parse_counted_for(
-            Some(&init), Some(&cond), Some(&step), 16,
-        );
+        let r_hot = parse_counted_for(Some(&init), Some(&cond), Some(&step), 16);
         assert!(r_hot.is_some());
         assert_eq!(r_hot.unwrap().1, 3);
     }

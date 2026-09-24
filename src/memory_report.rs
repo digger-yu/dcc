@@ -61,7 +61,9 @@ pub struct MemoryMap {
 impl MemoryMap {
     /// Create a new empty memory map
     pub fn new() -> Self {
-        Self { regions: Vec::new() }
+        Self {
+            regions: Vec::new(),
+        }
     }
 
     /// Add a memory region
@@ -87,7 +89,11 @@ impl MemoryMap {
 ///    text    data     bss     dec     hex filename
 ///   12345     678     901   13924    3664 firmware.elf
 /// ```
-pub fn print_size_report<W: Write>(mut output: W, usage: &MemoryUsage, filename: &str) -> io::Result<()> {
+pub fn print_size_report<W: Write>(
+    mut output: W,
+    usage: &MemoryUsage,
+    filename: &str,
+) -> io::Result<()> {
     let total = usage.flash_total + usage.bss;
 
     writeln!(output, "   text    data     bss     dec     hex filename")?;
@@ -159,36 +165,24 @@ pub fn print_detailed_report<W: Write>(
 pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
     // Minimal ELF parsing to extract section sizes
     if elf_data.len() < 64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "ELF file too small",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF file too small"));
     }
 
     // Check ELF magic
     if &elf_data[0..4] != b"\x7fELF" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not an ELF file",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not an ELF file"));
     }
 
     let is_64bit = elf_data[4] == 2;
     let is_little_endian = elf_data[5] == 1;
 
     if !is_little_endian {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "only little-endian ELF supported",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "only little-endian ELF supported"));
     }
 
     let (shoff, shentsize, shnum) = if is_64bit {
         if elf_data.len() < 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ELF64 header too small",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF64 header too small"));
         }
         let shoff = u64::from_le_bytes(elf_data[40..48].try_into().unwrap());
         let shentsize = u16::from_le_bytes(elf_data[58..60].try_into().unwrap());
@@ -196,10 +190,7 @@ pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
         (shoff, shentsize, shnum as u64)
     } else {
         if elf_data.len() < 52 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ELF32 header too small",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ELF32 header too small"));
         }
         let shoff = u32::from_le_bytes(elf_data[32..36].try_into().unwrap()) as u64;
         let shentsize = u16::from_le_bytes(elf_data[46..48].try_into().unwrap());
@@ -224,19 +215,51 @@ pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
             if elf_data.len() < (offset + 64) as usize {
                 continue;
             }
-            let sh_name = u32::from_le_bytes(elf_data[offset as usize..(offset + 4) as usize].try_into().unwrap());
-            let sh_type = u32::from_le_bytes(elf_data[(offset + 4) as usize..(offset + 8) as usize].try_into().unwrap());
-            let sh_flags = u64::from_le_bytes(elf_data[(offset + 8) as usize..(offset + 16) as usize].try_into().unwrap());
-            let sh_size = u64::from_le_bytes(elf_data[(offset + 32) as usize..(offset + 40) as usize].try_into().unwrap());
+            let sh_name = u32::from_le_bytes(
+                elf_data[offset as usize..(offset + 4) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let sh_type = u32::from_le_bytes(
+                elf_data[(offset + 4) as usize..(offset + 8) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let sh_flags = u64::from_le_bytes(
+                elf_data[(offset + 8) as usize..(offset + 16) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let sh_size = u64::from_le_bytes(
+                elf_data[(offset + 32) as usize..(offset + 40) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
             (sh_name, sh_type, sh_size, sh_flags)
         } else {
             if elf_data.len() < (offset + 40) as usize {
                 continue;
             }
-            let sh_name = u32::from_le_bytes(elf_data[offset as usize..(offset + 4) as usize].try_into().unwrap());
-            let sh_type = u32::from_le_bytes(elf_data[(offset + 4) as usize..(offset + 8) as usize].try_into().unwrap());
-            let sh_flags = u32::from_le_bytes(elf_data[(offset + 8) as usize..(offset + 12) as usize].try_into().unwrap()) as u64;
-            let sh_size = u32::from_le_bytes(elf_data[(offset + 20) as usize..(offset + 24) as usize].try_into().unwrap()) as u64;
+            let sh_name = u32::from_le_bytes(
+                elf_data[offset as usize..(offset + 4) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let sh_type = u32::from_le_bytes(
+                elf_data[(offset + 4) as usize..(offset + 8) as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let sh_flags = u32::from_le_bytes(
+                elf_data[(offset + 8) as usize..(offset + 12) as usize]
+                    .try_into()
+                    .unwrap(),
+            ) as u64;
+            let sh_size = u32::from_le_bytes(
+                elf_data[(offset + 20) as usize..(offset + 24) as usize]
+                    .try_into()
+                    .unwrap(),
+            ) as u64;
             (sh_name, sh_type, sh_size, sh_flags)
         };
 
@@ -244,15 +267,27 @@ pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
         if shstrndx > 0 && shstrndx < shnum {
             let strtab_offset = shoff + shstrndx * shentsize as u64;
             let strtab_sh_offset = if is_64bit {
-                u64::from_le_bytes(elf_data[(strtab_offset + 24) as usize..(strtab_offset + 32) as usize].try_into().unwrap())
+                u64::from_le_bytes(
+                    elf_data[(strtab_offset + 24) as usize..(strtab_offset + 32) as usize]
+                        .try_into()
+                        .unwrap(),
+                )
             } else {
-                u32::from_le_bytes(elf_data[(strtab_offset + 16) as usize..(strtab_offset + 20) as usize].try_into().unwrap()) as u64
+                u32::from_le_bytes(
+                    elf_data[(strtab_offset + 16) as usize..(strtab_offset + 20) as usize]
+                        .try_into()
+                        .unwrap(),
+                ) as u64
             };
 
             let name_start = (strtab_sh_offset + sh_name as u64) as usize;
             if name_start < elf_data.len() {
-                let name_end = elf_data[name_start..].iter().position(|&b| b == 0).unwrap_or(0);
-                let name = std::str::from_utf8(&elf_data[name_start..name_start + name_end]).unwrap_or("");
+                let name_end = elf_data[name_start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(0);
+                let name =
+                    std::str::from_utf8(&elf_data[name_start..name_start + name_end]).unwrap_or("");
 
                 // Accumulate section sizes
                 const SHT_PROGBITS: u32 = 1;
@@ -265,13 +300,13 @@ pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
                     match name {
                         ".text" | ".rodata" | ".ARM.exidx" => {
                             usage.text += sh_size;
-                        }
+                        },
                         ".data" => {
                             usage.data += sh_size;
-                        }
+                        },
                         ".bss" => {
                             usage.bss += sh_size;
-                        }
+                        },
                         _ => {
                             // Other allocatable sections
                             if sh_type == SHT_PROGBITS {
@@ -285,7 +320,7 @@ pub fn parse_elf_section_sizes(elf_data: &[u8]) -> io::Result<MemoryUsage> {
                             } else if sh_type == SHT_NOBITS {
                                 usage.bss += sh_size;
                             }
-                        }
+                        },
                     }
                 }
             }

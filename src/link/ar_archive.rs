@@ -66,16 +66,14 @@ pub fn extract_archive_members(archive_data: &[u8]) -> Result<Vec<(String, Vec<u
         // 处理特殊成员
         match name_raw {
             // 符号表 (跳过)
-            "/" | "/SYM64/" => {}
+            "/" | "/SYM64/" => {},
             // 扩展名表 (GNU ar 长文件名)
             "//" => {
                 extended_names = member_data.to_vec();
-            }
+            },
             // BSD 风格长文件名
             n if n.starts_with("#1/") => {
-                let name_len: usize = n[3..]
-                    .parse()
-                    .unwrap_or(0);
+                let name_len: usize = n[3..].parse().unwrap_or(0);
                 if name_len > 0 && member_data.len() > name_len {
                     let name = std::str::from_utf8(&member_data[..name_len])
                         .unwrap_or("<bad-name>")
@@ -84,21 +82,21 @@ pub fn extract_archive_members(archive_data: &[u8]) -> Result<Vec<(String, Vec<u
                     let actual_data = member_data[name_len..].to_vec();
                     members.push((name, actual_data));
                 }
-            }
+            },
             // GNU 长文件名引用 "/NNNN"
             n if n.starts_with('/') && n.len() > 1 => {
                 if let Ok(name_offset) = n[1..].parse::<usize>() {
                     let name = read_extended_name(&extended_names, name_offset);
                     members.push((name, member_data.to_vec()));
                 }
-            }
+            },
             // 普通成员 "name/"
             n => {
                 let name = n.trim_end_matches('/').to_string();
                 if !name.is_empty() {
                     members.push((name, member_data.to_vec()));
                 }
-            }
+            },
         }
 
         // 对齐到 2 字节边界

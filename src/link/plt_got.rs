@@ -230,7 +230,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
                 OutputSectionKind::RelPlt => rel_plt_i = Some(i),
                 OutputSectionKind::RelDyn => rel_dyn_i = Some(i),
                 OutputSectionKind::Dynamic => dynamic_i = Some(i),
-                _ => {}
+                _ => {},
             }
         }
         (

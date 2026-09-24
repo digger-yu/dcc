@@ -139,10 +139,7 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             parse_coff_object(data, name)
         } else {
             Err(ObjectError {
-                msg: format!(
-                    "{}: unknown object format (not ELF, not COFF AMD64)",
-                    name
-                ),
+                msg: format!("{}: unknown object format (not ELF, not COFF AMD64)", name),
             })
         }
     } else {
@@ -162,12 +159,8 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
             msg: format!("{}: COFF header truncated", name),
         });
     }
-    let ru16 = |o: usize| -> u16 {
-        u16::from_le_bytes(data[o..o + 2].try_into().unwrap())
-    };
-    let ru32 = |o: usize| -> u32 {
-        u32::from_le_bytes(data[o..o + 4].try_into().unwrap())
-    };
+    let ru16 = |o: usize| -> u16 { u16::from_le_bytes(data[o..o + 2].try_into().unwrap()) };
+    let ru32 = |o: usize| -> u32 { u32::from_le_bytes(data[o..o + 4].try_into().unwrap()) };
 
     let machine_raw = ru16(0);
     let num_sections = ru16(2) as usize;
@@ -204,7 +197,9 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
             format!("__coff_long_name_{}", strtab_off)
         } else {
             let end = name_raw.iter().position(|&b| b == 0).unwrap_or(8);
-            std::str::from_utf8(&name_raw[..end]).unwrap_or("").to_string()
+            std::str::from_utf8(&name_raw[..end])
+                .unwrap_or("")
+                .to_string()
         };
 
         let _virtual_size = ru32(off + 8);
@@ -254,8 +249,7 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
             let name_bytes = &data[base..base + 8];
             let sym_name = if u32::from_le_bytes(name_bytes[0..4].try_into().unwrap()) == 0 {
                 // Long name: offset in string table
-                let strtab_off =
-                    u32::from_le_bytes(name_bytes[4..8].try_into().unwrap()) as usize;
+                let strtab_off = u32::from_le_bytes(name_bytes[4..8].try_into().unwrap()) as usize;
                 if strtab_ptr + strtab_off < data.len() {
                     read_cstr(data, strtab_ptr + strtab_off)
                         .unwrap_or("")
@@ -265,7 +259,9 @@ fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError
                 }
             } else {
                 let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(8);
-                std::str::from_utf8(&name_bytes[..end]).unwrap_or("").to_string()
+                std::str::from_utf8(&name_bytes[..end])
+                    .unwrap_or("")
+                    .to_string()
             };
 
             let value = ru32(base + 8) as u64;
@@ -388,11 +384,7 @@ fn coff_storage_to_elf(storage_class: u8, coff_type: u16) -> (u8, u8) {
         3 => STB_LOCAL,  // IMAGE_SYM_CLASS_STATIC
         _ => STB_GLOBAL,
     };
-    let ty = if coff_type == 0x0020 {
-        STT_FUNC
-    } else {
-        STT_NOTYPE
-    };
+    let ty = if coff_type == 0x0020 { STT_FUNC } else { STT_NOTYPE };
     (bind, ty)
 }
 
@@ -400,15 +392,15 @@ fn coff_storage_to_elf(storage_class: u8, coff_type: u16) -> (u8, u8) {
 fn coff_reloc_to_elf(coff_type: u16) -> u32 {
     use crate::codegen::shared::elf::*;
     match coff_type {
-        0x0001 => R_X86_64_64,       // IMAGE_REL_AMD64_ADDR64
-        0x0002 => R_X86_64_32,       // IMAGE_REL_AMD64_ADDR32
-        0x0003 => R_X86_64_32S,      // IMAGE_REL_AMD64_ADDR32NB
-        0x0004 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32
-        0x0005 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_1
-        0x0006 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_2
-        0x0007 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_3
-        0x0008 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_4
-        0x0009 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_5
+        0x0001 => R_X86_64_64,   // IMAGE_REL_AMD64_ADDR64
+        0x0002 => R_X86_64_32,   // IMAGE_REL_AMD64_ADDR32
+        0x0003 => R_X86_64_32S,  // IMAGE_REL_AMD64_ADDR32NB
+        0x0004 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32
+        0x0005 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32_1
+        0x0006 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32_2
+        0x0007 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32_3
+        0x0008 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32_4
+        0x0009 => R_X86_64_PC32, // IMAGE_REL_AMD64_REL32_5
         _ => R_X86_64_NONE,
     }
 }
@@ -441,15 +433,27 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     let is_be = ei_data == ELFDATA2MSB;
     let ru16 = |o: usize| -> u16 {
         let b: [u8; 2] = data[o..o + 2].try_into().unwrap();
-        if is_be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) }
+        if is_be {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        }
     };
     let ru32 = |o: usize| -> u32 {
         let b: [u8; 4] = data[o..o + 4].try_into().unwrap();
-        if is_be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+        if is_be {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        }
     };
     let ru64 = |o: usize| -> u64 {
         let b: [u8; 8] = data[o..o + 8].try_into().unwrap();
-        if is_be { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) }
+        if is_be {
+            u64::from_be_bytes(b)
+        } else {
+            u64::from_le_bytes(b)
+        }
     };
     let machine = ru16(18);
     if machine != EM_X86_64
@@ -474,24 +478,14 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
                 msg: format!("{}: ELF64 header truncated", name),
             });
         }
-        (
-            ru64(40) as usize,
-            ru16(58) as usize,
-            ru16(60) as usize,
-            ru16(62) as usize,
-        )
+        (ru64(40) as usize, ru16(58) as usize, ru16(60) as usize, ru16(62) as usize)
     } else {
         if data.len() < 52 {
             return Err(ObjectError {
                 msg: format!("{}: ELF32 header truncated", name),
             });
         }
-        (
-            ru32(32) as usize,
-            ru16(46) as usize,
-            ru16(48) as usize,
-            ru16(50) as usize,
-        )
+        (ru32(32) as usize, ru16(46) as usize, ru16(48) as usize, ru16(50) as usize)
     };
     let min_shentsize = if is_64 { 64 } else { 40 };
     if shentsize < min_shentsize {
@@ -526,9 +520,15 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             let sh_addralign = ru64(off + 48);
             let sh_entsize = ru64(off + 56);
             raw_sections.push((
-                sh_name, sh_type, sh_flags, sh_addr,
-                sh_offset as u64, sh_size as u64,
-                sh_addralign, sh_entsize, sh_info,
+                sh_name,
+                sh_type,
+                sh_flags,
+                sh_addr,
+                sh_offset as u64,
+                sh_size as u64,
+                sh_addralign,
+                sh_entsize,
+                sh_info,
             ));
         } else {
             let sh_name = ru32(off);
@@ -542,9 +542,15 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             let sh_addralign = ru32(off + 32) as u64;
             let sh_entsize = ru32(off + 36) as u64;
             raw_sections.push((
-                sh_name, sh_type, sh_flags, sh_addr,
-                sh_offset as u64, sh_size as u64,
-                sh_addralign, sh_entsize, sh_info,
+                sh_name,
+                sh_type,
+                sh_flags,
+                sh_addr,
+                sh_offset as u64,
+                sh_size as u64,
+                sh_addralign,
+                sh_entsize,
+                sh_info,
             ));
         }
     }
@@ -656,9 +662,17 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             continue;
         }
         let default_entsize: u64 = if is_rela {
-            if is_64 { 24 } else { 12 }
+            if is_64 {
+                24
+            } else {
+                12
+            }
         } else {
-            if is_64 { 16 } else { 8 }
+            if is_64 {
+                16
+            } else {
+                8
+            }
         };
         let entsize = if s.7 > 0 { s.7 } else { default_entsize };
         let off = s.4 as usize;
@@ -677,9 +691,7 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
                 let r_sym = (r_info >> 32) as u32;
                 let r_type = (r_info & 0xffffffff) as u32;
                 let r_addend = if is_rela {
-                    i64::from_le_bytes(
-                        data[base + 16..base + 24].try_into().unwrap(),
-                    )
+                    i64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap())
                 } else {
                     0i64
                 };
@@ -701,9 +713,7 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
                 let r_sym = r_info >> 8;
                 let r_type = r_info & 0xff;
                 let r_addend = if is_rela {
-                    i64::from_le_bytes(
-                        data[base + 8..base + 12].try_into().unwrap(),
-                    )
+                    i64::from_le_bytes(data[base + 8..base + 12].try_into().unwrap())
                 } else {
                     0i64
                 };
@@ -740,8 +750,8 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let grp_offset = raw.4 as usize;
         let grp_size = raw.5 as usize;
         let sh_info = raw.8; // signature symbol index in symtab
-        // raw.3 = sh_link for SHT_GROUP (points to associated symtab),
-        // but we use the already-found symtab_idx/strtab_idx instead.
+                             // raw.3 = sh_link for SHT_GROUP (points to associated symtab),
+                             // but we use the already-found symtab_idx/strtab_idx instead.
 
         if grp_offset + grp_size > data.len() || grp_size < 4 {
             continue; // truncated or empty group
@@ -952,9 +962,7 @@ impl InputBundle {
             for grp in &obj.comdat_groups {
                 let mut member_indices = Vec::new();
                 for &member_sec_idx in &grp.member_sec_indices {
-                    if let Some(flat_idx) =
-                        find_section_in_bundle(&sections, oi, member_sec_idx)
-                    {
+                    if let Some(flat_idx) = find_section_in_bundle(&sections, oi, member_sec_idx) {
                         member_indices.push(flat_idx);
                     }
                 }
@@ -988,9 +996,7 @@ impl InputBundle {
                     input_obj: oi,
                     orig_index: sym.orig_index,
                     // COMMON 符号不在真实节中, 链接时合并到 .bss
-                    defined: sym.section != 0
-                        && sym.section != 0xffff
-                        && !is_common,
+                    defined: sym.section != 0 && sym.section != 0xffff && !is_common,
                     is_common,
                 });
             }
@@ -1120,8 +1126,23 @@ mod tests {
         assert!(parse_object(&riscv64, "riscv64.o").is_ok());
 
         let x86_64 = elf::build_elf_rel_x86_64(
-            &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
-            &[], &[], &[], &[], &[], &[],
+            &[0],
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         assert!(parse_object(&x86_64, "x86_64.o").is_ok());
 
@@ -1140,8 +1161,23 @@ mod tests {
     fn rejects_truly_unsupported_machines() {
         // Craft an ELF64 with an unknown e_machine (e.g. 999)
         let mut bad = elf::build_elf_rel_x86_64(
-            &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
-            &[], &[], &[], &[], &[], &[],
+            &[0],
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         bad[18..20].copy_from_slice(&999u16.to_le_bytes());
         let err = parse_object(&bad, "bad.o").unwrap_err();

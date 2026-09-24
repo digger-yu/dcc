@@ -157,10 +157,7 @@ pub enum TypeDefInfo {
         variants: Vec<(String, i64)>,
     },
     /// `typedef OldName NewName;`
-    Typedef {
-        name: String,
-        underlying: ValueType,
-    },
+    Typedef { name: String, underlying: ValueType },
     /// `__asm__("...")` at file scope — preserved for codegen.
     GlobalAsm { asm: String },
 }
@@ -259,7 +256,7 @@ fn build_type_info(decls: &[ast::Decl]) -> Vec<TypeDefInfo> {
                     size,
                     align,
                 });
-            }
+            },
             ast::Decl::UnionDef(sd) => {
                 let (fields, size, align) = layout_union_fields(&sd.fields);
                 out.push(TypeDefInfo::Union {
@@ -268,7 +265,7 @@ fn build_type_info(decls: &[ast::Decl]) -> Vec<TypeDefInfo> {
                     size,
                     align,
                 });
-            }
+            },
             ast::Decl::EnumDef(ed) => {
                 let variants: Vec<(String, i64)> = ed
                     .variants
@@ -279,7 +276,7 @@ fn build_type_info(decls: &[ast::Decl]) -> Vec<TypeDefInfo> {
                     name: format!("enum {}", ed.name.name),
                     variants,
                 });
-            }
+            },
             ast::Decl::Typedef { name, ty, .. } => {
                 // We cannot fully lower the type without a Lowering
                 // context, but we store a best-effort ValueType so
@@ -289,13 +286,13 @@ fn build_type_info(decls: &[ast::Decl]) -> Vec<TypeDefInfo> {
                     name: name.name.clone(),
                     underlying,
                 });
-            }
+            },
             ast::Decl::GlobalAsm { asm_str, .. } => {
                 out.push(TypeDefInfo::GlobalAsm {
                     asm: asm_str.clone(),
                 });
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     out
@@ -370,29 +367,78 @@ fn type_size_align(ty: &ast::Type) -> (usize, usize) {
 fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
     match ty {
         ast::Type::Void => ValueType::Void,
-        ast::Type::Bool => ValueType::Integer { bits: 8, signed: false },
-        ast::Type::Char | ast::Type::SChar => ValueType::Integer { bits: 8, signed: true },
-        ast::Type::UChar | ast::Type::Char8 => ValueType::Integer { bits: 8, signed: false },
-        ast::Type::Char16 => ValueType::Integer { bits: 16, signed: false },
-        ast::Type::Char32 => ValueType::Integer { bits: 32, signed: false },
-        ast::Type::Short => ValueType::Integer { bits: 16, signed: true },
-        ast::Type::UShort => ValueType::Integer { bits: 16, signed: false },
-        ast::Type::Int => ValueType::Integer { bits: 32, signed: true },
-        ast::Type::UInt => ValueType::Integer { bits: 32, signed: false },
-        ast::Type::Long => ValueType::Integer { bits: 64, signed: true },
-        ast::Type::ULong => ValueType::Integer { bits: 64, signed: false },
-        ast::Type::LongLong => ValueType::Integer { bits: 64, signed: true },
-        ast::Type::ULongLong => ValueType::Integer { bits: 64, signed: false },
-        ast::Type::Int128 => ValueType::Integer { bits: 128, signed: true },
-        ast::Type::UInt128 => ValueType::Integer { bits: 128, signed: false },
+        ast::Type::Bool => ValueType::Integer {
+            bits: 8,
+            signed: false,
+        },
+        ast::Type::Char | ast::Type::SChar => ValueType::Integer {
+            bits: 8,
+            signed: true,
+        },
+        ast::Type::UChar | ast::Type::Char8 => ValueType::Integer {
+            bits: 8,
+            signed: false,
+        },
+        ast::Type::Char16 => ValueType::Integer {
+            bits: 16,
+            signed: false,
+        },
+        ast::Type::Char32 => ValueType::Integer {
+            bits: 32,
+            signed: false,
+        },
+        ast::Type::Short => ValueType::Integer {
+            bits: 16,
+            signed: true,
+        },
+        ast::Type::UShort => ValueType::Integer {
+            bits: 16,
+            signed: false,
+        },
+        ast::Type::Int => ValueType::Integer {
+            bits: 32,
+            signed: true,
+        },
+        ast::Type::UInt => ValueType::Integer {
+            bits: 32,
+            signed: false,
+        },
+        ast::Type::Long => ValueType::Integer {
+            bits: 64,
+            signed: true,
+        },
+        ast::Type::ULong => ValueType::Integer {
+            bits: 64,
+            signed: false,
+        },
+        ast::Type::LongLong => ValueType::Integer {
+            bits: 64,
+            signed: true,
+        },
+        ast::Type::ULongLong => ValueType::Integer {
+            bits: 64,
+            signed: false,
+        },
+        ast::Type::Int128 => ValueType::Integer {
+            bits: 128,
+            signed: true,
+        },
+        ast::Type::UInt128 => ValueType::Integer {
+            bits: 128,
+            signed: false,
+        },
         ast::Type::Float => ValueType::Float { bits: 32 },
         ast::Type::Double => ValueType::Float { bits: 64 },
         ast::Type::LongDouble => ValueType::Float { bits: 128 },
-        ast::Type::Fract => ValueType::Integer { bits: 32, signed: true },
-        ast::Type::Accum => ValueType::Integer { bits: 64, signed: true },
-        ast::Type::Ptr(inner) => {
-            ValueType::Pointer(Box::new(best_effort_lower_type(&inner.base)))
-        }
+        ast::Type::Fract => ValueType::Integer {
+            bits: 32,
+            signed: true,
+        },
+        ast::Type::Accum => ValueType::Integer {
+            bits: 64,
+            signed: true,
+        },
+        ast::Type::Ptr(inner) => ValueType::Pointer(Box::new(best_effort_lower_type(&inner.base))),
         ast::Type::Array(inner, sz) => {
             let elem = best_effort_lower_type(&inner.base);
             let n = match sz {
@@ -400,11 +446,11 @@ fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
                 _ => None,
             };
             ValueType::Array(Box::new(elem), n)
-        }
+        },
         ast::Type::Vector(inner, count) => {
             let elem = best_effort_lower_type(&inner.base);
             ValueType::Vector(Box::new(elem), *count)
-        }
+        },
         ast::Type::Struct(name, _, _, _) => ValueType::Aggregate {
             name: name.clone(),
             size: ty.size().max(1),
@@ -415,20 +461,24 @@ fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
             size: ty.size().max(1),
             is_union: true,
         },
-        ast::Type::Enum(_, _, _) => ValueType::Integer { bits: 32, signed: true },
+        ast::Type::Enum(_, _, _) => ValueType::Integer {
+            bits: 32,
+            signed: true,
+        },
         ast::Type::Func(ret, params) => ValueType::Function {
             ret: Box::new(best_effort_lower_type(&ret.base)),
-            params: params.iter().map(|p| best_effort_lower_type(&p.base)).collect(),
+            params: params
+                .iter()
+                .map(|p| best_effort_lower_type(&p.base))
+                .collect(),
         },
         ast::Type::Complex(inner) => {
             ValueType::Complex(Box::new(best_effort_lower_type(&inner.base)))
-        }
+        },
         ast::Type::Imaginary(inner) => {
             ValueType::Imaginary(Box::new(best_effort_lower_type(&inner.base)))
-        }
-        ast::Type::Atomic(inner) => {
-            best_effort_lower_type(&inner.base)
-        }
+        },
+        ast::Type::Atomic(inner) => best_effort_lower_type(&inner.base),
         ast::Type::Named(name) => {
             // Cannot resolve without type_map; use opaque aggregate
             ValueType::Aggregate {
@@ -436,7 +486,7 @@ fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
                 size: ty.size().max(1),
                 is_union: false,
             }
-        }
+        },
     }
 }
 
@@ -453,37 +503,47 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
         match decl {
             Decl::StructDef(sd) => {
                 let key = format!("struct {}", sd.name.name);
-                type_map.entry(key).or_insert_with(|| Type::Struct(
-                    format!("struct {}", sd.name.name),
-                    std::sync::Arc::new(sd.fields.clone()),
-                    1,
-                    false,
-                ));
-            }
+                type_map.entry(key).or_insert_with(|| {
+                    Type::Struct(
+                        format!("struct {}", sd.name.name),
+                        std::sync::Arc::new(sd.fields.clone()),
+                        1,
+                        false,
+                    )
+                });
+            },
             Decl::UnionDef(sd) => {
                 let key = format!("union {}", sd.name.name);
-                type_map.entry(key).or_insert_with(|| Type::Union(
-                    format!("union {}", sd.name.name),
-                    std::sync::Arc::new(sd.fields.clone()),
-                    1,
-                    false,
-                ));
-            }
+                type_map.entry(key).or_insert_with(|| {
+                    Type::Union(
+                        format!("union {}", sd.name.name),
+                        std::sync::Arc::new(sd.fields.clone()),
+                        1,
+                        false,
+                    )
+                });
+            },
             Decl::EnumDef(ed) => {
                 let key = format!("enum {}", ed.name.name);
-                let variants: Vec<(String, i64)> = ed.variants.iter().map(|(id, val)| {
-                    (id.name.clone(), val.unwrap_or(0))
-                }).collect();
-                type_map.entry(key).or_insert_with(|| Type::Enum(
-                    format!("enum {}", ed.name.name),
-                    std::sync::Arc::new(variants),
-                    None,
-                ));
-            }
+                let variants: Vec<(String, i64)> = ed
+                    .variants
+                    .iter()
+                    .map(|(id, val)| (id.name.clone(), val.unwrap_or(0)))
+                    .collect();
+                type_map.entry(key).or_insert_with(|| {
+                    Type::Enum(
+                        format!("enum {}", ed.name.name),
+                        std::sync::Arc::new(variants),
+                        None,
+                    )
+                });
+            },
             Decl::Typedef { name, ty, .. } => {
-                type_map.entry(name.name.clone()).or_insert_with(|| ty.clone());
-            }
-            _ => {}
+                type_map
+                    .entry(name.name.clone())
+                    .or_insert_with(|| ty.clone());
+            },
+            _ => {},
         }
     }
     // 预分析 static local 变量, 用于 IR 层名字解析
@@ -518,7 +578,7 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     body,
                     span: f.span.clone(),
                 });
-            }
+            },
             Decl::Var(v) => {
                 if let Some(init) = &v.init {
                     if !is_static_initializer(init) {
@@ -540,20 +600,17 @@ pub fn lower(source: ast::Program) -> Result<(Module, Vec<Diagnostic>), Vec<Diag
                     alignment: v.alignment.unwrap_or(v.ty.align()).max(1),
                     section: v.section.clone(),
                 });
-            }
+            },
             // Type definitions and global asm do not produce IR nodes
             // but are preserved in `type_defs` for the backend.
-            Decl::StructDef(_)
-            | Decl::UnionDef(_)
-            | Decl::EnumDef(_)
-            | Decl::Typedef { .. } => {
+            Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_) | Decl::Typedef { .. } => {
                 type_defs.push(decl.clone());
-            }
+            },
             Decl::GlobalAsm { .. } => {
                 // Global asm has side effects (emitted into the output);
                 // preserved in type_defs for codegen to process from AST.
                 type_defs.push(decl.clone());
-            }
+            },
         }
     }
     // static local 变量已在上方预分析并添加到 globals
@@ -630,7 +687,10 @@ pub fn validate(module: &Module) -> Result<(), Vec<Diagnostic>> {
             if !global.name.starts_with(".Lsl") {
                 diagnostics.push(Diagnostic::err(
                     "E1091",
-                    format!("static local '{}' has non-mangled name (expected .Lsl prefix)", global.name),
+                    format!(
+                        "static local '{}' has non-mangled name (expected .Lsl prefix)",
+                        global.name
+                    ),
                     global.span.clone(),
                 ));
             }
@@ -684,11 +744,22 @@ const FLOAT_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::Not];
 
 /// 与 codegen SIMD 向量路径一致的二元运算符集合。
 const VECTOR_BINOPS: &[BinOp] = &[
-    BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div,
+    BinOp::Add,
+    BinOp::Sub,
+    BinOp::Mul,
+    BinOp::Div,
     BinOp::Mod,
-    BinOp::And, BinOp::Or, BinOp::Xor,
-    BinOp::Shl, BinOp::Shr,
-    BinOp::EqEq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
+    BinOp::And,
+    BinOp::Or,
+    BinOp::Xor,
+    BinOp::Shl,
+    BinOp::Shr,
+    BinOp::EqEq,
+    BinOp::Ne,
+    BinOp::Lt,
+    BinOp::Le,
+    BinOp::Gt,
+    BinOp::Ge,
 ];
 
 /// 当前没有 codegen 支持的向量一元运算符。
@@ -762,7 +833,7 @@ pub fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Pointer(_) | ValueType::Function { .. } => 8,
         ValueType::Array(inner, Some(n)) | ValueType::Vector(inner, n) => {
             value_type_size(inner) * *n
-        }
+        },
         ValueType::Array(_, None) => 8,
         ValueType::Aggregate { size, .. } => *size,
         ValueType::Complex(inner) => value_type_size(inner) * 2,
@@ -812,7 +883,7 @@ fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKin
         | (ValueType::Complex(_), ValueType::Vector(_, _)) => true,
         (ValueType::Vector(_, _), other) | (other, ValueType::Vector(_, _)) => {
             is_supported_vector_scalar_bitcast_ty(other)
-        }
+        },
         _ => false,
     }
 }
@@ -850,7 +921,7 @@ fn is_va_list_type(ty: &ValueType) -> bool {
         ValueType::Pointer(inner) => {
             is_va_list_struct(inner)
                 || matches!(inner.as_ref(), ValueType::Array(arr, Some(1)) if is_va_list_struct(arr))
-        }
+        },
         _ => false,
     }
 }
@@ -882,7 +953,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     expr.span.clone(),
                 ));
             }
-        }
+        },
         ExprKind::Unary(op) => {
             if let Some(operand) = expr.children.first() {
                 if is_float_ty(&operand.ty) && !FLOAT_UNOPS.contains(&op) {
@@ -907,7 +978,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     ));
                 }
             }
-        }
+        },
         ExprKind::Assign if expr.children.len() >= 2 => {
             let lhs = &expr.children[0];
             let rhs = &expr.children[1];
@@ -915,7 +986,11 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                 && !is_vector_ty(&rhs.ty)
                 && !matches!(
                     rhs.kind,
-                    ExprKind::Aggregate | ExprKind::Cast | ExprKind::Binary(_) | ExprKind::Unary(_) | ExprKind::Call
+                    ExprKind::Aggregate
+                        | ExprKind::Cast
+                        | ExprKind::Binary(_)
+                        | ExprKind::Unary(_)
+                        | ExprKind::Call
                 )
             {
                 diagnostics.push(Diagnostic::err(
@@ -926,17 +1001,14 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
             }
             // 复数赋值: 允许 complex = complex, complex = scalar (隐式转换)
             // 只禁止 complex = vector 等不兼容类型
-            if is_complex_ty(&lhs.ty)
-                && !is_complex_ty(&rhs.ty)
-                && is_vector_ty(&rhs.ty)
-            {
+            if is_complex_ty(&lhs.ty) && !is_complex_ty(&rhs.ty) && is_vector_ty(&rhs.ty) {
                 diagnostics.push(Diagnostic::err(
                     "E1008",
                     "cannot assign vector to complex type",
                     expr.span.clone(),
                 ));
             }
-        }
+        },
         ExprKind::Conditional if expr.children.len() >= 3 => {
             let then_e = &expr.children[1];
             let else_e = &expr.children[2];
@@ -955,7 +1027,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     expr.span.clone(),
                 ));
             }
-        }
+        },
         ExprKind::Cast => {
             if let Some(src) = expr.children.first() {
                 let is_valid_vector_cast = is_supported_vector_cast(&src.ty, &expr.ty, &src.kind);
@@ -970,16 +1042,14 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     ));
                 }
                 let cast_supported = is_valid_vector_cast || is_valid_complex_cast;
-                if (is_vector_ty(&src.ty) || is_vector_ty(&expr.ty)) && !cast_supported
-                {
+                if (is_vector_ty(&src.ty) || is_vector_ty(&expr.ty)) && !cast_supported {
                     diagnostics.push(Diagnostic::err(
                         "E1007",
                         "unsupported cast involving vector type",
                         expr.span.clone(),
                     ));
                 }
-                if (is_complex_ty(&src.ty) || is_complex_ty(&expr.ty)) && !cast_supported
-                {
+                if (is_complex_ty(&src.ty) || is_complex_ty(&expr.ty)) && !cast_supported {
                     diagnostics.push(Diagnostic::err(
                         "E1008",
                         "unsupported cast involving complex type",
@@ -987,7 +1057,7 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     ));
                 }
             }
-        }
+        },
         ExprKind::Aggregate => {
             if let ValueType::Vector(_, max) = &expr.ty {
                 if expr.children.len() > *max {
@@ -1002,16 +1072,20 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     ));
                 }
             }
-        }
+        },
         ExprKind::VaArg { .. }
-            if !expr.children.first().is_some_and(|ap| is_va_list_type(&ap.ty)) => {
-                diagnostics.push(Diagnostic::err(
-                    "E1005",
-                    "va_arg currently requires a va_list object",
-                    expr.span.clone(),
-                ));
-            }
-        _ => {}
+            if !expr
+                .children
+                .first()
+                .is_some_and(|ap| is_va_list_type(&ap.ty)) =>
+        {
+            diagnostics.push(Diagnostic::err(
+                "E1005",
+                "va_arg currently requires a va_list object",
+                expr.span.clone(),
+            ));
+        },
+        _ => {},
     }
     for child in &expr.children {
         validate_expr(child, diagnostics);
@@ -1043,7 +1117,7 @@ impl ValueType {
             Self::Pointer(_pointee) => {
                 // On all supported targets, pointers are 8 bytes (64-bit)
                 std::mem::size_of::<usize>()
-            }
+            },
             Self::Array(elem, count) => elem.size().saturating_mul(count.unwrap_or(0)),
             Self::Aggregate { size, .. } => *size,
             Self::Function { .. } => std::mem::size_of::<usize>(), // Function pointer
@@ -1060,7 +1134,7 @@ impl ValueType {
             Self::Integer { bits, .. } | Self::Float { bits } => {
                 let bytes = (*bits as usize).div_ceil(8);
                 bytes.min(8)
-            }
+            },
             Self::Pointer(_) => 8,
             Self::Array(elem, _) => elem.align(),
             Self::Aggregate { .. } => 1,
@@ -1278,9 +1352,9 @@ impl Lowering {
                                     span.clone(),
                                 ));
                                 None
-                            }
+                            },
                         }
-                    }
+                    },
                 },
             ),
             Type::Struct(name, _, _, _) => ValueType::Aggregate {
@@ -1295,13 +1369,20 @@ impl Lowering {
             },
             Type::Func(ret, params) => ValueType::Function {
                 ret: Box::new(self.lower_type(&ret.base, span)),
-                params: params.iter().map(|p| self.lower_type(&p.base, span)).collect(),
+                params: params
+                    .iter()
+                    .map(|p| self.lower_type(&p.base, span))
+                    .collect(),
             },
-            Type::Vector(inner, n) => ValueType::Vector(Box::new(self.lower_type(&inner.base, span)), *n),
-            Type::Complex(inner) => ValueType::Complex(Box::new(self.lower_type(&inner.base, span))),
+            Type::Vector(inner, n) => {
+                ValueType::Vector(Box::new(self.lower_type(&inner.base, span)), *n)
+            },
+            Type::Complex(inner) => {
+                ValueType::Complex(Box::new(self.lower_type(&inner.base, span)))
+            },
             Type::Imaginary(inner) => {
                 ValueType::Imaginary(Box::new(self.lower_type(&inner.base, span)))
-            }
+            },
             Type::Atomic(inner) => self.lower_type(&inner.base, span),
             Type::Named(name) => {
                 // Try to resolve through pre-scanned type definitions
@@ -1315,8 +1396,11 @@ impl Lowering {
                     format!("unresolved type '{}' in typed IR, assuming int", name),
                     span.clone(),
                 ));
-                ValueType::Integer { bits: 32, signed: true }
-            }
+                ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                }
+            },
         }
     }
 
@@ -1364,12 +1448,10 @@ impl Lowering {
                     nested.push(self.lower_stmt(other));
                 }
                 (vec![self.lower_expr(cond)], nested, span)
-            }
-            Stmt::While { cond, body, span } | Stmt::Do { cond, body, span } => (
-                vec![self.lower_expr(cond)],
-                vec![self.lower_stmt(body)],
-                span,
-            ),
+            },
+            Stmt::While { cond, body, span } | Stmt::Do { cond, body, span } => {
+                (vec![self.lower_expr(cond)], vec![self.lower_stmt(body)], span)
+            },
             Stmt::For {
                 init,
                 cond,
@@ -1390,12 +1472,10 @@ impl Lowering {
                 }
                 nested.push(self.lower_stmt(body));
                 (expressions, nested, span)
-            }
-            Stmt::Block { b, span } => (
-                Vec::new(),
-                b.items.iter().filter_map(|i| self.lower_item(i)).collect(),
-                span,
-            ),
+            },
+            Stmt::Block { b, span } => {
+                (Vec::new(), b.items.iter().filter_map(|i| self.lower_item(i)).collect(), span)
+            },
             Stmt::Switch { expr, cases, span } => (
                 vec![self.lower_expr(expr)],
                 cases
@@ -1423,7 +1503,7 @@ impl Lowering {
             ),
             Stmt::Break { span } | Stmt::Continue { span } | Stmt::Goto { span, .. } => {
                 (Vec::new(), Vec::new(), span)
-            }
+            },
             Stmt::Fallthrough { span } => (Vec::new(), Vec::new(), span),
         };
         TypedStmt {
@@ -1441,45 +1521,44 @@ impl Lowering {
             Expr::Int { v, .. } => {
                 literal = Some(ExprLiteral::Int(*v));
                 (ExprKind::Constant, Vec::new())
-            }
+            },
             Expr::Char { v, .. } => {
                 literal = Some(ExprLiteral::Int(*v));
                 (ExprKind::Constant, Vec::new())
-            }
+            },
             Expr::Float { v, .. } => {
                 literal = Some(ExprLiteral::Float(*v));
                 (ExprKind::Constant, Vec::new())
-            }
+            },
             Expr::ComplexLit { imag, .. } => {
                 // 虚数字面量: 常量 (虚部值; 实部 0)
                 literal = Some(ExprLiteral::Float(*imag));
                 (ExprKind::Constant, Vec::new())
-            }
+            },
             Expr::Real { e, .. } | Expr::Imag { e, .. } => {
                 // 实/虚部提取: 按一元运算降级 (profile 用途, 值透传)
                 (ExprKind::Unary(UnOp::Plus), vec![self.lower_expr(e)])
-            }
+            },
             Expr::String { .. } => (ExprKind::Constant, Vec::new()),
             Expr::Ident { name, .. } => {
                 // Static local 名字解析: 源名 -> mangled 名
                 let resolved_name = if let Some(ref func) = self.current_func {
-                    self.sl_map.resolve(func, &name.name)
+                    self.sl_map
+                        .resolve(func, &name.name)
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| name.name.clone())
                 } else {
                     name.name.clone()
                 };
                 (ExprKind::Local(resolved_name), Vec::new())
-            }
-            Expr::Binop { op, l, r, .. } => (
-                ExprKind::Binary(*op),
-                vec![self.lower_expr(l), self.lower_expr(r)],
-            ),
+            },
+            Expr::Binop { op, l, r, .. } => {
+                (ExprKind::Binary(*op), vec![self.lower_expr(l), self.lower_expr(r)])
+            },
             Expr::Unary { op, e, .. } => (ExprKind::Unary(*op), vec![self.lower_expr(e)]),
-            Expr::Assign { l, r, .. } => (
-                ExprKind::Assign,
-                vec![self.lower_expr(l), self.lower_expr(r)],
-            ),
+            Expr::Assign { l, r, .. } => {
+                (ExprKind::Assign, vec![self.lower_expr(l), self.lower_expr(r)])
+            },
             Expr::Cond {
                 cond, then_, else_, ..
             } => (
@@ -1498,17 +1577,16 @@ impl Lowering {
                         if let Type::Func(ret, _) = &inner.base {
                             ty = self.lower_type(&ret.base, &span);
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
                 let mut children = vec![self.lower_expr(callee)];
                 children.extend(args.iter().map(|e| self.lower_expr(e)));
                 (ExprKind::Call, children)
-            }
-            Expr::Index { arr, idx, .. } => (
-                ExprKind::Index,
-                vec![self.lower_expr(arr), self.lower_expr(idx)],
-            ),
+            },
+            Expr::Index { arr, idx, .. } => {
+                (ExprKind::Index, vec![self.lower_expr(arr), self.lower_expr(idx)])
+            },
             Expr::Member {
                 expr: base,
                 field,
@@ -1547,17 +1625,14 @@ impl Lowering {
                         span.clone(),
                     ));
                 }
-                (
-                    ExprKind::Member(field.name.clone()),
-                    vec![self.lower_expr(base)],
-                )
-            }
+                (ExprKind::Member(field.name.clone()), vec![self.lower_expr(base)])
+            },
             Expr::AddrOf { e, .. } => (ExprKind::Address, vec![self.lower_expr(e)]),
             Expr::Deref { e, .. } => {
                 match e.ty() {
                     Type::Ptr(inner) | Type::Array(inner, _) => {
                         ty = self.lower_type(&inner.base, &span);
-                    }
+                    },
                     _ => {
                         // 降级为 warning: 隐式声明函数返回 int 但被解引用
                         // (如 NODE_DATA(nid)->x). 阻断编译不利于内核构建.
@@ -1566,30 +1641,28 @@ impl Lowering {
                             "dereference of non-pointer type (implicit declaration?)",
                             span.clone(),
                         ));
-                    }
+                    },
                 }
                 (ExprKind::Dereference, vec![self.lower_expr(e)])
-            }
+            },
             Expr::PostInc { e, .. }
             | Expr::PostDec { e, .. }
             | Expr::PreInc { e, .. }
             | Expr::PreDec { e, .. } => (ExprKind::Assign, vec![self.lower_expr(e)]),
             Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
                 (ExprKind::Aggregate, lower_inits(self, inits))
-            }
+            },
             Expr::StmtExpr { block, .. } => (
                 ExprKind::ControlFlow,
                 block
                     .items
                     .iter()
                     .filter_map(|item| match item {
-                        BlockItem::Stmt(Stmt::Expr { e, .. }) => {
-                            Some(self.lower_expr(e))
-                        }
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) => Some(self.lower_expr(e)),
                         BlockItem::Decl(Decl::Var(v)) => {
                             // Preserve local variable initializers
                             v.init.as_ref().map(|e| self.lower_expr(e))
-                        }
+                        },
                         BlockItem::Stmt(other) => {
                             // Lower other statements and collect their
                             // expressions (e.g. conditions, nested flows)
@@ -1607,15 +1680,14 @@ impl Lowering {
                                     quals: QualifierFlags::NONE,
                                 })
                             }
-                        }
+                        },
                         _ => None,
                     })
                     .collect(),
             ),
-            Expr::Comma { l, r, .. } => (
-                ExprKind::ControlFlow,
-                vec![self.lower_expr(l), self.lower_expr(r)],
-            ),
+            Expr::Comma { l, r, .. } => {
+                (ExprKind::ControlFlow, vec![self.lower_expr(l), self.lower_expr(r)])
+            },
             Expr::VaArg { ap, ref ty, .. } => {
                 // 支持简单标识符和结构体成员访问 (如 state->ap)
                 let ap_name = match ap.as_ref() {
@@ -1624,24 +1696,34 @@ impl Lowering {
                     Expr::Member { field, .. } => field.name.clone(),
                     _ => String::new(),
                 };
-                (ExprKind::VaArg { ap: ap_name, arg_ty: self.lower_type(ty, &span) }, vec![self.lower_expr(ap)])
-            }
+                (
+                    ExprKind::VaArg {
+                        ap: ap_name,
+                        arg_ty: self.lower_type(ty, &span),
+                    },
+                    vec![self.lower_expr(ap)],
+                )
+            },
             Expr::SizeofTy { ty: ref sty, .. } => {
                 literal = Some(ExprLiteral::Int(sty.size() as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())
-            }
+            },
             Expr::AlignofTy { ty: ref aty, .. } => {
                 literal = Some(ExprLiteral::Int(aty.align() as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())
-            }
-            Expr::Offsetof { ty: ref oty, ref member, .. } => {
+            },
+            Expr::Offsetof {
+                ty: ref oty,
+                ref member,
+                ..
+            } => {
                 let off = crate::const_eval::eval_offsetof(oty, member);
                 literal = Some(ExprLiteral::Int(off as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())
-            }
+            },
             Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
                 (ExprKind::SizeAlignOffset, vec![self.lower_expr(e)])
-            }
+            },
             Expr::AsmExpr { .. } | Expr::LabelAddr { .. } => (ExprKind::Opaque, Vec::new()),
         };
         TypedExpr {
@@ -1667,7 +1749,7 @@ fn lower_inits(cx: &mut Lowering, inits: &[InitItem]) -> Vec<TypedExpr> {
                 }
                 out.push(cx.lower_expr(value));
                 out
-            }
+            },
         })
         .collect()
 }
@@ -1677,9 +1759,7 @@ fn lower_inits(cx: &mut Lowering, inits: &[InitItem]) -> Vec<TypedExpr> {
 fn is_addr_target_ok(e: &Expr) -> bool {
     match e {
         Expr::Ident { .. } | Expr::String { .. } => true,
-        Expr::Index { arr, idx, .. } => {
-            is_addr_target_ok(arr) && const_eval::eval(idx).is_ok()
-        }
+        Expr::Index { arr, idx, .. } => is_addr_target_ok(arr) && const_eval::eval(idx).is_ok(),
         Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
         Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
             InitItem::Expr(e) => is_static_initializer(e),
@@ -1695,10 +1775,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
     }
     // 地址常量 (ConstValue::Addr): 指针算术/成员偏移折叠成功即为
     // 链接期可重定位常量 (C11 6.6p9), 如 &((arr + 1)->field)
-    if matches!(
-        const_eval::eval_full(expr, false),
-        Ok(const_eval::ConstValue::Addr { .. })
-    ) {
+    if matches!(const_eval::eval_full(expr, false), Ok(const_eval::ConstValue::Addr { .. })) {
         return true;
     }
     match expr {
@@ -1733,7 +1810,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
         // 地址常量 (与显式 & 形式一致)
         e @ Expr::Member { expr, .. } if matches!(e.ty(), Type::Array(..)) => {
             is_addr_of_member_ok(expr)
-        }
+        },
         // 地址算术: 指针 + 整数 / 整数 + 指针 / 指针 - 整数
         // 也覆盖 (unsigned long)&var + sizeof(var) - const 等内核模式
         // 扩展: 也接受位运算/移位/比较等 (GCC 允许地址常量的这些运算)
@@ -1744,7 +1821,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
             }
             // 地址算术 / 位运算 / 比较: 两边都是静态初始化器时允许
             is_static_initializer(l) && is_static_initializer(r)
-        }
+        },
         // 逗号表达式: 右边必须是静态初始化器
         Expr::Comma { r, .. } => is_static_initializer(r),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
@@ -1757,22 +1834,22 @@ fn is_static_initializer(expr: &Expr) -> bool {
                             ast::Designator::Index(e) => const_eval::eval(e).is_ok(),
                             ast::Designator::Range(f, l) => {
                                 const_eval::eval(f).is_ok() && const_eval::eval(l).is_ok()
-                            }
+                            },
                             // 链式 designator: 全部 Index 都要能常量求值, Field 始终 OK
                             ast::Designator::Chain(items) => items.iter().all(|d| match d {
                                 ast::Designator::Field(_) => true,
                                 ast::Designator::Index(e) => const_eval::eval(e).is_ok(),
                                 ast::Designator::Range(f, l) => {
                                     const_eval::eval(f).is_ok() && const_eval::eval(l).is_ok()
-                                }
+                                },
                                 ast::Designator::Chain(_) => false,
                             }),
                         };
                         index_ok && is_static_initializer(value)
-                    }
+                    },
                 }
             })
-        }
+        },
         _ => false,
     }
 }
@@ -1796,7 +1873,7 @@ fn is_addr_of_member_ok(e: &Expr) -> bool {
                 _ => false,
             };
             base_ok && const_eval::eval(idx).is_ok()
-        }
+        },
         // (type *)0x1000->field: 整数到指针的强制转换 (链接期地址常量)
         Expr::Cast { e, .. } => is_static_initializer(e),
         // (struct S){...}.field: 复合字面量成员
@@ -2124,10 +2201,7 @@ mod tests {
         }
         resync(&mut module).expect("resync");
         validate(&module).expect("validate after resync");
-        assert_eq!(
-            module.functions[0].body[0].expressions[0].literal,
-            Some(ExprLiteral::Int(5))
-        );
+        assert_eq!(module.functions[0].body[0].expressions[0].literal, Some(ExprLiteral::Int(5)));
     }
 
     // 5.1: type_info() exposes structured type definitions to IR consumers.
@@ -2139,7 +2213,9 @@ mod tests {
         let (mut module, _) = lower(program).expect("lower");
         let info = module.type_info();
         assert!(!info.is_empty(), "type_info should not be empty");
-        let found = info.iter().any(|t| matches!(t, TypeDefInfo::Struct { name, .. } if name == "struct point"));
+        let found = info
+            .iter()
+            .any(|t| matches!(t, TypeDefInfo::Struct { name, .. } if name == "struct point"));
         assert!(found, "struct point should be in type_info");
     }
 
@@ -2151,8 +2227,12 @@ mod tests {
         let (program, _) = crate::parser::parse(src, "type-info-union-enum.c");
         let (mut module, _) = lower(program).expect("lower");
         let info = module.type_info();
-        let has_union = info.iter().any(|t| matches!(t, TypeDefInfo::Union { name, .. } if name == "union data"));
-        let has_enum = info.iter().any(|t| matches!(t, TypeDefInfo::Enum { name, .. } if name == "enum color"));
+        let has_union = info
+            .iter()
+            .any(|t| matches!(t, TypeDefInfo::Union { name, .. } if name == "union data"));
+        let has_enum = info
+            .iter()
+            .any(|t| matches!(t, TypeDefInfo::Enum { name, .. } if name == "enum color"));
         assert!(has_union, "union data should be in type_info");
         assert!(has_enum, "enum color should be in type_info");
     }
@@ -2164,7 +2244,9 @@ mod tests {
         let (program, _) = crate::parser::parse(src, "type-info-typedef.c");
         let (mut module, _) = lower(program).expect("lower");
         let info = module.type_info();
-        let has_td = info.iter().any(|t| matches!(t, TypeDefInfo::Typedef { name, .. } if name == "size_t"));
+        let has_td = info
+            .iter()
+            .any(|t| matches!(t, TypeDefInfo::Typedef { name, .. } if name == "size_t"));
         assert!(has_td, "typedef size_t should be in type_info");
     }
 
@@ -2176,7 +2258,13 @@ mod tests {
         let (mut module, _) = lower(program).expect("lower");
         let agg = module.find_aggregate("struct pair");
         assert!(agg.is_some(), "find_aggregate should find struct pair");
-        if let Some(TypeDefInfo::Struct { fields, size, align, .. }) = agg {
+        if let Some(TypeDefInfo::Struct {
+            fields,
+            size,
+            align,
+            ..
+        }) = agg
+        {
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].name, "a");
             assert_eq!(fields[1].name, "b");
@@ -2236,9 +2324,15 @@ int main(void) { return fa() + fb(); }
         assert!(fb_x.name.starts_with(".Lsl"));
         assert!(fb_x.name.contains("fb"));
         // fb::x has initializer (42), so it should have an IR initializer
-        assert!(fb_x.initializer.is_some(), "initialized static local should have IR initializer");
+        assert!(
+            fb_x.initializer.is_some(),
+            "initialized static local should have IR initializer"
+        );
         // fa::x is uninitialized, so no IR initializer
-        assert!(fa_x.initializer.is_none(), "uninitialized static local should have no IR initializer");
+        assert!(
+            fa_x.initializer.is_none(),
+            "uninitialized static local should have no IR initializer"
+        );
     }
 
     #[test]
@@ -2246,7 +2340,10 @@ int main(void) { return fa() + fb(); }
         // Construct a Global with is_static_local but no owner_function
         let bad_global = Global {
             name: ".Lsl0.bad.x".to_string(),
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             initializer: None,
             span: crate::diagnostics::Span::point("", 0, 0),
             is_tls: false,
@@ -2275,7 +2372,10 @@ int main(void) { return fa() + fb(); }
     fn static_locals_validation_rejects_non_mangled_name() {
         let bad_global = Global {
             name: "plain_name".to_string(), // should start with .Lsl
-            ty: ValueType::Integer { bits: 32, signed: true },
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             initializer: None,
             span: crate::diagnostics::Span::point("", 0, 0),
             is_tls: false,

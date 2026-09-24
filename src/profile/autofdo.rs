@@ -130,7 +130,7 @@ impl AutoFdoProfile {
                     if !name.is_empty() {
                         *p.func_samples.entry(name).or_insert(0) += total;
                     }
-                }
+                },
                 Some("line") => {
                     let name = it.next().unwrap_or("").to_string();
                     let line_n: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -139,7 +139,7 @@ impl AutoFdoProfile {
                     if !name.is_empty() {
                         *p.line_samples.entry((name, line_n, col)).or_insert(0) += total;
                     }
-                }
+                },
                 Some("calls") => {
                     let caller = it.next().unwrap_or("").to_string();
                     let callee = it.next().unwrap_or("").to_string();
@@ -147,7 +147,7 @@ impl AutoFdoProfile {
                     if !caller.is_empty() && !callee.is_empty() {
                         *p.calls.entry((caller, callee)).or_insert(0) += count;
                     }
-                }
+                },
                 Some("disc") => {
                     let name = it.next().unwrap_or("").to_string();
                     let line_n: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -158,8 +158,8 @@ impl AutoFdoProfile {
                             .entry((name, line_n, disc))
                             .or_insert(0) += samples;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         Ok(p)
@@ -291,16 +291,10 @@ impl AutoFdoProfile {
     /// 从 dcc 二进制格式解析
     pub fn read_binary(data: &[u8]) -> io::Result<Self> {
         if data.len() < 8 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "autofdo binary too short",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "autofdo binary too short"));
         }
         if &data[0..4] != AFDO_BINARY_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad autofdo magic",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad autofdo magic"));
         }
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
         if version != AFDO_BINARY_VERSION {
@@ -368,10 +362,7 @@ fn write_binary_string(buf: &mut Vec<u8>, s: &str) {
 fn read_binary_string(data: &[u8], off: &mut usize) -> io::Result<String> {
     let len = read_u32(data, off)? as usize;
     if *off + len > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated binary string",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated binary string"));
     }
     let s = std::str::from_utf8(&data[*off..*off + len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -416,10 +407,7 @@ mod tests {
     #[test]
     fn parse_rejects_unsupported_text_version() {
         let err = AutoFdoProfile::parse_text("# dcc autofdo v0\nfunc main 100\n").unwrap_err();
-        assert!(
-            err.to_string().contains("unsupported autofdo text version"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("unsupported autofdo text version"), "{err}");
     }
 
     #[test]
@@ -498,11 +486,8 @@ mod tests {
     #[test]
     fn read_from_file() {
         let tmp = std::env::temp_dir().join("dcc-autofdo-test-v1.txt");
-        std::fs::write(
-            &tmp,
-            b"# dcc autofdo v1\nfunc main 100\nfunc foo 10\ncalls main foo 5\n",
-        )
-        .unwrap();
+        std::fs::write(&tmp, b"# dcc autofdo v1\nfunc main 100\nfunc foo 10\ncalls main foo 5\n")
+            .unwrap();
         let p = AutoFdoProfile::read(&tmp).unwrap();
         assert_eq!(p.func_samples.get("main"), Some(&100));
         assert_eq!(p.calls.get(&("main".into(), "foo".into())), Some(&5));
@@ -552,14 +537,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.discriminated_samples.len(), 3);
-        assert_eq!(
-            p.discriminated_samples.get(&("main".into(), 10, 0)),
-            Some(&30)
-        );
-        assert_eq!(
-            p.discriminated_samples.get(&("main".into(), 10, 1)),
-            Some(&20)
-        );
+        assert_eq!(p.discriminated_samples.get(&("main".into(), 10, 0)), Some(&30));
+        assert_eq!(p.discriminated_samples.get(&("main".into(), 10, 1)), Some(&20));
     }
 
     /// discriminators_for query returns all discriminators for a line.

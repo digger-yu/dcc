@@ -60,10 +60,7 @@ impl IncrementalCache {
         // 输出文件不存在 → 必须编译
         if !output.exists() {
             if self.verbose {
-                eprintln!(
-                    "dcc: incremental: {} -> output missing, recompiling",
-                    input.display()
-                );
+                eprintln!("dcc: incremental: {} -> output missing, recompiling", input.display());
             }
             return CacheResult::Miss { entry_path };
         }
@@ -80,7 +77,7 @@ impl IncrementalCache {
                     );
                 }
                 return CacheResult::Miss { entry_path };
-            }
+            },
         };
 
         // 读缓存条目
@@ -88,22 +85,16 @@ impl IncrementalCache {
             Ok(s) => s,
             Err(_) => {
                 if self.verbose {
-                    eprintln!(
-                        "dcc: incremental: {} -> no cache entry, compiling",
-                        input.display()
-                    );
+                    eprintln!("dcc: incremental: {} -> no cache entry, compiling", input.display());
                 }
                 return CacheResult::Miss { entry_path };
-            }
+            },
         };
 
         // 对比指纹
         if current_fingerprint == cached_fingerprint {
             if self.verbose {
-                eprintln!(
-                    "dcc: incremental: {} -> up to date (skipped)",
-                    input.display()
-                );
+                eprintln!("dcc: incremental: {} -> up to date (skipped)", input.display());
             }
             CacheResult::Hit
         } else {
@@ -445,7 +436,7 @@ mod tests {
 
         match cache.check(&cfg, &src) {
             CacheResult::Hit => panic!("expected miss when output missing"),
-            CacheResult::Miss { .. } => {} // expected
+            CacheResult::Miss { .. } => {}, // expected
         }
 
         let _ = fs::remove_file(&src);
@@ -480,7 +471,7 @@ mod tests {
 
         // 再次检查: 应命中
         match cache.check(&cfg, &src) {
-            CacheResult::Hit => {} // expected
+            CacheResult::Hit => {}, // expected
             CacheResult::Miss { .. } => panic!("expected hit after update"),
         }
 
@@ -518,7 +509,7 @@ mod tests {
         // 应 miss (源变了)
         match cache.check(&cfg, &src) {
             CacheResult::Hit => panic!("expected miss after source change"),
-            CacheResult::Miss { .. } => {} // expected
+            CacheResult::Miss { .. } => {}, // expected
         }
 
         let _ = fs::remove_file(&src);
@@ -554,7 +545,7 @@ mod tests {
         // 应 miss (标志变了)
         match cache.check(&cfg, &src) {
             CacheResult::Hit => panic!("expected miss after flag change"),
-            CacheResult::Miss { .. } => {} // expected
+            CacheResult::Miss { .. } => {}, // expected
         }
 
         let _ = fs::remove_file(&src);

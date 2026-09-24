@@ -231,26 +231,10 @@ mod tests {
     #[test]
     fn guard_runtime_defines_both_underscore_variants() {
         let s = cxa_guard_runtime();
-        assert!(
-            s.contains("int _cxa_guard_acquire(unsigned char* g)"),
-            "{}",
-            s
-        );
-        assert!(
-            s.contains("void _cxa_guard_release(unsigned char* g)"),
-            "{}",
-            s
-        );
-        assert!(
-            s.contains("void _cxa_guard_abort(unsigned char* g)"),
-            "{}",
-            s
-        );
-        assert!(
-            s.contains("int __cxa_guard_acquire(unsigned char* g)"),
-            "{}",
-            s
-        );
+        assert!(s.contains("int _cxa_guard_acquire(unsigned char* g)"), "{}", s);
+        assert!(s.contains("void _cxa_guard_release(unsigned char* g)"), "{}", s);
+        assert!(s.contains("void _cxa_guard_abort(unsigned char* g)"), "{}", s);
+        assert!(s.contains("int __cxa_guard_acquire(unsigned char* g)"), "{}", s);
     }
 
     #[test]
@@ -265,11 +249,7 @@ mod tests {
     #[test]
     fn typeinfo_decl_has_name_field() {
         let s = typeinfo_struct_decl();
-        assert!(
-            s.contains("typedef struct __dcc_typeinfo { const char* name; }"),
-            "{}",
-            s
-        );
+        assert!(s.contains("typedef struct __dcc_typeinfo { const char* name; }"), "{}", s);
     }
 
     #[test]

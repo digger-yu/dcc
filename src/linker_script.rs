@@ -44,27 +44,27 @@ pub fn parse_linker_script(content: &str) -> Result<LinkerScript, String> {
             '/' if content.contains("/*") => {
                 // Skip comments
                 skip_comment(&mut chars, content);
-            }
+            },
             'M' => {
                 if try_parse_keyword(&mut chars, "MEMORY") {
                     parse_memory_block(&mut chars, content, &mut script)?;
                 } else {
                     chars.next();
                 }
-            }
+            },
             'S' => {
                 if try_parse_keyword(&mut chars, "SECTIONS") {
                     parse_sections_block(&mut chars, content, &mut script)?;
                 } else {
                     chars.next();
                 }
-            }
+            },
             'E' | 'e' if try_parse_keyword(&mut chars, "ENTRY") => {
                 parse_entry(&mut chars, content, &mut script)?;
-            }
+            },
             _ => {
                 chars.next();
-            }
+            },
         }
     }
 
@@ -202,14 +202,14 @@ fn parse_sections_block(
             Some(&'}') => {
                 chars.next();
                 depth -= 1;
-            }
+            },
             Some(&'{') => {
                 chars.next();
                 depth += 1;
-            }
+            },
             Some(_) => {
                 chars.next();
-            }
+            },
             None => break,
         }
     }
@@ -297,11 +297,11 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> u64 {
         Some(&'K') | Some(&'k') => {
             chars.next();
             1024u64
-        }
+        },
         Some(&'M') | Some(&'m') => {
             chars.next();
             1024 * 1024u64
-        }
+        },
         _ => 1u64,
     };
 

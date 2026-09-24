@@ -19,6 +19,7 @@ use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
 use crate::cpp::coroutine::{
     body_has_coro, coro_fn_decls, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
 };
+use crate::cpp::cpp_const_eval::{eval_cpp_const_full, ConstexprContext};
 use crate::cpp::gcc_compat::runtime_prologue as gcc_runtime_prologue;
 use crate::cpp::mangle::{
     mangle_ctor, mangle_dtor, mangle_global_function, mangle_member_function, mangle_op_delete,
@@ -27,7 +28,6 @@ use crate::cpp::mangle::{
 };
 use crate::cpp::parser::*;
 use crate::cpp::template::{instantiated_class_name, type_key, TemplateRegistry};
-use crate::cpp::cpp_const_eval::{eval_cpp_const_full, ConstexprContext};
 
 /// 降级选项
 #[derive(Debug, Clone, Default)]
@@ -226,7 +226,9 @@ pub fn has_cpp_feature(text: &str) -> bool {
 /// 检查文本是否包含指定模式.
 /// 纯字母关键字做词边界检查; 其他模式用 `contains`.
 pub fn has_cpp_pattern(text: &str, pattern: &str) -> bool {
-    let is_pure_ident = pattern.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let is_pure_ident = pattern
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_');
     if is_pure_ident {
         has_cpp_word(text, pattern)
     } else {
@@ -339,10 +341,14 @@ pub fn is_ident_char(b: u8) -> bool {
 /// 检查 bytes[pos..] 是否以 word 开头且前后是标识符边界
 fn match_word_at(bytes: &[u8], pos: usize, word: &str) -> bool {
     let wlen = word.len();
-    if pos + wlen > bytes.len() { return false; }
-    if &bytes[pos..pos+wlen] != word.as_bytes() { return false; }
-    let before_ok = pos == 0 || !is_ident_char(bytes[pos-1]);
-    let after_ok = pos + wlen >= bytes.len() || !is_ident_char(bytes[pos+wlen]);
+    if pos + wlen > bytes.len() {
+        return false;
+    }
+    if &bytes[pos..pos + wlen] != word.as_bytes() {
+        return false;
+    }
+    let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
+    let after_ok = pos + wlen >= bytes.len() || !is_ident_char(bytes[pos + wlen]);
     before_ok && after_ok
 }
 
@@ -352,7 +358,9 @@ fn match_word_at(bytes: &[u8], pos: usize, word: &str) -> bool {
 /// 一旦误判就会吞掉到下一个 `"` 为止的全部代码, 使后续模板展平 /
 /// 关键字剥离全部失步. 因此这里检测前导 `'`, 将 `"` 视为普通字符.
 fn skip_string_literal(bytes: &[u8], mut pos: usize) -> usize {
-    if pos >= bytes.len() || bytes[pos] != b'"' { return pos; }
+    if pos >= bytes.len() || bytes[pos] != b'"' {
+        return pos;
+    }
     // 前一个字符是 `'` → 这是字符字面量 `'"'` 的引号, 不是字符串
     if pos > 0 && bytes[pos - 1] == b'\'' {
         // 但若前导 `'` 自身是 `\'` 转义的一部分 (即处于字符串内),
@@ -361,8 +369,13 @@ fn skip_string_literal(bytes: &[u8], mut pos: usize) -> usize {
     }
     pos += 1;
     while pos < bytes.len() {
-        if bytes[pos] == b'\\' { pos += 2; continue; }
-        if bytes[pos] == b'"' { return pos + 1; }
+        if bytes[pos] == b'\\' {
+            pos += 2;
+            continue;
+        }
+        if bytes[pos] == b'"' {
+            return pos + 1;
+        }
         pos += 1;
     }
     pos
@@ -370,15 +383,21 @@ fn skip_string_literal(bytes: &[u8], mut pos: usize) -> usize {
 
 /// 跳过 // 或 /* */ 注释
 fn skip_comment(bytes: &[u8], mut pos: usize) -> usize {
-    if pos + 1 >= bytes.len() { return pos; }
-    if bytes[pos] == b'/' && bytes[pos+1] == b'/' {
-        while pos < bytes.len() && bytes[pos] != b'\n' { pos += 1; }
+    if pos + 1 >= bytes.len() {
         return pos;
     }
-    if bytes[pos] == b'/' && bytes[pos+1] == b'*' {
+    if bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
+        while pos < bytes.len() && bytes[pos] != b'\n' {
+            pos += 1;
+        }
+        return pos;
+    }
+    if bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
         pos += 2;
         while pos + 1 < bytes.len() {
-            if bytes[pos] == b'*' && bytes[pos+1] == b'/' { return pos + 2; }
+            if bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
+                return pos + 2;
+            }
             pos += 1;
         }
         return bytes.len();
@@ -389,13 +408,17 @@ fn skip_comment(bytes: &[u8], mut pos: usize) -> usize {
 /// 读取一个标识符, 返回 (ident_text, end_pos)
 fn read_ident(bytes: &[u8], mut pos: usize) -> (String, usize) {
     let start = pos;
-    while pos < bytes.len() && is_ident_char(bytes[pos]) { pos += 1; }
+    while pos < bytes.len() && is_ident_char(bytes[pos]) {
+        pos += 1;
+    }
     (String::from_utf8_lossy(&bytes[start..pos]).to_string(), pos)
 }
 
 /// 跳过空白 (空格/Tab/换行)
 fn skip_ws(bytes: &[u8], mut pos: usize) -> usize {
-    while pos < bytes.len() && (bytes[pos] as char).is_ascii_whitespace() { pos += 1; }
+    while pos < bytes.len() && (bytes[pos] as char).is_ascii_whitespace() {
+        pos += 1;
+    }
     pos
 }
 
@@ -407,23 +430,32 @@ fn remove_struct_inheritance(s: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') { let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
         // 检测 struct 或 class 关键字
-        if match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class")
-        {
+        if match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class") {
             let kw_len = if match_word_at(bytes, i, "struct") { 6 } else { 5 };
             // 输出关键字
-            result.push_str(&s[i..i+kw_len]);
+            result.push_str(&s[i..i + kw_len]);
             let mut j = skip_ws(bytes, i + kw_len);
             // 读取结构名 (如果有)
             if j < len && is_ident_char(bytes[j]) {
                 let (_, name_end) = read_ident(bytes, j);
                 // 输出从关键字后到 name_end 的所有内容 (含空白和结构名)
-                result.push_str(&s[i+kw_len..name_end]);
+                result.push_str(&s[i + kw_len..name_end]);
                 j = skip_ws(bytes, name_end);
                 // 检查是否有 ':' (继承) 且不是 '::'
-                if j < len && bytes[j] == b':' && (j+1 >= len || bytes[j+1] != b':') {
+                if j < len && bytes[j] == b':' && (j + 1 >= len || bytes[j + 1] != b':') {
                     // 跳过继承列表直到 '{' 或 ';'
                     while j < len && bytes[j] != b'{' && bytes[j] != b';' {
                         j += 1;
@@ -469,10 +501,18 @@ fn clean_struct_bodies(s: &str) -> String {
 
     while i < len {
         // 跳过字符串
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
         // 跳过注释
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
 
         // 跟踪括号深度
@@ -494,7 +534,11 @@ fn clean_struct_bodies(s: &str) -> String {
         if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "class"))
             && paren_depth == 0
         {
-            let kw = if match_word_at(bytes, i, "struct") { "struct" } else { "class" };
+            let kw = if match_word_at(bytes, i, "struct") {
+                "struct"
+            } else {
+                "class"
+            };
             let kw_len = kw.len();
             let mut j = skip_ws(bytes, i + kw_len);
             if j < len && is_ident_char(bytes[j]) {
@@ -512,112 +556,169 @@ fn clean_struct_bodies(s: &str) -> String {
                     // Inheritance: struct NAME : base { ... }
                     // Skip to '{'
                     let mut k = j;
-                    while k < len && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                    while k < len && bytes[k] != b'{' && bytes[k] != b';' {
+                        k += 1;
+                    }
                     k < len && bytes[k] == b'{'
                 } else {
                     false
                 };
                 if is_struct_def {
                     // Skip to '{'
-                    while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                    while j < len && bytes[j] != b'{' && bytes[j] != b';' {
+                        j += 1;
+                    }
                     if j < len && bytes[j] == b'{' {
-                    struct_name_stack.push(name.clone());
-                    nested_brace_depth = 0; // 重置嵌套深度
-                    result.push_str(&s[i..j+1]);
-                    i = j + 1;
-                    // Pre-scan struct body to collect field names
-                    // for adding this_-> prefix in inline member functions
-                    field_names.clear();
-                    {
-                        let mut scan = i;
-                        let mut scan_depth = 1i32;
-                        while scan < len && scan_depth > 0 {
-                            if bytes[scan] == b'"' { scan = skip_string_literal(bytes, scan); continue; }
-                            if bytes[scan] == b'{' { scan_depth += 1; scan += 1; continue; }
-                            if bytes[scan] == b'}' { scan_depth -= 1; scan += 1; continue; }
-                            if bytes[scan] == b';' && scan_depth == 1 {
-                                // Look backward for field name: last identifier before ';'
-                                let mut fe = scan;
-                                while fe > i && !is_ident_char(bytes[fe-1]) { fe -= 1; }
-                                let mut fs = fe;
-                                while fs > i && is_ident_char(bytes[fs-1]) { fs -= 1; }
-                                if fs < fe {
-                                    let fname = &s[fs..fe];
-                                    // Skip keywords and type names
-                                    if fname != "const" && fname != "volatile"
-                                        && fname != "static" && fname != "inline"
-                                        && fname != "virtual" && fname != "explicit"
-                                        && fname != "struct" && fname != "class"
-                                        && fname != "enum" && fname != "union"
-                                        && fname != "void" && fname != "int"
-                                        && fname != "char" && fname != "float"
-                                        && fname != "double" && fname != "long"
-                                        && fname != "short" && fname != "unsigned"
-                                        && fname != "signed" && fname != "bool"
-                                        && fname != "auto" && fname != "return"
-                                        && fname != "delete" && fname != "default"
-                                        && fname != "public" && fname != "private"
-                                        && fname != "protected" && fname != "friend"
-                                        && fname != "typedef" && fname != "namespace"
-                                        && fname != "template" && fname != "typename"
-                                        && fname != "using" && fname != "new"
-                                        && fname != "delete" && fname != "this"
-                                        && !fname.starts_with('~')
-                                        && fname != name
-                                        && !field_names.contains(&fname.to_string()) {
+                        struct_name_stack.push(name.clone());
+                        nested_brace_depth = 0; // 重置嵌套深度
+                        result.push_str(&s[i..j + 1]);
+                        i = j + 1;
+                        // Pre-scan struct body to collect field names
+                        // for adding this_-> prefix in inline member functions
+                        field_names.clear();
+                        {
+                            let mut scan = i;
+                            let mut scan_depth = 1i32;
+                            while scan < len && scan_depth > 0 {
+                                if bytes[scan] == b'"' {
+                                    scan = skip_string_literal(bytes, scan);
+                                    continue;
+                                }
+                                if bytes[scan] == b'{' {
+                                    scan_depth += 1;
+                                    scan += 1;
+                                    continue;
+                                }
+                                if bytes[scan] == b'}' {
+                                    scan_depth -= 1;
+                                    scan += 1;
+                                    continue;
+                                }
+                                if bytes[scan] == b';' && scan_depth == 1 {
+                                    // Look backward for field name: last identifier before ';'
+                                    let mut fe = scan;
+                                    while fe > i && !is_ident_char(bytes[fe - 1]) {
+                                        fe -= 1;
+                                    }
+                                    let mut fs = fe;
+                                    while fs > i && is_ident_char(bytes[fs - 1]) {
+                                        fs -= 1;
+                                    }
+                                    if fs < fe {
+                                        let fname = &s[fs..fe];
+                                        // Skip keywords and type names
+                                        if fname != "const"
+                                            && fname != "volatile"
+                                            && fname != "static"
+                                            && fname != "inline"
+                                            && fname != "virtual"
+                                            && fname != "explicit"
+                                            && fname != "struct"
+                                            && fname != "class"
+                                            && fname != "enum"
+                                            && fname != "union"
+                                            && fname != "void"
+                                            && fname != "int"
+                                            && fname != "char"
+                                            && fname != "float"
+                                            && fname != "double"
+                                            && fname != "long"
+                                            && fname != "short"
+                                            && fname != "unsigned"
+                                            && fname != "signed"
+                                            && fname != "bool"
+                                            && fname != "auto"
+                                            && fname != "return"
+                                            && fname != "delete"
+                                            && fname != "default"
+                                            && fname != "public"
+                                            && fname != "private"
+                                            && fname != "protected"
+                                            && fname != "friend"
+                                            && fname != "typedef"
+                                            && fname != "namespace"
+                                            && fname != "template"
+                                            && fname != "typename"
+                                            && fname != "using"
+                                            && fname != "new"
+                                            && fname != "delete"
+                                            && fname != "this"
+                                            && !fname.starts_with('~')
+                                            && fname != name
+                                            && !field_names.contains(&fname.to_string())
+                                        {
                                             field_names.push(fname.to_string());
                                         }
+                                    }
                                 }
+                                scan += 1;
                             }
-                            scan += 1;
                         }
-                    }
-                    // Pre-scan struct body to collect member function names
-                    // for converting bare member calls in extracted bodies
-                    member_fn_names.clear();
-                    {
-                        let mut scan = i;
-                        let mut scan_depth = 1i32;
-                        while scan < len && scan_depth > 0 {
-                            if bytes[scan] == b'"' { scan = skip_string_literal(bytes, scan); continue; }
-                            if bytes[scan] == b'{' { scan_depth += 1; scan += 1; continue; }
-                            if bytes[scan] == b'}' { scan_depth -= 1; scan += 1; continue; }
-                            // Look for pattern: ident(...) ... {
-                            if is_ident_char(bytes[scan]) && (scan == 0 || !is_ident_char(bytes[scan-1])) {
-                                let (ident, ident_end) = read_ident(bytes, scan);
-                                if ident != "if" && ident != "while" && ident != "for"
+                        // Pre-scan struct body to collect member function names
+                        // for converting bare member calls in extracted bodies
+                        member_fn_names.clear();
+                        {
+                            let mut scan = i;
+                            let mut scan_depth = 1i32;
+                            while scan < len && scan_depth > 0 {
+                                if bytes[scan] == b'"' {
+                                    scan = skip_string_literal(bytes, scan);
+                                    continue;
+                                }
+                                if bytes[scan] == b'{' {
+                                    scan_depth += 1;
+                                    scan += 1;
+                                    continue;
+                                }
+                                if bytes[scan] == b'}' {
+                                    scan_depth -= 1;
+                                    scan += 1;
+                                    continue;
+                                }
+                                // Look for pattern: ident(...) ... {
+                                if is_ident_char(bytes[scan])
+                                    && (scan == 0 || !is_ident_char(bytes[scan - 1]))
+                                {
+                                    let (ident, ident_end) = read_ident(bytes, scan);
+                                    if ident != "if" && ident != "while" && ident != "for"
                                     && ident != "switch" && ident != "catch" && ident != "return"
                                     && ident != "enum" && ident != "struct" && ident != "class"
                                     && ident != name.as_str() // not the constructor
                                     && !ident.starts_with('~')
-                                {
-                                    let mut sk = skip_ws(bytes, ident_end);
-                                    if sk < len && bytes[sk] == b'(' {
-                                        // Skip parens
-                                        let mut pd = 1i32;
-                                        sk += 1;
-                                        while sk < len && pd > 0 {
-                                            if bytes[sk] == b'(' { pd += 1; }
-                                            else if bytes[sk] == b')' { pd -= 1; }
+                                    {
+                                        let mut sk = skip_ws(bytes, ident_end);
+                                        if sk < len && bytes[sk] == b'(' {
+                                            // Skip parens
+                                            let mut pd = 1i32;
                                             sk += 1;
-                                        }
-                                        sk = skip_ws(bytes, sk);
-                                        // Skip const/noexcept/override
-                                        while sk < len && bytes[sk] != b'{' && bytes[sk] != b';' {
-                                            sk += 1;
-                                        }
-                                        if sk < len && bytes[sk] == b'{'
-                                            && !member_fn_names.contains(&ident.to_string()) {
+                                            while sk < len && pd > 0 {
+                                                if bytes[sk] == b'(' {
+                                                    pd += 1;
+                                                } else if bytes[sk] == b')' {
+                                                    pd -= 1;
+                                                }
+                                                sk += 1;
+                                            }
+                                            sk = skip_ws(bytes, sk);
+                                            // Skip const/noexcept/override
+                                            while sk < len && bytes[sk] != b'{' && bytes[sk] != b';'
+                                            {
+                                                sk += 1;
+                                            }
+                                            if sk < len
+                                                && bytes[sk] == b'{'
+                                                && !member_fn_names.contains(&ident.to_string())
+                                            {
                                                 member_fn_names.push(ident.to_string());
                                             }
+                                        }
                                     }
                                 }
+                                scan += 1;
                             }
-                            scan += 1;
                         }
+                        continue;
                     }
-                    continue;
-                }
                 } // end if is_struct_def
             }
         }
@@ -653,7 +754,11 @@ fn clean_struct_bodies(s: &str) -> String {
             if (match_word_at(bytes, i, "struct") || match_word_at(bytes, i, "union"))
                 && i + 6 < len
             {
-                let kw = if match_word_at(bytes, i, "struct") { "struct" } else { "union" };
+                let kw = if match_word_at(bytes, i, "struct") {
+                    "struct"
+                } else {
+                    "union"
+                };
                 let kw_len = kw.len();
                 let mut j = skip_ws(bytes, i + kw_len);
                 // 检查是否是匿名定义 (后面直接是 '{')
@@ -662,13 +767,20 @@ fn clean_struct_bodies(s: &str) -> String {
                     let mut depth = 1i32;
                     j += 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'{' { depth += 1; }
-                        else if bytes[j] == b'}' { depth -= 1; }
+                        if bytes[j] == b'{' {
+                            depth += 1;
+                        } else if bytes[j] == b'}' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     // 跳过变量名和 ';'
-                    while j < len && bytes[j] != b';' { j += 1; }
-                    if j < len { j += 1; }
+                    while j < len && bytes[j] != b';' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1;
+                    }
                     // 输出整个嵌套定义
                     result.push_str(&s[i..j]);
                     i = j;
@@ -681,17 +793,25 @@ fn clean_struct_bodies(s: &str) -> String {
             if bytes[i] == b'{' {
                 // 检查前面的非空白字符是否是 '=' (如果是, 这是初始化器不是块)
                 let mut bk = i;
-                while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n' || bytes[bk-1] == b'\r') {
+                while bk > 0
+                    && (bytes[bk - 1] == b' '
+                        || bytes[bk - 1] == b'\t'
+                        || bytes[bk - 1] == b'\n'
+                        || bytes[bk - 1] == b'\r')
+                {
                     bk -= 1;
                 }
-                if bk > 0 && bytes[bk-1] == b'=' {
+                if bk > 0 && bytes[bk - 1] == b'=' {
                     // 这是初始化器 `{...}`, 不是嵌套块
                     // 跳过整个 {...} 并输出
                     let mut depth = 1i32;
                     let mut j = i + 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'{' { depth += 1; }
-                        else if bytes[j] == b'}' { depth -= 1; }
+                        if bytes[j] == b'{' {
+                            depth += 1;
+                        } else if bytes[j] == b'}' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     result.push_str(&s[i..j]);
@@ -745,16 +865,25 @@ fn clean_struct_bodies(s: &str) -> String {
                 let mut j = i;
                 let mut bd = 0i32;
                 while j < len {
-                    if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
-                    if bytes[j] == b'{' { bd += 1; }
-                    else if bytes[j] == b'}' {
-                        if bd == 0 { break; } // struct body closing brace
-                        bd -= 1;
+                    if bytes[j] == b'"' {
+                        j = skip_string_literal(bytes, j);
+                        continue;
                     }
-                    else if bytes[j] == b';' && bd == 0 { break; }
+                    if bytes[j] == b'{' {
+                        bd += 1;
+                    } else if bytes[j] == b'}' {
+                        if bd == 0 {
+                            break;
+                        } // struct body closing brace
+                        bd -= 1;
+                    } else if bytes[j] == b';' && bd == 0 {
+                        break;
+                    }
                     j += 1;
                 }
-                if j < len && bytes[j] == b';' { j += 1; }
+                if j < len && bytes[j] == b';' {
+                    j += 1;
+                }
                 i = j;
                 continue;
             }
@@ -762,12 +891,18 @@ fn clean_struct_bodies(s: &str) -> String {
             // 检测析构函数声明: ~ClassName(...);
             if bytes[i] == b'~' {
                 let mut j = i + 1;
-                while j < len && is_ident_char(bytes[j]) { j += 1; }
+                while j < len && is_ident_char(bytes[j]) {
+                    j += 1;
+                }
                 j = skip_ws(bytes, j);
                 if j < len && bytes[j] == b'(' {
                     // 跳过到 ';'
-                    while j < len && bytes[j] != b';' { j += 1; }
-                    if j < len { j += 1; }
+                    while j < len && bytes[j] != b';' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1;
+                    }
                     i = j;
                     continue;
                 }
@@ -785,8 +920,11 @@ fn clean_struct_bodies(s: &str) -> String {
                     let mut depth = 1i32;
                     j += 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     let param_end = j - 1; // position of ')'
@@ -799,12 +937,14 @@ fn clean_struct_bodies(s: &str) -> String {
                     j = skip_ws(bytes, j);
                     // 解析初始化列表 ': member(init), ...'
                     let mut init_list: Vec<(String, String)> = Vec::new();
-                    if j < len && bytes[j] == b':' && (j+1 >= len || bytes[j+1] != b':') {
+                    if j < len && bytes[j] == b':' && (j + 1 >= len || bytes[j + 1] != b':') {
                         j += 1;
                         // 解析每个 member(init) 对
                         while j < len && bytes[j] != b'{' && bytes[j] != b';' {
                             j = skip_ws(bytes, j);
-                            if j >= len || bytes[j] == b'{' || bytes[j] == b';' { break; }
+                            if j >= len || bytes[j] == b'{' || bytes[j] == b';' {
+                                break;
+                            }
                             // 读取成员名
                             if is_ident_char(bytes[j]) {
                                 let (mname, mname_end) = read_ident(bytes, j);
@@ -815,16 +955,21 @@ fn clean_struct_bodies(s: &str) -> String {
                                     let init_start = j + 1;
                                     j += 1;
                                     while j < len && pd > 0 {
-                                        if bytes[j] == b'(' { pd += 1; }
-                                        else if bytes[j] == b')' { pd -= 1; }
+                                        if bytes[j] == b'(' {
+                                            pd += 1;
+                                        } else if bytes[j] == b')' {
+                                            pd -= 1;
+                                        }
                                         j += 1;
                                     }
-                                    let init_val = s[init_start..j-1].trim().to_string();
+                                    let init_val = s[init_start..j - 1].trim().to_string();
                                     init_list.push((mname.to_string(), init_val));
                                 }
                                 j = skip_ws(bytes, j);
                                 // 跳过 ','
-                                if j < len && bytes[j] == b',' { j += 1; }
+                                if j < len && bytes[j] == b',' {
+                                    j += 1;
+                                }
                             } else {
                                 j += 1; // skip unknown char
                             }
@@ -834,15 +979,19 @@ fn clean_struct_bodies(s: &str) -> String {
                     if j < len && bytes[j] == b'{' {
                         // 构建 _ctor 函数
                         let this_param = format!("struct {} *this_", struct_name);
-                        let all_params = if params_clean.trim().is_empty() || params_clean.trim() == "void" {
-                            this_param
-                        } else {
-                            format!("{}, {}", this_param, params_clean.trim())
-                        };
+                        let all_params =
+                            if params_clean.trim().is_empty() || params_clean.trim() == "void" {
+                                this_param
+                            } else {
+                                format!("{}, {}", this_param, params_clean.trim())
+                            };
                         let mut ctor_func = String::new();
                         // Count parameters (including this_) for overloaded ctor naming
                         let param_count = all_params.split(',').count();
-                        ctor_func.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
+                        ctor_func.push_str(&format!(
+                            "\nvoid _ctor_{}_{}({}) {{\n",
+                            struct_name, param_count, all_params
+                        ));
                         // 输出初始化列表: this_->member = init;
                         for (mname, mval) in &init_list {
                             // 替换参数名中的引用为指针访问
@@ -854,11 +1003,14 @@ fn clean_struct_bodies(s: &str) -> String {
                         let mut brace_depth = 1i32;
                         j += 1;
                         while j < len && brace_depth > 0 {
-                            if bytes[j] == b'{' { brace_depth += 1; }
-                            else if bytes[j] == b'}' { brace_depth -= 1; }
+                            if bytes[j] == b'{' {
+                                brace_depth += 1;
+                            } else if bytes[j] == b'}' {
+                                brace_depth -= 1;
+                            }
                             j += 1;
                         }
-                        let body = s[body_start..j-1].trim();
+                        let body = s[body_start..j - 1].trim();
                         if !body.is_empty() {
                             // 替换 body 中的字段名为 this_->field
                             let mut fixed_body = body.to_string();
@@ -888,15 +1040,19 @@ fn clean_struct_bodies(s: &str) -> String {
                     } else if j < len && bytes[j] == b';' {
                         // 只有声明没有 body, 生成空 ctor
                         let this_param = format!("struct {} *this_", struct_name);
-                        let all_params = if params_clean.trim().is_empty() || params_clean.trim() == "void" {
-                            this_param
-                        } else {
-                            format!("{}, {}", this_param, params_clean.trim())
-                        };
+                        let all_params =
+                            if params_clean.trim().is_empty() || params_clean.trim() == "void" {
+                                this_param
+                            } else {
+                                format!("{}, {}", this_param, params_clean.trim())
+                            };
                         let mut ctor_decl = String::new();
                         // Count parameters (including this_) for overloaded ctor naming
                         let param_count = all_params.split(',').count();
-                        ctor_decl.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
+                        ctor_decl.push_str(&format!(
+                            "\nvoid _ctor_{}_{}({}) {{\n",
+                            struct_name, param_count, all_params
+                        ));
                         for (mname, mval) in &init_list {
                             ctor_decl.push_str(&format!("  this_->{} = {};\n", mname, mval));
                         }
@@ -915,7 +1071,9 @@ fn clean_struct_bodies(s: &str) -> String {
                 if match_word_at(bytes, j, "delete") || match_word_at(bytes, j, "default") {
                     let skip_len = if match_word_at(bytes, j, "delete") { 6 } else { 7 };
                     j = skip_ws(bytes, j + skip_len);
-                    if j < len && bytes[j] == b';' { j += 1; }
+                    if j < len && bytes[j] == b';' {
+                        j += 1;
+                    }
                     i = j;
                     continue;
                 }
@@ -925,8 +1083,12 @@ fn clean_struct_bodies(s: &str) -> String {
             if match_word_at(bytes, i, "operator") {
                 let mut j = skip_ws(bytes, i + 8);
                 if j < len && bytes[j] == b'=' {
-                    while j < len && bytes[j] != b';' { j += 1; }
-                    if j < len { j += 1; }
+                    while j < len && bytes[j] != b';' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1;
+                    }
                     i = j;
                     continue;
                 }
@@ -942,20 +1104,30 @@ fn clean_struct_bodies(s: &str) -> String {
             // 检测模板字段类型: `template_name<...> field_name;`
             // 替换为 `void *field_name;`
             // 先检测标识符后跟 '<'
-            if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
                 let (ident, ident_end) = read_ident(bytes, i);
                 let j = skip_ws(bytes, ident_end);
-                if j < len && bytes[j] == b'<' && ident != "enum" && ident != "return"
-                    && ident != "if" && ident != "while" && ident != "for"
+                if j < len
+                    && bytes[j] == b'<'
+                    && ident != "enum"
+                    && ident != "return"
+                    && ident != "if"
+                    && ident != "while"
+                    && ident != "for"
                 {
                     // 可能是模板类型, 尝试跳过 <...>
                     let mut depth = 1i32;
                     let mut k = j + 1;
                     let mut is_template = true;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'<' { depth += 1; }
-                        else if bytes[k] == b'>' { depth -= 1; }
-                        else if bytes[k] == b';' || bytes[k] == b'}' { is_template = false; break; }
+                        if bytes[k] == b'<' {
+                            depth += 1;
+                        } else if bytes[k] == b'>' {
+                            depth -= 1;
+                        } else if bytes[k] == b';' || bytes[k] == b'}' {
+                            is_template = false;
+                            break;
+                        }
                         k += 1;
                     }
                     if is_template && depth == 0 {
@@ -967,8 +1139,12 @@ fn clean_struct_bodies(s: &str) -> String {
                             let mut fe = skip_ws(bytes, field_end);
                             // 跳过可能的数组 [N]
                             while fe < len && bytes[fe] == b'[' {
-                                while fe < len && bytes[fe] != b']' { fe += 1; }
-                                if fe < len { fe += 1; }
+                                while fe < len && bytes[fe] != b']' {
+                                    fe += 1;
+                                }
+                                if fe < len {
+                                    fe += 1;
+                                }
                             }
                             if fe < len && bytes[fe] == b';' {
                                 // 替换为 void *field_name;
@@ -998,12 +1174,24 @@ fn clean_struct_bodies(s: &str) -> String {
                 // 扫描到 ';' 或 '{' 或 '}'
                 let mut pd = 0i32; // paren depth
                 while j < len {
-                    if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
-                    if bytes[j] == b'(' { pd += 1; found_paren = true; }
-                    else if bytes[j] == b')' { pd -= 1; }
-                    else if bytes[j] == b'{' && pd == 0 { found_open_brace = true; break; }
-                    else if bytes[j] == b';' && pd == 0 { found_semi = true; break; }
-                    else if bytes[j] == b'}' && pd == 0 { break; }
+                    if bytes[j] == b'"' {
+                        j = skip_string_literal(bytes, j);
+                        continue;
+                    }
+                    if bytes[j] == b'(' {
+                        pd += 1;
+                        found_paren = true;
+                    } else if bytes[j] == b')' {
+                        pd -= 1;
+                    } else if bytes[j] == b'{' && pd == 0 {
+                        found_open_brace = true;
+                        break;
+                    } else if bytes[j] == b';' && pd == 0 {
+                        found_semi = true;
+                        break;
+                    } else if bytes[j] == b'}' && pd == 0 {
+                        break;
+                    }
                     j += 1;
                 }
                 if found_paren && found_open_brace {
@@ -1024,23 +1212,33 @@ fn clean_struct_bodies(s: &str) -> String {
                                     found_first_paren = true;
                                 }
                                 d += 1;
+                            } else if bytes[k] == b')' {
+                                d -= 1;
+                            } else if bytes[k] == b'{' && d == 0 {
+                                break;
                             }
-                            else if bytes[k] == b')' { d -= 1; }
-                            else if bytes[k] == b'{' && d == 0 { break; }
                             k += 1;
                         }
                     }
                     // 找函数名: paren_start 前的标识符
                     let mut fn_end = paren_start;
-                    while fn_end > sig_start && !is_ident_char(bytes[fn_end-1]) { fn_end -= 1; }
+                    while fn_end > sig_start && !is_ident_char(bytes[fn_end - 1]) {
+                        fn_end -= 1;
+                    }
                     let mut fn_start = fn_end;
-                    while fn_start > sig_start && is_ident_char(bytes[fn_start-1]) { fn_start -= 1; }
+                    while fn_start > sig_start && is_ident_char(bytes[fn_start - 1]) {
+                        fn_start -= 1;
+                    }
                     let fn_name_base = &s[fn_start..fn_end];
                     // 如果是 operator，捕获后面的操作符符号
                     let fn_name = if fn_name_base == "operator" {
                         // 从 fn_end 开始捕获操作符符号
                         let mut op_end = fn_end;
-                        while op_end < len && !is_ident_char(bytes[op_end]) && bytes[op_end] != b'(' && bytes[op_end] != b')' {
+                        while op_end < len
+                            && !is_ident_char(bytes[op_end])
+                            && bytes[op_end] != b'('
+                            && bytes[op_end] != b')'
+                        {
                             op_end += 1;
                         }
                         let op_symbols = s[fn_end..op_end].trim();
@@ -1055,8 +1253,12 @@ fn clean_struct_bodies(s: &str) -> String {
 
                     // Skip C++ control flow keywords that look like function calls
                     // but are not member functions (if, while, for, switch, etc.)
-                    if fn_name == "if" || fn_name == "while" || fn_name == "for"
-                        || fn_name == "switch" || fn_name == "catch" || fn_name == "return"
+                    if fn_name == "if"
+                        || fn_name == "while"
+                        || fn_name == "for"
+                        || fn_name == "switch"
+                        || fn_name == "catch"
+                        || fn_name == "return"
                     {
                         // Not a member function, skip to next statement
                         i = if found_open_brace {
@@ -1064,8 +1266,11 @@ fn clean_struct_bodies(s: &str) -> String {
                             let mut brace_depth = 1i32;
                             let mut skip_i = j + 1;
                             while skip_i < len && brace_depth > 0 {
-                                if bytes[skip_i] == b'{' { brace_depth += 1; }
-                                else if bytes[skip_i] == b'}' { brace_depth -= 1; }
+                                if bytes[skip_i] == b'{' {
+                                    brace_depth += 1;
+                                } else if bytes[skip_i] == b'}' {
+                                    brace_depth -= 1;
+                                }
                                 skip_i += 1;
                             }
                             skip_i
@@ -1085,13 +1290,16 @@ fn clean_struct_bodies(s: &str) -> String {
                             let mut d = 1i32;
                             let mut k = paren_start + 1;
                             while k < len && d > 0 {
-                                if bytes[k] == b'(' { d += 1; }
-                                else if bytes[k] == b')' { d -= 1; }
+                                if bytes[k] == b'(' {
+                                    d += 1;
+                                } else if bytes[k] == b')' {
+                                    d -= 1;
+                                }
                                 k += 1;
                             }
                             paren_end = k - 1;
                         }
-                        let params_raw = &s[paren_start+1..paren_end];
+                        let params_raw = &s[paren_start + 1..paren_end];
                         let params_clean = remove_default_args(params_raw);
                         let params_clean = convert_ref_params(&params_clean);
                         let params_clean = add_struct_prefix(&params_clean, &struct_name);
@@ -1100,11 +1308,16 @@ fn clean_struct_bodies(s: &str) -> String {
                         let mut skip_j = skip_ws(bytes, paren_end + 1);
                         // 解析初始化列表
                         let mut init_list: Vec<(String, String)> = Vec::new();
-                        if skip_j < len && bytes[skip_j] == b':' && (skip_j+1 >= len || bytes[skip_j+1] != b':') {
+                        if skip_j < len
+                            && bytes[skip_j] == b':'
+                            && (skip_j + 1 >= len || bytes[skip_j + 1] != b':')
+                        {
                             skip_j += 1;
                             while skip_j < len && bytes[skip_j] != b'{' && bytes[skip_j] != b';' {
                                 skip_j = skip_ws(bytes, skip_j);
-                                if skip_j >= len || bytes[skip_j] == b'{' || bytes[skip_j] == b';' { break; }
+                                if skip_j >= len || bytes[skip_j] == b'{' || bytes[skip_j] == b';' {
+                                    break;
+                                }
                                 if is_ident_char(bytes[skip_j]) {
                                     let (mname, mname_end) = read_ident(bytes, skip_j);
                                     skip_j = skip_ws(bytes, mname_end);
@@ -1113,15 +1326,20 @@ fn clean_struct_bodies(s: &str) -> String {
                                         let init_start = skip_j + 1;
                                         skip_j += 1;
                                         while skip_j < len && pd > 0 {
-                                            if bytes[skip_j] == b'(' { pd += 1; }
-                                            else if bytes[skip_j] == b')' { pd -= 1; }
+                                            if bytes[skip_j] == b'(' {
+                                                pd += 1;
+                                            } else if bytes[skip_j] == b')' {
+                                                pd -= 1;
+                                            }
                                             skip_j += 1;
                                         }
-                                        let init_val = s[init_start..skip_j-1].trim().to_string();
+                                        let init_val = s[init_start..skip_j - 1].trim().to_string();
                                         init_list.push((mname.to_string(), init_val));
                                     }
                                     skip_j = skip_ws(bytes, skip_j);
-                                    if skip_j < len && bytes[skip_j] == b',' { skip_j += 1; }
+                                    if skip_j < len && bytes[skip_j] == b',' {
+                                        skip_j += 1;
+                                    }
                                 } else {
                                     skip_j += 1;
                                 }
@@ -1129,15 +1347,19 @@ fn clean_struct_bodies(s: &str) -> String {
                         }
                         // 构建 _ctor 函数
                         let this_param = format!("struct {} *this_", struct_name);
-                        let all_params = if params_clean.trim().is_empty() || params_clean.trim() == "void" {
-                            this_param
-                        } else {
-                            format!("{}, {}", this_param, params_clean.trim())
-                        };
+                        let all_params =
+                            if params_clean.trim().is_empty() || params_clean.trim() == "void" {
+                                this_param
+                            } else {
+                                format!("{}, {}", this_param, params_clean.trim())
+                            };
                         let mut ctor_func = String::new();
                         // Count parameters (including this_) for overloaded ctor naming
                         let param_count = all_params.split(',').count();
-                        ctor_func.push_str(&format!("\nvoid _ctor_{}_{}({}) {{\n", struct_name, param_count, all_params));
+                        ctor_func.push_str(&format!(
+                            "\nvoid _ctor_{}_{}({}) {{\n",
+                            struct_name, param_count, all_params
+                        ));
                         for (mname, mval) in &init_list {
                             ctor_func.push_str(&format!("  this_->{} = {};\n", mname, mval));
                         }
@@ -1147,15 +1369,22 @@ fn clean_struct_bodies(s: &str) -> String {
                             let mut brace_depth = 1i32;
                             skip_j += 1;
                             while skip_j < len && brace_depth > 0 {
-                                if bytes[skip_j] == b'{' { brace_depth += 1; }
-                                else if bytes[skip_j] == b'}' { brace_depth -= 1; }
+                                if bytes[skip_j] == b'{' {
+                                    brace_depth += 1;
+                                } else if bytes[skip_j] == b'}' {
+                                    brace_depth -= 1;
+                                }
                                 skip_j += 1;
                             }
-                            let body = s[body_start..skip_j-1].trim();
+                            let body = s[body_start..skip_j - 1].trim();
                             if !body.is_empty() {
                                 let mut fixed_body = body.to_string();
                                 for fname in &field_names {
-                                    fixed_body = replace_word(&fixed_body, fname, &format!("this_->{}", fname));
+                                    fixed_body = replace_word(
+                                        &fixed_body,
+                                        fname,
+                                        &format!("this_->{}", fname),
+                                    );
                                 }
                                 fixed_body = fixed_body.replace("this->", "this_->");
                                 ctor_func.push_str(&format!("  {}\n", fixed_body.trim()));
@@ -1173,13 +1402,16 @@ fn clean_struct_bodies(s: &str) -> String {
                         let mut d = 1i32;
                         let mut k = paren_start + 1;
                         while k < len && d > 0 {
-                            if bytes[k] == b'(' { d += 1; }
-                            else if bytes[k] == b')' { d -= 1; }
+                            if bytes[k] == b'(' {
+                                d += 1;
+                            } else if bytes[k] == b')' {
+                                d -= 1;
+                            }
                             k += 1;
                         }
                         paren_end = k - 1; // position of ')'
                     }
-                    let params_str = &s[paren_start+1..paren_end];
+                    let params_str = &s[paren_start + 1..paren_end];
                     // 去掉默认参数 (= xxx)
                     let params_clean = remove_default_args(params_str);
                     // 将引用参数 Type& name 转换为 Type* name
@@ -1207,19 +1439,16 @@ fn clean_struct_bodies(s: &str) -> String {
                     } else {
                         ret_base.to_string()
                     };
-                    let ret = if ret_is_ref {
-                        format!("{}*", ret_base)
-                    } else {
-                        ret_base
-                    };
+                    let ret = if ret_is_ref { format!("{}*", ret_base) } else { ret_base };
 
                     // 构建参数
                     let this_param = format!("struct {} *this_", struct_name);
-                    let all_params = if params_clean.trim().is_empty() || params_clean.trim() == "void" {
-                        this_param
-                    } else {
-                        format!("{}, {}", this_param, params_clean.trim())
-                    };
+                    let all_params =
+                        if params_clean.trim().is_empty() || params_clean.trim() == "void" {
+                            this_param
+                        } else {
+                            format!("{}, {}", this_param, params_clean.trim())
+                        };
 
                     // 处理 operator 函数名: operator== → operator_eq, operator!= → operator_ne
                     let fn_name_clean = if fn_name.starts_with("operator") {
@@ -1263,35 +1492,46 @@ fn clean_struct_bodies(s: &str) -> String {
                             "||" => "operator_lor".to_string(),
                             _ => {
                                 // Sanitize: replace any remaining non-ident chars
-                                let sanitized: String = op.chars().map(|c| {
-                                    if c.is_alphanumeric() || c == '_' { c } else { '_' }
-                                }).collect();
+                                let sanitized: String = op
+                                    .chars()
+                                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                                    .collect();
                                 format!("operator_{}", sanitized)
-                            }
+                            },
                         }
                     } else {
                         fn_name.to_string()
                     };
 
                     let mut func_body = String::new();
-                    func_body.push_str(&format!("\n{} {}_{}({}) ", ret, struct_name, fn_name_clean, all_params));
+                    func_body.push_str(&format!(
+                        "\n{} {}_{}({}) ",
+                        ret, struct_name, fn_name_clean, all_params
+                    ));
 
                     // 跳过 body { ... }
                     j = skip_ws(bytes, paren_end + 1);
                     // 跳过可能的 const/noexcept/override
-                    while j < len && bytes[j] != b'{' { j += 1; }
+                    while j < len && bytes[j] != b'{' {
+                        j += 1;
+                    }
                     if j < len && bytes[j] == b'{' {
                         // 输出 body 但替换 this-> 为 this_->, 替换 param.field 为 param->field
                         func_body.push('{');
                         let mut brace_depth = 1i32;
                         j += 1;
                         // 收集参数名 (用于替换 param.field → param->field)
-                        let param_names: Vec<String> = params_clean.split(',')
+                        let param_names: Vec<String> = params_clean
+                            .split(',')
                             .filter_map(|p| {
                                 let parts: Vec<&str> = p.split_whitespace().collect();
                                 if parts.len() >= 2 {
                                     // 最后一个部分是参数名 (可能包含 * 或 &)
-                                    let name = parts.last().unwrap().trim_start_matches('*').trim_start_matches('&');
+                                    let name = parts
+                                        .last()
+                                        .unwrap()
+                                        .trim_start_matches('*')
+                                        .trim_start_matches('&');
                                     if !name.is_empty() && name != "void" {
                                         return Some(name.to_string());
                                     }
@@ -1300,11 +1540,19 @@ fn clean_struct_bodies(s: &str) -> String {
                             })
                             .collect();
                         while j < len && brace_depth > 0 {
-                            if bytes[j] == b'{' { brace_depth += 1; }
-                            else if bytes[j] == b'}' { brace_depth -= 1; }
+                            if bytes[j] == b'{' {
+                                brace_depth += 1;
+                            } else if bytes[j] == b'}' {
+                                brace_depth -= 1;
+                            }
                             if brace_depth > 0 {
                                 // 替换 this-> 为 this_->
-                                if match_word_at(bytes, j, "this") && j+4 < len && bytes[j+4] == b'-' && j+5 < len && bytes[j+5] == b'>' {
+                                if match_word_at(bytes, j, "this")
+                                    && j + 4 < len
+                                    && bytes[j + 4] == b'-'
+                                    && j + 5 < len
+                                    && bytes[j + 5] == b'>'
+                                {
                                     func_body.push_str("this_->");
                                     j += 6;
                                     continue;
@@ -1319,7 +1567,9 @@ fn clean_struct_bodies(s: &str) -> String {
                                     }
                                 }
                                 // 替换裸成员函数调用: func(args) -> struct_name_func(this_, args)
-                                if is_ident_char(bytes[j]) && (j == 0 || !is_ident_char(bytes[j-1])) {
+                                if is_ident_char(bytes[j])
+                                    && (j == 0 || !is_ident_char(bytes[j - 1]))
+                                {
                                     let (ident, ident_end) = read_ident(bytes, j);
                                     if member_fn_names.contains(&ident.to_string()) {
                                         let sk = skip_ws(bytes, ident_end);
@@ -1327,11 +1577,17 @@ fn clean_struct_bodies(s: &str) -> String {
                                             let after_paren = skip_ws(bytes, sk + 1);
                                             if after_paren < len && bytes[after_paren] == b')' {
                                                 // 无参数: func() -> struct_name_func(this_)
-                                                func_body.push_str(&format!("{}_{}(this_)", struct_name, ident));
+                                                func_body.push_str(&format!(
+                                                    "{}_{}(this_)",
+                                                    struct_name, ident
+                                                ));
                                                 j = after_paren + 1; // skip past ')'
                                             } else {
                                                 // 有参数: func(args) -> struct_name_func(this_, args)
-                                                func_body.push_str(&format!("{}_{}(this_, ", struct_name, ident));
+                                                func_body.push_str(&format!(
+                                                    "{}_{}(this_, ",
+                                                    struct_name, ident
+                                                ));
                                                 j = sk + 1; // skip past '('
                                             }
                                             continue;
@@ -1342,8 +1598,13 @@ fn clean_struct_bodies(s: &str) -> String {
                                 if match_word_at(bytes, j, &struct_name) {
                                     let name_len = struct_name.len();
                                     // 检查前面是否已经有 struct 前缀
-                                    let before = if func_body.len() >= 7 { &func_body[func_body.len()-7..] } else { &func_body };
-                                    if !before.ends_with("struct ") && !before.ends_with("struct\t") {
+                                    let before = if func_body.len() >= 7 {
+                                        &func_body[func_body.len() - 7..]
+                                    } else {
+                                        &func_body
+                                    };
+                                    if !before.ends_with("struct ") && !before.ends_with("struct\t")
+                                    {
                                         func_body.push_str("struct ");
                                     }
                                     func_body.push_str(&struct_name);
@@ -1365,16 +1626,24 @@ fn clean_struct_bodies(s: &str) -> String {
                                         }
                                     }
                                 }
-                                if replaced { continue; }
+                                if replaced {
+                                    continue;
+                                }
                                 // 替换裸字段名为 this_->field
-                                if is_ident_char(bytes[j]) && (j == 0 || !is_ident_char(bytes[j-1])) {
+                                if is_ident_char(bytes[j])
+                                    && (j == 0 || !is_ident_char(bytes[j - 1]))
+                                {
                                     let (ident, ident_end) = read_ident(bytes, j);
                                     let is_field = field_names.iter().any(|f| f == &ident);
                                     if is_field {
                                         // 检查前面是否是 . 或 -> (已经是成员访问)
                                         let fb = func_body.as_bytes();
                                         let fl = fb.len();
-                                        let after_dot = fl > 0 && (fb[fl-1] == b'.' || (fl >= 2 && fb[fl-1] == b'>' && fb[fl-2] == b'-'));
+                                        let after_dot = fl > 0
+                                            && (fb[fl - 1] == b'.'
+                                                || (fl >= 2
+                                                    && fb[fl - 1] == b'>'
+                                                    && fb[fl - 2] == b'-'));
                                         if !after_dot {
                                             func_body.push_str("this_->");
                                         }
@@ -1423,12 +1692,24 @@ fn remove_default_args(s: &str) -> String {
     let mut i = 0;
     let mut depth = 0i32; // 括号深度
     while i < len {
-        if bytes[i] == b'(' { depth += 1; result.push('('); i += 1; continue; }
-        if bytes[i] == b')' { depth -= 1; result.push(')'); i += 1; continue; }
+        if bytes[i] == b'(' {
+            depth += 1;
+            result.push('(');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            depth -= 1;
+            result.push(')');
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'=' && depth == 0 {
             // 跳过默认值到 ',' 或结尾
             i += 1;
-            while i < len && bytes[i] != b',' { i += 1; }
+            while i < len && bytes[i] != b',' {
+                i += 1;
+            }
             continue;
         }
         result.push(bytes[i] as char);
@@ -1445,19 +1726,33 @@ fn convert_ref_params(s: &str) -> String {
     let mut i = 0;
     let mut depth = 0i32; // 括号深度
     while i < len {
-        if bytes[i] == b'(' { depth += 1; result.push('('); i += 1; continue; }
-        if bytes[i] == b')' { depth -= 1; result.push(')'); i += 1; continue; }
+        if bytes[i] == b'(' {
+            depth += 1;
+            result.push('(');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            depth -= 1;
+            result.push(')');
+            i += 1;
+            continue;
+        }
         // 在参数列表中 (depth == 0), 将 '&' 转换为 '*'
         if bytes[i] == b'&' && depth == 0 {
             // 检查不是 '&&' (移动语义)
-            if i + 1 < len && bytes[i+1] == b'&' {
+            if i + 1 < len && bytes[i + 1] == b'&' {
                 // && 转换为 * (简化处理)
                 result.push('*');
                 i += 2;
                 continue;
             }
             // 检查前面是标识符字符或 '*' (类型结束)
-            let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
+            let prev_char = if result.is_empty() {
+                b' '
+            } else {
+                result.as_bytes().last().copied().unwrap()
+            };
             if is_ident_char(prev_char) || prev_char == b'*' || prev_char == b'>' {
                 // 检查后面是标识符开始或空白+标识符 (参数名)
                 let j = skip_ws(bytes, i + 1);
@@ -1491,39 +1786,47 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
             let mut has_struct_prefix = false;
             let mut k = result.len();
             // 跳过尾部空白
-            while k > 0 && (result.as_bytes()[k-1] as char).is_ascii_whitespace() {
+            while k > 0 && (result.as_bytes()[k - 1] as char).is_ascii_whitespace() {
                 k -= 1;
             }
             // 检查是否以 "struct" 结尾
-            if k >= 6 && &result.as_bytes()[k-6..k] == b"struct" {
+            if k >= 6 && &result.as_bytes()[k - 6..k] == b"struct" {
                 // 检查 struct 前面是否是标识符边界
-                if k == 6 || !is_ident_char(result.as_bytes()[k-7]) {
+                if k == 6 || !is_ident_char(result.as_bytes()[k - 7]) {
                     has_struct_prefix = true;
                 }
             }
             // 检查前面是否是 '*' (指针变量名) 或 '&' (引用变量名)
             // 如果是, 则当前名字是变量名, 不是类型名
-            let is_var_after_ptr = k > 0 && (result.as_bytes()[k-1] == b'*' || result.as_bytes()[k-1] == b'&');
+            let is_var_after_ptr =
+                k > 0 && (result.as_bytes()[k - 1] == b'*' || result.as_bytes()[k - 1] == b'&');
             // 检查前面是否是标识符 (类型名), 如果是, 则当前名字是变量名
             // 但需要排除 C/C++ 关键字 (如 const, inline, static 等)
-            let mut is_var_after_type = k > 0 && is_ident_char(result.as_bytes()[k-1])
-                && !has_struct_prefix;
+            let mut is_var_after_type =
+                k > 0 && is_ident_char(result.as_bytes()[k - 1]) && !has_struct_prefix;
             // 如果前面是标识符, 检查是否是关键字
             if is_var_after_type {
                 // 提取前面的标识符
                 let mut kend = k;
-                while kend > 0 && is_ident_char(result.as_bytes()[kend-1]) {
+                while kend > 0 && is_ident_char(result.as_bytes()[kend - 1]) {
                     kend -= 1;
                 }
                 let prev_ident = &result.as_bytes()[kend..k];
                 // 检查是否是 C/C++ 关键字 (这些关键字后面可以跟类型名)
-                let is_keyword = prev_ident == b"const" || prev_ident == b"volatile"
-                    || prev_ident == b"inline" || prev_ident == b"static"
-                    || prev_ident == b"extern" || prev_ident == b"register"
-                    || prev_ident == b"auto" || prev_ident == b"typedef"
-                    || prev_ident == b"return" || prev_ident == b"sizeof"
-                    || prev_ident == b"typeof" || prev_ident == b"__typeof"
-                    || prev_ident == b"struct" || prev_ident == b"enum"
+                let is_keyword = prev_ident == b"const"
+                    || prev_ident == b"volatile"
+                    || prev_ident == b"inline"
+                    || prev_ident == b"static"
+                    || prev_ident == b"extern"
+                    || prev_ident == b"register"
+                    || prev_ident == b"auto"
+                    || prev_ident == b"typedef"
+                    || prev_ident == b"return"
+                    || prev_ident == b"sizeof"
+                    || prev_ident == b"typeof"
+                    || prev_ident == b"__typeof"
+                    || prev_ident == b"struct"
+                    || prev_ident == b"enum"
                     || prev_ident == b"union";
                 // 如果是关键字, 则当前名字是类型名, 不是变量名
                 if is_keyword {
@@ -1531,45 +1834,64 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
                 }
             }
             // 检查前面是否是 '(' 或 ',' (函数参数位置), 如果是, 则当前名字是变量名
-            let is_func_arg = k > 0 && (result.as_bytes()[k-1] == b'(' || result.as_bytes()[k-1] == b',');
+            let is_func_arg =
+                k > 0 && (result.as_bytes()[k - 1] == b'(' || result.as_bytes()[k - 1] == b',');
             // 检查前面是否是 'return' (构造函数返回), 如果是, 不添加 struct 前缀
             let is_after_return = {
                 let rbytes = result.as_bytes();
                 let rlen = rbytes.len();
                 // 跳过尾部空白
                 let mut kend = rlen;
-                while kend > 0 && (rbytes[kend-1] as char).is_ascii_whitespace() {
+                while kend > 0 && (rbytes[kend - 1] as char).is_ascii_whitespace() {
                     kend -= 1;
                 }
                 // 检查是否以 "return" 结尾
-                kend >= 6 && &rbytes[kend-6..kend] == b"return"
-                    && (kend == 6 || !is_ident_char(rbytes[kend-7]))
+                kend >= 6
+                    && &rbytes[kend - 6..kend] == b"return"
+                    && (kend == 6 || !is_ident_char(rbytes[kend - 7]))
             };
             // 检查后面是否是 struct 定义的开始 ({ 或 ; 或 :)
             let j = skip_ws(bytes, i + name_len);
-            let is_struct_def = j < len && (bytes[j] == b'{' || bytes[j] == b';' || bytes[j] == b':');
+            let is_struct_def =
+                j < len && (bytes[j] == b'{' || bytes[j] == b';' || bytes[j] == b':');
             // 检查后面是否是函数调用 (NAME()
             let is_func_call = j < len && bytes[j] == b'(';
             // 检查后面是否是另一个标识符 (类型位置, 如 `pair make_pair`)
             // 如果是, 则当前名字是类型名, 应添加 struct 前缀
-            let is_type_before_ident = j < len && is_ident_char(bytes[j])
-                && bytes[j] != b'{' && bytes[j] != b';' && bytes[j] != b':';
+            let is_type_before_ident = j < len
+                && is_ident_char(bytes[j])
+                && bytes[j] != b'{'
+                && bytes[j] != b';'
+                && bytes[j] != b':';
             // 检查后面是否是 '[' (数组索引), 如果是, 则当前名字是变量名
             let is_array_access = j < len && bytes[j] == b'[';
             // 检查后面是否是 '.' 或 '->' (成员访问的左边), 如果是, 则当前名字是变量名
             let is_member_lhs = j < len && bytes[j] == b'.';
             // 检查后面是否是赋值/比较运算符 (变量在表达式中)
-            let is_expr_operator = j < len && (bytes[j] == b'=' || bytes[j] == b'<' 
-                || bytes[j] == b'>' || bytes[j] == b'!' || bytes[j] == b'+'
-                || bytes[j] == b'-' || bytes[j] == b'*' || bytes[j] == b'/'
-                || bytes[j] == b'%' || bytes[j] == b'|' || bytes[j] == b'&'
-                || bytes[j] == b'^' || bytes[j] == b'?' || bytes[j] == b':');
+            let is_expr_operator = j < len
+                && (bytes[j] == b'='
+                    || bytes[j] == b'<'
+                    || bytes[j] == b'>'
+                    || bytes[j] == b'!'
+                    || bytes[j] == b'+'
+                    || bytes[j] == b'-'
+                    || bytes[j] == b'*'
+                    || bytes[j] == b'/'
+                    || bytes[j] == b'%'
+                    || bytes[j] == b'|'
+                    || bytes[j] == b'&'
+                    || bytes[j] == b'^'
+                    || bytes[j] == b'?'
+                    || bytes[j] == b':');
             // 检查前面是否是 '.' 或 '->' (成员访问), 如果是, 则当前名字是成员名
-            let is_member_access = k > 0 && (result.as_bytes()[k-1] == b'.' 
-                || (k >= 2 && result.as_bytes()[k-1] == b'>' && result.as_bytes()[k-2] == b'-'));
+            let is_member_access = k > 0
+                && (result.as_bytes()[k - 1] == b'.'
+                    || (k >= 2
+                        && result.as_bytes()[k - 1] == b'>'
+                        && result.as_bytes()[k - 2] == b'-'));
             // 检查前面是否是 '[' (数组索引内部), 如果是, 则当前名字是变量/表达式
-            let is_inside_brackets = k > 0 && result.as_bytes()[k-1] == b'[';
-            
+            let is_inside_brackets = k > 0 && result.as_bytes()[k - 1] == b'[';
+
             // 如果后面是标识符 (类型位置), 或者不落在任何"此处不是类型名"
             // 的启发式例外中, 强制添加 struct 前缀
             let is_unqualified_name = !is_func_call
@@ -1582,9 +1904,7 @@ fn add_struct_prefix(s: &str, struct_name: &str) -> String {
                 && !is_member_access
                 && !is_member_lhs
                 && !is_inside_brackets;
-            if !has_struct_prefix
-                && !is_struct_def
-                && (is_type_before_ident || is_unqualified_name)
+            if !has_struct_prefix && !is_struct_def && (is_type_before_ident || is_unqualified_name)
             {
                 result.push_str("struct ");
             }
@@ -1606,9 +1926,13 @@ fn add_struct_prefix_to_types(s: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            i = skip_comment(bytes, i); continue;
+        if bytes[i] == b'"' {
+            i = skip_string_literal(bytes, i);
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = skip_comment(bytes, i);
+            continue;
         }
         if match_word_at(bytes, i, "struct") {
             let mut j = skip_ws(bytes, i + 6);
@@ -1623,8 +1947,11 @@ fn add_struct_prefix_to_types(s: &str) -> String {
                     let mut depth = 1i32;
                     let mut m = k + 1;
                     while m < len && depth > 0 {
-                        if bytes[m] == b'(' { depth += 1; }
-                        else if bytes[m] == b')' { depth -= 1; }
+                        if bytes[m] == b'(' {
+                            depth += 1;
+                        } else if bytes[m] == b')' {
+                            depth -= 1;
+                        }
                         m += 1;
                     }
                     j = skip_ws(bytes, m);
@@ -1642,7 +1969,9 @@ fn add_struct_prefix_to_types(s: &str) -> String {
         }
         i += 1;
     }
-    if struct_names.is_empty() { return s.to_string(); }
+    if struct_names.is_empty() {
+        return s.to_string();
+    }
 
     // 第二步: 为所有 struct 名称添加 struct 前缀
     let mut result = s.to_string();
@@ -1661,7 +1990,7 @@ fn convert_if_condition_decls(s: &str) -> String {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
-    
+
     while i < len {
         // Skip string literals
         if bytes[i] == b'"' {
@@ -1671,13 +2000,13 @@ fn convert_if_condition_decls(s: &str) -> String {
             continue;
         }
         // Skip comments
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
             let j = skip_comment(bytes, i);
             result.push_str(&s[i..j]);
             i = j;
             continue;
         }
-        
+
         // Look for "if ("
         if match_word_at(bytes, i, "if") {
             let _if_start = i;
@@ -1687,15 +2016,18 @@ fn convert_if_condition_decls(s: &str) -> String {
                 let mut paren_depth = 1i32;
                 let mut j = after_if + 1;
                 while j < len && paren_depth > 0 {
-                    if bytes[j] == b'(' { paren_depth += 1; }
-                    else if bytes[j] == b')' { paren_depth -= 1; }
+                    if bytes[j] == b'(' {
+                        paren_depth += 1;
+                    } else if bytes[j] == b')' {
+                        paren_depth -= 1;
+                    }
                     j += 1;
                 }
                 let paren_end = j - 1; // position of ')'
-                let cond_content = &s[after_if+1..paren_end];
-                
+                let cond_content = &s[after_if + 1..paren_end];
+
                 // Check if condition contains a variable declaration: Type var = expr
-                // Look for pattern: identifier identifier = 
+                // Look for pattern: identifier identifier =
                 // But skip comparison operators: !=, ==, <=, >=
                 let converted = false;
                 if let Some(eq_pos) = cond_content.find('=') {
@@ -1718,8 +2050,8 @@ fn convert_if_condition_decls(s: &str) -> String {
                             } else {
                                 0
                             };
-                            if next2 == b'=' { /* also ==, skip */ }
-                            else {
+                            if next2 == b'=' { /* also ==, skip */
+                            } else {
                                 // Process actual_eq_pos below by falling through
                                 // We handle this by re-assigning eq_pos
                                 // (Rust doesn't allow reassigning in if-let,
@@ -1730,32 +2062,34 @@ fn convert_if_condition_decls(s: &str) -> String {
                         // unless we find a standalone = later
                         // Simple approach: just skip if first = is ==
                     } else {
-                    // Check if this is part of a comparison operator
-                    // Look back to skip whitespace and check for !, =, <, >
-                    let is_comparison = {
-                        let before_eq = cond_content[..eq_pos].trim_end();
-                        if !before_eq.is_empty() {
-                            let last_char = before_eq.as_bytes()[before_eq.len() - 1];
-                            last_char == b'!' || last_char == b'='
-                                || last_char == b'<' || last_char == b'>'
-                        } else {
-                            false
-                        }
-                    };
-                    
-                    if !is_comparison {
-                        let before_eq = cond_content[..eq_pos].trim();
-                        let after_eq = cond_content[eq_pos+1..].trim();
-                        
-                        // Check if before_eq looks like "Type varname"
-                        let parts: Vec<&str> = before_eq.split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            // The first token must look like a type name:
-                            // - a C keyword (int, char, etc.) or
-                            // - starts with 'struct'/'enum'/'union' or
-                            // - a single identifier (no operators like >, <, &&, etc.)
-                            let first_token = parts[0];
-                            let looks_like_type = first_token == "int"
+                        // Check if this is part of a comparison operator
+                        // Look back to skip whitespace and check for !, =, <, >
+                        let is_comparison = {
+                            let before_eq = cond_content[..eq_pos].trim_end();
+                            if !before_eq.is_empty() {
+                                let last_char = before_eq.as_bytes()[before_eq.len() - 1];
+                                last_char == b'!'
+                                    || last_char == b'='
+                                    || last_char == b'<'
+                                    || last_char == b'>'
+                            } else {
+                                false
+                            }
+                        };
+
+                        if !is_comparison {
+                            let before_eq = cond_content[..eq_pos].trim();
+                            let after_eq = cond_content[eq_pos + 1..].trim();
+
+                            // Check if before_eq looks like "Type varname"
+                            let parts: Vec<&str> = before_eq.split_whitespace().collect();
+                            if parts.len() >= 2 {
+                                // The first token must look like a type name:
+                                // - a C keyword (int, char, etc.) or
+                                // - starts with 'struct'/'enum'/'union' or
+                                // - a single identifier (no operators like >, <, &&, etc.)
+                                let first_token = parts[0];
+                                let looks_like_type = first_token == "int"
                                 || first_token == "char"
                                 || first_token == "short"
                                 || first_token == "long"
@@ -1780,47 +2114,56 @@ fn convert_if_condition_decls(s: &str) -> String {
                                     && first_token.chars().next()
                                         .is_some_and(|c| c.is_alphabetic()
                                         || c == '_'));
-                            
-                            // Also check that no part contains binary operators
-                            // (but allow * which can be a pointer declarator)
-                            let has_operators = parts.iter().any(|p| {
-                                p.contains('>') || p.contains('<')
-                                    || p.contains('&') || p.contains('|')
-                                    || p.contains('!') || p.contains('+')
-                                    || p.contains('-') || p.contains('/')
-                                    || p.contains('%') || p.contains('^')
-                                    || p.contains('~') || p.contains('?')
-                                    || p.contains(',') || p.contains('[')
-                                    || p.contains(']') || p.contains('(')
-                                    || p.contains(')') || p.contains('=')
-                            });
-                            
-                            if looks_like_type && !has_operators {
-                                // Likely a declaration: Type varname = expr
-                                // Handle pointer declarations: Type *varname = expr
-                                // The '*' should be part of the type, not the variable name
-                                let mut var_type_parts = parts[..parts.len()-1].to_vec();
-                                let mut var_name = parts[parts.len()-1].to_string();
-                                
-                                // Check if var_name starts with '*' (pointer declarator)
-                                if var_name.starts_with('*') {
-                                    // Move the '*' to the type
-                                    var_name = var_name[1..].to_string();
-                                    var_type_parts.push("*");
+
+                                // Also check that no part contains binary operators
+                                // (but allow * which can be a pointer declarator)
+                                let has_operators = parts.iter().any(|p| {
+                                    p.contains('>')
+                                        || p.contains('<')
+                                        || p.contains('&')
+                                        || p.contains('|')
+                                        || p.contains('!')
+                                        || p.contains('+')
+                                        || p.contains('-')
+                                        || p.contains('/')
+                                        || p.contains('%')
+                                        || p.contains('^')
+                                        || p.contains('~')
+                                        || p.contains('?')
+                                        || p.contains(',')
+                                        || p.contains('[')
+                                        || p.contains(']')
+                                        || p.contains('(')
+                                        || p.contains(')')
+                                        || p.contains('=')
+                                });
+
+                                if looks_like_type && !has_operators {
+                                    // Likely a declaration: Type varname = expr
+                                    // Handle pointer declarations: Type *varname = expr
+                                    // The '*' should be part of the type, not the variable name
+                                    let mut var_type_parts = parts[..parts.len() - 1].to_vec();
+                                    let mut var_name = parts[parts.len() - 1].to_string();
+
+                                    // Check if var_name starts with '*' (pointer declarator)
+                                    if var_name.starts_with('*') {
+                                        // Move the '*' to the type
+                                        var_name = var_name[1..].to_string();
+                                        var_type_parts.push("*");
+                                    }
+
+                                    let var_type = var_type_parts.join(" ");
+
+                                    // Output: Type varname = expr; if (varname)
+                                    result.push_str(&format!(
+                                        "{} {} = {}; if ({})",
+                                        var_type, var_name, after_eq, var_name
+                                    ));
+                                    i = paren_end + 1;
+                                    continue;
                                 }
-                                
-                                let var_type = var_type_parts.join(" ");
-                                
-                                // Output: Type varname = expr; if (varname)
-                                result.push_str(&format!(
-                                    "{} {} = {}; if ({})",
-                                    var_type, var_name, after_eq, var_name
-                                ));
-                                i = paren_end + 1;
-                                continue;
                             }
                         }
-                    }
                     } // end else (not ==)
                 }
                 // If we didn't convert it, output the if statement normally
@@ -1832,11 +2175,11 @@ fn convert_if_condition_decls(s: &str) -> String {
                 }
             }
         }
-        
+
         result.push(bytes[i] as char);
         i += 1;
     }
-    
+
     result
 }
 
@@ -1845,29 +2188,44 @@ fn convert_if_condition_decls(s: &str) -> String {
 /// Returns true only if a type keyword appears at a word boundary that is
 /// NOT inside a parenthesized sub-expression (i.e. not inside a cast).
 fn looks_like_param_decls(args: &str) -> bool {
-    let type_kws = ["void", "int", "char", "unsigned", "long",
-                    "float", "double", "struct", "const"];
+    let type_kws = [
+        "void", "int", "char", "unsigned", "long", "float", "double", "struct", "const",
+    ];
     let bytes = args.as_bytes();
     let len = bytes.len();
     let mut paren = 0i32;
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'(' { paren += 1; i += 1; continue; }
-        if bytes[i] == b')' { paren = (paren - 1).max(0); i += 1; continue; }
-        if paren > 0 { i += 1; continue; }
+        if bytes[i] == b'(' {
+            paren += 1;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            paren = (paren - 1).max(0);
+            i += 1;
+            continue;
+        }
+        if paren > 0 {
+            i += 1;
+            continue;
+        }
         for kw in &type_kws {
             let kw_len = kw.len();
-            if i + kw_len <= len && &args[i..i+kw_len] == *kw {
-                let before_ok = i == 0
-                    || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_';
+            if i + kw_len <= len && &args[i..i + kw_len] == *kw {
+                let before_ok =
+                    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
                 let after_pos = i + kw_len;
-                if before_ok && after_pos < len
+                if before_ok
+                    && after_pos < len
                     && !bytes[after_pos].is_ascii_alphanumeric()
                     && bytes[after_pos] != b'_'
                 {
                     let rest = args[after_pos..].trim_start();
-                    if rest.is_empty() || rest.starts_with('*')
-                        || rest.starts_with('&') || rest.starts_with(',')
+                    if rest.is_empty()
+                        || rest.starts_with('*')
+                        || rest.starts_with('&')
+                        || rest.starts_with(',')
                     {
                         return true;
                     }
@@ -1893,13 +2251,17 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                 let j = skip_ws(bytes, i + kw_len);
                 if j < bytes.len() && is_ident_char(bytes[j]) {
                     let (name, _) = read_ident(bytes, j);
-                    if !name.is_empty() { known_types.push(name); }
+                    if !name.is_empty() {
+                        known_types.push(name);
+                    }
                 }
             }
             i += 1;
         }
     }
-    if known_types.is_empty() { return s.to_string(); }
+    if known_types.is_empty() {
+        return s.to_string();
+    }
 
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -1908,12 +2270,24 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
     let mut brace_depth = 0i32;
 
     while i < len {
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
-        if bytes[i] == b'{' { brace_depth += 1; }
-        if bytes[i] == b'}' { brace_depth = (brace_depth - 1).max(0); }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'{' {
+            brace_depth += 1;
+        }
+        if bytes[i] == b'}' {
+            brace_depth = (brace_depth - 1).max(0);
+        }
 
         if brace_depth > 0 {
             let mut matched = false;
@@ -1922,8 +2296,12 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                 let after_struct = skip_ws(bytes, i + 6);
                 if after_struct < len && is_ident_char(bytes[after_struct]) {
                     (after_struct - i, true)
-                } else { (0, false) }
-            } else { (0, false) };
+                } else {
+                    (0, false)
+                }
+            } else {
+                (0, false)
+            };
             for ty in known_types.iter() {
                 let type_start = if has_struct_prefix { struct_prefix_len } else { 0 };
                 if match_word_at(bytes, i + type_start, ty) {
@@ -1936,11 +2314,14 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                             let mut depth = 1i32;
                             let mut m = k + 1;
                             while m < len && depth > 0 {
-                                if bytes[m] == b'(' { depth += 1; }
-                                else if bytes[m] == b')' { depth -= 1; }
+                                if bytes[m] == b'(' {
+                                    depth += 1;
+                                } else if bytes[m] == b')' {
+                                    depth -= 1;
+                                }
                                 m += 1;
                             }
-                            let args = s[k+1..m-1].trim().to_string();
+                            let args = s[k + 1..m - 1].trim().to_string();
                             let after = skip_ws(bytes, m);
                             // args should not look like parameter declarations
                             let looks_like_params = looks_like_param_decls(&args);
@@ -1948,26 +2329,48 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                                 // Check if we're inside a for-loop init
                                 let in_for_init = {
                                     let mut bk = i;
-                                    while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
-                                    if has_struct_prefix && bk >= 6 && &bytes[bk-6..bk] == b"struct" {
-                                        bk -= 6;
-                                        while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
-                                    }
-                                    if bk > 0 && bytes[bk-1] == b'(' {
+                                    while bk > 0
+                                        && (bytes[bk - 1] == b' '
+                                            || bytes[bk - 1] == b'\t'
+                                            || bytes[bk - 1] == b'\n')
+                                    {
                                         bk -= 1;
-                                        while bk > 0 && (bytes[bk-1] == b' ' || bytes[bk-1] == b'\t' || bytes[bk-1] == b'\n') { bk -= 1; }
-                                        if bk >= 3 && &bytes[bk-3..bk] == b"for" {
-                                            bk < 3 || !is_ident_char(bytes[bk-4])
-                                        } else { false }
-                                    } else { false }
+                                    }
+                                    if has_struct_prefix
+                                        && bk >= 6
+                                        && &bytes[bk - 6..bk] == b"struct"
+                                    {
+                                        bk -= 6;
+                                        while bk > 0
+                                            && (bytes[bk - 1] == b' '
+                                                || bytes[bk - 1] == b'\t'
+                                                || bytes[bk - 1] == b'\n')
+                                        {
+                                            bk -= 1;
+                                        }
+                                    }
+                                    if bk > 0 && bytes[bk - 1] == b'(' {
+                                        bk -= 1;
+                                        while bk > 0
+                                            && (bytes[bk - 1] == b' '
+                                                || bytes[bk - 1] == b'\t'
+                                                || bytes[bk - 1] == b'\n')
+                                        {
+                                            bk -= 1;
+                                        }
+                                        if bk >= 3 && &bytes[bk - 3..bk] == b"for" {
+                                            bk < 3 || !is_ident_char(bytes[bk - 4])
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
                                 };
                                 let type_prefix = if has_struct_prefix { "struct " } else { "" };
                                 // Count arguments to match overloaded constructor name
-                                let arg_count = if args.is_empty() {
-                                    0
-                                } else {
-                                    args.split(',').count()
-                                };
+                                let arg_count =
+                                    if args.is_empty() { 0 } else { args.split(',').count() };
                                 // +1 for the &this parameter
                                 let ctor_suffix = arg_count + 1;
                                 if in_for_init {
@@ -1979,7 +2382,13 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                                     } else {
                                         result.push_str(&format!(
                                             "{}{} {}; _ctor_{}_{}(&{}, {})",
-                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name, args
+                                            type_prefix,
+                                            ty,
+                                            var_name,
+                                            ty,
+                                            ctor_suffix,
+                                            var_name,
+                                            args
                                         ));
                                     }
                                     i = after + 1;
@@ -1992,7 +2401,13 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                                     } else {
                                         result.push_str(&format!(
                                             "{}{} {}; _ctor_{}_{}(&{}, {});",
-                                            type_prefix, ty, var_name, ty, ctor_suffix, var_name, args
+                                            type_prefix,
+                                            ty,
+                                            var_name,
+                                            ty,
+                                            ctor_suffix,
+                                            var_name,
+                                            args
                                         ));
                                     }
                                     i = after + 1;
@@ -2004,7 +2419,9 @@ fn replace_ctor_calls_in_bodies(s: &str) -> String {
                     }
                 }
             }
-            if matched { continue; }
+            if matched {
+                continue;
+            }
         }
 
         result.push(bytes[i] as char);
@@ -2029,7 +2446,9 @@ fn replace_brace_init(s: &str) -> String {
                 let k = skip_ws(bytes, j + kw_len);
                 if k < len && is_ident_char(bytes[k]) {
                     let (name, _) = read_ident(bytes, k);
-                    if !name.is_empty() { known_types.push(name); }
+                    if !name.is_empty() {
+                        known_types.push(name);
+                    }
                 }
             }
             j += 1;
@@ -2037,9 +2456,17 @@ fn replace_brace_init(s: &str) -> String {
     }
 
     while i < len {
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
 
         // 检查 TypeName varname{
@@ -2056,8 +2483,11 @@ fn replace_brace_init(s: &str) -> String {
                         let mut depth = 1i32;
                         let mut m = k + 1;
                         while m < len && depth > 0 {
-                            if bytes[m] == b'{' { depth += 1; }
-                            else if bytes[m] == b'}' { depth -= 1; }
+                            if bytes[m] == b'{' {
+                                depth += 1;
+                            } else if bytes[m] == b'}' {
+                                depth -= 1;
+                            }
                             m += 1;
                         }
                         // 检查后面是 ';'
@@ -2073,7 +2503,9 @@ fn replace_brace_init(s: &str) -> String {
                 }
             }
         }
-        if matched { continue; }
+        if matched {
+            continue;
+        }
 
         result.push(bytes[i] as char);
         i += 1;
@@ -2093,16 +2525,26 @@ fn replace_member_calls(s: &str) -> String {
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
 
         // 检测 ident.ident( 或 ident->ident(
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (obj_name, obj_end) = read_ident(bytes, i);
             let j = skip_ws(bytes, obj_end);
-            if j < len && (bytes[j] == b'.' || (bytes[j] == b'-' && j+1 < len && bytes[j+1] == b'>')) {
+            if j < len
+                && (bytes[j] == b'.' || (bytes[j] == b'-' && j + 1 < len && bytes[j + 1] == b'>'))
+            {
                 let is_arrow = bytes[j] == b'-';
                 let dot_pos = j;
                 let k = skip_ws(bytes, if is_arrow { j + 2 } else { j + 1 });
@@ -2114,11 +2556,14 @@ fn replace_member_calls(s: &str) -> String {
                         let mut depth = 1i32;
                         let mut n = m + 1;
                         while n < len && depth > 0 {
-                            if bytes[n] == b'(' { depth += 1; }
-                            else if bytes[n] == b')' { depth -= 1; }
+                            if bytes[n] == b'(' {
+                                depth += 1;
+                            } else if bytes[n] == b')' {
+                                depth -= 1;
+                            }
                             n += 1;
                         }
-                        let args_str = &s[m+1..n-1];
+                        let args_str = &s[m + 1..n - 1];
                         let obj_arg = if is_arrow {
                             obj_name.clone()
                         } else {
@@ -2155,13 +2600,24 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
     {
         let mut j = 0;
         while j < len {
-            if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
-            if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "typedef")
-                || match_word_at(bytes, j, "enum") || match_word_at(bytes, j, "class")
+            if bytes[j] == b'"' {
+                j = skip_string_literal(bytes, j);
+                continue;
+            }
+            if match_word_at(bytes, j, "struct")
+                || match_word_at(bytes, j, "typedef")
+                || match_word_at(bytes, j, "enum")
+                || match_word_at(bytes, j, "class")
             {
-                let kw_len = if match_word_at(bytes, j, "struct") { 6 }
-                    else if match_word_at(bytes, j, "typedef") { 7 }
-                    else if match_word_at(bytes, j, "enum") { 4 } else { 5 };
+                let kw_len = if match_word_at(bytes, j, "struct") {
+                    6
+                } else if match_word_at(bytes, j, "typedef") {
+                    7
+                } else if match_word_at(bytes, j, "enum") {
+                    4
+                } else {
+                    5
+                };
                 let k = skip_ws(bytes, j + kw_len);
                 if k < len && is_ident_char(bytes[k]) {
                     let (name, _) = read_ident(bytes, k);
@@ -2174,22 +2630,49 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
         }
     }
     // 添加基本类型关键字
-    for kw in &["int", "char", "bool", "long", "short", "float", "double",
-                "unsigned", "signed", "void", "auto", "size_t", "ssize_t",
-                "ptrdiff_t", "intptr_t", "uintptr_t"] {
+    for kw in &[
+        "int",
+        "char",
+        "bool",
+        "long",
+        "short",
+        "float",
+        "double",
+        "unsigned",
+        "signed",
+        "void",
+        "auto",
+        "size_t",
+        "ssize_t",
+        "ptrdiff_t",
+        "intptr_t",
+        "uintptr_t",
+    ] {
         known_types.insert(kw.to_string());
     }
     let mut i = 0;
     // 跟踪是否在函数参数列表中
     let mut paren_depth = 0i32;
     while i < len {
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // 跟踪括号深度
-        if bytes[i] == b'(' { paren_depth += 1; }
-        if bytes[i] == b')' { paren_depth = (paren_depth - 1).max(0); }
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+        }
+        if bytes[i] == b')' {
+            paren_depth = (paren_depth - 1).max(0);
+        }
         // nullptr → ((void*)0)
         if match_word_at(bytes, i, "nullptr") {
             result.push_str("((void*)0)");
@@ -2218,11 +2701,14 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 let mut depth = 1i32;
                 let mut k = j + 1;
                 while k < len && depth > 0 {
-                    if bytes[k] == b'{' { depth += 1; }
-                    else if bytes[k] == b'}' { depth -= 1; }
+                    if bytes[k] == b'{' {
+                        depth += 1;
+                    } else if bytes[k] == b'}' {
+                        depth -= 1;
+                    }
                     k += 1;
                 }
-                let content = &s[j+1..k-1];
+                let content = &s[j + 1..k - 1];
                 if !ns_name.is_empty() {
                     // 为内容中的顶层标识符添加命名空间前缀
                     result.push_str(&prefix_ns_identifiers(content, &ns_name));
@@ -2242,7 +2728,7 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
         // 策略: 只有当 '&' 前面的标识符是已知类型名或类型关键字时才转换
         if paren_depth > 0 && bytes[i] == b'&' {
             // 检查不是 && (移动语义或逻辑与)
-            if i + 1 < len && bytes[i+1] == b'&' {
+            if i + 1 < len && bytes[i + 1] == b'&' {
                 // && 在参数列表中可能是移动语义, 在表达式中是逻辑与
                 // 不替换, 原样输出
                 result.push_str("&&");
@@ -2250,15 +2736,25 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 continue;
             }
             // 检查前面是标识符字符 (可能是类型名)
-            let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
-            if is_ident_char(prev_char) || prev_char == b'*' || prev_char == b'>' || prev_char == b' ' {
+            let prev_char = if result.is_empty() {
+                b' '
+            } else {
+                result.as_bytes().last().copied().unwrap()
+            };
+            if is_ident_char(prev_char)
+                || prev_char == b'*'
+                || prev_char == b'>'
+                || prev_char == b' '
+            {
                 // 提取前面的标识符, 检查是否是类型名
                 let is_ref_decl = if is_ident_char(prev_char) {
                     // 向前找到标识符起始位置
                     let rbytes = result.as_bytes();
                     let id_end = rbytes.len();
                     let mut id_start = id_end;
-                    while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                    while id_start > 0 && is_ident_char(rbytes[id_start - 1]) {
+                        id_start -= 1;
+                    }
                     let prev_ident = &result[id_start..id_end];
                     // 检查是否是已知类型名或以 _t 结尾
                     known_types.contains(prev_ident) || prev_ident.ends_with("_t")
@@ -2270,14 +2766,18 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                     let rbytes = result.as_bytes();
                     let mut k = rbytes.len();
                     // 跳过空格
-                    while k > 0 && (rbytes[k-1] == b' ' || rbytes[k-1] == b'\t') { k -= 1; }
-                    if k > 0 && (rbytes[k-1] == b'*' || rbytes[k-1] == b'>') {
+                    while k > 0 && (rbytes[k - 1] == b' ' || rbytes[k - 1] == b'\t') {
+                        k -= 1;
+                    }
+                    if k > 0 && (rbytes[k - 1] == b'*' || rbytes[k - 1] == b'>') {
                         // After pointer (*) or template (>), & is a reference
                         true
-                    } else if k > 0 && is_ident_char(rbytes[k-1]) {
+                    } else if k > 0 && is_ident_char(rbytes[k - 1]) {
                         let id_end = k;
                         let mut id_start = k;
-                        while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                        while id_start > 0 && is_ident_char(rbytes[id_start - 1]) {
+                            id_start -= 1;
+                        }
                         let prev_ident = &result[id_start..id_end];
                         known_types.contains(prev_ident) || prev_ident.ends_with("_t")
                     } else {
@@ -2305,20 +2805,26 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
         // 已知类型名 / `*_t` 后缀 / `*` (指针) / `>` (模板) 之一.
         if paren_depth == 0 && bytes[i] == b'&' {
             // 检查不是 &&
-            if i + 1 < len && bytes[i+1] == b'&' {
+            if i + 1 < len && bytes[i + 1] == b'&' {
                 result.push_str("&&");
                 i += 2;
                 continue;
             }
             // 检查前面是类型上下文
-            let prev_char = if result.is_empty() { b' ' } else { result.as_bytes().last().copied().unwrap() };
+            let prev_char = if result.is_empty() {
+                b' '
+            } else {
+                result.as_bytes().last().copied().unwrap()
+            };
             let is_ref_decl = if is_ident_char(prev_char) {
                 // '&' 紧跟标识符: 仅当该标识符是已知类型名
                 // (Type& x / Type& fn()), 位与 `a & b` 的 a 不是类型
                 let rbytes = result.as_bytes();
                 let id_end = rbytes.len();
                 let mut id_start = id_end;
-                while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                while id_start > 0 && is_ident_char(rbytes[id_start - 1]) {
+                    id_start -= 1;
+                }
                 let prev_ident = &result[id_start..id_end];
                 known_types.contains(prev_ident) || prev_ident.ends_with("_t")
             } else if prev_char == b'>' {
@@ -2330,15 +2836,19 @@ fn fix_remaining_cpp_syntax(s: &str) -> String {
                 // `x = &y` 的前置字符是 `=`/`(`/`return` 结尾, 不满足.
                 let rbytes = result.as_bytes();
                 let mut k = rbytes.len();
-                while k > 0 && (rbytes[k-1] == b' ' || rbytes[k-1] == b'\t') { k -= 1; }
+                while k > 0 && (rbytes[k - 1] == b' ' || rbytes[k - 1] == b'\t') {
+                    k -= 1;
+                }
                 if k == 0 {
                     false
-                } else if rbytes[k-1] == b'*' || rbytes[k-1] == b'>' {
+                } else if rbytes[k - 1] == b'*' || rbytes[k - 1] == b'>' {
                     true
-                } else if is_ident_char(rbytes[k-1]) {
+                } else if is_ident_char(rbytes[k - 1]) {
                     let id_end = k;
                     let mut id_start = k;
-                    while id_start > 0 && is_ident_char(rbytes[id_start-1]) { id_start -= 1; }
+                    while id_start > 0 && is_ident_char(rbytes[id_start - 1]) {
+                        id_start -= 1;
+                    }
                     let prev_ident = &result[id_start..id_end];
                     known_types.contains(prev_ident) || prev_ident.ends_with("_t")
                 } else {
@@ -2384,7 +2894,7 @@ fn convert_inline_to_static_inline(s: &str) -> String {
             continue;
         }
         // Skip comments
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
             let j = skip_comment(bytes, i);
             result.push_str(&s[i..j]);
             i = j;
@@ -2394,7 +2904,7 @@ fn convert_inline_to_static_inline(s: &str) -> String {
         if match_word_at(bytes, i, "inline") {
             // Check if preceded by `static` or `extern`
             let before = result.trim_end();
-            let needs_static = !before.ends_with("static") 
+            let needs_static = !before.ends_with("static")
                 && !before.ends_with("extern")
                 && !before.ends_with("__inline")
                 && !before.ends_with("__inline__");
@@ -2421,15 +2931,27 @@ fn strip_gcc_attributes(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // 检测属性宏: IDENT(...) 其中 IDENT 是 GTY, __attribute__, __declspec 等
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
-            if ident == "GTY" || ident == "__attribute__" || ident == "__declspec"
-                || ident == "__cdecl" || ident == "__stdcall" || ident == "__fastcall"
+            if ident == "GTY"
+                || ident == "__attribute__"
+                || ident == "__declspec"
+                || ident == "__cdecl"
+                || ident == "__stdcall"
+                || ident == "__fastcall"
             {
                 let j = skip_ws(bytes, ident_end);
                 if j < len && bytes[j] == b'(' {
@@ -2438,8 +2960,11 @@ fn strip_gcc_attributes(s: &str) -> String {
                     let mut k = j + 1;
                     let content_start = k;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'(' { depth += 1; }
-                        else if bytes[k] == b')' { depth -= 1; }
+                        if bytes[k] == b'(' {
+                            depth += 1;
+                        } else if bytes[k] == b')' {
+                            depth -= 1;
+                        }
                         k += 1;
                     }
                     let content_end = k - 1;
@@ -2476,9 +3001,13 @@ fn generate_struct_typedefs(s: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            i = skip_comment(bytes, i); continue;
+        if bytes[i] == b'"' {
+            i = skip_string_literal(bytes, i);
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = skip_comment(bytes, i);
+            continue;
         }
         // Collect struct names
         if match_word_at(bytes, i, "struct") {
@@ -2491,8 +3020,11 @@ fn generate_struct_typedefs(s: &str) -> String {
                     let mut depth = 1i32;
                     let mut m = k + 1;
                     while m < len && depth > 0 {
-                        if bytes[m] == b'(' { depth += 1; }
-                        else if bytes[m] == b')' { depth -= 1; }
+                        if bytes[m] == b'(' {
+                            depth += 1;
+                        } else if bytes[m] == b')' {
+                            depth -= 1;
+                        }
                         m += 1;
                     }
                     j = skip_ws(bytes, m);
@@ -2502,8 +3034,10 @@ fn generate_struct_typedefs(s: &str) -> String {
             }
             if j < len && is_ident_char(bytes[j]) {
                 let (name, _) = read_ident(bytes, j);
-                if !name.is_empty() && !struct_names.contains(&name)
-                    && name != "_IO_FILE" && name != "_IO_marker"
+                if !name.is_empty()
+                    && !struct_names.contains(&name)
+                    && name != "_IO_FILE"
+                    && name != "_IO_marker"
                 {
                     struct_names.push(name);
                 }
@@ -2517,10 +3051,13 @@ fn generate_struct_typedefs(s: &str) -> String {
                 let k = skip_ws(bytes, name_end);
                 // Only collect if followed by '{' (definition) or
                 // ';' (forward declaration)
-                if k < len && (bytes[k] == b'{' || bytes[k] == b';')
-                    && !name.is_empty() && !enum_names.contains(&name) {
-                        enum_names.push(name);
-                    }
+                if k < len
+                    && (bytes[k] == b'{' || bytes[k] == b';')
+                    && !name.is_empty()
+                    && !enum_names.contains(&name)
+                {
+                    enum_names.push(name);
+                }
             }
         }
         i += 1;
@@ -2528,9 +3065,8 @@ fn generate_struct_typedefs(s: &str) -> String {
     if struct_names.is_empty() && enum_names.is_empty() {
         return s.to_string();
     }
-    let mut result = String::with_capacity(
-        s.len() + struct_names.len() * 50 + enum_names.len() * 50
-    );
+    let mut result =
+        String::with_capacity(s.len() + struct_names.len() * 50 + enum_names.len() * 50);
     result.push_str("/* Generated struct/enum typedefs */\n");
     for name in &struct_names {
         result.push_str(&format!("typedef struct {} {};\n", name, name));
@@ -2566,10 +3102,13 @@ fn fix_flattened_enum_refs(s: &str) -> String {
                     let mut m = k + 1;
                     let mut depth = 1i32;
                     while m < len && depth > 0 {
-                        if bytes[m] == b'{' { depth += 1; }
-                        else if bytes[m] == b'}' { depth -= 1; }
-                        else if depth == 1 && is_ident_char(bytes[m]) 
-                            && (m == 0 || !is_ident_char(bytes[m-1])) 
+                        if bytes[m] == b'{' {
+                            depth += 1;
+                        } else if bytes[m] == b'}' {
+                            depth -= 1;
+                        } else if depth == 1
+                            && is_ident_char(bytes[m])
+                            && (m == 0 || !is_ident_char(bytes[m - 1]))
                         {
                             let (val, _) = read_ident(bytes, m);
                             if val != "enum" && val != "struct" {
@@ -2586,16 +3125,17 @@ fn fix_flattened_enum_refs(s: &str) -> String {
         }
         i += 1;
     }
-    
+
     if enum_defs.is_empty() {
         return s.to_string();
     }
-    
+
     // Step 2: Find references like PREFIX_ENUM_NAME that don't match any enum name
     // These are namespace-flattened references
-    let mut prefix_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut prefix_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Map from flattened type name (e.g., "bidi_kind") to original enum name (e.g., "kind")
-    
+
     for (enum_name, _) in &enum_defs {
         // Look for patterns like `PREFIX_<enum_name>` used as a TYPE
         // e.g., `bidi_kind` when enum is `kind`
@@ -2610,7 +3150,7 @@ fn fix_flattened_enum_refs(s: &str) -> String {
                 // Read the identifier before `_`
                 let before_bytes = before.as_bytes();
                 let mut start = before_bytes.len();
-                while start > 0 && is_ident_char(before_bytes[start-1]) {
+                while start > 0 && is_ident_char(before_bytes[start - 1]) {
                     start -= 1;
                 }
                 if start < before_bytes.len() {
@@ -2634,15 +3174,16 @@ fn fix_flattened_enum_refs(s: &str) -> String {
                         let mut search_pos = 0;
                         while let Some(pos) = s[search_pos..].find(&search_type) {
                             let abs_pos = search_pos + pos;
-                            let before_ok = abs_pos == 0 
-                                || !is_ident_char(s.as_bytes()[abs_pos - 1]);
+                            let before_ok =
+                                abs_pos == 0 || !is_ident_char(s.as_bytes()[abs_pos - 1]);
                             let after_pos = abs_pos + search_type.len();
-                            let after_ok = after_pos >= len 
-                                || !is_ident_char(s.as_bytes()[after_pos]);
+                            let after_ok =
+                                after_pos >= len || !is_ident_char(s.as_bytes()[after_pos]);
                             if before_ok && after_ok {
                                 // Check what comes after - if it's '(' this is a
                                 // function definition/call, not a type usage
-                                let next_non_ws = s[after_pos..].find(|c: char| !c.is_whitespace())
+                                let next_non_ws = s[after_pos..]
+                                    .find(|c: char| !c.is_whitespace())
                                     .map(|p| after_pos + p);
                                 if let Some(next_pos) = next_non_ws {
                                     if s.as_bytes()[next_pos] != b'(' {
@@ -2663,11 +3204,11 @@ fn fix_flattened_enum_refs(s: &str) -> String {
             pos = abs_pos + search.len();
         }
     }
-    
+
     if prefix_map.is_empty() {
         return s.to_string();
     }
-    
+
     // Step 3: Generate typedefs and defines
     let mut preamble = String::new();
     for (flattened_type, enum_name) in &prefix_map {
@@ -2682,7 +3223,7 @@ fn fix_flattened_enum_refs(s: &str) -> String {
             }
         }
     }
-    
+
     let mut result = preamble;
     result.push_str(s);
     result
@@ -2695,33 +3236,46 @@ fn remove_all_default_args(s: &str) -> String {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
-    
+
     while i < len {
         // Skip string literals
-        if bytes[i] == b'"' { 
-            let j = skip_string_literal(bytes, i); 
-            result.push_str(&s[i..j]); 
-            i = j; 
-            continue; 
-        }
-        // Skip comments
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); 
-            result.push_str(&s[i..j]); 
-            i = j; 
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
             continue;
         }
-        
+        // Skip comments
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+
         // Look for function declarations: identifier followed by '('
         // Check if this looks like a function name (identifier followed by '(')
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             // Skip keywords that look like function calls but aren't
-            if ident == "__asm__" || ident == "__volatile__" || ident == "asm" || ident == "volatile"
-                || ident == "__attribute__" || ident == "typeof" || ident == "__typeof__"
-                || ident == "sizeof" || ident == "alignof" || ident == "__alignof__"
-                || ident == "if" || ident == "while" || ident == "for" || ident == "switch"
-                || ident == "return" || ident == "case" || ident == "do" || ident == "else"
+            if ident == "__asm__"
+                || ident == "__volatile__"
+                || ident == "asm"
+                || ident == "volatile"
+                || ident == "__attribute__"
+                || ident == "typeof"
+                || ident == "__typeof__"
+                || ident == "sizeof"
+                || ident == "alignof"
+                || ident == "__alignof__"
+                || ident == "if"
+                || ident == "while"
+                || ident == "for"
+                || ident == "switch"
+                || ident == "return"
+                || ident == "case"
+                || ident == "do"
+                || ident == "else"
             {
                 result.push_str(&ident);
                 i = ident_end;
@@ -2737,66 +3291,75 @@ fn remove_all_default_args(s: &str) -> String {
                 let mut paren_depth = 1i32;
                 let mut k = j + 1;
                 let mut has_default_arg = false;
-                
+
                 while k < len && paren_depth > 0 {
                     // Stop scanning if we hit '{' or ';' at depth 0
                     // (this means we've gone past the parameter list)
                     if paren_depth == 1 && (bytes[k] == b'{' || bytes[k] == b';') {
                         break;
                     }
-                    if bytes[k] == b'"' { k = skip_string_literal(bytes, k); continue; }
+                    if bytes[k] == b'"' {
+                        k = skip_string_literal(bytes, k);
+                        continue;
+                    }
                     // Skip character literals like '=' or '\n'
                     if bytes[k] == b'\'' {
                         k += 1;
                         while k < len && bytes[k] != b'\'' {
-                            if bytes[k] == b'\\' { k += 1; } // skip escape
+                            if bytes[k] == b'\\' {
+                                k += 1;
+                            } // skip escape
                             k += 1;
                         }
-                        if k < len { k += 1; } // skip closing '
+                        if k < len {
+                            k += 1;
+                        } // skip closing '
                         continue;
                     }
-                    if bytes[k] == b'(' { paren_depth += 1; }
-                    else if bytes[k] == b')' { paren_depth -= 1; }
-                    else if paren_depth == 1 {
+                    if bytes[k] == b'(' {
+                        paren_depth += 1;
+                    } else if bytes[k] == b')' {
+                        paren_depth -= 1;
+                    } else if paren_depth == 1 {
                         // Check for '=' that's not '=='
-                        if bytes[k] == b'=' && (k+1 >= len || bytes[k+1] != b'=') {
+                        if bytes[k] == b'=' && (k + 1 >= len || bytes[k + 1] != b'=') {
                             // Check it's not '!=', '<=', '>='
-                            if k == 0 || (bytes[k-1] != b'!' && bytes[k-1] != b'<' && bytes[k-1] != b'>') {
+                            if k == 0
+                                || (bytes[k - 1] != b'!'
+                                    && bytes[k - 1] != b'<'
+                                    && bytes[k - 1] != b'>')
+                            {
                                 has_default_arg = true;
                             }
                         }
                     }
                     k += 1;
                 }
-                
+
                 // Check what follows the closing ')'
                 // Function declarations are followed by '{' (definition) or ';' (declaration)
                 let is_func_decl = if k < len && has_default_arg {
                     let after_paren = skip_ws(bytes, k);
-                    after_paren < len && (
-                        bytes[after_paren] == b'{' || 
-                        bytes[after_paren] == b';'
-                    )
+                    after_paren < len && (bytes[after_paren] == b'{' || bytes[after_paren] == b';')
                 } else {
                     false
                 };
-                
+
                 // If this looks like a function declaration with default args, process it
                 if is_func_decl {
                     // Output the identifier and '('
                     result.push_str(&ident);
                     result.push('(');
                     i = j + 1;
-                    
+
                     // Process parameters, removing default args
                     paren_depth = 1;
                     while i < len && paren_depth > 0 {
-                        if bytes[i] == b'(' { 
+                        if bytes[i] == b'(' {
                             paren_depth += 1;
                             result.push('(');
                             i += 1;
-                        }
-                        else if bytes[i] == b')' { 
+                        } else if bytes[i] == b')' {
                             paren_depth -= 1;
                             if paren_depth == 0 {
                                 result.push(')');
@@ -2805,37 +3368,45 @@ fn remove_all_default_args(s: &str) -> String {
                             }
                             result.push(')');
                             i += 1;
-                        }
-                        else if bytes[i] == b'=' && paren_depth == 1 {
+                        } else if bytes[i] == b'=' && paren_depth == 1 {
                             // Check it's not '=='
-                            if i+1 < len && bytes[i+1] == b'=' {
+                            if i + 1 < len && bytes[i + 1] == b'=' {
                                 result.push_str("==");
                                 i += 2;
                             }
                             // Check it's not '!=', '<=', '>='
-                            else if i > 0 && (bytes[i-1] == b'!' || bytes[i-1] == b'<' || bytes[i-1] == b'>') {
+                            else if i > 0
+                                && (bytes[i - 1] == b'!'
+                                    || bytes[i - 1] == b'<'
+                                    || bytes[i - 1] == b'>')
+                            {
                                 result.push('=');
                                 i += 1;
-                            }
-                            else {
+                            } else {
                                 // Skip the default value until ',' or ')'
                                 // at the same parenthesis depth.
                                 // Handle string literals and nested parens.
                                 i += 1;
                                 let mut d = 0i32;
                                 while i < len {
-                                    if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
-                                    if bytes[i] == b'(' { d += 1; }
-                                    else if bytes[i] == b')' {
-                                        if d == 0 { break; }
-                                        d -= 1;
+                                    if bytes[i] == b'"' {
+                                        i = skip_string_literal(bytes, i);
+                                        continue;
                                     }
-                                    else if bytes[i] == b',' && d == 0 { break; }
+                                    if bytes[i] == b'(' {
+                                        d += 1;
+                                    } else if bytes[i] == b')' {
+                                        if d == 0 {
+                                            break;
+                                        }
+                                        d -= 1;
+                                    } else if bytes[i] == b',' && d == 0 {
+                                        break;
+                                    }
                                     i += 1;
                                 }
                             }
-                        }
-                        else {
+                        } else {
                             result.push(bytes[i] as char);
                             i += 1;
                         }
@@ -2844,7 +3415,7 @@ fn remove_all_default_args(s: &str) -> String {
                 }
             }
         }
-        
+
         result.push(bytes[i] as char);
         i += 1;
     }
@@ -2864,7 +3435,10 @@ fn convert_functional_casts(s: &str) -> String {
     {
         let mut j = 0;
         while j < len {
-            if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
+            if bytes[j] == b'"' {
+                j = skip_string_literal(bytes, j);
+                continue;
+            }
             if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "typedef") {
                 let kw_len = if match_word_at(bytes, j, "struct") { 6 } else { 7 };
                 let k = skip_ws(bytes, j + kw_len);
@@ -2880,27 +3454,47 @@ fn convert_functional_casts(s: &str) -> String {
     }
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
-        if bytes[i] == b'(' { paren_depth += 1; }
-        if bytes[i] == b')' { paren_depth = (paren_depth - 1).max(0); }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+        }
+        if bytes[i] == b')' {
+            paren_depth = (paren_depth - 1).max(0);
+        }
         // 检测类型名后跟 '('
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             let j = skip_ws(bytes, ident_end);
             if j < len && bytes[j] == b'(' {
                 // 检查是否是已知类型名或看起来像类型名
-                let is_type = known_types.contains(&ident) || ident.ends_with("_t")
-                    || ident == "int" || ident == "char" || ident == "bool"
-                    || ident == "long" || ident == "short" || ident == "unsigned";
+                let is_type = known_types.contains(&ident)
+                    || ident.ends_with("_t")
+                    || ident == "int"
+                    || ident == "char"
+                    || ident == "bool"
+                    || ident == "long"
+                    || ident == "short"
+                    || ident == "unsigned";
                 if is_type {
                     // 检查上下文: 前面是否是操作符/空白 (表达式上下文)
                     // 而不是标识符或 ')' (函数调用或声明上下文)
                     let prev = result.trim_end().as_bytes().last().copied().unwrap_or(b' ');
-                    let is_expr_ctx = !is_ident_char(prev) && prev != b')' && prev != b']'
-                        && prev != b'(' && prev != b',';
+                    let is_expr_ctx = !is_ident_char(prev)
+                        && prev != b')'
+                        && prev != b']'
+                        && prev != b'('
+                        && prev != b',';
                     // 也检查是否在括号内且前面是操作符
                     if is_expr_ctx {
                         // 检查括号内容是否是简单值 (数字或简单表达式)
@@ -2908,10 +3502,13 @@ fn convert_functional_casts(s: &str) -> String {
                         let mut k = j + 1;
                         let mut is_simple = true;
                         while k < len && d > 0 {
-                            if bytes[k] == b'(' { d += 1; }
-                            else if bytes[k] == b')' { d -= 1; }
-                            else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
-                                is_simple = false; break;
+                            if bytes[k] == b'(' {
+                                d += 1;
+                            } else if bytes[k] == b')' {
+                                d -= 1;
+                            } else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
+                                is_simple = false;
+                                break;
                             }
                             k += 1;
                         }
@@ -2944,12 +3541,21 @@ fn convert_simple_functional_casts(s: &str) -> String {
     {
         let mut j = 0;
         while j < len {
-            if bytes[j] == b'"' { j = skip_string_literal(bytes, j); continue; }
-            if match_word_at(bytes, j, "struct") || match_word_at(bytes, j, "typedef")
+            if bytes[j] == b'"' {
+                j = skip_string_literal(bytes, j);
+                continue;
+            }
+            if match_word_at(bytes, j, "struct")
+                || match_word_at(bytes, j, "typedef")
                 || match_word_at(bytes, j, "enum")
             {
-                let kw_len = if match_word_at(bytes, j, "struct") { 6 }
-                    else if match_word_at(bytes, j, "typedef") { 7 } else { 4 };
+                let kw_len = if match_word_at(bytes, j, "struct") {
+                    6
+                } else if match_word_at(bytes, j, "typedef") {
+                    7
+                } else {
+                    4
+                };
                 let k = skip_ws(bytes, j + kw_len);
                 if k < len && is_ident_char(bytes[k]) {
                     let (name, _) = read_ident(bytes, k);
@@ -2964,18 +3570,31 @@ fn convert_simple_functional_casts(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // 检测类型名后跟 '(' 和简单数字
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             let j = skip_ws(bytes, ident_end);
             if j < len && bytes[j] == b'(' {
-                let is_type = known_types.contains(&ident) || ident.ends_with("_t")
-                    || ident == "int" || ident == "char" || ident == "bool"
-                    || ident == "long" || ident == "short" || ident == "unsigned"
+                let is_type = known_types.contains(&ident)
+                    || ident.ends_with("_t")
+                    || ident == "int"
+                    || ident == "char"
+                    || ident == "bool"
+                    || ident == "long"
+                    || ident == "short"
+                    || ident == "unsigned"
                     || ident == "size_t";
                 if is_type {
                     // 找到匹配的 ')'
@@ -2983,17 +3602,24 @@ fn convert_simple_functional_casts(s: &str) -> String {
                     let mut depth = 1i32;
                     let mut has_star = false;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'(' { depth += 1; }
-                        else if bytes[k] == b')' { depth -= 1; }
-                        else if bytes[k] == b'*' { has_star = true; }
+                        if bytes[k] == b'(' {
+                            depth += 1;
+                        } else if bytes[k] == b')' {
+                            depth -= 1;
+                        } else if bytes[k] == b'*' {
+                            has_star = true;
+                        }
                         k += 1;
                     }
                     // 如果括号内容包含 '*', 可能是函数指针声明, 不转换
                     if depth == 0 && !has_star {
                         // 检查前面是否是表达式上下文
                         let prev = result.trim_end().as_bytes().last().copied().unwrap_or(b' ');
-                        let is_expr_ctx = !is_ident_char(prev) && prev != b')'
-                            && prev != b']' && prev != b';' && prev != b'{'
+                        let is_expr_ctx = !is_ident_char(prev)
+                            && prev != b')'
+                            && prev != b']'
+                            && prev != b';'
+                            && prev != b'{'
                             && prev != b'}';
                         if is_expr_ctx {
                             // 转换: type(expr) → (type)(expr)
@@ -3020,11 +3646,17 @@ fn convert_direct_initialization(s: &str) -> String {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
-    let mut last_push = 0;  // 上次 push 到的位置
+    let mut last_push = 0; // 上次 push 到的位置
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; last_push = i; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            last_push = i;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
             let j = skip_comment(bytes, i);
             result.push_str(&s[i..j]);
             i = j;
@@ -3035,27 +3667,46 @@ fn convert_direct_initialization(s: &str) -> String {
         if bytes[i] == b'(' && i > 0 {
             // 检查前面是否是标识符
             let mut j = i;
-            while j > 0 && (bytes[j-1] == b' ' || bytes[j-1] == b'\t' || bytes[j-1] == b'\n') { j -= 1; }
-            if j > 0 && is_ident_char(bytes[j-1]) {
+            while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t' || bytes[j - 1] == b'\n')
+            {
+                j -= 1;
+            }
+            if j > 0 && is_ident_char(bytes[j - 1]) {
                 let id_end = j;
                 let mut id_start = j;
-                while id_start > 0 && is_ident_char(bytes[id_start-1]) { id_start -= 1; }
+                while id_start > 0 && is_ident_char(bytes[id_start - 1]) {
+                    id_start -= 1;
+                }
                 // 检查标识符前面是否有类型名或 *
                 let mut k = id_start;
-                while k > 0 && (bytes[k-1] == b' ' || bytes[k-1] == b'\t' || bytes[k-1] == b'\n' || bytes[k-1] == b'*') { k -= 1; }
-                if k > 0 && is_ident_char(bytes[k-1]) {
+                while k > 0
+                    && (bytes[k - 1] == b' '
+                        || bytes[k - 1] == b'\t'
+                        || bytes[k - 1] == b'\n'
+                        || bytes[k - 1] == b'*')
+                {
+                    k -= 1;
+                }
+                if k > 0 && is_ident_char(bytes[k - 1]) {
                     // 找到匹配的 )
                     let mut depth = 1;
                     let mut m = i + 1;
                     while m < len && depth > 0 {
-                        if bytes[m] == b'(' { depth += 1; }
-                        else if bytes[m] == b')' { depth -= 1; }
+                        if bytes[m] == b'(' {
+                            depth += 1;
+                        } else if bytes[m] == b')' {
+                            depth -= 1;
+                        }
                         m += 1;
                     }
                     if depth == 0 && m < len {
                         // 检查 ) 后面是否是 ;
                         let mut n = m;
-                        while n < len && (bytes[n] == b' ' || bytes[n] == b'\t' || bytes[n] == b'\n') { n += 1; }
+                        while n < len
+                            && (bytes[n] == b' ' || bytes[n] == b'\t' || bytes[n] == b'\n')
+                        {
+                            n += 1;
+                        }
                         if n < len && bytes[n] == b';' {
                             // 转换: identifier (expr) ; → identifier = (expr) ;
                             result.push_str(&s[last_push..id_end]);
@@ -3088,9 +3739,17 @@ fn remove_template_definitions(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // 检测 template 关键字
         if match_word_at(bytes, i, "template") {
@@ -3100,8 +3759,11 @@ fn remove_template_definitions(s: &str) -> String {
                 let mut depth = 1i32;
                 j += 1;
                 while j < len && depth > 0 {
-                    if bytes[j] == b'<' { depth += 1; }
-                    else if bytes[j] == b'>' { depth -= 1; }
+                    if bytes[j] == b'<' {
+                        depth += 1;
+                    } else if bytes[j] == b'>' {
+                        depth -= 1;
+                    }
                     j += 1;
                 }
                 j = skip_ws(bytes, j);
@@ -3121,24 +3783,34 @@ fn remove_template_definitions(s: &str) -> String {
                         let mut depth = 1i32;
                         j += 1;
                         while j < len && depth > 0 {
-                            if bytes[j] == b'<' { depth += 1; }
-                            else if bytes[j] == b'>' { depth -= 1; }
+                            if bytes[j] == b'<' {
+                                depth += 1;
+                            } else if bytes[j] == b'>' {
+                                depth -= 1;
+                            }
                             j += 1;
                         }
                     }
                     // 跳过可能的基类列表和 { ... }
                     // 找到 '{' 并跳过整个类定义
-                    while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                    while j < len && bytes[j] != b'{' && bytes[j] != b';' {
+                        j += 1;
+                    }
                     if j < len && bytes[j] == b'{' {
                         let mut depth = 1i32;
                         j += 1;
                         while j < len && depth > 0 {
-                            if bytes[j] == b'{' { depth += 1; }
-                            else if bytes[j] == b'}' { depth -= 1; }
+                            if bytes[j] == b'{' {
+                                depth += 1;
+                            } else if bytes[j] == b'}' {
+                                depth -= 1;
+                            }
                             j += 1;
                         }
                         // 跳过结尾的 ';'
-                        if j < len && bytes[j] == b';' { j += 1; }
+                        if j < len && bytes[j] == b';' {
+                            j += 1;
+                        }
                     } else if j < len && bytes[j] == b';' {
                         j += 1;
                     }
@@ -3147,13 +3819,18 @@ fn remove_template_definitions(s: &str) -> String {
                 }
                 // 对于模板函数, 跳过整个函数定义
                 // 找到 '{' 并跳过整个函数体
-                while j < len && bytes[j] != b'{' && bytes[j] != b';' { j += 1; }
+                while j < len && bytes[j] != b'{' && bytes[j] != b';' {
+                    j += 1;
+                }
                 if j < len && bytes[j] == b'{' {
                     let mut depth = 1i32;
                     j += 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'{' { depth += 1; }
-                        else if bytes[j] == b'}' { depth -= 1; }
+                        if bytes[j] == b'{' {
+                            depth += 1;
+                        } else if bytes[j] == b'}' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                 } else if j < len && bytes[j] == b';' {
@@ -3180,17 +3857,25 @@ fn replace_template_usages(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // Skip strings and comments
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // Check for identifier followed by '<'
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             let j = skip_ws(bytes, ident_end);
             if j < len && bytes[j] == b'<' {
                 // Skip if this is '<<' (bit-shift operator, not template)
-                if j + 1 < len && bytes[j+1] == b'<' {
+                if j + 1 < len && bytes[j + 1] == b'<' {
                     result.push_str(&ident);
                     i = ident_end;
                     continue;
@@ -3198,8 +3883,10 @@ fn replace_template_usages(s: &str) -> String {
                 // Skip if preceded by '->' or '.' (member access, not template)
                 let before_ident = if i > 0 { i - 1 } else { 0 };
                 let mut k = before_ident;
-                while k > 0 && (bytes[k] == b' ' || bytes[k] == b'\t') { k -= 1; }
-                if k > 0 && bytes[k] == b'>' && k > 0 && bytes[k-1] == b'-' {
+                while k > 0 && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                    k -= 1;
+                }
+                if k > 0 && bytes[k] == b'>' && k > 0 && bytes[k - 1] == b'-' {
                     // After ->, this is member access, not template
                     result.push_str(&ident);
                     i = ident_end;
@@ -3224,34 +3911,41 @@ fn replace_template_usages(s: &str) -> String {
                 let start_k = k;
                 while k < len && depth > 0 {
                     // Skip '>>' (bit-shift, not two template closes)
-                    if bytes[k] == b'>' && k + 1 < len && bytes[k+1] == b'>' {
+                    if bytes[k] == b'>' && k + 1 < len && bytes[k + 1] == b'>' {
                         depth -= 1;
                         k += 2;
                         continue;
                     }
                     // Skip '<<' (bit-shift, not two template opens)
-                    if bytes[k] == b'<' && k + 1 < len && bytes[k+1] == b'<' {
+                    if bytes[k] == b'<' && k + 1 < len && bytes[k + 1] == b'<' {
                         depth += 1;
                         k += 2;
                         continue;
                     }
-                    if bytes[k] == b'<' { depth += 1; }
-                    else if bytes[k] == b'>' { depth -= 1; }
-                    else if bytes[k] == b',' && depth == 1 { _has_comma = true; }
-                    else if bytes[k] == b'(' || bytes[k] == b')' { _has_parens = true; }
-                    else if bytes[k] == b';' { has_semicolon = true; }
-                    else if bytes[k] == b'\n' { has_newline = true; }
-                    else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
+                    if bytes[k] == b'<' {
+                        depth += 1;
+                    } else if bytes[k] == b'>' {
+                        depth -= 1;
+                    } else if bytes[k] == b',' && depth == 1 {
+                        _has_comma = true;
+                    } else if bytes[k] == b'(' || bytes[k] == b')' {
+                        _has_parens = true;
+                    } else if bytes[k] == b';' {
+                        has_semicolon = true;
+                    } else if bytes[k] == b'\n' {
+                        has_newline = true;
+                    } else if bytes[k] == b';' || bytes[k] == b'{' || bytes[k] == b'}' {
                         break; // Not a template
                     }
                     // Check for comparison operators (==, !=, <=, >=)
                     if k + 1 < len
-                        && ((bytes[k] == b'=' && bytes[k+1] == b'=')
-                            || (bytes[k] == b'!' && bytes[k+1] == b'=')
-                            || (bytes[k] == b'<' && bytes[k+1] == b'=')
-                            || (bytes[k] == b'>' && bytes[k+1] == b'=')) {
-                            has_comparison = true;
-                        }
+                        && ((bytes[k] == b'=' && bytes[k + 1] == b'=')
+                            || (bytes[k] == b'!' && bytes[k + 1] == b'=')
+                            || (bytes[k] == b'<' && bytes[k + 1] == b'=')
+                            || (bytes[k] == b'>' && bytes[k + 1] == b'='))
+                    {
+                        has_comparison = true;
+                    }
                     k += 1;
                 }
                 // Only replace if identifier contains template keywords
@@ -3259,17 +3953,24 @@ fn replace_template_usages(s: &str) -> String {
                 // (identifiers, types, pointers, references, const, etc.)
                 let content_len = k - start_k;
                 let looks_like_template = ident.contains("vec")
-                    || ident.contains("map") || ident.contains("hash")
-                    || ident.contains("set") || ident.contains("pair")
+                    || ident.contains("map")
+                    || ident.contains("hash")
+                    || ident.contains("set")
+                    || ident.contains("pair")
                     || ident.contains("auto_suppress")
-                    || ident.contains("unique_ptr") || ident.contains("shared_ptr")
-                    || ident.contains("vector") || ident.contains("list")
-                    || ident.contains("deque") || ident.contains("array")
-                    || ident.contains("tuple") || ident.contains("optional")
-                    || ident.contains("function") || ident.contains("allocator")
+                    || ident.contains("unique_ptr")
+                    || ident.contains("shared_ptr")
+                    || ident.contains("vector")
+                    || ident.contains("list")
+                    || ident.contains("deque")
+                    || ident.contains("array")
+                    || ident.contains("tuple")
+                    || ident.contains("optional")
+                    || ident.contains("function")
+                    || ident.contains("allocator")
                     || ident.contains("node"); // alloc_node, hash_node, etc.
-                // Check if content looks like template type arguments
-                // (no operators except *, &, ::, no keywords like if/while/for/return)
+                                               // Check if content looks like template type arguments
+                                               // (no operators except *, &, ::, no keywords like if/while/for/return)
                 let content = &s[start_k..k];
                 let content_looks_like_types = !content.contains("if ")
                     && !content.contains("while ")
@@ -3290,7 +3991,7 @@ fn replace_template_usages(s: &str) -> String {
                 // - Content is too long (spanning across code)
                 // - Content has semicolons (spanning statements)
                 // - Content has too many newlines (spanning multiple lines incorrectly)
-                let is_valid_template = depth == 0 
+                let is_valid_template = depth == 0
                     && (looks_like_template || content_looks_like_types)
                     && !has_comparison
                     && !has_semicolon
@@ -3301,15 +4002,14 @@ fn replace_template_usages(s: &str) -> String {
                     // Check what follows '>' - should be identifier (var name)
                     // or ';' or ',' or ')'
                     let after_gt = skip_ws(bytes, k);
-                    let is_type_pos = after_gt < len && (
-                        is_ident_char(bytes[after_gt])
-                        || bytes[after_gt] == b'*'
-                        || bytes[after_gt] == b'&'
-                        || bytes[after_gt] == b';'
-                        || bytes[after_gt] == b','
-                        || bytes[after_gt] == b')'
-                        || bytes[after_gt] == b'>'
-                    );
+                    let is_type_pos = after_gt < len
+                        && (is_ident_char(bytes[after_gt])
+                            || bytes[after_gt] == b'*'
+                            || bytes[after_gt] == b'&'
+                            || bytes[after_gt] == b';'
+                            || bytes[after_gt] == b','
+                            || bytes[after_gt] == b')'
+                            || bytes[after_gt] == b'>');
                     if is_type_pos {
                         result.push_str("void*");
                         i = k;
@@ -3336,9 +4036,17 @@ fn convert_return_struct_ctor(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 跳过字符串和注释
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // 检测 return struct Type(
         if match_word_at(bytes, i, "return") {
@@ -3353,13 +4061,16 @@ fn convert_return_struct_ctor(s: &str) -> String {
                         let mut depth = 1i32;
                         let mut n = m + 1;
                         while n < len && depth > 0 {
-                            if bytes[n] == b'(' { depth += 1; }
-                            else if bytes[n] == b')' { depth -= 1; }
+                            if bytes[n] == b'(' {
+                                depth += 1;
+                            } else if bytes[n] == b')' {
+                                depth -= 1;
+                            }
                             n += 1;
                         }
                         if depth == 0 {
                             // 提取参数
-                            let args = &s[m+1..n-1];
+                            let args = &s[m + 1..n - 1];
                             // 输出: return (struct Type){args}
                             result.push_str("return ");
                             result.push_str(&format!("(struct {})", type_name));
@@ -3392,17 +4103,26 @@ fn flatten_scope_operators(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 跳过字符串字面量
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
         // 跳过注释
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
         // 检测 `::`
-        if bytes[i] == b':' && i+1 < len && bytes[i+1] == b':' {
+        if bytes[i] == b':' && i + 1 < len && bytes[i + 1] == b':' {
             // 检查前面是否是标识符 (形成 ident:: 模式)
             if !result.is_empty() && {
                 let rb = result.as_bytes();
                 let rl = rb.len();
-                rl > 0 && is_ident_char(rb[rl-1])
+                rl > 0 && is_ident_char(rb[rl - 1])
             } {
                 // 检查后面是否是标识符 (形成 ::ident 模式)
                 let k = i + 2;
@@ -3511,7 +4231,7 @@ fn replace_cpp_constructs(s: &str) -> String {
                 i = j;
                 continue;
             }
-            if bytes[i] == b':' && i + 1 < len && bytes[i+1] == b':' {
+            if bytes[i] == b':' && i + 1 < len && bytes[i + 1] == b':' {
                 forced.push('_');
                 i += 2;
                 continue;
@@ -3539,7 +4259,12 @@ fn replace_word(s: &str, from: &str, to: &str) -> String {
             if before_ok && after_ok {
                 result.push_str(to);
                 // 保留空格避免粘连
-                if !to.is_empty() && to.as_bytes().last().is_some_and(|b| b.is_ascii_alphanumeric()) {
+                if !to.is_empty()
+                    && to
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b.is_ascii_alphanumeric())
+                {
                     // 检查后面是否需要空格
                     if i + flen < len && is_ident_char(bytes[i + flen]) {
                         result.push(' ');
@@ -3598,7 +4323,7 @@ fn replace_access_specifier(s: &str, kw: &str) -> String {
                 }
                 if j < len && bytes[j] == b':' {
                     j += 1; // 跳过 ':'
-                    // 检查不是 '::'
+                            // 检查不是 '::'
                     if j < len && bytes[j] == b':' {
                         // 这是 '::', 不是访问说明符
                         result.push(bytes[i] as char);
@@ -3649,7 +4374,11 @@ fn replace_lambdas(s: &str) -> String {
                     let mut depth = 1i32;
                     j += 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; } else if bytes[j] == b')' { depth -= 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     // 跳过空白
@@ -3667,7 +4396,11 @@ fn replace_lambdas(s: &str) -> String {
                     let mut depth = 1i32;
                     j += 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'{' { depth += 1; } else if bytes[j] == b'}' { depth -= 1; }
+                        if bytes[j] == b'{' {
+                            depth += 1;
+                        } else if bytes[j] == b'}' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     // 成功匹配 lambda, 替换为 0
@@ -3696,7 +4429,7 @@ fn replace_destructors(s: &str) -> String {
         if bytes[i] == b'~' {
             // 检查前面是 '::' (析构函数定义)
             let before = i;
-            if before >= 2 && bytes[before-1] == b':' && bytes[before-2] == b':' {
+            if before >= 2 && bytes[before - 1] == b':' && bytes[before - 2] == b':' {
                 // 找到类名
                 let class_end = before - 2;
                 let mut class_start = class_end;
@@ -3734,7 +4467,7 @@ fn replace_constructors(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 查找 ClassName::ClassName 模式 (类名与函数名相同)
-        if bytes[i] == b':' && i + 1 < len && bytes[i+1] == b':' {
+        if bytes[i] == b':' && i + 1 < len && bytes[i + 1] == b':' {
             // 前面是类名
             let class_end = i;
             let mut class_start = class_end;
@@ -3755,7 +4488,7 @@ fn replace_constructors(s: &str) -> String {
             }
             let fn_name = &s[j..name_end];
             if fn_name == class_name {
-                // 确认是构造函数: 后面跟 '(' 或空白后 '(' 
+                // 确认是构造函数: 后面跟 '(' 或空白后 '('
                 let mut k = name_end;
                 while k < len && (bytes[k] as char).is_ascii_whitespace() {
                     k += 1;
@@ -3765,7 +4498,11 @@ fn replace_constructors(s: &str) -> String {
                     let mut depth = 1i32;
                     k += 1;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'(' { depth += 1; } else if bytes[k] == b')' { depth -= 1; }
+                        if bytes[k] == b'(' {
+                            depth += 1;
+                        } else if bytes[k] == b')' {
+                            depth -= 1;
+                        }
                         k += 1;
                     }
                     // 跳过空白
@@ -3775,14 +4512,18 @@ fn replace_constructors(s: &str) -> String {
                     // 跳过构造函数初始化列表 : member(init), ...
                     if k < len && bytes[k] == b':' {
                         // 检查不是 '::'
-                        if k + 1 < len && bytes[k+1] != b':' {
+                        if k + 1 < len && bytes[k + 1] != b':' {
                             k += 1; // 跳过 ':'
-                            // 跳过到 '{'
+                                    // 跳过到 '{'
                             let mut brace_depth = 0i32;
                             while k < len {
-                                if bytes[k] == b'(' { brace_depth += 1; }
-                                else if bytes[k] == b')' { brace_depth -= 1; }
-                                else if bytes[k] == b'{' && brace_depth == 0 { break; }
+                                if bytes[k] == b'(' {
+                                    brace_depth += 1;
+                                } else if bytes[k] == b')' {
+                                    brace_depth -= 1;
+                                } else if bytes[k] == b'{' && brace_depth == 0 {
+                                    break;
+                                }
                                 k += 1;
                             }
                         }
@@ -3817,21 +4558,22 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
         let len = bytes.len();
         let mut i = 0;
         while i < len {
-            if bytes[i] == b'"' { i = skip_string_literal(bytes, i); continue; }
-            if bytes[i] == b'/' && i+1 < len
-                && (bytes[i+1] == b'/' || bytes[i+1] == b'*')
-            {
-                i = skip_comment(bytes, i); continue;
+            if bytes[i] == b'"' {
+                i = skip_string_literal(bytes, i);
+                continue;
+            }
+            if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+                i = skip_comment(bytes, i);
+                continue;
             }
             if match_word_at(bytes, i, "struct") {
                 let j = skip_ws(bytes, i + 6);
                 if j < len && is_ident_char(bytes[j]) {
                     let (name, name_end) = read_ident(bytes, j);
                     let k = skip_ws(bytes, name_end);
-                    if k < len && bytes[k] == b'{'
-                        && !struct_names.contains(&name) {
-                            struct_names.push(name);
-                        }
+                    if k < len && bytes[k] == b'{' && !struct_names.contains(&name) {
+                        struct_names.push(name);
+                    }
                 }
             }
             i += 1;
@@ -3849,7 +4591,9 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
             // Check word boundary before pattern
             if pos > 0 {
                 let prev = result.as_bytes()[pos - 1];
-                if is_ident_char(prev) { break; }
+                if is_ident_char(prev) {
+                    break;
+                }
             }
             let after = pos + pattern.len();
             // Skip whitespace after pattern
@@ -3861,12 +4605,7 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
             // Must be followed by (
             if j < rb.len() && rb[j] == b'(' {
                 let replacement = format!("void _dtor_{} ", name);
-                result = format!(
-                    "{}{}{}",
-                    &result[..pos],
-                    replacement,
-                    &result[after..]
-                );
+                result = format!("{}{}{}", &result[..pos], replacement, &result[after..]);
             } else {
                 break;
             }
@@ -3882,46 +4621,51 @@ fn replace_flattened_ctor_dtor(s: &str) -> String {
             // Check word boundary before pattern
             if pos > 0 {
                 let prev = result.as_bytes()[pos - 1];
-                if is_ident_char(prev) { break; }
+                if is_ident_char(prev) {
+                    break;
+                }
             }
             let after = pos + pattern.len();
             let rb = result.as_bytes();
             // Skip whitespace
             let mut j = after;
-            while j < rb.len()
-                && (rb[j] as char).is_ascii_whitespace()
-            {
+            while j < rb.len() && (rb[j] as char).is_ascii_whitespace() {
                 j += 1;
             }
             // Must be followed by (
-            if j >= rb.len() || rb[j] != b'(' { break; }
+            if j >= rb.len() || rb[j] != b'(' {
+                break;
+            }
             // Find matching )
             let mut depth = 1i32;
             j += 1; // skip (
             while j < rb.len() && depth > 0 {
-                if rb[j] == b'(' { depth += 1; }
-                else if rb[j] == b')' { depth -= 1; }
+                if rb[j] == b'(' {
+                    depth += 1;
+                } else if rb[j] == b')' {
+                    depth -= 1;
+                }
                 j += 1;
             }
             // j is now right after matching ')'
             // Save this position - we keep params up to here
             let after_params = j;
             // Skip whitespace
-            while j < rb.len()
-                && (rb[j] as char).is_ascii_whitespace()
-            {
+            while j < rb.len() && (rb[j] as char).is_ascii_whitespace() {
                 j += 1;
             }
             // Skip initializer list : member(init), ...
-            if j < rb.len() && rb[j] == b':'
-                && (j + 1 >= rb.len() || rb[j + 1] != b':')
-            {
+            if j < rb.len() && rb[j] == b':' && (j + 1 >= rb.len() || rb[j + 1] != b':') {
                 j += 1;
                 let mut bd = 0i32;
                 while j < rb.len() {
-                    if rb[j] == b'(' { bd += 1; }
-                    else if rb[j] == b')' { bd -= 1; }
-                    else if rb[j] == b'{' && bd == 0 { break; }
+                    if rb[j] == b'(' {
+                        bd += 1;
+                    } else if rb[j] == b')' {
+                        bd -= 1;
+                    } else if rb[j] == b'{' && bd == 0 {
+                        break;
+                    }
                     j += 1;
                 }
             }
@@ -3979,8 +4723,11 @@ fn collect_struct_members(s: &str) -> Vec<(String, Vec<String>)> {
                     let mut j = after_name + 1;
                     let mut members = Vec::new();
                     while j < len && depth > 0 {
-                        if bytes[j] == b'{' { depth += 1; }
-                        else if bytes[j] == b'}' { depth -= 1; }
+                        if bytes[j] == b'{' {
+                            depth += 1;
+                        } else if bytes[j] == b'}' {
+                            depth -= 1;
+                        }
                         // Look for member declarations: type m_name;
                         // Simple heuristic: identifier starting with m_
                         else if depth == 1 && is_ident_char(bytes[j]) {
@@ -3988,12 +4735,15 @@ fn collect_struct_members(s: &str) -> Vec<(String, Vec<String>)> {
                             if ident.starts_with("m_") {
                                 // Check if followed by whitespace/semicolon/bracket
                                 let after = skip_ws(bytes, ident_end);
-                                if after < len && (bytes[after] == b';'
-                                    || bytes[after] == b'[' || bytes[after] == b'='
-                                    || bytes[after] == b')')
-                                    && !members.contains(&ident) {
-                                        members.push(ident);
-                                    }
+                                if after < len
+                                    && (bytes[after] == b';'
+                                        || bytes[after] == b'['
+                                        || bytes[after] == b'='
+                                        || bytes[after] == b')')
+                                    && !members.contains(&ident)
+                                {
+                                    members.push(ident);
+                                }
                             }
                         }
                         j += 1;
@@ -4013,7 +4763,10 @@ fn collect_struct_members(s: &str) -> Vec<(String, Vec<String>)> {
 
 /// Check if a function name matches the pattern ClassName_methodname
 /// where ClassName is a known struct. Returns (class_name, method_name) if matched.
-fn match_member_fn_name<'a>(fname: &str, structs: &'a [(String, Vec<String>)]) -> Option<&'a (String, Vec<String>)> {
+fn match_member_fn_name<'a>(
+    fname: &str,
+    structs: &'a [(String, Vec<String>)],
+) -> Option<&'a (String, Vec<String>)> {
     for s in structs {
         let prefix = format!("{}_", s.0);
         if fname.starts_with(&prefix) {
@@ -4037,14 +4790,24 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
     let mut i = 0;
     while i < len {
         // Skip strings and comments
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // Look for function definitions: at start of line (or after }), find:
         // [return_type]\nClassName_methodname (params) { body }
         // We detect this by looking for an identifier followed by '(' at the start of a line
-        if is_ident_char(bytes[i]) && (i == 0 || bytes[i-1] == b'\n' || bytes[i-1] == b' ' || bytes[i-1] == b'\t') {
+        if is_ident_char(bytes[i])
+            && (i == 0 || bytes[i - 1] == b'\n' || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t')
+        {
             let (ident, ident_end) = read_ident(bytes, i);
             let after_ident = skip_ws(bytes, ident_end);
             // Check if this is a function name (followed by '(' )
@@ -4053,14 +4816,15 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                 // But first we need to handle the return type which might be on a previous line
                 // Pattern: "ClassName_\n" or "return_type\nClassName_("
                 // Also handle broken constructor return types like "ClassName_"
-                
+
                 // Check if ident is a constructor: "ClassName_" pattern (trailing underscore)
                 // This happens when "ClassName::ClassName" is flattened to "ClassName_ClassName"
                 // but then the return type detection breaks
-                let is_ctor = ident.ends_with('_') && structs.iter().any(|(sn,_)| {
-                    ident == format!("{}_", sn) || ident == sn.as_str()
-                });
-                
+                let is_ctor = ident.ends_with('_')
+                    && structs
+                        .iter()
+                        .any(|(sn, _)| ident == format!("{}_", sn) || ident == sn.as_str());
+
                 if is_ctor {
                     // This is a broken constructor return type like "cpp_string_location_reader_"
                     // The actual function name is on the next line
@@ -4080,32 +4844,47 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                 let mut depth = 1i32;
                                 let mut j = after_fname + 1;
                                 while j < len && depth > 0 {
-                                    if bytes[j] == b'(' { depth += 1; }
-                                    else if bytes[j] == b')' { depth -= 1; }
+                                    if bytes[j] == b'(' {
+                                        depth += 1;
+                                    } else if bytes[j] == b')' {
+                                        depth -= 1;
+                                    }
                                     j += 1;
                                 }
                                 let paren_end = j - 1;
-                                let params = &s[after_fname+1..paren_end];
+                                let params = &s[after_fname + 1..paren_end];
                                 // Check for ':' (member initializer list) or '{' (body)
                                 let after_paren = skip_ws(bytes, j);
                                 let has_init_list = after_paren < len && bytes[after_paren] == b':';
-                                
+
                                 // Output: void _ctor_ClassName_N(struct ClassName *this_, params)
                                 // Count parameters for overloaded ctor naming
-                                let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
+                                let param_count = if params.trim().is_empty() {
+                                    1
+                                } else {
+                                    1 + params.split(',').count()
+                                };
                                 result.push_str(&format!(
-                                    "\nvoid _ctor_{}_{}(struct {} *this_{}", 
-                                    struct_info.0, param_count, struct_info.0,
+                                    "\nvoid _ctor_{}_{}(struct {} *this_{}",
+                                    struct_info.0,
+                                    param_count,
+                                    struct_info.0,
                                     if params.trim().is_empty() { "" } else { ", " }
                                 ));
                                 result.push_str(params);
                                 result.push(')');
-                                
+
                                 if has_init_list {
                                     // Parse initializer list: member(value), ...
                                     let mut k = after_paren + 1;
                                     // Skip whitespace
-                                    while k < len && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') { k += 1; }
+                                    while k < len
+                                        && (bytes[k] == b' '
+                                            || bytes[k] == b'\t'
+                                            || bytes[k] == b'\n')
+                                    {
+                                        k += 1;
+                                    }
                                     // Find the opening '{'
                                     let mut init_entries = Vec::new();
                                     while k < len && bytes[k] != b'{' {
@@ -4113,17 +4892,23 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                         if is_ident_char(bytes[k]) {
                                             let (mname, mname_end) = read_ident(bytes, k);
                                             let after_mname = skip_ws(bytes, mname_end);
-                                            if after_mname < len && (bytes[after_mname] == b'(' || bytes[after_mname] == b'{') {
+                                            if after_mname < len
+                                                && (bytes[after_mname] == b'('
+                                                    || bytes[after_mname] == b'{')
+                                            {
                                                 let open = bytes[after_mname];
                                                 let close = if open == b'(' { b')' } else { b'}' };
                                                 let mut d = 1i32;
                                                 let mut v = after_mname + 1;
                                                 while v < len && d > 0 {
-                                                    if bytes[v] == open { d += 1; }
-                                                    else if bytes[v] == close { d -= 1; }
+                                                    if bytes[v] == open {
+                                                        d += 1;
+                                                    } else if bytes[v] == close {
+                                                        d -= 1;
+                                                    }
                                                     v += 1;
                                                 }
-                                                let value = &s[after_mname+1..v-1];
+                                                let value = &s[after_mname + 1..v - 1];
                                                 init_entries.push((mname, value.to_string()));
                                                 k = v;
                                                 // Skip comma
@@ -4146,8 +4931,11 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                         let body_start = k + 1;
                                         k += 1;
                                         while k < len && bd > 0 {
-                                            if bytes[k] == b'{' { bd += 1; }
-                                            else if bytes[k] == b'}' { bd -= 1; }
+                                            if bytes[k] == b'{' {
+                                                bd += 1;
+                                            } else if bytes[k] == b'}' {
+                                                bd -= 1;
+                                            }
                                             k += 1;
                                         }
                                         let body_end = k - 1;
@@ -4155,10 +4943,14 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                         // Output init list as assignments
                                         result.push_str(" {\n");
                                         for (mname, mvalue) in &init_entries {
-                                            result.push_str(&format!("  this_->{} = {};\n", mname, mvalue));
+                                            result.push_str(&format!(
+                                                "  this_->{} = {};\n",
+                                                mname, mvalue
+                                            ));
                                         }
                                         // Rewrite bare member accesses in body
-                                        let fixed_body = rewrite_member_accesses(body, &struct_info.1);
+                                        let fixed_body =
+                                            rewrite_member_accesses(body, &struct_info.1);
                                         result.push_str(&fixed_body);
                                         result.push_str("}\n");
                                         i = k;
@@ -4170,8 +4962,11 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                                     let body_start = after_paren + 1;
                                     let mut k = body_start;
                                     while k < len && bd > 0 {
-                                        if bytes[k] == b'{' { bd += 1; }
-                                        else if bytes[k] == b'}' { bd -= 1; }
+                                        if bytes[k] == b'{' {
+                                            bd += 1;
+                                        } else if bytes[k] == b'}' {
+                                            bd -= 1;
+                                        }
                                         k += 1;
                                     }
                                     let body_end = k - 1;
@@ -4191,7 +4986,7 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                     i = ident_end;
                     continue;
                 }
-                
+
                 // Check if this is a regular member function (not constructor)
                 if let Some(struct_info) = match_member_fn_name(&ident, structs) {
                     let method_name = &ident[struct_info.0.len() + 1..];
@@ -4205,12 +5000,15 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                     let mut depth = 1i32;
                     let mut j = after_ident + 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     let paren_end = j - 1;
-                    let params = &s[after_ident+1..paren_end];
+                    let params = &s[after_ident + 1..paren_end];
                     // Check if followed by '{' (function definition, not declaration)
                     let after_paren = skip_ws(bytes, j);
                     if after_paren < len && bytes[after_paren] == b'{' {
@@ -4235,8 +5033,11 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
                             let body_start = after_paren + 1;
                             let mut k = body_start;
                             while k < len && bd > 0 {
-                                if bytes[k] == b'{' { bd += 1; }
-                                else if bytes[k] == b'}' { bd -= 1; }
+                                if bytes[k] == b'{' {
+                                    bd += 1;
+                                } else if bytes[k] == b'}' {
+                                    bd -= 1;
+                                }
                                 k += 1;
                             }
                             let body_end = k - 1;
@@ -4260,26 +5061,40 @@ fn convert_member_fn_definitions(s: &str, structs: &[(String, Vec<String>)]) -> 
 
 /// Rewrite bare member variable accesses (m_foo) to this_->m_foo in a function body
 fn rewrite_member_accesses(body: &str, members: &[String]) -> String {
-    if members.is_empty() { return body.to_string(); }
+    if members.is_empty() {
+        return body.to_string();
+    }
     let mut result = String::with_capacity(body.len());
     let bytes = body.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     while i < len {
         // Skip strings
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&body[i..j]); i = j; continue; }
-        // Skip comments
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&body[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&body[i..j]);
+            i = j;
+            continue;
         }
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        // Skip comments
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&body[i..j]);
+            i = j;
+            continue;
+        }
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             // Check if this is a member variable
             if members.iter().any(|m| m == &ident) {
                 // Check it's not preceded by '->' or '.' (already qualified)
-                let before_ok = if i == 0 { true }
-                    else if bytes[i-1] == b'>' && i >= 2 && bytes[i-2] == b'-' { false }
-                    else { bytes[i-1] != b'.' };
+                let before_ok = if i == 0 {
+                    true
+                } else if bytes[i - 1] == b'>' && i >= 2 && bytes[i - 2] == b'-' {
+                    false
+                } else {
+                    bytes[i - 1] != b'.'
+                };
                 if before_ok {
                     result.push_str("this_->");
                 }
@@ -4307,11 +5122,15 @@ fn convert_member_call_sites(s: &str, structs: &[(String, Vec<String>)]) -> Stri
         let len = bytes.len();
         let mut i = 0;
         while i < len {
-            if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+            if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
                 let (ident, _) = read_ident(bytes, i);
                 if ident.starts_with(&prefix) {
                     let method = &ident[prefix.len()..];
-                    if !method.is_empty() && !method_to_class.iter().any(|(m, c)| m == method && c == sname) {
+                    if !method.is_empty()
+                        && !method_to_class
+                            .iter()
+                            .any(|(m, c)| m == method && c == sname)
+                    {
                         method_to_class.push((method.to_string(), sname.clone()));
                     }
                 }
@@ -4319,44 +5138,64 @@ fn convert_member_call_sites(s: &str, structs: &[(String, Vec<String>)]) -> Stri
             i += 1;
         }
     }
-    
+
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     while i < len {
         // Skip strings and comments
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // Look for identifier->method( or identifier.method(
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (receiver, receiver_end) = read_ident(bytes, i);
             let after_receiver = skip_ws(bytes, receiver_end);
-            if after_receiver < len && (bytes[after_receiver] == b'-' || bytes[after_receiver] == b'.') {
+            if after_receiver < len
+                && (bytes[after_receiver] == b'-' || bytes[after_receiver] == b'.')
+            {
                 let is_arrow = bytes[after_receiver] == b'-';
                 let is_dot = bytes[after_receiver] == b'.';
                 if (is_arrow && after_receiver + 1 < len && bytes[after_receiver + 1] == b'>')
-                    || is_dot {
-                    let method_start = if is_arrow { after_receiver + 2 } else { after_receiver + 1 };
+                    || is_dot
+                {
+                    let method_start = if is_arrow {
+                        after_receiver + 2
+                    } else {
+                        after_receiver + 1
+                    };
                     let method_start = skip_ws(bytes, method_start);
                     if method_start < len && is_ident_char(bytes[method_start]) {
                         let (method, method_end) = read_ident(bytes, method_start);
                         let after_method = skip_ws(bytes, method_end);
                         if after_method < len && bytes[after_method] == b'(' {
                             // Check if this method belongs to a known class
-                            if let Some((_, class_name)) = method_to_class.iter().find(|(m, _)| m == &method) {
+                            if let Some((_, class_name)) =
+                                method_to_class.iter().find(|(m, _)| m == &method)
+                            {
                                 let full_fn = format!("{}_{}", class_name, method);
                                 // Find matching ')' for args
                                 let mut depth = 1i32;
                                 let mut j = after_method + 1;
                                 while j < len && depth > 0 {
-                                    if bytes[j] == b'(' { depth += 1; }
-                                    else if bytes[j] == b')' { depth -= 1; }
+                                    if bytes[j] == b'(' {
+                                        depth += 1;
+                                    } else if bytes[j] == b')' {
+                                        depth -= 1;
+                                    }
                                     j += 1;
                                 }
-                                let args = &s[after_method+1..j-1];
+                                let args = &s[after_method + 1..j - 1];
                                 if is_arrow {
                                     // ptr->method(args) -> Class_method(ptr, args)
                                     result.push_str(&full_fn);
@@ -4404,7 +5243,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, _) = read_ident(bytes, i);
             for (sname, _) in structs {
                 let prefix = format!("{}_", sname);
@@ -4418,7 +5257,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
         }
         i += 1;
     }
-    
+
     // Now scan for function definitions with this_ parameter and fix bare calls within them
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -4427,46 +5266,67 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
     let mut in_member_fn = false;
     let mut current_class = String::new();
     let mut brace_depth = 0i32;
-    
+
     while i < len {
         // Skip strings and comments
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
-        
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+
         // Track brace depth
-        if bytes[i] == b'{' { 
+        if bytes[i] == b'{' {
             brace_depth += 1;
             result.push(bytes[i] as char);
             i += 1;
             continue;
         }
-        if bytes[i] == b'}' { 
+        if bytes[i] == b'}' {
             brace_depth -= 1;
-            if brace_depth == 0 { in_member_fn = false; }
+            if brace_depth == 0 {
+                in_member_fn = false;
+            }
             result.push(bytes[i] as char);
             i += 1;
             continue;
         }
-        
+
         // Detect function definitions with this_ parameter
         if !in_member_fn && bytes[i] == b'(' {
             // Check if params contain "struct ClassName *this_"
             let mut depth = 1i32;
             let mut j = i + 1;
             while j < len && depth > 0 {
-                if bytes[j] == b'(' { depth += 1; }
-                else if bytes[j] == b')' { depth -= 1; }
+                if bytes[j] == b'(' {
+                    depth += 1;
+                } else if bytes[j] == b')' {
+                    depth -= 1;
+                }
                 j += 1;
             }
             let params = &s[i..j];
             if params.contains("*this_") || params.contains("* this_") {
                 // Find the function name (before '(')
                 let mut fn_end = i;
-                while fn_end > 0 && (bytes[fn_end-1] == b' ' || bytes[fn_end-1] == b'\t' || bytes[fn_end-1] == b'\n') { fn_end -= 1; }
+                while fn_end > 0
+                    && (bytes[fn_end - 1] == b' '
+                        || bytes[fn_end - 1] == b'\t'
+                        || bytes[fn_end - 1] == b'\n')
+                {
+                    fn_end -= 1;
+                }
                 let mut fn_start = fn_end;
-                while fn_start > 0 && is_ident_char(bytes[fn_start-1]) { fn_start -= 1; }
+                while fn_start > 0 && is_ident_char(bytes[fn_start - 1]) {
+                    fn_start -= 1;
+                }
                 if fn_start < fn_end {
                     let fname = &s[fn_start..fn_end];
                     // Check if fname matches ClassName_method pattern
@@ -4488,30 +5348,36 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
                 }
             }
         }
-        
+
         // Inside a member function, look for bare member function calls
-        if in_member_fn && is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i-1])) {
+        if in_member_fn && is_ident_char(bytes[i]) && (i == 0 || !is_ident_char(bytes[i - 1])) {
             let (ident, ident_end) = read_ident(bytes, i);
             let after_ident = skip_ws(bytes, ident_end);
             if after_ident < len && bytes[after_ident] == b'(' {
                 // Check if this is a bare call to another member function of the same class
                 let target_full = format!("{}_{}", current_class, ident);
-                let is_same_class_call = member_fns.iter().any(|(c, m, _f)| c == &current_class && m == &ident);
+                let is_same_class_call = member_fns
+                    .iter()
+                    .any(|(c, m, _f)| c == &current_class && m == &ident);
                 // Also check if it's a call to a function that doesn't exist as a standalone function
                 // (i.e., it's a member function that needs this_ prefix)
                 if is_same_class_call {
                     // Check it's not already prefixed
-                    let before_ok = i == 0 || (!is_ident_char(bytes[i-1]) && bytes[i-1] != b'_');
+                    let before_ok =
+                        i == 0 || (!is_ident_char(bytes[i - 1]) && bytes[i - 1] != b'_');
                     if before_ok {
                         // Find matching ')'
                         let mut depth = 1i32;
                         let mut j = after_ident + 1;
                         while j < len && depth > 0 {
-                            if bytes[j] == b'(' { depth += 1; }
-                            else if bytes[j] == b')' { depth -= 1; }
+                            if bytes[j] == b'(' {
+                                depth += 1;
+                            } else if bytes[j] == b')' {
+                                depth -= 1;
+                            }
                             j += 1;
                         }
-                        let args = &s[after_ident+1..j-1];
+                        let args = &s[after_ident + 1..j - 1];
                         result.push_str(&target_full);
                         result.push_str(" (this_");
                         if !args.trim().is_empty() {
@@ -4528,7 +5394,7 @@ fn convert_bare_member_calls_in_bodies(s: &str, structs: &[(String, Vec<String>)
             i = ident_end;
             continue;
         }
-        
+
         result.push(bytes[i] as char);
         i += 1;
     }
@@ -4545,22 +5411,29 @@ fn convert_constexpr_fn_to_macro(s: &str) -> String {
         let bytes = s.as_bytes();
         // Find '{'
         let mut j = after_sig;
-        while j < bytes.len() && bytes[j] != b'{' { j += 1; }
-        if j >= bytes.len() { return s.to_string(); }
+        while j < bytes.len() && bytes[j] != b'{' {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return s.to_string();
+        }
         let body_start = j + 1;
         // Find matching '}'
         let mut depth = 1i32;
         let mut k = body_start;
         while k < bytes.len() && depth > 0 {
-            if bytes[k] == b'{' { depth += 1; }
-            else if bytes[k] == b'}' { depth -= 1; }
+            if bytes[k] == b'{' {
+                depth += 1;
+            } else if bytes[k] == b'}' {
+                depth -= 1;
+            }
             k += 1;
         }
         let body_end = k - 1;
         let body = &s[body_start..body_end];
         let body_trimmed = body.trim();
         if body_trimmed.starts_with("return ") && body_trimmed.ends_with(';') {
-            let expr = body_trimmed[7..body_trimmed.len()-1].trim();
+            let expr = body_trimmed[7..body_trimmed.len() - 1].trim();
             // Build macro definition
             let macro_def = format!("#define base64_dec_fn(c) ({})\n", expr);
             // Find start of return type line
@@ -4629,20 +5502,28 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
             let mut depth = 1i32;
             let mut j = after_lt;
             while j < bytes.len() && depth > 0 {
-                if bytes[j] == b'<' { depth += 1; }
-                else if bytes[j] == b'>' { depth -= 1; }
+                if bytes[j] == b'<' {
+                    depth += 1;
+                } else if bytes[j] == b'>' {
+                    depth -= 1;
+                }
                 j += 1;
             }
             if depth == 0 {
                 // Skip past > and whitespace/newlines to find { or ;
                 let mut k = j;
-                while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' { k += 1; }
+                while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
                 if k < bytes.len() && bytes[k] == b'{' {
                     let mut bd = 1i32;
                     k += 1;
                     while k < bytes.len() && bd > 0 {
-                        if bytes[k] == b'{' { bd += 1; }
-                        else if bytes[k] == b'}' { bd -= 1; }
+                        if bytes[k] == b'{' {
+                            bd += 1;
+                        } else if bytes[k] == b'}' {
+                            bd -= 1;
+                        }
                         k += 1;
                     }
                 } else if k < bytes.len() && bytes[k] == b';' {
@@ -4658,7 +5539,9 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     // Remove remaining constexpr keyword
     result = result.replace("constexpr ", "");
     // Inject uchar typedef if not present (needed when IN_GCC is defined)
-    if !result.contains("typedef unsigned char uchar") && !result.contains("typedef\tunsigned char uchar") {
+    if !result.contains("typedef unsigned char uchar")
+        && !result.contains("typedef\tunsigned char uchar")
+    {
         // Add after the first #include or at the beginning
         if let Some(pos) = result.find("\n") {
             result.insert_str(pos, "\n#ifndef HAVE_UCHAR\ntypedef unsigned char uchar;\n#endif\n");
@@ -4715,7 +5598,7 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
         let already_defined = result.contains(&pattern)
             || result.contains(&format!("typedef {} {};", base, ty))
             || result.contains(&format!("}} {};", ty))  // struct typedef 结尾
-            || result.contains(&format!("typedef struct {} {};", ty, ty));  // struct 前向声明
+            || result.contains(&format!("typedef struct {} {};", ty, ty)); // struct 前向声明
         if !already_defined {
             // 仅在类型未定义时注入
             let def = format!("typedef {} {};\n", base, ty);
@@ -4749,8 +5632,11 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
     result = fix_inline_member_calls(&result);
     // Convert out-of-line member function definitions (add this_, fix init lists)
     // Only run for files that have known out-of-line member function patterns
-    if result.contains("_add_range") || result.contains("_get_next")
-        || result.contains("_process_next_codepoint") || result.contains("_advance_display_cols") {
+    if result.contains("_add_range")
+        || result.contains("_get_next")
+        || result.contains("_process_next_codepoint")
+        || result.contains("_advance_display_cols")
+    {
         let structs = collect_struct_members(&result);
         if !structs.is_empty() {
             result = convert_member_fn_definitions(&result, &structs);
@@ -4802,8 +5688,11 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
             let after_brace = pos + "static signed char base64_dec[] = {".len();
             if let Some(end_pos) = result[after_brace..].find("};") {
                 let abs_end = after_brace + end_pos + 2;
-                result = format!("{}static signed char base64_dec[256];{}", 
-                    &result[..pos], &result[abs_end..]);
+                result = format!(
+                    "{}static signed char base64_dec[256];{}",
+                    &result[..pos],
+                    &result[abs_end..]
+                );
             }
         }
         // Remove the base64_dec_fn function definition including its return type
@@ -4819,13 +5708,23 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
             // Go back further to find the return type on previous line(s)
             if type_start > 0 {
                 let mut line_end = type_start - 1; // skip newline
-                // Skip whitespace
-                while line_end > 0 && (bytes[line_end - 1] == b' ' || bytes[line_end - 1] == b'\t' || bytes[line_end - 1] == b'\n') {
+                                                   // Skip whitespace
+                while line_end > 0
+                    && (bytes[line_end - 1] == b' '
+                        || bytes[line_end - 1] == b'\t'
+                        || bytes[line_end - 1] == b'\n')
+                {
                     line_end -= 1;
                 }
                 // Go back past the return type identifier(s)
-                while line_end > 0 && (is_ident_char(bytes[line_end - 1]) || bytes[line_end - 1] == b' ' || bytes[line_end - 1] == b'\t') {
-                    if bytes[line_end - 1] == b'\n' { break; }
+                while line_end > 0
+                    && (is_ident_char(bytes[line_end - 1])
+                        || bytes[line_end - 1] == b' '
+                        || bytes[line_end - 1] == b'\t')
+                {
+                    if bytes[line_end - 1] == b'\n' {
+                        break;
+                    }
                     line_end -= 1;
                 }
                 type_start = line_end;
@@ -4833,18 +5732,27 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
             // Find the function body end
             let after_sig = fn_start + "base64_dec_fn (unsigned char c)".len();
             let mut j = after_sig;
-            while j < bytes.len() && bytes[j] != b'{' { j += 1; }
+            while j < bytes.len() && bytes[j] != b'{' {
+                j += 1;
+            }
             if j < bytes.len() {
                 let mut depth = 1i32;
                 let mut k = j + 1;
                 while k < bytes.len() && depth > 0 {
-                    if bytes[k] == b'{' { depth += 1; }
-                    else if bytes[k] == b'}' { depth -= 1; }
+                    if bytes[k] == b'{' {
+                        depth += 1;
+                    } else if bytes[k] == b'}' {
+                        depth -= 1;
+                    }
                     k += 1;
                 }
                 // Skip trailing whitespace/newlines
                 let mut end = k;
-                while end < bytes.len() && (bytes[end] == b'\n' || bytes[end] == b' ' || bytes[end] == b'\t') { end += 1; }
+                while end < bytes.len()
+                    && (bytes[end] == b'\n' || bytes[end] == b' ' || bytes[end] == b'\t')
+                {
+                    end += 1;
+                }
                 result = format!("{}{}", &result[..type_start], &result[end..]);
             }
         }
@@ -4917,15 +5825,23 @@ fn fix_broken_constructors(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // Skip strings and comments
-        if bytes[i] == b'"' { let j = skip_string_literal(bytes, i); result.push_str(&s[i..j]); i = j; continue; }
-        if bytes[i] == b'/' && i+1 < len && (bytes[i+1] == b'/' || bytes[i+1] == b'*') {
-            let j = skip_comment(bytes, i); result.push_str(&s[i..j]); i = j; continue;
+        if bytes[i] == b'"' {
+            let j = skip_string_literal(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < len && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            let j = skip_comment(bytes, i);
+            result.push_str(&s[i..j]);
+            i = j;
+            continue;
         }
         // Look for identifier at start of line that ends with '_'
-        if is_ident_char(bytes[i]) && (i == 0 || bytes[i-1] == b'\n') {
+        if is_ident_char(bytes[i]) && (i == 0 || bytes[i - 1] == b'\n') {
             let (ident, ident_end) = read_ident(bytes, i);
             if ident.ends_with('_') && ident.len() > 1 {
-                let class_name = &ident[..ident.len()-1];
+                let class_name = &ident[..ident.len() - 1];
                 // Check if next non-whitespace is the same identifier followed by '('
                 let after = skip_ws(bytes, ident_end);
                 if after < len && is_ident_char(bytes[after]) {
@@ -4938,12 +5854,15 @@ fn fix_broken_constructors(s: &str) -> String {
                             let mut depth = 1i32;
                             let mut j = after_next + 1;
                             while j < len && depth > 0 {
-                                if bytes[j] == b'(' { depth += 1; }
-                                else if bytes[j] == b')' { depth -= 1; }
+                                if bytes[j] == b'(' {
+                                    depth += 1;
+                                } else if bytes[j] == b')' {
+                                    depth -= 1;
+                                }
                                 j += 1;
                             }
                             let paren_end = j - 1;
-                            let params = &s[after_next+1..paren_end];
+                            let params = &s[after_next + 1..paren_end];
                             let after_paren = skip_ws(bytes, j);
                             // Check for initializer list ':'
                             if after_paren < len && bytes[after_paren] == b':' {
@@ -4955,25 +5874,37 @@ fn fix_broken_constructors(s: &str) -> String {
                                     if is_ident_char(bytes[k]) {
                                         let (mname, mname_end) = read_ident(bytes, k);
                                         let after_mname = skip_ws(bytes, mname_end);
-                                        if after_mname < len && (bytes[after_mname] == b'(' || bytes[after_mname] == b'{') {
+                                        if after_mname < len
+                                            && (bytes[after_mname] == b'('
+                                                || bytes[after_mname] == b'{')
+                                        {
                                             let open = bytes[after_mname];
                                             let close = if open == b'(' { b')' } else { b'}' };
                                             let mut d = 1i32;
                                             let mut v = after_mname + 1;
                                             while v < len && d > 0 {
-                                                if bytes[v] == open { d += 1; }
-                                                else if bytes[v] == close { d -= 1; }
+                                                if bytes[v] == open {
+                                                    d += 1;
+                                                } else if bytes[v] == close {
+                                                    d -= 1;
+                                                }
                                                 v += 1;
                                             }
-                                            let value = &s[after_mname+1..v-1];
+                                            let value = &s[after_mname + 1..v - 1];
                                             init_entries.push((mname, value.to_string()));
                                             k = v;
                                             let after_val = skip_ws(bytes, k);
                                             if after_val < len && bytes[after_val] == b',' {
                                                 k = after_val + 1;
-                                            } else { k = after_val; }
-                                        } else { k = after_mname; }
-                                    } else { k += 1; }
+                                            } else {
+                                                k = after_val;
+                                            }
+                                        } else {
+                                            k = after_mname;
+                                        }
+                                    } else {
+                                        k += 1;
+                                    }
                                 }
                                 // Find body '{' ... '}'
                                 if k < len && bytes[k] == b'{' {
@@ -4981,22 +5912,34 @@ fn fix_broken_constructors(s: &str) -> String {
                                     let body_start = k + 1;
                                     k += 1;
                                     while k < len && bd > 0 {
-                                        if bytes[k] == b'{' { bd += 1; }
-                                        else if bytes[k] == b'}' { bd -= 1; }
+                                        if bytes[k] == b'{' {
+                                            bd += 1;
+                                        } else if bytes[k] == b'}' {
+                                            bd -= 1;
+                                        }
                                         k += 1;
                                     }
-                                    let body = &s[body_start..k-1];
+                                    let body = &s[body_start..k - 1];
                                     // Output: void _ctor_ClassName_N(struct ClassName *this_, params) { assignments; body }
-                                    let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
+                                    let param_count = if params.trim().is_empty() {
+                                        1
+                                    } else {
+                                        1 + params.split(',').count()
+                                    };
                                     result.push_str(&format!(
-                                        "void _ctor_{}_{}(struct {} *this_{}", 
-                                        class_name, param_count, class_name,
+                                        "void _ctor_{}_{}(struct {} *this_{}",
+                                        class_name,
+                                        param_count,
+                                        class_name,
                                         if params.trim().is_empty() { "" } else { ", " }
                                     ));
                                     result.push_str(params.trim());
                                     result.push_str(") {\n");
                                     for (mname, mvalue) in &init_entries {
-                                        result.push_str(&format!("  this_->{} = {};\n", mname, mvalue));
+                                        result.push_str(&format!(
+                                            "  this_->{} = {};\n",
+                                            mname, mvalue
+                                        ));
                                     }
                                     result.push_str(body);
                                     result.push_str("}\n");
@@ -5009,15 +5952,24 @@ fn fix_broken_constructors(s: &str) -> String {
                                 let body_start = after_paren + 1;
                                 let mut k = body_start;
                                 while k < len && bd > 0 {
-                                    if bytes[k] == b'{' { bd += 1; }
-                                    else if bytes[k] == b'}' { bd -= 1; }
+                                    if bytes[k] == b'{' {
+                                        bd += 1;
+                                    } else if bytes[k] == b'}' {
+                                        bd -= 1;
+                                    }
                                     k += 1;
                                 }
-                                let body = &s[body_start..k-1];
-                                let param_count = if params.trim().is_empty() { 1 } else { 1 + params.split(',').count() };
+                                let body = &s[body_start..k - 1];
+                                let param_count = if params.trim().is_empty() {
+                                    1
+                                } else {
+                                    1 + params.split(',').count()
+                                };
                                 result.push_str(&format!(
-                                    "void _ctor_{}_{}(struct {} *this_{}", 
-                                    class_name, param_count, class_name,
+                                    "void _ctor_{}_{}(struct {} *this_{}",
+                                    class_name,
+                                    param_count,
+                                    class_name,
                                     if params.trim().is_empty() { "" } else { ", " }
                                 ));
                                 result.push_str(params.trim());
@@ -5048,12 +6000,14 @@ fn strip_attributes(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // 检查 __attribute__
-        if i + 13 <= len && &bytes[i..i+13] == b"__attribute__" {
+        if i + 13 <= len && &bytes[i..i + 13] == b"__attribute__" {
             let attr_start = i;
             // 跳过 __attribute__
             i += 13;
             // 跳过空格
-            while i < len && bytes[i] == b' ' { i += 1; }
+            while i < len && bytes[i] == b' ' {
+                i += 1;
+            }
             // 检查 (( 或 (
             if i < len && bytes[i] == b'(' {
                 i += 1;
@@ -5062,8 +6016,11 @@ fn strip_attributes(s: &str) -> String {
                 // 跳过 balanced parens
                 let mut depth = 1i32;
                 while i < len && depth > 0 {
-                    if bytes[i] == b'(' { depth += 1; }
-                    else if bytes[i] == b')' { depth -= 1; }
+                    if bytes[i] == b'(' {
+                        depth += 1;
+                    } else if bytes[i] == b')' {
+                        depth -= 1;
+                    }
                     i += 1;
                 }
                 let content_end = i - 1;
@@ -5073,7 +6030,9 @@ fn strip_attributes(s: &str) -> String {
                     result.push_str(&s[attr_start..i]);
                 }
                 // 跳过尾部空格
-                while i < len && bytes[i] == b' ' { i += 1; }
+                while i < len && bytes[i] == b' ' {
+                    i += 1;
+                }
             }
         } else {
             result.push(bytes[i] as char);
@@ -5090,16 +6049,32 @@ fn fix_struct_primitive_types(s: &str) -> String {
     let mut result = s.to_string();
     // 基本类型列表: 这些类型不应该有 struct 前缀
     let primitive_types = [
-        "signed long int", "unsigned long int",
-        "signed long long", "unsigned long long",
-        "signed int", "unsigned int",
-        "signed short", "unsigned short",
-        "signed char", "unsigned char",
-        "long double", "long long",
-        "long int", "short int",
-        "signed", "unsigned",
-        "long", "short", "int", "char", "float", "double",
-        "void", "size_t", "ssize_t", "ptrdiff_t",
+        "signed long int",
+        "unsigned long int",
+        "signed long long",
+        "unsigned long long",
+        "signed int",
+        "unsigned int",
+        "signed short",
+        "unsigned short",
+        "signed char",
+        "unsigned char",
+        "long double",
+        "long long",
+        "long int",
+        "short int",
+        "signed",
+        "unsigned",
+        "long",
+        "short",
+        "int",
+        "char",
+        "float",
+        "double",
+        "void",
+        "size_t",
+        "ssize_t",
+        "ptrdiff_t",
     ];
     for ty in &primitive_types {
         // 替换 `struct <type>` 为 `<type>`
@@ -5114,11 +6089,39 @@ fn fix_struct_primitive_types(s: &str) -> String {
 /// 检测这种模式并添加 struct 前缀, 同时添加 typedef 以便无 struct 前缀引用.
 fn fix_missing_struct_keywords(s: &str) -> String {
     let c_keywords = [
-        "if", "else", "for", "while", "do", "switch", "case", "break",
-        "continue", "return", "goto", "typedef", "struct", "union", "enum",
-        "extern", "static", "const", "volatile", "inline", "register",
-        "void", "int", "char", "float", "double", "long", "short",
-        "signed", "unsigned", "sizeof", "typeof", "__typeof__",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "switch",
+        "case",
+        "break",
+        "continue",
+        "return",
+        "goto",
+        "typedef",
+        "struct",
+        "union",
+        "enum",
+        "extern",
+        "static",
+        "const",
+        "volatile",
+        "inline",
+        "register",
+        "void",
+        "int",
+        "char",
+        "float",
+        "double",
+        "long",
+        "short",
+        "signed",
+        "unsigned",
+        "sizeof",
+        "typeof",
+        "__typeof__",
     ];
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
@@ -5134,7 +6137,9 @@ fn fix_missing_struct_keywords(s: &str) -> String {
                 && !before_brace.contains('(')
                 && !before_brace.contains(')')
                 && !before_brace.contains('=')
-                && before_brace.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && before_brace
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_')
                 && !c_keywords.contains(&before_brace)
                 && i + 1 < lines.len()
                 && (lines[i + 1].trim() == "};" || lines[i + 1].trim().starts_with("void _ZN"))
@@ -5174,18 +6179,71 @@ fn demangle_c_functions(s: &str) -> String {
     let mut result = s.to_string();
     // 常见 C 标准库函数 (无参或可变参的简单函数)
     let c_functions = [
-        "strlen", "strcmp", "strncmp", "memcpy", "memcmp", "memset",
-        "strcpy", "strncpy", "strcat", "strncat", "strchr", "strrchr",
-        "strstr", "malloc", "free", "calloc", "realloc", "abort",
-        "exit", "atoi", "atol", "atof", "abs", "labs", "printf",
-        "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf",
-        "vsprintf", "vsnprintf", "fopen", "fclose", "fread", "fwrite",
-        "fseek", "ftell", "rewind", "feof", "ferror", "clearerr",
-        "getenv", "setenv", "system", "qsort", "bsearch",
-        "memchr", "rawmemchr", "memrchr", "strpbrk", "strnlen",
-        "strchrnul", "stpcpy", "stpncpy", "index", "rindex",
-        "strdup", "strndup", "fopencookie", "fgetpos", "fsetpos",
-        "fgetpos64", "fsetpos64", "strcoll",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "memcpy",
+        "memcmp",
+        "memset",
+        "strcpy",
+        "strncpy",
+        "strcat",
+        "strncat",
+        "strchr",
+        "strrchr",
+        "strstr",
+        "malloc",
+        "free",
+        "calloc",
+        "realloc",
+        "abort",
+        "exit",
+        "atoi",
+        "atol",
+        "atof",
+        "abs",
+        "labs",
+        "printf",
+        "fprintf",
+        "sprintf",
+        "snprintf",
+        "vprintf",
+        "vfprintf",
+        "vsprintf",
+        "vsnprintf",
+        "fopen",
+        "fclose",
+        "fread",
+        "fwrite",
+        "fseek",
+        "ftell",
+        "rewind",
+        "feof",
+        "ferror",
+        "clearerr",
+        "getenv",
+        "setenv",
+        "system",
+        "qsort",
+        "bsearch",
+        "memchr",
+        "rawmemchr",
+        "memrchr",
+        "strpbrk",
+        "strnlen",
+        "strchrnul",
+        "stpcpy",
+        "stpncpy",
+        "index",
+        "rindex",
+        "strdup",
+        "strndup",
+        "fopencookie",
+        "fgetpos",
+        "fsetpos",
+        "fgetpos64",
+        "fsetpos64",
+        "strcoll",
     ];
     for func in &c_functions {
         // _ZN<len><name>Ev 模式 (Itanium ABI: 无参函数)
@@ -5200,16 +6258,53 @@ fn demangle_c_functions(s: &str) -> String {
 /// 链接时与 libc/libiberty 的实现冲突. 将空函数体转为 `;` 声明.
 fn convert_empty_clib_defs_to_decls(s: &str) -> String {
     let clib_fns = [
-        "memchr", "rawmemchr", "memrchr", "memcmp", "memcpy",
-        "memmove", "memset", "strcpy", "strncpy", "strcat",
-        "strncat", "strchr", "strrchr", "strstr", "strpbrk",
-        "strnlen", "strlen", "strcmp", "strncmp", "strcoll",
-        "index", "rindex", "stpcpy", "stpncpy",
-        "strchrnul", "strdup", "strndup", "malloc", "free",
-        "calloc", "realloc", "fopen", "fclose", "fread", "fwrite",
-        "fseek", "ftell", "rewind", "feof", "ferror",
-        "getenv", "setenv", "fopencookie",
-        "fgetpos", "fsetpos", "fgetpos64", "fsetpos64",
+        "memchr",
+        "rawmemchr",
+        "memrchr",
+        "memcmp",
+        "memcpy",
+        "memmove",
+        "memset",
+        "strcpy",
+        "strncpy",
+        "strcat",
+        "strncat",
+        "strchr",
+        "strrchr",
+        "strstr",
+        "strpbrk",
+        "strnlen",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "strcoll",
+        "index",
+        "rindex",
+        "stpcpy",
+        "stpncpy",
+        "strchrnul",
+        "strdup",
+        "strndup",
+        "malloc",
+        "free",
+        "calloc",
+        "realloc",
+        "fopen",
+        "fclose",
+        "fread",
+        "fwrite",
+        "fseek",
+        "ftell",
+        "rewind",
+        "feof",
+        "ferror",
+        "getenv",
+        "setenv",
+        "fopencookie",
+        "fgetpos",
+        "fsetpos",
+        "fgetpos64",
+        "fsetpos64",
     ];
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
@@ -5229,7 +6324,7 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
         });
         if is_clib_fn && i + 1 < lines.len() && lines[i + 1].trim() == "}" {
             // 确认是空函数体: 当前行 `{` 结尾, 下一行 `}`
-            let new_line = format!("{};", trimmed[..trimmed.len()-1].trim_end());
+            let new_line = format!("{};", trimmed[..trimmed.len() - 1].trim_end());
             result.push_str(&new_line);
             result.push('\n');
             i += 2; // 跳过 `{` 行和 `}` 行
@@ -5251,7 +6346,7 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
             // 检查是否所有参数名为 `_`
             if let Some(paren_start) = trimmed.rfind('(') {
                 // 提取 ( 和 ) 之间的参数列表
-                let after_paren = &trimmed[paren_start+1..];
+                let after_paren = &trimmed[paren_start + 1..];
                 let params_str = if let Some(close_paren) = after_paren.rfind(')') {
                     after_paren[..close_paren].trim()
                 } else {
@@ -5261,12 +6356,14 @@ fn convert_empty_clib_defs_to_decls(s: &str) -> String {
                 if !params_str.is_empty() {
                     let all_underscore = params_str.split(',').all(|p| {
                         let p = p.trim();
-                        p.ends_with(" _") || p == "void* _" || p == "..." ||
-                        (p.split_whitespace().last() == Some("_"))
+                        p.ends_with(" _")
+                            || p == "void* _"
+                            || p == "..."
+                            || (p.split_whitespace().last() == Some("_"))
                     });
                     if all_underscore && j + 1 < lines2.len() && lines2[j + 1].trim() == "}" {
                         // 空函数体且所有参数名为 _: 转为声明
-                        let decl = format!("{};", trimmed[..trimmed.len()-1].trim_end());
+                        let decl = format!("{};", trimmed[..trimmed.len() - 1].trim_end());
                         result2.push_str(&decl);
                         result2.push('\n');
                         j += 2;
@@ -5337,8 +6434,12 @@ fn staticize_clib_inline_fns(s: &str) -> String {
                 j += 1;
                 while j < lines.len() && brace_depth > 0 {
                     for ch in lines[j].chars() {
-                        if ch == '{' { brace_depth += 1; }
-                        if ch == '}' { brace_depth -= 1; }
+                        if ch == '{' {
+                            brace_depth += 1;
+                        }
+                        if ch == '}' {
+                            brace_depth -= 1;
+                        }
                     }
                     j += 1;
                 }
@@ -5364,8 +6465,12 @@ fn convert_dynamic_global_inits(s: &str) -> String {
     for line in s.lines() {
         // 跟踪花括号深度 (0 = 全局作用域)
         for ch in line.chars() {
-            if ch == '{' { brace_depth += 1; }
-            if ch == '}' { brace_depth -= 1; }
+            if ch == '{' {
+                brace_depth += 1;
+            }
+            if ch == '}' {
+                brace_depth -= 1;
+            }
         }
         // 只在全局作用域 (brace_depth == 0) 转换
         // 注意: 上面的循环已更新了 depth, 所以当前行的 depth
@@ -5453,8 +6558,11 @@ fn remove_leaked_fn_body_stmts(s: &str) -> String {
         let trimmed = lines[i].trim();
         // 更新花括号深度
         for ch in trimmed.chars() {
-            if ch == '{' { brace_depth += 1; }
-            else if ch == '}' { brace_depth -= 1; }
+            if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                brace_depth -= 1;
+            }
         }
         // 检查是否是函数/宏定义结束后的泄漏语句块
         // 特征: 前一行是 `}` 且花括号深度回到 0 (顶层函数结束),
@@ -5501,8 +6609,8 @@ fn remove_leaked_fn_body_stmts(s: &str) -> String {
                 // - 2+ 行且包含 struct 声明, 或
                 // - 3+ 行简单声明 (无 struct 也可能是泄漏)
                 // 则认为是泄漏的函数体, 移除这些行
-                let is_leak = (has_struct_decl && leak_end - leak_start >= 2)
-                    || leak_end - leak_start >= 3;
+                let is_leak =
+                    (has_struct_decl && leak_end - leak_start >= 2) || leak_end - leak_start >= 3;
                 if is_leak {
                     // 检查泄漏块后是否是函数定义或文件结尾
                     let mut after_leak = leak_end;
@@ -5562,16 +6670,29 @@ fn dedup_global_fn_defs(s: &str) -> String {
             if let Some(paren_pos) = trimmed.find('(') {
                 // 提取函数名 (括号前的标识符)
                 let before_paren = trimmed[..paren_pos].trim();
-                if let Some(fn_name) = before_paren.rsplit_once(' ').or_else(|| before_paren.rsplit_once('*')).map(|(_, name)| name.trim()).or_else(|| {
-                    // 如果没空格, 整个 before_paren 可能是 fn_name
-                    if !before_paren.is_empty() && before_paren.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        Some(before_paren)
-                    } else {
-                        None
-                    }
-                }) {
+                if let Some(fn_name) = before_paren
+                    .rsplit_once(' ')
+                    .or_else(|| before_paren.rsplit_once('*'))
+                    .map(|(_, name)| name.trim())
+                    .or_else(|| {
+                        // 如果没空格, 整个 before_paren 可能是 fn_name
+                        if !before_paren.is_empty()
+                            && before_paren
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            Some(before_paren)
+                        } else {
+                            None
+                        }
+                    })
+                {
                     if !fn_name.is_empty()
-                        && fn_name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                        && fn_name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_alphabetic() || c == '_')
+                            .unwrap_or(false)
                     {
                         // 检查行是否包含 '{' (函数定义开始)
                         if trimmed.contains('{') {
@@ -5591,14 +6712,22 @@ fn dedup_global_fn_defs(s: &str) -> String {
                                     // 多行函数 - 跳过到匹配的 '}'
                                     let mut brace_depth: i32 = 0;
                                     for ch in trimmed.chars() {
-                                        if ch == '{' { brace_depth += 1; }
-                                        if ch == '}' { brace_depth -= 1; }
+                                        if ch == '{' {
+                                            brace_depth += 1;
+                                        }
+                                        if ch == '}' {
+                                            brace_depth -= 1;
+                                        }
                                     }
                                     i += 1;
                                     while i < lines.len() && brace_depth > 0 {
                                         for ch in lines[i].chars() {
-                                            if ch == '{' { brace_depth += 1; }
-                                            if ch == '}' { brace_depth -= 1; }
+                                            if ch == '{' {
+                                                brace_depth += 1;
+                                            }
+                                            if ch == '}' {
+                                                brace_depth -= 1;
+                                            }
                                         }
                                         i += 1;
                                     }
@@ -5629,10 +6758,11 @@ fn fix_sch_extern_decls(s: &str) -> String {
     for line in &lines {
         let trimmed = line.trim();
         // 检测 _sch_* 变量定义: "unsigned short _sch_istable;" 等
-        if (trimmed.starts_with("unsigned short _sch_") 
+        if (trimmed.starts_with("unsigned short _sch_")
             || trimmed.starts_with("unsigned char _sch_"))
             && trimmed.ends_with(';')
-            && !trimmed.contains('[') // 数组声明保持原样
+            && !trimmed.contains('[')
+        // 数组声明保持原样
         {
             // 转为 extern 声明
             result.push_str("extern ");
@@ -5664,8 +6794,8 @@ fn staticize_std_functions(s: &str) -> String {
         let has_cpp_mangled = trimmed.contains("_ZN");
         let is_std_fn = !is_main_fn
             && !has_cpp_mangled
-            && (trimmed.starts_with("void ") 
-                || trimmed.starts_with("void*") 
+            && (trimmed.starts_with("void ")
+                || trimmed.starts_with("void*")
                 || trimmed.starts_with("size_t ")
                 || trimmed.starts_with("int ")
                 || trimmed.starts_with("char ")
@@ -5709,12 +6839,29 @@ fn staticize_std_functions(s: &str) -> String {
 fn fix_gengtype_global_vars(s: &str) -> String {
     // gengtype 全局变量列表
     let gengtype_vars = [
-        "gt_files", "num_gt_files", "build_headers", "num_build_headers",
-        "this_file", "system_h_file", "lang_dir_names", "num_lang_dirs",
-        "lexer_toplevel_done", "lexer_line", "typedefs", "structures",
-        "variables", "string_type", "scalar_nonchar", "scalar_char",
-        "callback_type", "output_files", "header_file",
-        "hit_error", "verbosity_level", "do_dump", "do_debug",
+        "gt_files",
+        "num_gt_files",
+        "build_headers",
+        "num_build_headers",
+        "this_file",
+        "system_h_file",
+        "lang_dir_names",
+        "num_lang_dirs",
+        "lexer_toplevel_done",
+        "lexer_line",
+        "typedefs",
+        "structures",
+        "variables",
+        "string_type",
+        "scalar_nonchar",
+        "scalar_char",
+        "callback_type",
+        "output_files",
+        "header_file",
+        "hit_error",
+        "verbosity_level",
+        "do_dump",
+        "do_debug",
     ];
     let lines: Vec<&str> = s.lines().collect();
     let mut result = String::with_capacity(s.len());
@@ -5730,7 +6877,8 @@ fn fix_gengtype_global_vars(s: &str) -> String {
             && !trimmed.starts_with("static")
             && !trimmed.contains('=')  // 排除赋值语句 (如 p->next = typedefs;)
             && !trimmed.contains("->") // 排除成员访问
-            && !trimmed.contains('.')  // 排除成员访问
+            && !trimmed.contains('.')
+        // 排除成员访问
         {
             result.push_str("extern ");
             result.push_str(trimmed);
@@ -5764,23 +6912,33 @@ fn fix_missing_ptr_typedefs(s: &str) -> String {
                 // 检查 struct 是否存在
                 let struct_pattern = format!("struct {} {{", struct_name);
                 let struct_pattern2 = format!("struct {}\n", struct_name);
-                if s.contains(&struct_pattern) || s.contains(&struct_pattern2) || s.contains(&format!("struct {} ", struct_name)) {
+                if s.contains(&struct_pattern)
+                    || s.contains(&struct_pattern2)
+                    || s.contains(&format!("struct {} ", struct_name))
+                {
                     // 检查 typedef 是否已存在
-                    let typedef_pattern = format!("typedef struct {} *{}", struct_name, typedef_name);
+                    let typedef_pattern =
+                        format!("typedef struct {} *{}", struct_name, typedef_name);
                     if !s.contains(&typedef_pattern) {
                         // 检查 typedef_name 是否被使用
                         if s.contains(typedef_name) {
-                            result.push_str(&format!("typedef struct {} *{};\n", struct_name, typedef_name));
+                            result.push_str(&format!(
+                                "typedef struct {} *{};\n",
+                                struct_name, typedef_name
+                            ));
                         }
                     }
                 }
             }
             // 也检查 const_type_p
-            if s.contains("const_type_p") && !s.contains("typedef const struct type *const_type_p") {
+            if s.contains("const_type_p") && !s.contains("typedef const struct type *const_type_p")
+            {
                 result.push_str("typedef const struct type *const_type_p;\n");
             }
             // flex 生成的 YY_BUFFER_STATE
-            if s.contains("YY_BUFFER_STATE") && !s.contains("typedef struct yy_buffer_state *YY_BUFFER_STATE") {
+            if s.contains("YY_BUFFER_STATE")
+                && !s.contains("typedef struct yy_buffer_state *YY_BUFFER_STATE")
+            {
                 result.push_str("typedef struct yy_buffer_state *YY_BUFFER_STATE;\n");
             }
             inserted = true;
@@ -5803,31 +6961,39 @@ fn convert_if_cond_decls(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // Look for 'if ('
-        if i + 4 < len && &bytes[i..i+3] == b"if " && bytes[i+3] == b'(' {
+        if i + 4 < len && &bytes[i..i + 3] == b"if " && bytes[i + 3] == b'(' {
             // Check if there's a type declaration inside
             let mut j = i + 4;
             // Skip ASCII whitespace
-            while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') { j += 1; }
+            while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+                j += 1;
+            }
             // Check for type keywords or identifiers that could be types
-            let is_type_start = (j + 11 <= len && &bytes[j..j+11] == b"__auto_type")
-                || (j + 8 <= len && &bytes[j..j+8] == b"unsigned")
-                || (j + 6 <= len && &bytes[j..j+6] == b"signed")
-                || (j + 4 <= len && (&bytes[j..j+4] == b"int " || &bytes[j..j+4] == b"char" || &bytes[j..j+4] == b"long"))
-                || (j + 3 <= len && &bytes[j..j+3] == b"int")
-                || (bytes[j] == b's' && j + 7 <= len && &bytes[j..j+7] == b"struct ");
+            let is_type_start = (j + 11 <= len && &bytes[j..j + 11] == b"__auto_type")
+                || (j + 8 <= len && &bytes[j..j + 8] == b"unsigned")
+                || (j + 6 <= len && &bytes[j..j + 6] == b"signed")
+                || (j + 4 <= len
+                    && (&bytes[j..j + 4] == b"int "
+                        || &bytes[j..j + 4] == b"char"
+                        || &bytes[j..j + 4] == b"long"))
+                || (j + 3 <= len && &bytes[j..j + 3] == b"int")
+                || (bytes[j] == b's' && j + 7 <= len && &bytes[j..j + 7] == b"struct ");
 
             if is_type_start {
                 // Find the matching )
                 let mut depth = 1;
                 let mut k = j;
                 while k < len && depth > 0 {
-                    if bytes[k] == b'(' { depth += 1; }
-                    else if bytes[k] == b')' { depth -= 1; }
+                    if bytes[k] == b'(' {
+                        depth += 1;
+                    } else if bytes[k] == b')' {
+                        depth -= 1;
+                    }
                     k += 1;
                 }
                 if depth == 0 {
                     // Extract the declaration: Type var = expr
-                    let decl_bytes = &bytes[j..k-1];
+                    let decl_bytes = &bytes[j..k - 1];
                     // Find the variable name (last identifier before =)
                     // But skip comparison operators: !=, ==, <=, >=
                     let mut found_eq_pos = None;
@@ -5836,11 +7002,18 @@ fn convert_if_cond_decls(s: &str) -> String {
                         let eq_pos = search_start + rel_pos;
                         // Check if this is part of a comparison operator
                         let prev_char = if eq_pos > 0 { decl_bytes[eq_pos - 1] } else { 0 };
-                        let next_char = if eq_pos + 1 < decl_bytes.len() { decl_bytes[eq_pos + 1] } else { 0 };
+                        let next_char = if eq_pos + 1 < decl_bytes.len() {
+                            decl_bytes[eq_pos + 1]
+                        } else {
+                            0
+                        };
                         // Skip if part of !=, ==, <=, >=
-                        if prev_char == b'!' || prev_char == b'='
-                            || prev_char == b'<' || prev_char == b'>'
-                            || next_char == b'=' {
+                        if prev_char == b'!'
+                            || prev_char == b'='
+                            || prev_char == b'<'
+                            || prev_char == b'>'
+                            || next_char == b'='
+                        {
                             search_start = eq_pos + 1;
                             continue;
                         }
@@ -5852,7 +7025,11 @@ fn convert_if_cond_decls(s: &str) -> String {
                         let before_eq = trim_ascii_end(&decl_bytes[..eq_pos]);
                         // Find the last word (variable name)
                         let var_name = last_ascii_word(before_eq);
-                        if !var_name.is_empty() && var_name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                        if !var_name.is_empty()
+                            && var_name
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        {
                             // Convert: if (Type var = expr) { ... }
                             // To: Type var = expr; if (var) { ... }
                             result.extend_from_slice(decl_bytes);
@@ -5910,31 +7087,37 @@ fn convert_ref_to_array(s: &str) -> String {
     let mut result = String::with_capacity(len);
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'(' && i + 1 < len && bytes[i+1] == b'&' {
+        if bytes[i] == b'(' && i + 1 < len && bytes[i + 1] == b'&' {
             // Check if this is *(&pattern)
-            if i > 0 && bytes[i-1] == b'*' {
+            if i > 0 && bytes[i - 1] == b'*' {
                 // Find matching )
                 let mut j = i + 2;
                 let mut depth = 1;
                 while j < len && depth > 0 {
-                    if bytes[j] == b'(' { depth += 1; }
-                    else if bytes[j] == b')' { depth -= 1; }
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
                     j += 1;
                 }
                 if depth == 0 && j < len && bytes[j] == b')' {
                     // Check if followed by [
-                    if j + 1 < len && bytes[j+1] == b'[' {
+                    if j + 1 < len && bytes[j + 1] == b'[' {
                         // Extract identifier between & and )
                         let id_start = i + 2;
                         let id_end = j;
                         let ident = &s[id_start..id_end];
                         // Check it's a valid identifier
-                        if !ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        if !ident.is_empty()
+                            && ident.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
                             // Replace *(&ident) with *(*ident)
                             // Remove the & and change first ( to *
                             let result_bytes = result.as_bytes();
                             let new_result_len = result_bytes.len() - 1; // remove trailing *
-                            result = String::from_utf8_lossy(&result_bytes[..new_result_len]).to_string();
+                            result = String::from_utf8_lossy(&result_bytes[..new_result_len])
+                                .to_string();
                             result.push_str(&format!("(*{})", ident));
                             i = j + 1; // skip past )
                             continue;
@@ -5971,7 +7154,9 @@ fn convert_direct_init(s: &str) -> String {
             // Read identifier
             if i < len && is_ident_char(bytes[i]) {
                 let id_start = i;
-                while i < len && is_ident_char(bytes[i]) { i += 1; }
+                while i < len && is_ident_char(bytes[i]) {
+                    i += 1;
+                }
                 let ident = &s[id_start..i];
                 // Skip whitespace
                 while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
@@ -5983,17 +7168,24 @@ fn convert_direct_init(s: &str) -> String {
                     let mut depth = 1;
                     let mut j = i + 1;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     if depth == 0 {
                         // Check if followed by ;
                         let mut k = j;
-                        while k < len && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') { k += 1; }
+                        while k < len
+                            && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n')
+                        {
+                            k += 1;
+                        }
                         if k < len && bytes[k] == b';' {
                             // Check that the content of () is an expression (not a type declaration)
-                            let inner = &s[i+1..j-1];
+                            let inner = &s[i + 1..j - 1];
                             if !inner.contains("*") && !inner.contains("enum ") {
                                 // This is direct initialization: convert to = (expr)
                                 result.push_str(ident);
@@ -6060,17 +7252,23 @@ fn fix_inline_member_calls(s: &str) -> String {
     // Fix: get_loc (0) -> this_->m_loc (in rich_location_get_loc)
     result = result.replace(
         "rich_location_get_loc(struct rich_location *this_) { return get_loc (0); }",
-        "rich_location_get_loc(struct rich_location *this_) { return this_->m_loc; }"
+        "rich_location_get_loc(struct rich_location *this_) { return this_->m_loc; }",
     );
     // Fix member function calls on struct variables:
     // rich_loc.set_escape_on_output (true) -> rich_loc_set_escape_on_output (&rich_loc, true)
     // rich_loc.add_range (expr) -> rich_loc_add_range (&rich_loc, expr)
-    result = result.replace("rich_loc.set_escape_on_output (true)", "rich_loc_set_escape_on_output (&rich_loc, true)");
+    result = result.replace(
+        "rich_loc.set_escape_on_output (true)",
+        "rich_loc_set_escape_on_output (&rich_loc, true)",
+    );
     result = result.replace("rich_loc.add_range (", "rich_loc_add_range (&rich_loc, ");
     // Fix bidi_vec.count() -> bidi_vec_count()
     result = result.replace("bidi_vec.count ()", "bidi_vec_count ()");
     // Fix C++ direct initialization: bidi_context *ctxt (expr) -> bidi_context *ctxt = (expr)
-    result = result.replace("bidi_context *ctxt (bidi_vec[range_idx - 1])", "bidi_context *ctxt = (bidi_vec[range_idx - 1])");
+    result = result.replace(
+        "bidi_context *ctxt (bidi_vec[range_idx - 1])",
+        "bidi_context *ctxt = (bidi_vec[range_idx - 1])",
+    );
     // Fix pointer member access: ctxt.m_kind -> ctxt->m_kind
     result = result.replace("ctxt.m_kind", "ctxt->m_kind");
     // Fix reference-to-array: cpp_hashnode *(&n_modules)[N][2] -> cpp_hashnode *(*n_modules)[N][2]
@@ -6085,24 +7283,35 @@ fn fix_inline_member_calls(s: &str) -> String {
             // Look for pattern: (struct STRUCTNAME *this_ (with possible whitespace before '(')
             if bytes[si] == b'(' {
                 let after_paren = skip_ws(bytes, si + 1);
-                if after_paren + 7 <= bytes.len() && bytes[after_paren..after_paren+7] == *b"struct " {
+                if after_paren + 7 <= bytes.len()
+                    && bytes[after_paren..after_paren + 7] == *b"struct "
+                {
                     let after_struct = after_paren + 7;
                     if is_ident_char(bytes[after_struct]) {
                         let (sname, sname_end) = read_ident(bytes, after_struct);
                         let after_sname = skip_ws(bytes, sname_end);
                         // Check for *this_ or *this pattern (pointer parameter named this_)
-                        let this_pattern_ok = if after_sname + 5 <= bytes.len() && bytes[after_sname..after_sname+5] == *b"*this" {
+                        let this_pattern_ok = if after_sname + 5 <= bytes.len()
+                            && bytes[after_sname..after_sname + 5] == *b"*this"
+                        {
                             true
-                        } else { after_sname + 6 <= bytes.len() && bytes[after_sname..after_sname+6] == *b" *this" };
+                        } else {
+                            after_sname + 6 <= bytes.len()
+                                && bytes[after_sname..after_sname + 6] == *b" *this"
+                        };
                         if this_pattern_ok {
                             // Found a function with struct sname *this_ parameter
                             // Now find the function name: go backward from '(' (skip whitespace)
                             let mut fn_end = si;
-                            while fn_end > 0 && (bytes[fn_end-1] == b' ' || bytes[fn_end-1] == b'\t' || bytes[fn_end-1] == b'\n') {
+                            while fn_end > 0
+                                && (bytes[fn_end - 1] == b' '
+                                    || bytes[fn_end - 1] == b'\t'
+                                    || bytes[fn_end - 1] == b'\n')
+                            {
                                 fn_end -= 1;
                             }
                             let mut fn_start = fn_end;
-                            while fn_start > 0 && is_ident_char(bytes[fn_start-1]) {
+                            while fn_start > 0 && is_ident_char(bytes[fn_start - 1]) {
                                 fn_start -= 1;
                             }
                             if fn_start < fn_end {
@@ -6111,8 +7320,13 @@ fn fix_inline_member_calls(s: &str) -> String {
                                 let prefix = format!("{}_", sname);
                                 if full_fname.starts_with(&prefix) {
                                     let mname = &full_fname[prefix.len()..];
-                                    if !mname.is_empty() && !global_member_fns.iter().any(|(sn, mn)| sn == &sname && mn == mname) {
-                                        global_member_fns.push((sname.to_string(), mname.to_string()));
+                                    if !mname.is_empty()
+                                        && !global_member_fns
+                                            .iter()
+                                            .any(|(sn, mn)| sn == &sname && mn == mname)
+                                    {
+                                        global_member_fns
+                                            .push((sname.to_string(), mname.to_string()));
                                     }
                                 }
                             }
@@ -6135,7 +7349,8 @@ fn fix_inline_member_calls(s: &str) -> String {
                     let after_mname = skip_ws(rbytes, ri + mname.len());
                     if after_mname < rbytes.len() && rbytes[after_mname] == b'(' {
                         // Check it's not already prefixed (no _ before the name)
-                        let before_ok = ri == 0 || (!is_ident_char(rbytes[ri-1]) && rbytes[ri-1] != b'_');
+                        let before_ok =
+                            ri == 0 || (!is_ident_char(rbytes[ri - 1]) && rbytes[ri - 1] != b'_');
                         if before_ok {
                             let after_paren = skip_ws(rbytes, after_mname + 1);
                             if after_paren < rbytes.len() && rbytes[after_paren] == b')' {
@@ -6201,9 +7416,9 @@ static inline int dcc_pmovmskb128(const void *p) { (void)p; return 0; }
 static inline void *dcc_pshufb128(void *p, const void *q) { (void)p; (void)q; return p; }
 "#;
     if let Some(pos) = s.find('\n') {
-        result.push_str(&s[..pos+1]);
+        result.push_str(&s[..pos + 1]);
         result.push_str(fwd_decls);
-        result.push_str(&s[pos+1..]);
+        result.push_str(&s[pos + 1..]);
     } else {
         result.push_str(fwd_decls);
         result.push_str(s);
@@ -6222,28 +7437,35 @@ fn convert_destructors(s: &str) -> String {
         // Look for pattern: identifier_~identifier
         if bytes[i] == b'~' && i > 0 && i + 1 < len {
             // Check if there's _ before ~
-            if bytes[i-1] == b'_' {
+            if bytes[i - 1] == b'_' {
                 // Find the start of the class name before _
                 let mut start = i - 2;
-                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
                     start -= 1;
                 }
                 // Extract class name
-                let class_name = &s[start..i-1];
+                let class_name = &s[start..i - 1];
                 // Find the end of the destructor name (after ~)
                 let mut j = i + 1;
                 while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                     j += 1;
                 }
                 // Skip whitespace
-                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
                 // Skip (ClassName) if present
                 if j < len && bytes[j] == b'(' {
                     let mut k = j + 1;
                     let mut depth = 1;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'(' { depth += 1; }
-                        else if bytes[k] == b')' { depth -= 1; }
+                        if bytes[k] == b'(' {
+                            depth += 1;
+                        } else if bytes[k] == b')' {
+                            depth -= 1;
+                        }
                         k += 1;
                     }
                     j = k;
@@ -6279,20 +7501,24 @@ fn convert_new_delete_expressions(s: &str) -> String {
     let mut i = 0;
     while i < len {
         // Look for 'delete ' (standalone keyword, not part of identifier)
-        if i + 7 <= len && &bytes[i..i+7] == b"delete " {
+        if i + 7 <= len && &bytes[i..i + 7] == b"delete " {
             // Check word boundary: must not be preceded by alphanumeric or _
-            let prev_ok = i == 0 || !(bytes[i-1].is_ascii_alphanumeric() || bytes[i-1] == b'_');
+            let prev_ok = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
             if prev_ok {
                 // Find the end of the expression (until ;)
                 let mut j = i + 7;
                 let mut depth = 0;
                 while j < len {
-                    if bytes[j] == b'(' { depth += 1; }
-                    else if bytes[j] == b')' { depth -= 1; }
-                    else if bytes[j] == b';' && depth == 0 { break; }
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    } else if bytes[j] == b';' && depth == 0 {
+                        break;
+                    }
                     j += 1;
                 }
-                let expr = trim_ascii(&bytes[i+7..j]);
+                let expr = trim_ascii(&bytes[i + 7..j]);
                 result.extend_from_slice(b"free (");
                 result.extend_from_slice(expr);
                 result.push(b')');
@@ -6301,41 +7527,55 @@ fn convert_new_delete_expressions(s: &str) -> String {
             }
         }
         // Look for 'new '
-        if i + 4 <= len && &bytes[i..i+4] == b"new " {
+        if i + 4 <= len && &bytes[i..i + 4] == b"new " {
             // Check if this is placement new: new (ptr) ClassName
             let mut j = i + 4;
             // Skip whitespace
-            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
             if j < len && bytes[j] == b'(' {
                 // This is placement new: new (ptr) ClassName
                 // Find matching )
                 let mut k = j + 1;
                 let mut depth = 1;
                 while k < len && depth > 0 {
-                    if bytes[k] == b'(' { depth += 1; }
-                    else if bytes[k] == b')' { depth -= 1; }
+                    if bytes[k] == b'(' {
+                        depth += 1;
+                    } else if bytes[k] == b')' {
+                        depth -= 1;
+                    }
                     k += 1;
                 }
                 // Extract pointer expression
-                let ptr_expr = &bytes[j+1..k-1];
+                let ptr_expr = &bytes[j + 1..k - 1];
                 // Skip whitespace
-                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                    k += 1;
+                }
                 // Find class name
                 let mut m = k;
-                while m < len && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') { m += 1; }
+                while m < len && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') {
+                    m += 1;
+                }
                 let class_name = &bytes[k..m];
                 // Skip whitespace and find (
-                while m < len && (bytes[m] == b' ' || bytes[m] == b'\t') { m += 1; }
+                while m < len && (bytes[m] == b' ' || bytes[m] == b'\t') {
+                    m += 1;
+                }
                 if m < len && bytes[m] == b'(' {
                     // Find matching )
                     let mut n = m + 1;
                     let mut depth = 1;
                     while n < len && depth > 0 {
-                        if bytes[n] == b'(' { depth += 1; }
-                        else if bytes[n] == b')' { depth -= 1; }
+                        if bytes[n] == b'(' {
+                            depth += 1;
+                        } else if bytes[n] == b')' {
+                            depth -= 1;
+                        }
                         n += 1;
                     }
-                    let args = &bytes[m+1..n-1];
+                    let args = &bytes[m + 1..n - 1];
                     result.extend_from_slice(b"_ctor_");
                     result.extend_from_slice(class_name);
                     result.extend_from_slice(b" (");
@@ -6352,20 +7592,27 @@ fn convert_new_delete_expressions(s: &str) -> String {
                 // Regular new: new ClassName(args)
                 // Find class name
                 let mut k = j;
-                while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') { k += 1; }
+                while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                    k += 1;
+                }
                 let class_name = &bytes[j..k];
                 // Skip whitespace
-                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') { k += 1; }
+                while k < len && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                    k += 1;
+                }
                 if k < len && bytes[k] == b'(' {
                     // Find matching )
                     let mut m = k + 1;
                     let mut depth = 1;
                     while m < len && depth > 0 {
-                        if bytes[m] == b'(' { depth += 1; }
-                        else if bytes[m] == b')' { depth -= 1; }
+                        if bytes[m] == b'(' {
+                            depth += 1;
+                        } else if bytes[m] == b')' {
+                            depth -= 1;
+                        }
                         m += 1;
                     }
-                    let args = &bytes[k+1..m-1];
+                    let args = &bytes[k + 1..m - 1];
                     result.extend_from_slice(b"_new_");
                     result.extend_from_slice(class_name);
                     result.extend_from_slice(b" (");
@@ -6412,11 +7659,13 @@ fn convert_vector_member_calls(s: &str) -> String {
     while i < len {
         // Look for .push (, .count (, .truncate (
         if bytes[i] == b'.' && i + 1 < len {
-            let rest = &s[i+1..];
+            let rest = &s[i + 1..];
             if rest.starts_with("push (") || rest.starts_with("push(") {
                 // Find the variable name before .
                 let mut start = i;
-                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
                     start -= 1;
                 }
                 let var_name = &s[start..i];
@@ -6425,11 +7674,14 @@ fn convert_vector_member_calls(s: &str) -> String {
                 let mut j = paren_start;
                 let mut depth = 1;
                 while j < len && depth > 0 {
-                    if bytes[j] == b'(' { depth += 1; }
-                    else if bytes[j] == b')' { depth -= 1; }
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
                     j += 1;
                 }
-                let args = &s[paren_start..j-1];
+                let args = &s[paren_start..j - 1];
                 // Remove what we added for var_name and write vec_push(&vec, args)
                 let prefix_len = var_name.len();
                 let new_len = result.len();
@@ -6445,7 +7697,9 @@ fn convert_vector_member_calls(s: &str) -> String {
             } else if rest.starts_with("count (") || rest.starts_with("count(") {
                 // Find the variable name before .
                 let mut start = i;
-                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
                     start -= 1;
                 }
                 let var_name = &s[start..i];
@@ -6454,8 +7708,11 @@ fn convert_vector_member_calls(s: &str) -> String {
                 let mut j = paren_start;
                 let mut depth = 1;
                 while j < len && depth > 0 {
-                    if bytes[j] == b'(' { depth += 1; }
-                    else if bytes[j] == b')' { depth -= 1; }
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
                     j += 1;
                 }
                 // Remove what we added for var_name and write vec_count(&vec)
@@ -6471,7 +7728,9 @@ fn convert_vector_member_calls(s: &str) -> String {
             } else if rest.starts_with("truncate (") || rest.starts_with("truncate(") {
                 // Find the variable name before .
                 let mut start = i;
-                while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') {
+                while start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
                     start -= 1;
                 }
                 let var_name = &s[start..i];
@@ -6480,11 +7739,14 @@ fn convert_vector_member_calls(s: &str) -> String {
                 let mut j = paren_start;
                 let mut depth = 1;
                 while j < len && depth > 0 {
-                    if bytes[j] == b'(' { depth += 1; }
-                    else if bytes[j] == b')' { depth -= 1; }
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
                     j += 1;
                 }
-                let args = &s[paren_start..j-1];
+                let args = &s[paren_start..j - 1];
                 // Remove what we added for var_name and write vec_truncate(&vec, args)
                 let prefix_len = var_name.len();
                 let new_len = result.len();
@@ -6523,21 +7785,97 @@ fn prefix_ns_identifiers(content: &str, ns_name: &str) -> String {
 
     // C/C++ 关键字集合 — 这些标识符不加前缀
     static KEYWORDS: &[&str] = &[
-        "auto", "break", "case", "char", "const", "continue", "default", "do",
-        "double", "else", "enum", "extern", "float", "for", "goto", "if",
-        "int", "long", "register", "return", "short", "signed", "sizeof",
-        "static", "struct", "switch", "typedef", "union", "unsigned", "void",
-        "volatile", "while", "class", "namespace", "template", "typename",
-        "using", "virtual", "public", "private", "protected", "new", "delete",
-        "try", "catch", "throw", "operator", "this", "const_cast",
-        "static_cast", "dynamic_cast", "reinterpret_cast", "nullptr",
-        "bool", "true", "false", "constexpr", "noexcept", "explicit",
-        "inline", "friend", "override", "final", "decltype", "static_assert",
-        "alignas", "alignof", "thread_local", "char16_t", "char32_t",
-        "wchar_t", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t",
-        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-        "ifdef", "ifndef", "endif", "define", "include", "pragma",
-        "undef", "elif", "error", "warning",
+        "auto",
+        "break",
+        "case",
+        "char",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extern",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "int",
+        "long",
+        "register",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "typedef",
+        "union",
+        "unsigned",
+        "void",
+        "volatile",
+        "while",
+        "class",
+        "namespace",
+        "template",
+        "typename",
+        "using",
+        "virtual",
+        "public",
+        "private",
+        "protected",
+        "new",
+        "delete",
+        "try",
+        "catch",
+        "throw",
+        "operator",
+        "this",
+        "const_cast",
+        "static_cast",
+        "dynamic_cast",
+        "reinterpret_cast",
+        "nullptr",
+        "bool",
+        "true",
+        "false",
+        "constexpr",
+        "noexcept",
+        "explicit",
+        "inline",
+        "friend",
+        "override",
+        "final",
+        "decltype",
+        "static_assert",
+        "alignas",
+        "alignof",
+        "thread_local",
+        "char16_t",
+        "char32_t",
+        "wchar_t",
+        "size_t",
+        "ptrdiff_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "ifdef",
+        "ifndef",
+        "endif",
+        "define",
+        "include",
+        "pragma",
+        "undef",
+        "elif",
+        "error",
+        "warning",
     ];
 
     fn is_keyword(s: &str) -> bool {
@@ -6634,8 +7972,11 @@ fn prefix_ns_identifiers(content: &str, ns_name: &str) -> String {
                     let mut depth = 1i32;
                     let mut k = j + 1;
                     while k < len && depth > 0 {
-                        if bytes[k] == b'{' { depth += 1; }
-                        else if bytes[k] == b'}' { depth -= 1; }
+                        if bytes[k] == b'{' {
+                            depth += 1;
+                        } else if bytes[k] == b'}' {
+                            depth -= 1;
+                        }
                         k += 1;
                     }
                     let inner_content = &content[j + 1..k - 1];
@@ -6657,13 +7998,16 @@ fn prefix_ns_identifiers(content: &str, ns_name: &str) -> String {
             if before_ok && !is_keyword(&ident) && !ident.starts_with('_') {
                 // 检查后面是否跟 '(' (函数) 或 '{' (类/结构体) 或 ';' (变量/typedef)
                 let after = skip_ws(bytes, ident_end);
-                let is_decl = after < len && (
-                    bytes[after] == b'(' || bytes[after] == b'{' ||
-                    bytes[after] == b';' || bytes[after] == b',' ||
-                    bytes[after] == b'=' || bytes[after] == b':' ||
-                    bytes[after] == b'[' || bytes[after] == b')' ||
-                    bytes[after] == b'>'
-                );
+                let is_decl = after < len
+                    && (bytes[after] == b'('
+                        || bytes[after] == b'{'
+                        || bytes[after] == b';'
+                        || bytes[after] == b','
+                        || bytes[after] == b'='
+                        || bytes[after] == b':'
+                        || bytes[after] == b'['
+                        || bytes[after] == b')'
+                        || bytes[after] == b'>');
                 // 只对看起来像声明位置的标识符加前缀
                 // 前面应有类型关键字或 '}' 或文件开头
                 if is_decl {
@@ -6694,7 +8038,9 @@ pub fn strip_cpp_keywords(s: &str) -> String {
     result.push_str("typedef int bool;\n");
     result.push_str("#endif\n");
     // Helper for std::swap → std_swap (used by GCC source)
-    result.push_str("#define std_swap(a, b) do { __typeof__(a) _tmp = (a); (a) = (b); (b) = _tmp; } while(0)\n");
+    result.push_str(
+        "#define std_swap(a, b) do { __typeof__(a) _tmp = (a); (a) = (b); (b) = _tmp; } while(0)\n",
+    );
     // M26/C++23: stdfloat 类型降级
     result.push_str("typedef float std_float32_t;\n");
     result.push_str("typedef double std_float64_t;\n");
@@ -6726,7 +8072,11 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                     if j < len {
                         j += 1; // 跳过结尾 "
                         let lit = &bytes[str_start..j];
-                        if lit == b"\"C\"" || lit == b"\"c\"" || lit == b"\"C++\"" || lit == b"\"c++\"" {
+                        if lit == b"\"C\""
+                            || lit == b"\"c\""
+                            || lit == b"\"C++\""
+                            || lit == b"\"c++\""
+                        {
                             // 跳过空白
                             while j < len && (bytes[j] as char).is_ascii_whitespace() {
                                 j += 1;
@@ -6744,7 +8094,10 @@ pub fn strip_cpp_keywords(s: &str) -> String {
                                         continue;
                                     }
                                     // 跳过注释
-                                    if k + 1 < len && bytes[k] == b'/' && (bytes[k+1] == b'/' || bytes[k+1] == b'*') {
+                                    if k + 1 < len
+                                        && bytes[k] == b'/'
+                                        && (bytes[k + 1] == b'/' || bytes[k + 1] == b'*')
+                                    {
                                         k = skip_comment(bytes, k);
                                         continue;
                                     }
@@ -6800,7 +8153,9 @@ pub fn strip_cpp_keywords(s: &str) -> String {
         }
         // 检查 constexpr / consteval / constinit (引用 CPP_STRIP_KEYWORDS)
         for &kw in CPP_STRIP_KEYWORDS {
-            if kw.len() != 9 { continue; } // constexpr/consteval/constinit 均 9 字节
+            if kw.len() != 9 {
+                continue;
+            } // constexpr/consteval/constinit 均 9 字节
             let kw_b = kw.as_bytes();
             let kw_len = kw.len();
             if i + kw_len <= len && &bytes[i..i + kw_len] == kw_b {
@@ -6964,7 +8319,7 @@ pub fn strip_cpp_keywords(s: &str) -> String {
             ri = rj;
             continue;
         }
-        if rbytes[ri] == b':' && ri + 1 < rlen && rbytes[ri+1] == b':' {
+        if rbytes[ri] == b':' && ri + 1 < rlen && rbytes[ri + 1] == b':' {
             final_result.push('_');
             ri += 2;
             continue;
@@ -7001,14 +8356,12 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         MangleType::Array(t, _n) => mangle_to_c(t),
         MangleType::Class(n) => {
             // enum/struct/union 前缀: 保留原始关键字而非一律加 struct
-            if n.starts_with("enum ") || n.starts_with("union ")
-                || n.starts_with("struct ")
-            {
+            if n.starts_with("enum ") || n.starts_with("union ") || n.starts_with("struct ") {
                 n.clone()
             } else {
                 format!("struct {}", n)
             }
-        }
+        },
         MangleType::Ellipsis => "...".into(),
         // M17.0: Auto / DecltypeAuto 在所有变量声明点都应已被解析;
         // 若此处仍出现, 说明 lower 顺序错误, 输出占位 int 并发出警告.
@@ -7024,7 +8377,7 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
                 s.push_str(&template_arg_to_c(a));
             }
             format!("struct {}", s)
-        }
+        },
         // M30: TplMember 应在 Lower::mangle_to_c_ns 中展开为实例类
         // typedef 成员的真实类型；到达此模块级函数说明展开未发生，
         // 输出占位并注释 (同 Auto 处理).
@@ -7064,7 +8417,7 @@ fn template_arg_to_c(ty: &MangleType) -> String {
                 s.push_str(&template_arg_to_c(a));
             }
             s
-        }
+        },
         MangleType::Array(t, n) => format!("arr{}_{}", n, template_arg_to_c(t)),
         MangleType::Schar => "schar".into(),
         MangleType::Uchar => "uchar".into(),
@@ -7084,7 +8437,7 @@ fn template_arg_to_c(ty: &MangleType) -> String {
             s.push('_');
             s.push_str(member);
             s
-        }
+        },
         // M30.1: 非类型实参序列化为 `n<值>`标识符片段
         MangleType::NonType(v) => format!("n{}", v),
         // G11: 模板模板参数 - 编码为 tt_模板名
@@ -7093,11 +8446,13 @@ fn template_arg_to_c(ty: &MangleType) -> String {
         MangleType::VariadicPack(tys) => {
             let mut s = String::from("pack_");
             for (i, t) in tys.iter().enumerate() {
-                if i > 0 { s.push('_'); }
+                if i > 0 {
+                    s.push('_');
+                }
                 s.push_str(&template_arg_to_c(t));
             }
             s
-        }
+        },
     }
 }
 
@@ -7114,7 +8469,11 @@ impl Lower {
         match ty {
             MangleType::Class(n) => {
                 // Normalize: flatten `::` to `_` so `std::string` → `std_string`
-                let n = if n.contains("::") { n.replace("::", "_") } else { n.clone() };
+                let n = if n.contains("::") {
+                    n.replace("::", "_")
+                } else {
+                    n.clone()
+                };
                 // M30.3: 检查 typedef 别名表, 若 name 是已知 typedef,
                 // 直接输出名字 (不加 struct 前缀). C 编译器会通过
                 // 降级器发射的 typedef 声明解析到真实类型.
@@ -7145,9 +8504,7 @@ impl Lower {
                     return self.qualify_name(&n);
                 }
                 // enum/union/struct 前缀: 保留原始关键字而非加 struct
-                if n.starts_with("enum ") || n.starts_with("union ")
-                    || n.starts_with("struct ")
-                {
+                if n.starts_with("enum ") || n.starts_with("union ") || n.starts_with("struct ") {
                     return n.clone();
                 }
                 // 提取 enum/struct/union 后的裸名检查 enum_types
@@ -7164,15 +8521,15 @@ impl Lower {
                 } else {
                     format!("struct {}", n)
                 }
-            }
+            },
             MangleType::Pointer(t) | MangleType::Reference(t) => {
                 format!("{}*", self.mangle_to_c_ns(t))
-            }
+            },
             // M27: Template 类型直接走 instantiated_class_name, 确保与
             // template.rs 单态化生成的类名一致 (不再走占位 typedef)
             MangleType::Template { name, args } => {
                 format!("struct {}", instantiated_class_name(name, args))
-            }
+            },
             // M30: TplMember 展开为实例类内 typedef 成员的形参替换后类型.
             // 实例化由 scan_decl_types 的 TplMember 分支提前触发; 若映射
             // 不存在 (模板未注册 / 引用先于扫描), 输出占位.
@@ -7184,7 +8541,7 @@ impl Lower {
                     }
                 }
                 "int /*M30 unresolved tpl-member*/".into()
-            }
+            },
             _ => mangle_to_c(ty),
         }
     }
@@ -7271,10 +8628,10 @@ impl Lower {
                     return c.clone();
                 }
                 String::new()
-            }
+            },
             CppExpr::MemberStar(obj, _) | CppExpr::PtrMemberStar(obj, _) => {
                 self.expr_static_class(obj)
-            }
+            },
             CppExpr::This => self.current_class.clone().unwrap_or_default(),
             CppExpr::ThisMember(_) => self.current_class.clone().unwrap_or_default(),
             _ => String::new(),
@@ -7304,7 +8661,7 @@ impl Lower {
                 } else {
                     MangleType::Int
                 }
-            }
+            },
             CppExpr::This => MangleType::Pointer(Box::new(MangleType::Class(
                 self.current_class.clone().unwrap_or_default(),
             ))),
@@ -7331,7 +8688,7 @@ impl Lower {
                         match name.as_str() {
                             "malloc" | "calloc" | "realloc" => {
                                 MangleType::Pointer(Box::new(MangleType::Void))
-                            }
+                            },
                             "strlen" | "printf" | "scanf" => MangleType::Int,
                             _ => MangleType::Int,
                         }
@@ -7339,18 +8696,18 @@ impl Lower {
                 } else {
                     MangleType::Int
                 }
-            }
+            },
             CppExpr::New(ty, _) | CppExpr::PlacementNew { ty, .. } => {
                 // M26.1: new T -> T* (不再 Unknown)
                 MangleType::Pointer(Box::new(MangleType::Class(ty.clone())))
-            }
+            },
             CppExpr::NewArr { ty, .. } => {
                 MangleType::Pointer(Box::new(MangleType::Class(ty.clone())))
-            }
+            },
             CppExpr::Member(o, m) | CppExpr::PtrMember(o, m) => {
                 // M26.1: `auto x = obj.field` -> 查类成员类型
                 self.member_field_type(o, m).unwrap_or(MangleType::Int)
-            }
+            },
             CppExpr::Ternary { then, .. } => self.infer_type(then, is_decltype_auto),
             // M18.0: 多维下标返回元素类型 (与单下标一致)
             CppExpr::MultiIndex(obj, _) => self.infer_type(obj, is_decltype_auto),
@@ -7413,15 +8770,15 @@ impl Lower {
             CppExpr::New(..) | CppExpr::NewArr { .. } => true,
             CppExpr::PlacementNew { ptr, ty: _, args } => {
                 self.expr_can_throw(ptr) || args.iter().any(|a| self.expr_can_throw(a))
-            }
+            },
             CppExpr::DynamicCast { .. } => {
                 // dynamic_cast 到引用类型会抛 bad_cast
                 true
-            }
+            },
             CppExpr::Typeid(x) => {
                 // 多态表达式 typeid 可能抛 bad_typeid
                 self.expr_can_throw(x) || self.is_polymorphic_expr(x)
-            }
+            },
             CppExpr::Member(o, _)
             | CppExpr::PtrMember(o, _)
             | CppExpr::MemberStar(o, _)
@@ -7435,7 +8792,7 @@ impl Lower {
             CppExpr::BinOp(_, l, r) => self.expr_can_throw(l) || self.expr_can_throw(r),
             CppExpr::Ternary { cond, then, els } => {
                 self.expr_can_throw(cond) || self.expr_can_throw(then) || self.expr_can_throw(els)
-            }
+            },
             CppExpr::Comma(es) => es.iter().any(|x| self.expr_can_throw(x)),
             CppExpr::Cast(_, x)
             | CppExpr::StaticCast { expr: x, .. }
@@ -7446,17 +8803,17 @@ impl Lower {
                     return true;
                 }
                 self.call_target_can_throw(f)
-            }
+            },
             CppExpr::OpCall { .. } => {
                 // 内建运算符不抛 (parser 只对重载运算符产生 OpCall);
                 // 重载运算符是函数调用, 保守视为可抛.
                 true
-            }
+            },
             CppExpr::InitList(es) => es.iter().any(|x| self.expr_can_throw(x)),
             CppExpr::TypedInitList { elems, .. } => elems.iter().any(|x| self.expr_can_throw(x)),
             CppExpr::MultiIndex(o, idxs) => {
                 self.expr_can_throw(o) || idxs.iter().any(|x| self.expr_can_throw(x))
-            }
+            },
             CppExpr::QualifiedAccess(_, _) => false,
         }
     }
@@ -7473,7 +8830,7 @@ impl Lower {
                     // 未知接收者: 保守视为可抛
                     true
                 }
-            }
+            },
             CppExpr::QualifiedAccess(_, _) => true,
             _ => true,
         }
@@ -7597,16 +8954,44 @@ impl Lower {
     /// 检查是否是 C/C++ 标准 typedef (不是真正的 class 类型).
     /// 用于跳过构造函数调用生成.
     fn is_known_typedef(name: &str) -> bool {
-        matches!(name,
-            "size_t" | "ptrdiff_t" | "wchar_t" | "char8_t"
-            | "char16_t" | "char32_t" | "int8_t" | "int16_t"
-            | "int32_t" | "int64_t" | "uint8_t" | "uint16_t"
-            | "uint32_t" | "uint64_t" | "intptr_t" | "uintptr_t"
-            | "ssize_t" | "off_t" | "time_t" | "pid_t" | "uid_t"
-            | "gid_t" | "mode_t" | "off64_t" | "ino_t" | "nlink_t"
-            | "blksize_t" | "blkcnt_t" | "fsblkcnt_t" | "fsfilcnt_t"
-            | "id_t" | "key_t" | "clock_t" | "suseconds_t"
-            | "useconds_t" | "dev_t"
+        matches!(
+            name,
+            "size_t"
+                | "ptrdiff_t"
+                | "wchar_t"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "int8_t"
+                | "int16_t"
+                | "int32_t"
+                | "int64_t"
+                | "uint8_t"
+                | "uint16_t"
+                | "uint32_t"
+                | "uint64_t"
+                | "intptr_t"
+                | "uintptr_t"
+                | "ssize_t"
+                | "off_t"
+                | "time_t"
+                | "pid_t"
+                | "uid_t"
+                | "gid_t"
+                | "mode_t"
+                | "off64_t"
+                | "ino_t"
+                | "nlink_t"
+                | "blksize_t"
+                | "blkcnt_t"
+                | "fsblkcnt_t"
+                | "fsfilcnt_t"
+                | "id_t"
+                | "key_t"
+                | "clock_t"
+                | "suseconds_t"
+                | "useconds_t"
+                | "dev_t"
         )
     }
 
@@ -7618,7 +9003,9 @@ impl Lower {
     }
 
     fn resolve_typedef_chain_inner(&self, ty: &MangleType, depth: usize) -> MangleType {
-        if depth > 16 { return ty.clone(); } // 防止循环 typedef 导致栈溢出
+        if depth > 16 {
+            return ty.clone();
+        } // 防止循环 typedef 导致栈溢出
         match ty {
             MangleType::Class(n) => {
                 if let Some(target) = self.typedef_aliases.get(n) {
@@ -7627,7 +9014,7 @@ impl Lower {
                 } else {
                     ty.clone()
                 }
-            }
+            },
             MangleType::Pointer(inner) => {
                 let resolved = self.resolve_typedef_chain_inner(inner, depth + 1);
                 if std::mem::discriminant(&resolved) == std::mem::discriminant(inner.as_ref()) {
@@ -7635,7 +9022,7 @@ impl Lower {
                 } else {
                     MangleType::Pointer(Box::new(resolved))
                 }
-            }
+            },
             MangleType::Reference(inner) => {
                 let resolved = self.resolve_typedef_chain_inner(inner, depth + 1);
                 if std::mem::discriminant(&resolved) == std::mem::discriminant(inner.as_ref()) {
@@ -7643,7 +9030,7 @@ impl Lower {
                 } else {
                     MangleType::Reference(Box::new(resolved))
                 }
-            }
+            },
             _ => ty.clone(),
         }
     }
@@ -7746,11 +9133,13 @@ impl Lower {
         self.out.push_str("typedef long int __blksize_t;\n");
         self.out.push_str("typedef long int __blkcnt_t;\n");
         self.out.push_str("typedef long int __syscall_slong_t;\n");
-        self.out.push_str("typedef unsigned long int __syscall_ulong_t;\n");
+        self.out
+            .push_str("typedef unsigned long int __syscall_ulong_t;\n");
         self.out.push_str("typedef long int __loff_t;\n");
         self.out.push_str("typedef long int off_t;\n");
         self.out.push_str("typedef long int ssize_t;\n");
-        self.out.push_str("typedef __builtin_va_list __gnuc_va_list;\n");
+        self.out
+            .push_str("typedef __builtin_va_list __gnuc_va_list;\n");
         self.out.push_str("typedef __builtin_va_list va_list;\n");
         // glibc 内部整数类型 (<bits/types.h>): GCC 源码广泛使用,
         // C++ parser 处理系统头文件时可能丢失定义.
@@ -7759,7 +9148,8 @@ impl Lower {
         self.out.push_str("typedef int __int32_t;\n");
         self.out.push_str("typedef long int __int64_t;\n");
         self.out.push_str("typedef unsigned char __uint8_t;\n");
-        self.out.push_str("typedef unsigned short int __uint16_t;\n");
+        self.out
+            .push_str("typedef unsigned short int __uint16_t;\n");
         self.out.push_str("typedef unsigned int __uint32_t;\n");
         self.out.push_str("typedef unsigned long int __uint64_t;\n");
         // C99 standard integer types (without leading underscores)
@@ -7782,10 +9172,14 @@ impl Lower {
         self.out.push_str("typedef unsigned int __id_t;\n");
         self.out.push_str("typedef unsigned long int __ino64_t;\n");
         self.out.push_str("typedef long int __blkcnt64_t;\n");
-        self.out.push_str("typedef unsigned long int __fsblkcnt_t;\n");
-        self.out.push_str("typedef unsigned long int __fsblkcnt64_t;\n");
-        self.out.push_str("typedef unsigned long int __fsfilcnt_t;\n");
-        self.out.push_str("typedef unsigned long int __fsfilcnt64_t;\n");
+        self.out
+            .push_str("typedef unsigned long int __fsblkcnt_t;\n");
+        self.out
+            .push_str("typedef unsigned long int __fsblkcnt64_t;\n");
+        self.out
+            .push_str("typedef unsigned long int __fsfilcnt_t;\n");
+        self.out
+            .push_str("typedef unsigned long int __fsfilcnt64_t;\n");
         self.out.push_str("typedef long int __ssize_t;\n");
         self.out.push_str("typedef void* __locale_t;\n");
         // __fsid_t is provided by system headers (<bits/types.h>)
@@ -7802,17 +9196,24 @@ impl Lower {
         // 导致后续使用这些类型的代码报错. 统一补充前向声明.
         // 注意: C 中需要 typedef 才能让名字直接作为类型使用.
         self.out.push_str("typedef struct cpp_reader cpp_reader;\n");
-        self.out.push_str("typedef struct cpp_hashnode cpp_hashnode;\n");
+        self.out
+            .push_str("typedef struct cpp_hashnode cpp_hashnode;\n");
         self.out.push_str("typedef struct cpp_token cpp_token;\n");
         self.out.push_str("typedef struct cpp_string cpp_string;\n");
-        self.out.push_str("typedef struct cpp_identifier cpp_identifier;\n");
-        self.out.push_str("typedef struct cpp_macro_arg cpp_macro_arg;\n");
-        self.out.push_str("typedef struct cpp_token_u cpp_token_u;\n");
+        self.out
+            .push_str("typedef struct cpp_identifier cpp_identifier;\n");
+        self.out
+            .push_str("typedef struct cpp_macro_arg cpp_macro_arg;\n");
+        self.out
+            .push_str("typedef struct cpp_token_u cpp_token_u;\n");
         self.out.push_str("typedef struct cpp_parm_u cpp_parm_u;\n");
         self.out.push_str("typedef struct cpp_macro cpp_macro;\n");
-        self.out.push_str("typedef struct ht_identifier ht_identifier;\n");
-        self.out.push_str("typedef struct ht_identifier *hashnode;\n");
-        self.out.push_str("typedef struct line_map_macro line_map_macro;\n");
+        self.out
+            .push_str("typedef struct ht_identifier ht_identifier;\n");
+        self.out
+            .push_str("typedef struct ht_identifier *hashnode;\n");
+        self.out
+            .push_str("typedef struct line_map_macro line_map_macro;\n");
         self.out.push_str("typedef struct line_maps line_maps;\n");
         // POSIX rlimit 类型 (<bits/types.h>)
         self.out.push_str("typedef unsigned long rlim_t;\n");
@@ -7897,18 +9298,18 @@ impl Lower {
                 for m in &c.members {
                     match m {
                         CppDecl::MemberFn { name, .. } => methods.push(name.clone()),
-                        CppDecl::Ctor { .. } | CppDecl::Dtor { .. } => {}
+                        CppDecl::Ctor { .. } | CppDecl::Dtor { .. } => {},
                         CppDecl::MemberVar { ty, name, .. } => {
                             fields.push((name.clone(), ty.clone()))
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 self.class_methods.insert(qname.clone(), methods);
                 self.class_fields.insert(qname, fields);
                 // M26: 扫描类成员类型, 触发模板类实例化
                 self.scan_decl_types(d);
-            }
+            },
             CppDecl::Namespace { name, body } => {
                 // M18.0: 跟踪 namespace stack 让 qualify_name 出正确名字
                 if let Some(n) = name {
@@ -7920,7 +9321,7 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             CppDecl::InlineNamespace { name, body } => {
                 // Inline namespace treated same as regular namespace for name resolution
                 if let Some(n) = name {
@@ -7932,7 +9333,7 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             // M26: 模板声明只注册 (不再展开); 模板体在实例化时替换形参
             CppDecl::Template {
                 params,
@@ -7941,13 +9342,13 @@ impl Lower {
                 ..
             } => {
                 self.templates.register(params, requires, decl);
-            }
+            },
             CppDecl::ExternTemplate(decl) => {
                 // Extern template suppresses implicit instantiation.
                 // Register the declaration but don't emit instantiation here.
                 // The actual instantiation should come from explicit instantiation elsewhere.
                 self.collect_classes(decl);
-            }
+            },
             CppDecl::PartialSpec {
                 params,
                 pattern_text,
@@ -7962,7 +9363,7 @@ impl Lower {
                         decl,
                     );
                 }
-            }
+            },
             // M26: 概念定义注册 (concept Name = body_text)
             CppDecl::Concept { name, body_text } => {
                 self.concepts.insert(name.clone(), body_text.clone());
@@ -7970,7 +9371,7 @@ impl Lower {
                 self.templates
                     .concepts
                     .insert(name.clone(), body_text.clone());
-            }
+            },
             _ => {
                 // M30.3: 收集顶层 typedef 别名, 用于后续
                 // Class(name) 解析到底层类型.
@@ -7990,7 +9391,7 @@ impl Lower {
                     self.plain_fns.insert(name.clone());
                 }
                 self.scan_decl_types(d);
-            }
+            },
         }
     }
 
@@ -8025,7 +9426,7 @@ impl Lower {
                         self.class_bases.insert(nq, nested.bases.clone());
                     }
                 }
-            }
+            },
             CppDecl::Namespace { name, body } => {
                 if let Some(n) = name {
                     self.ns.stack.push(n.clone());
@@ -8036,7 +9437,7 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             CppDecl::InlineNamespace { name, body } => {
                 // Inline namespace treated same as regular namespace for base class collection
                 if let Some(n) = name {
@@ -8048,16 +9449,16 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             CppDecl::Template { decl, .. } => {
                 self.collect_class_bases(decl);
-            }
+            },
             CppDecl::ExportBlock(body) => {
                 for x in body {
                     self.collect_class_bases(x);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -8396,7 +9797,7 @@ impl Lower {
                 if *is_noexcept {
                     self.noexcept_fns.insert(name.clone());
                 }
-            }
+            },
             CppDecl::MemberFn {
                 class,
                 name,
@@ -8406,46 +9807,46 @@ impl Lower {
                 if *is_noexcept {
                     self.noexcept_fns.insert(format!("{}::{}", class, name));
                 }
-            }
+            },
             CppDecl::Ctor {
                 class, is_noexcept, ..
             } => {
                 if *is_noexcept {
                     self.noexcept_fns.insert(format!("{}::ctor", class));
                 }
-            }
+            },
             CppDecl::Dtor {
                 class, is_noexcept, ..
             } => {
                 if *is_noexcept {
                     self.noexcept_fns.insert(format!("{}::dtor", class));
                 }
-            }
+            },
             CppDecl::Namespace { body, .. } => {
                 for x in body {
                     self.collect_noexcept_fns(x);
                 }
-            }
+            },
             CppDecl::InlineNamespace { body, .. } => {
                 // Inline namespace treated same as regular namespace for noexcept collection
                 for x in body {
                     self.collect_noexcept_fns(x);
                 }
-            }
+            },
             CppDecl::Class(c) => {
                 for m in &c.members {
                     self.collect_noexcept_fns(m);
                 }
-            }
+            },
             CppDecl::Template { decl, .. } => {
                 self.collect_noexcept_fns(decl);
-            }
+            },
             CppDecl::ExportBlock(body) => {
                 for x in body {
                     self.collect_noexcept_fns(x);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -8456,43 +9857,43 @@ impl Lower {
         match d {
             CppDecl::FreeFn { name, ret, .. } => {
                 self.fn_ret_types.insert(name.clone(), ret.clone());
-            }
+            },
             CppDecl::MemberFn {
                 class, name, ret, ..
             } => {
                 let cls = self.resolve_class_name(class);
                 self.fn_ret_types
                     .insert(format!("{}::{}", cls, name), ret.clone());
-            }
+            },
             CppDecl::Ctor { class, .. } => {
                 let cls = self.resolve_class_name(class);
                 self.fn_ret_types
                     .insert(format!("{}::ctor", cls), MangleType::Class(cls));
-            }
+            },
             CppDecl::Dtor { class, .. } => {
                 let cls = self.resolve_class_name(class);
                 self.fn_ret_types
                     .insert(format!("{}::dtor", cls), MangleType::Void);
-            }
+            },
             CppDecl::Namespace { body, .. } => {
                 for x in body {
                     self.collect_fn_ret_types(x);
                 }
-            }
+            },
             CppDecl::Class(c) => {
                 for m in &c.members {
                     self.collect_fn_ret_types(m);
                 }
-            }
+            },
             CppDecl::Template { decl, .. } => {
                 self.collect_fn_ret_types(decl);
-            }
+            },
             CppDecl::ExportBlock(body) => {
                 for x in body {
                     self.collect_fn_ret_types(x);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -8505,7 +9906,7 @@ impl Lower {
                 for m in &c.members {
                     self.scan_decl_types(m);
                 }
-            }
+            },
             CppDecl::FreeFn {
                 ret, params, body, ..
             } => {
@@ -8514,7 +9915,7 @@ impl Lower {
                     self.scan_ty(t);
                 }
                 self.scan_body_types(body);
-            }
+            },
             CppDecl::MemberFn {
                 ret, params, body, ..
             } => {
@@ -8523,26 +9924,26 @@ impl Lower {
                     self.scan_ty(t);
                 }
                 self.scan_body_types(body);
-            }
+            },
             CppDecl::Ctor { params, body, .. } => {
                 for (_, t) in params {
                     self.scan_ty(t);
                 }
                 self.scan_body_types(body);
-            }
+            },
             CppDecl::Dtor { body, .. } => {
                 self.scan_body_types(body);
-            }
+            },
             CppDecl::MemberVar { ty, .. } => {
                 self.scan_ty(ty);
-            }
+            },
             // M30: 顶层全局变量 (含 TplMember 类型触发实例化)
             CppDecl::GlobalVar { ty, init, .. } => {
                 self.scan_ty(ty);
                 if let Some(e) = init {
                     self.scan_expr_types(e);
                 }
-            }
+            },
             CppDecl::OperatorFn {
                 params, body, ret, ..
             } => {
@@ -8551,19 +9952,19 @@ impl Lower {
                 }
                 self.scan_ty(ret);
                 self.scan_body_types(body);
-            }
+            },
             CppDecl::Namespace { body, .. } => {
                 for x in body {
                     self.scan_decl_types(x);
                 }
-            }
+            },
             CppDecl::InlineNamespace { body, .. } => {
                 // Inline namespace treated same as regular namespace for type scanning
                 for x in body {
                     self.scan_decl_types(x);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -8574,16 +9975,16 @@ impl Lower {
                     self.scan_ty(a);
                 }
                 self.emit_inst_class(name, args);
-            }
+            },
             // M30: TplMember 同样触发实例化 (收集 inst_typedefs 供展开)
             MangleType::TplMember { name, args, .. } => {
                 for a in args {
                     self.scan_ty(a);
                 }
                 self.emit_inst_class(name, args);
-            }
+            },
             MangleType::Pointer(t) | MangleType::Reference(t) => self.scan_ty(t),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -8602,18 +10003,18 @@ impl Lower {
                 if let Some(e) = els {
                     self.scan_body_types(e);
                 }
-            }
+            },
             CppStmt::IfConstexpr { cond, then, els } => {
                 self.scan_expr_types(cond);
                 self.scan_body_types(then);
                 if let Some(e) = els {
                     self.scan_body_types(e);
                 }
-            }
+            },
             CppStmt::While { cond, body } => {
                 self.scan_expr_types(cond);
                 self.scan_body_types(body);
-            }
+            },
             CppStmt::For {
                 init,
                 cond,
@@ -8630,7 +10031,7 @@ impl Lower {
                     self.scan_stmt_types(x);
                 }
                 self.scan_body_types(body);
-            }
+            },
             CppStmt::Block(b) => self.scan_body_types(b),
             CppStmt::ThisMember(_, inner) => self.scan_stmt_types(inner),
             CppStmt::LocalVar { ty, init, .. } | CppStmt::StaticLocal { ty, init, .. } => {
@@ -8638,7 +10039,7 @@ impl Lower {
                 if let Some(e) = init {
                     self.scan_expr_types(e);
                 }
-            }
+            },
             CppStmt::Try { body, catches } => {
                 self.scan_body_types(body);
                 for c in catches {
@@ -8647,18 +10048,18 @@ impl Lower {
                     }
                     self.scan_body_types(&c.body);
                 }
-            }
+            },
             CppStmt::Throw(Some(e)) => self.scan_expr_types(e),
             CppStmt::Switch { expr, arms, .. } => {
                 self.scan_expr_types(expr);
                 for (_, body) in arms {
                     self.scan_body_types(body);
                 }
-            }
+            },
             CppStmt::CoAwait(e) | CppStmt::CoYield(e) => self.scan_expr_types(e),
             CppStmt::CoReturn(Some(e)) => self.scan_expr_types(e),
             CppStmt::Decl(d) => self.scan_decl_types(d),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -8667,14 +10068,14 @@ impl Lower {
             CppExpr::Cast(t, x) => {
                 self.scan_ty(t);
                 self.scan_expr_types(x);
-            }
+            },
             CppExpr::StaticCast { ty, expr }
             | CppExpr::ConstCast { ty, expr }
             | CppExpr::ReinterpretCast { ty, expr }
             | CppExpr::DynamicCast { ty, expr } => {
                 self.scan_ty(ty);
                 self.scan_expr_types(expr);
-            }
+            },
             CppExpr::TypeidType(t) => self.scan_ty(t),
             CppExpr::Sizeof(SizeofArg::Type(t)) => self.scan_ty(t),
             CppExpr::Sizeof(SizeofArg::Expr(x)) => self.scan_expr_types(x),
@@ -8683,7 +10084,7 @@ impl Lower {
                 for x in elems {
                     self.scan_expr_types(x);
                 }
-            }
+            },
             CppExpr::Member(o, _)
             | CppExpr::PtrMember(o, _)
             | CppExpr::MemberStar(o, _)
@@ -8693,24 +10094,24 @@ impl Lower {
                 for a in args {
                     self.scan_expr_types(a);
                 }
-            }
+            },
             CppExpr::New(ty, args) => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
                 for a in args {
                     self.scan_expr_types(a);
                 }
-            }
+            },
             CppExpr::NewArr { ty, count } => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
                 self.scan_expr_types(count);
-            }
+            },
             CppExpr::PlacementNew { ty, args, ptr } => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
                 self.scan_expr_types(ptr);
                 for a in args {
                     self.scan_expr_types(a);
                 }
-            }
+            },
             CppExpr::Delete(x)
             | CppExpr::DeleteArr(x)
             | CppExpr::Noexcept(x)
@@ -8721,41 +10122,41 @@ impl Lower {
             CppExpr::BinOp(_, l, r) => {
                 self.scan_expr_types(l);
                 self.scan_expr_types(r);
-            }
+            },
             CppExpr::Ternary { cond, then, els } => {
                 self.scan_expr_types(cond);
                 self.scan_expr_types(then);
                 self.scan_expr_types(els);
-            }
+            },
             CppExpr::Comma(xs) | CppExpr::InitList(xs) => {
                 for x in xs {
                     self.scan_expr_types(x);
                 }
-            }
+            },
             CppExpr::OpCall { args, .. } => {
                 for a in args {
                     self.scan_expr_types(a);
                 }
-            }
+            },
             CppExpr::Lambda(lam) => {
                 for (_, t) in &lam.params {
                     self.scan_ty(t);
                 }
                 self.scan_body_types(&lam.body);
-            }
+            },
             CppExpr::MultiIndex(o, idx) => {
                 self.scan_expr_types(o);
                 for x in idx {
                     self.scan_expr_types(x);
                 }
-            }
+            },
             CppExpr::TplStaticAccess { name, args, .. } => {
                 // M29: 扫描阶段触发模板类实例化 (此时输出位置在函数定义
                 // 之前, 保证类内 enum 常量定义先于引用); 表达式发射阶段
                 // 的 emit_inst_class 依赖 inst_emitted 幂等跳过.
                 self.emit_inst_class(name, args);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -8831,7 +10232,7 @@ impl Lower {
                     CppDecl::MemberFn { name, .. } => methods.push(name.clone()),
                     CppDecl::MemberVar { ty, name, .. } => fields.push((name.clone(), ty.clone())),
                     CppDecl::Ctor { .. } => ctors.push(m.clone()),
-                    _ => {}
+                    _ => {},
                 }
             }
             self.class_methods.insert(qname.clone(), methods);
@@ -8851,12 +10252,12 @@ impl Lower {
     fn emit_template_fn_call(&mut self, name: &str, args: &[MangleType]) {
         // 验证可实例化 (requires 约束); 失败 = SFINAE 跳过
         match self.templates.instantiate_fn(name, args) {
-            Some(CppDecl::FreeFn { .. }) => {}
+            Some(CppDecl::FreeFn { .. }) => {},
             _ => {
                 self.out
                     .push_str(&format!("0 /* SFINAE: {}<...> not a function */", name));
                 return;
-            }
+            },
         }
         let key = TemplateRegistry::key_for(name, args);
         if !self
@@ -8897,15 +10298,15 @@ impl Lower {
             CppDecl::Template { decl, .. } => self.decl_needs_system_headers(decl),
             CppDecl::Namespace { body, .. } => {
                 body.iter().any(|x| self.decl_needs_system_headers(x))
-            }
+            },
             CppDecl::InlineNamespace { body, .. } => {
                 // Inline namespace treated same as regular namespace for header detection
                 body.iter().any(|x| self.decl_needs_system_headers(x))
-            }
+            },
             CppDecl::Class(c) => {
                 // 类内成员函数体可能用 new / delete / throw
                 c.members.iter().any(|m| self.decl_needs_system_headers(m))
-            }
+            },
             CppDecl::FreeFn { body, .. }
             | CppDecl::MemberFn { body, .. }
             | CppDecl::Ctor { body, .. }
@@ -8936,10 +10337,10 @@ impl Lower {
                     || els
                         .as_ref()
                         .is_some_and(|b| self.body_needs_system_headers(b))
-            }
+            },
             CppStmt::While { cond, body } => {
                 self.expr_needs_system_headers(cond) || self.body_needs_system_headers(body)
-            }
+            },
             CppStmt::For {
                 init,
                 cond,
@@ -8955,12 +10356,12 @@ impl Lower {
                         .as_ref()
                         .is_some_and(|s| self.stmt_needs_system_headers(s))
                     || self.body_needs_system_headers(body)
-            }
+            },
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
             CppStmt::Switch { expr, arms, .. } => {
                 self.expr_needs_system_headers(expr)
                     || arms.iter().any(|(_, b)| self.body_needs_system_headers(b))
-            }
+            },
             CppStmt::Try { .. } | CppStmt::Throw(_) => true,
             _ => false,
         }
@@ -8972,10 +10373,10 @@ impl Lower {
             CppExpr::Call(f, args) => {
                 self.expr_needs_system_headers(f)
                     || args.iter().any(|a| self.expr_needs_system_headers(a))
-            }
+            },
             CppExpr::BinOp(_, l, r) => {
                 self.expr_needs_system_headers(l) || self.expr_needs_system_headers(r)
-            }
+            },
             CppExpr::UnaryOp(_, x)
             | CppExpr::Ref(x)
             | CppExpr::AddrOf(x)
@@ -8990,7 +10391,7 @@ impl Lower {
                 self.expr_needs_system_headers(cond)
                     || self.expr_needs_system_headers(then)
                     || self.expr_needs_system_headers(els)
-            }
+            },
             CppExpr::Comma(exprs) => exprs.iter().any(|e| self.expr_needs_system_headers(e)),
             CppExpr::Typeid(_) => true,
             // M18.0: 多维下标按 obj 递归 (与单下标一致)
@@ -9011,15 +10412,12 @@ impl Lower {
                 self.out.push_str(&format!("{} {{\n", kw));
                 for am_m in am {
                     if let CppDecl::MemberVar { ty, name, .. } = am_m {
-                        self.out.push_str(&format!(
-                            "    {} {};\n",
-                            self.mangle_to_c_ns(ty),
-                            name
-                        ));
+                        self.out
+                            .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
                     }
                 }
                 self.out.push_str(&format!("}} {};\n", an));
-            }
+            },
             // M30: 顶层全局变量 (`int g = 5;` / `static unsigned long h;`)
             CppDecl::GlobalVar {
                 ty,
@@ -9035,12 +10433,12 @@ impl Lower {
                         self.out.push_str(&format!("{}{} {} = ", st, ty_c, name));
                         self.emit_expr(e);
                         self.out.push_str(";\n");
-                    }
+                    },
                     None => {
                         self.out.push_str(&format!("{}{} {};\n", st, ty_c, name));
-                    }
+                    },
                 }
-            }
+            },
             CppDecl::Class(c) => {
                 // M26: BMF - export module 后的类记为导出 (含成员布局)
                 if self.module_collect {
@@ -9052,7 +10450,7 @@ impl Lower {
                         .filter_map(|m| match m {
                             CppDecl::MemberVar { ty, name, .. } => {
                                 Some(format!("{} {};", self.mangle_to_c_ns(ty), name))
-                            }
+                            },
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -9065,13 +10463,16 @@ impl Lower {
                     });
                 }
                 self.lower_class(c);
-            }
+            },
             CppDecl::FreeFn {
                 ret,
                 name,
                 params,
                 body,
-                is_noexcept, trailing_ret_type, .. } => {
+                is_noexcept,
+                trailing_ret_type,
+                ..
+            } => {
                 // Use trailing return type if present (M30.5)
                 let final_ret = trailing_ret_type.as_ref().unwrap_or(ret);
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
@@ -9094,7 +10495,7 @@ impl Lower {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
                 self.emit_fn(&m, final_ret, params, body);
-            }
+            },
             // M30.9: static_assert(condition, "message")
             CppDecl::StaticAssert { condition, message } => {
                 // Emit as C _Static_assert (C11 feature)
@@ -9108,7 +10509,7 @@ impl Lower {
                     self.out.push_str(", \"static assertion failed\"");
                 }
                 self.out.push_str(");\n");
-            }
+            },
             CppDecl::MemberFn {
                 class,
                 ret,
@@ -9120,7 +10521,10 @@ impl Lower {
                 is_const,
                 is_final,
                 is_noexcept,
-                is_volatile, is_friend, .. } => {
+                is_volatile,
+                is_friend,
+                ..
+            } => {
                 // M17.0: friend 函数声明是自由函数, 不属于类成员
                 // (即: 没有 this 形参, 不放在类作用域中, 也不做 mangle)
                 if *is_friend {
@@ -9135,8 +10539,7 @@ impl Lower {
                     let class_q = self.qualify_name(class);
                     let n = NestedName::from_dotted(vec![class_q.clone(), name.clone()]);
                     let m = mangle_member_function(&n, &[], ret);
-                    let this_ty =
-                        MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
+                    let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
                     let mut all_params: Vec<(String, MangleType)> =
                         vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
@@ -9189,14 +10592,17 @@ impl Lower {
                 // M17.0: final 阻止派生覆盖 (codegen 端, 派生若尝试覆盖会 mangled 冲突)
                 // override 在派生类声明时检查基类是否存在; 当前简化不做
                 let _ = (is_override, is_final, is_friend);
-            }
+            },
             CppDecl::Ctor {
                 class,
                 params,
                 inits,
                 body,
                 is_virtual,
-                is_explicit, is_noexcept, .. } => {
+                is_explicit,
+                is_noexcept,
+                ..
+            } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
@@ -9230,11 +10636,14 @@ impl Lower {
                 }
                 self.emit_ctor(&m, &class_q, &all_params, inits, body);
                 let _ = is_virtual;
-            }
+            },
             CppDecl::Dtor {
                 class,
                 body,
-                is_virtual, is_noexcept, .. } => {
+                is_virtual,
+                is_noexcept,
+                ..
+            } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let m = mangle_dtor(&n, 1);
@@ -9253,7 +10662,7 @@ impl Lower {
                 self.current_class = Some(class_q);
                 self.emit_fn(&m, &MangleType::Void, &all_params, body);
                 let _ = is_virtual;
-            }
+            },
             CppDecl::MemberVar {
                 ty,
                 name,
@@ -9270,13 +10679,16 @@ impl Lower {
                             .or_default()
                             .push(name.clone());
                     }
-                    self.out
-                        .push_str(&format!("    {} {}; /* mutable */\n", self.mangle_to_c_ns(ty), name));
+                    self.out.push_str(&format!(
+                        "    {} {}; /* mutable */\n",
+                        self.mangle_to_c_ns(ty),
+                        name
+                    ));
                 } else {
                     self.out
                         .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
                 }
-            }
+            },
             CppDecl::Namespace { name, body } => {
                 if let Some(n) = name {
                     self.ns.stack.push(n.clone());
@@ -9287,7 +10699,7 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             CppDecl::InlineNamespace { name, body } => {
                 // Inline namespace members are visible at outer scope (ABI versioning)
                 if let Some(n) = name {
@@ -9299,19 +10711,19 @@ impl Lower {
                 if name.is_some() {
                     self.ns.stack.pop();
                 }
-            }
+            },
             CppDecl::ExternTemplate(inner) => {
                 // Extern template: just lower the inner declaration (suppresses implicit instantiation)
                 self.lower_decl(inner);
-            }
+            },
             CppDecl::Using { is_namespace, path } => {
                 // M8: 仅注释提示 (lower 阶段忽略)
                 let _ = (is_namespace, path);
-            }
+            },
             CppDecl::UsingEnum { ref name } => {
                 // C++20: using enum - C 枚举值已在同一作用域, no-op
                 let _ = name;
-            }
+            },
             CppDecl::OperatorFn {
                 class,
                 op,
@@ -9345,7 +10757,7 @@ impl Lower {
                     let m = mangle_operator_global(op.clone(), &param_tys);
                     self.emit_fn(&m, ret, params, body);
                 }
-            }
+            },
             CppDecl::Template {
                 params,
                 decl,
@@ -9397,7 +10809,7 @@ impl Lower {
                             .join(", ")
                     ));
                 }
-            }
+            },
             CppDecl::PartialSpec {
                 params,
                 pattern_text,
@@ -9415,7 +10827,7 @@ impl Lower {
                         .join(", "),
                     pattern_text
                 ));
-            }
+            },
             // M17.0: using Base::Base 真 wrapper - 为基类每个 ctor 生成派生 wrapper
             // 实际策略: 查 class_methods[Base] 获取基类 ctor 列表, 派生类生成转发
             CppDecl::InheritingCtor { class, base } => {
@@ -9493,7 +10905,7 @@ impl Lower {
                         base, base
                     ));
                 }
-            }
+            },
             // M10+: concept 求值 (而非 M9 的简单占位)
             CppDecl::Concept { name, body_text } => {
                 let c = crate::cpp::feature_degrade::Concept::parse(body_text);
@@ -9502,7 +10914,7 @@ impl Lower {
                     name, body_text
                 ));
                 let _ = c; // 概念定义仅作声明, 实际约束在 use 处求值
-            }
+            },
             CppDecl::Module {
                 name,
                 partition,
@@ -9529,13 +10941,13 @@ impl Lower {
                     }
                     self.module_collect = true;
                 }
-            }
+            },
             CppDecl::PrivateFragment => {
                 // M26.4: `module :private;` - 之后的声明不导出
                 self.module_collect = false;
                 self.out
                     .push_str("/* dcc C++ module :private (M26.4): exports end here */\n");
-            }
+            },
             CppDecl::Import { path } => {
                 // M26: BMF - 记录 import 依赖 (module 收集模式下)
                 if self.module_collect {
@@ -9579,14 +10991,14 @@ impl Lower {
                     "/* dcc C++ import (M9 placeholder): {} */\n",
                     path.join("::")
                 ));
-            }
+            },
             CppDecl::ExportBlock(body) => {
                 self.out
                     .push_str("/* dcc C++ export block (M9 placeholder) */\n");
                 for x in body {
                     self.lower_decl(x);
                 }
-            }
+            },
             CppDecl::RawExternC(text) => {
                 /* M18.0: 透传 extern "C" { ... } 块原文.
                  * 内部 C 函数声明 (如 dccpp_dur_from_nanos) 必须保留,
@@ -9681,28 +11093,75 @@ impl Lower {
                     }
                 }
                 self.out.push('\n');
-            }
+            },
             CppDecl::Typedef { target, name } => {
                 // M30.3: 发射 typedef 到 C 输出, 确保后续使用
                 // 该类型名时 C 编译器能识别.
                 // 跳过已在 lower_decls 硬编码的 typedef (避免重复定义)
                 static SKIP_TYPEDEFS: &[&str] = &[
-                    "__gnuc_va_list", "va_list", "size_t", "wchar_t",
-                    "intmax_t", "uintmax_t", "int64_t", "uint64_t",
-                    "int32_t", "uint32_t", "int16_t", "uint16_t",
-                    "int8_t", "uint8_t", "off_t", "ssize_t",
-                    "__off_t", "__off64_t", "__ssize_t", "__dev_t",
-                    "__uid_t", "__gid_t", "__ino_t", "__mode_t",
-                    "__nlink_t", "__time_t", "__blksize_t", "__blkcnt_t",
-                    "__syscall_slong_t", "__syscall_ulong_t", "__loff_t",
-                    "__clock_t", "__suseconds_t", "__pid_t", "__key_t",
-                    "__caddr_t", "__daddr_t", "__quad_t", "__u_quad_t",
-                    "__id_t", "__ino64_t", "__blkcnt64_t",
-                    "__fsblkcnt_t", "__fsblkcnt64_t", "__fsfilcnt_t", "__fsfilcnt64_t",
-                    "__locale_t", "__u_char", "__u_short", "__u_int", "__u_long",
-                    "__useconds_t", "__socklen_t", "__timer_t", "__clockid_t",
-                    "__int8_t", "__int16_t", "__int32_t", "__int64_t",
-                    "__uint8_t", "__uint16_t", "__uint32_t", "__uint64_t",
+                    "__gnuc_va_list",
+                    "va_list",
+                    "size_t",
+                    "wchar_t",
+                    "intmax_t",
+                    "uintmax_t",
+                    "int64_t",
+                    "uint64_t",
+                    "int32_t",
+                    "uint32_t",
+                    "int16_t",
+                    "uint16_t",
+                    "int8_t",
+                    "uint8_t",
+                    "off_t",
+                    "ssize_t",
+                    "__off_t",
+                    "__off64_t",
+                    "__ssize_t",
+                    "__dev_t",
+                    "__uid_t",
+                    "__gid_t",
+                    "__ino_t",
+                    "__mode_t",
+                    "__nlink_t",
+                    "__time_t",
+                    "__blksize_t",
+                    "__blkcnt_t",
+                    "__syscall_slong_t",
+                    "__syscall_ulong_t",
+                    "__loff_t",
+                    "__clock_t",
+                    "__suseconds_t",
+                    "__pid_t",
+                    "__key_t",
+                    "__caddr_t",
+                    "__daddr_t",
+                    "__quad_t",
+                    "__u_quad_t",
+                    "__id_t",
+                    "__ino64_t",
+                    "__blkcnt64_t",
+                    "__fsblkcnt_t",
+                    "__fsblkcnt64_t",
+                    "__fsfilcnt_t",
+                    "__fsfilcnt64_t",
+                    "__locale_t",
+                    "__u_char",
+                    "__u_short",
+                    "__u_int",
+                    "__u_long",
+                    "__useconds_t",
+                    "__socklen_t",
+                    "__timer_t",
+                    "__clockid_t",
+                    "__int8_t",
+                    "__int16_t",
+                    "__int32_t",
+                    "__int64_t",
+                    "__uint8_t",
+                    "__uint16_t",
+                    "__uint32_t",
+                    "__uint64_t",
                 ];
                 if SKIP_TYPEDEFS.contains(&name.as_str()) {
                     // 跳过已硬编码的 typedef
@@ -9720,13 +11179,14 @@ impl Lower {
                     // 其中 c_target 和 qname 相同
                     let is_self_ref_output = c_target == qname;
                     if !is_bad_struct && !is_self_ref_output {
-                        self.out.push_str(&format!("typedef {} {};\n", c_target, qname));
+                        self.out
+                            .push_str(&format!("typedef {} {};\n", c_target, qname));
                     }
                 }
-            }
+            },
             CppDecl::Empty => {
                 /* M18.0: enum / 修饰后无实际声明时使用, 不产生 C 输出. */
-            }
+            },
             CppDecl::Enum {
                 name,
                 scoped,
@@ -9734,12 +11194,12 @@ impl Lower {
                 variants,
             } => {
                 self.emit_enum_decl(name, *scoped, underlying, variants);
-            }
+            },
             // G13: Full specialization - emit as weak symbol
             CppDecl::FullSpec { .. } => {
                 // Skip full spec in legacy mode for now - native will handle properly
                 // TODO: Implement proper lowering for FullSpec when needed
-            }
+            },
             CppDecl::Opaque(text) => {
                 // 无法解析的声明，原样输出到 C 代码中。
                 // 包裹在注释标记中便于调试追踪。
@@ -9749,7 +11209,7 @@ impl Lower {
                     self.out.push('\n');
                 }
                 self.out.push_str("/* opaque decl end */\n");
-            }
+            },
         }
     }
 
@@ -9794,10 +11254,8 @@ impl Lower {
             self.out.push_str(&format!("enum {{ {} }};\n", body));
         } else if let Some(ut) = underlying {
             // C23 enum 底层类型: 尽可能保留 sizeof / 值域语义.
-            self.out.push_str(&format!(
-                "typedef enum : {} {{ {} }} {};\n",
-                ut, body, prefixed
-            ));
+            self.out
+                .push_str(&format!("typedef enum : {} {{ {} }} {};\n", ut, body, prefixed));
         } else {
             self.out
                 .push_str(&format!("typedef enum {{ {} }} {};\n", body, prefixed));
@@ -9848,11 +11306,20 @@ impl Lower {
         // M30.3: 先收集并发射嵌套类, 在 enclosing struct 定义之前.
         // 避免嵌套类的 post-class 代码 (constructor, typedef, offsetof)
         // 被发射到 enclosing struct 内部.
-        let nested_classes: Vec<&ClassDecl> = c.members.iter().filter_map(|m| {
-            if let CppDecl::Class(nested) = m { Some(nested) } else { None }
-        }).collect();
+        let nested_classes: Vec<&ClassDecl> = c
+            .members
+            .iter()
+            .filter_map(|m| {
+                if let CppDecl::Class(nested) = m {
+                    Some(nested)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for nested in &nested_classes {
-            self.out.push_str(&format!("/* nested class {} */\n", nested.name));
+            self.out
+                .push_str(&format!("/* nested class {} */\n", nested.name));
             self.lower_class(nested);
         }
         // 阶段 1: 仅 struct/union 定义 (成员字段 + vptr + vbptr + 虚基子对象)
@@ -9890,7 +11357,7 @@ impl Lower {
                 CppDecl::MemberVar { ty, name, .. } => {
                     self.out
                         .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
-                }
+                },
                 CppDecl::Class(nested) => {
                     // M30.3: 嵌套类已在 struct 定义前发射,
                     // 这里只发射成员变量实例.
@@ -9898,7 +11365,7 @@ impl Lower {
                     // 注意: 原始成员名可能不是 "val", 但 parser 未保留
                     // 嵌套类的成员名, 这里用类名作为近似.
                     self.out.push_str(&format!("    {} {};\n", kw, nested.name));
-                }
+                },
                 CppDecl::AnonAggr {
                     is_union,
                     members: am,
@@ -9919,8 +11386,8 @@ impl Lower {
                         }
                     }
                     self.out.push_str(&format!("    }} {};\n", an));
-                }
-                _ => {} // 成员函数 / 构造 / 析构 -> 阶段 2
+                },
+                _ => {}, // 成员函数 / 构造 / 析构 -> 阶段 2
             }
         }
         // M26.3: 虚基子对象嵌入尾部 (传递虚基, DFS 顺序, 去重 - 菱形共享)
@@ -9942,17 +11409,17 @@ impl Lower {
                     m, qname
                 ));
             } else {
-            self.out
-                .push_str(&format!("void {} (struct {}* this) {{\n", m, qname));
-            self.out
-                .push_str(&format!("    this->__vbptr = (long*)__vbt_{};\n", qname));
-            for vb in &vbs {
-                let n_vb = NestedName::from_dotted(vec![vb.clone()]);
-                let m_vb = mangle_ctor(&n_vb, &[], 1);
                 self.out
-                    .push_str(&format!("    {}(&this->__vb_{});\n", m_vb, vb));
-            }
-            self.out.push_str("}\n");
+                    .push_str(&format!("void {} (struct {}* this) {{\n", m, qname));
+                self.out
+                    .push_str(&format!("    this->__vbptr = (long*)__vbt_{};\n", qname));
+                for vb in &vbs {
+                    let n_vb = NestedName::from_dotted(vec![vb.clone()]);
+                    let m_vb = mangle_ctor(&n_vb, &[], 1);
+                    self.out
+                        .push_str(&format!("    {}(&this->__vb_{});\n", m_vb, vb));
+                }
+                self.out.push_str("}\n");
             }
         }
         // M18.0: 同时输出 typedef 让 unqualified 类名可作为类型
@@ -9972,7 +11439,9 @@ impl Lower {
                     && last[1..].chars().all(|c| c.is_ascii_digit() || c == '-');
                 // M30.4: 别名必须以字母或下划线开头 (合法 C 标识符).
                 // `__anon_aggr_1` 的尾段 `1` 是数字, 不能作为 typedef 名.
-                let valid_ident = last.chars().next()
+                let valid_ident = last
+                    .chars()
+                    .next()
                     .map(|c| c.is_ascii_alphabetic() || c == '_')
                     .unwrap_or(false);
                 if last != qname
@@ -10061,8 +11530,8 @@ impl Lower {
             | CppDecl::MemberFn { .. }
             | CppDecl::OperatorFn { .. } => {
                 self.lower_decl(m);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -10070,26 +11539,26 @@ impl Lower {
         match m {
             CppDecl::Ctor { .. } | CppDecl::Dtor { .. } | CppDecl::MemberFn { .. } => {
                 self.lower_decl(m);
-            }
+            },
             CppDecl::MemberVar { ty, name, .. } => {
                 self.out
                     .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
-            }
+            },
             CppDecl::OperatorFn { .. } => {
                 self.lower_decl(m);
-            }
+            },
             CppDecl::Class(c) => {
                 // 嵌套类
                 self.out
                     .push_str(&format!("/* nested class {} */\n", c.name));
                 self.lower_class(c);
-            }
+            },
             CppDecl::Enum { .. } => {
                 // 已在 lower_class 开头提前发射 (保证常量定义先于使用)
-            }
+            },
             _ => {
                 self.out.push_str("/* unsupported class member */\n");
-            }
+            },
         }
     }
     /// 限定名 (在当前命名空间上下文中)
@@ -10108,10 +11577,8 @@ impl Lower {
     /// `__dcc_ti_<Name>` 是 typeinfo 唯一标识, `typeid(T)` 与 `typeid(e)` 均返回此符号地址.
     fn emit_typeinfo(&mut self, name: &str) {
         let zti = mangle_typeinfo(name);
-        self.out.push_str(&format!(
-            "static char __dcc_ti_{}_name[] = \"{}\";\n",
-            name, name
-        ));
+        self.out
+            .push_str(&format!("static char __dcc_ti_{}_name[] = \"{}\";\n", name, name));
         // M17.0: typeinfo struct, 含 name 字段; address 即 typeinfo 指针
         // M26: 承载类型为 gcc_compat 的 __dcc_typeinfo_t (prologue 已定义)
         self.out.push_str(&format!(
@@ -10119,10 +11586,8 @@ impl Lower {
             name
         ));
         // Itanium _ZTI<Name> 兼容符号 (static: 多 TU 允许重复定义)
-        self.out.push_str(&format!(
-            "static void* {} = (void*)&__dcc_ti_{};\n",
-            zti, name
-        ));
+        self.out
+            .push_str(&format!("static void* {} = (void*)&__dcc_ti_{};\n", zti, name));
     }
 
     /// 输出 vtable 数组与符号
@@ -10131,10 +11596,8 @@ impl Lower {
         self.out
             .push_str(&format!("static void* __dcc_vt_{}[] = {{\n", name));
         // RTTI slot: pointer to typeinfo struct for dynamic typeid
-        self.out.push_str(&format!(
-            "    (void*)&__dcc_ti_{},  /* RTTI typeinfo pointer */\n",
-            name
-        ));
+        self.out
+            .push_str(&format!("    (void*)&__dcc_ti_{},  /* RTTI typeinfo pointer */\n", name));
         for m in members {
             if let CppDecl::MemberFn {
                 is_virtual: true,
@@ -10163,10 +11626,8 @@ impl Lower {
         }
         self.out.push_str("    (void*)0\n");
         self.out.push_str("};\n");
-        self.out.push_str(&format!(
-            "static void* {} = __dcc_vt_{};\n",
-            ztv, name
-        ));
+        self.out
+            .push_str(&format!("static void* {} = __dcc_vt_{};\n", ztv, name));
     }
 
     /// 输出 vtable 项
@@ -10301,26 +11762,31 @@ impl Lower {
                     self.emit_expr(e);
                     self.out.push_str(";\n");
                 }
-            }
+            },
             CppStmt::Expr(e) => {
                 self.emit_expr(e);
                 self.out.push_str(";\n");
-            }
+            },
             CppStmt::Block(b) => {
                 self.out.push_str("{\n");
                 for s in &b.stmts {
                     self.emit_stmt(s);
                 }
                 self.out.push_str("}\n");
-            }
+            },
             CppStmt::ThisMember(name, inner) => {
                 self.out.push_str(&format!("this->{} = ", name));
                 if let CppStmt::Expr(e) = &**inner {
                     self.emit_expr(e);
                 }
                 self.out.push_str(";\n");
-            }
-            CppStmt::LocalVar { ty, name, init, is_volatile: _ } => {
+            },
+            CppStmt::LocalVar {
+                ty,
+                name,
+                init,
+                is_volatile: _,
+            } => {
                 // M17.0: auto / decltype(auto) 真类型推导
                 let resolved_ty = if ty.is_unresolved() {
                     if let Some(e) = init {
@@ -10417,7 +11883,9 @@ impl Lower {
                         if let CppExpr::InitList(elems) = e {
                             self.out.push('{');
                             for (i, elem) in elems.iter().enumerate() {
-                                if i > 0 { self.out.push_str(", "); }
+                                if i > 0 {
+                                    self.out.push_str(", ");
+                                }
                                 self.emit_expr(elem);
                             }
                             self.out.push('}');
@@ -10435,19 +11903,21 @@ impl Lower {
                     let inst_class = match &resolved_ty {
                         MangleType::Template { name: tn, args: ta } => {
                             instantiated_class_name(tn, ta)
-                        }
+                        },
                         _ => self.qualify_name(class),
                     };
                     let n = NestedName::from_dotted(vec![inst_class]);
-                    let param_tys: Vec<MangleType> =
-                        class_ctor_args.iter().map(|a| {
+                    let param_tys: Vec<MangleType> = class_ctor_args
+                        .iter()
+                        .map(|a| {
                             let ty = self.infer_type(a, false);
                             // Unwrap reference: constructor args are passed by value
                             match ty {
                                 MangleType::Reference(inner) => *inner,
                                 _ => ty,
                             }
-                        }).collect();
+                        })
+                        .collect();
                     let m = mangle_ctor(&n, &param_tys, 1);
                     self.out.push_str(&format!("    {}(&{}", m, name));
                     for a in &class_ctor_args {
@@ -10466,8 +11936,13 @@ impl Lower {
                         self.out.push_str(&format!("    {}(&{});\n", m, name));
                     }
                 }
-            }
-            CppStmt::StaticLocal { ty, name, init, is_volatile: _ } => {
+            },
+            CppStmt::StaticLocal {
+                ty,
+                name,
+                init,
+                is_volatile: _,
+            } => {
                 // M10+: 静态局部变量 - 触发 __cxa_guard_* 线程安全单次初始化
                 // Itanium C++ ABI: 静态局部变量存放在 .rodata/.data, 初始化由 guard 保护
                 self.local_var_types.insert(name.clone(), ty.clone());
@@ -10477,10 +11952,8 @@ impl Lower {
                     .push_str(&format!("static {} {};\n", self.mangle_to_c_ns(ty), name));
                 self.out
                     .push_str(&format!("static unsigned char _cxa_guard_{} = 0;\n", name));
-                self.out.push_str(&format!(
-                    "if (_cxa_guard_acquire(&_cxa_guard_{})) {{\n",
-                    name
-                ));
+                self.out
+                    .push_str(&format!("if (_cxa_guard_acquire(&_cxa_guard_{})) {{\n", name));
                 if let Some(e) = init {
                     self.out.push_str(&format!("    {} = ", name));
                     self.emit_expr(e);
@@ -10494,12 +11967,18 @@ impl Lower {
                 self.out
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
-            }
-            CppStmt::StructuredBinding { names, ty: _, init: _, is_volatile: _ } => {
+            },
+            CppStmt::StructuredBinding {
+                names,
+                ty: _,
+                init: _,
+                is_volatile: _,
+            } => {
                 // M30.4: 结构化绑定降级 - 暂时输出注释警告
-                self.out.push_str("// structured binding not yet fully implemented: ");
+                self.out
+                    .push_str("// structured binding not yet fully implemented: ");
                 self.out.push_str(&format!("{:?}\n", names));
-            }
+            },
             CppStmt::If { cond, then, els } => {
                 self.out.push_str("if (");
                 self.emit_expr(cond);
@@ -10515,13 +11994,13 @@ impl Lower {
                     }
                     self.out.push_str("}\n");
                 }
-            }
+            },
             // M17.0 + Phase 3: `if constexpr` with enhanced compile-time evaluation
             CppStmt::IfConstexpr { cond, then, els } => {
                 // Phase 3: Try full evaluation with context awareness first
                 let context = ConstexprContext::new(true, &self.const_local_i128);
                 let result = eval_cpp_const_full(cond, &context);
-                            
+
                 if let Some(v) = result {
                     if v != 0 {
                         // ✅ Condition is true: emit ONLY then branch
@@ -10557,7 +12036,7 @@ impl Lower {
                         self.out.push_str("}\n");
                     }
                 }
-            }
+            },
             CppStmt::While { cond, body } => {
                 self.out.push_str("while (");
                 self.emit_expr(cond);
@@ -10566,7 +12045,7 @@ impl Lower {
                     self.emit_stmt(s);
                 }
                 self.out.push_str("}\n");
-            }
+            },
             CppStmt::For {
                 init,
                 cond,
@@ -10595,7 +12074,7 @@ impl Lower {
                     self.emit_stmt(s);
                 }
                 self.out.push_str("}\n");
-            }
+            },
             CppStmt::Try { body, catches } => {
                 self.out.push_str("{\n");
                 self.out.push_str("__cxa_eh_context_t __eh_ctx = {0,0};\n");
@@ -10631,7 +12110,7 @@ impl Lower {
                 }
                 self.out.push_str("}\n");
                 self.out.push_str("}\n");
-            }
+            },
             CppStmt::Throw(val) => {
                 if let Some(e) = val {
                     self.out.push_str("{\n");
@@ -10647,7 +12126,7 @@ impl Lower {
                     self.out
                         .push_str("__cxa_throw((void*)0, (void*)0, (void(*)(void*))0);\n");
                 }
-            }
+            },
             CppStmt::Break => self.out.push_str("break;\n"),
             CppStmt::Continue => self.out.push_str("continue;\n"),
             CppStmt::Switch { expr, arms, .. } => {
@@ -10660,17 +12139,17 @@ impl Lower {
                             self.out.push_str("case ");
                             self.emit_expr(e);
                             self.out.push_str(":\n");
-                        }
+                        },
                         None => {
                             self.out.push_str("default:\n");
-                        }
+                        },
                     }
                     for s in &body.stmts {
                         self.emit_stmt(s);
                     }
                 }
                 self.out.push_str("}\n");
-            }
+            },
             // M26: 真协程状态机 (Duff's device) - 每个挂起点:
             //   state = N+1; value = (expr); return value;  + 恢复标签 case N+1:
             // 状态/返回槽/完成标志变量 per-function 命名 (见 coroutine.rs)
@@ -10683,7 +12162,7 @@ impl Lower {
                     &expr,
                 ));
                 self.coro_state += 1;
-            }
+            },
             CppStmt::CoYield(e) => {
                 // co_yield 与 co_await 同为挂起点 (产出值给调用方)
                 let expr = self.expr_to_c(e);
@@ -10694,7 +12173,7 @@ impl Lower {
                     &expr,
                 ));
                 self.coro_state += 1;
-            }
+            },
             CppStmt::CoReturn(v) => {
                 // co_return: 置 done 标志 + 存返回槽, 不生成恢复标签 (协程终止)
                 let expr = v
@@ -10708,10 +12187,10 @@ impl Lower {
                     &expr,
                 ));
                 self.coro_state += 1;
-            }
+            },
             CppStmt::Decl(d) => {
                 self.lower_decl(d);
-            }
+            },
             CppStmt::OpaqueStmt(text) => {
                 // 无法解析的语句，原样输出到函数体中。
                 self.out.push_str(text);
@@ -10722,10 +12201,10 @@ impl Lower {
                 if !text.ends_with('\n') {
                     self.out.push('\n');
                 }
-            }
+            },
             CppStmt::Fallthrough { .. } => {
                 // no-op: fallthrough 只是一个标记，不输出任何代码
-            }
+            },
             CppStmt::DoWhile { body, cond } => {
                 self.out.push_str("do {\n");
                 for s in &body.stmts {
@@ -10734,17 +12213,17 @@ impl Lower {
                 self.out.push_str("} while (");
                 self.emit_expr(cond);
                 self.out.push_str(");\n");
-            }
+            },
             CppStmt::Goto(label) => {
                 self.out.push_str("goto ");
                 self.out.push_str(label);
                 self.out.push_str(";\n");
-            }
+            },
             CppStmt::Labeled { label, stmt } => {
                 self.out.push_str(label);
                 self.out.push_str(": ");
                 self.emit_stmt(stmt);
-            }
+            },
         }
     }
 
@@ -10767,7 +12246,7 @@ impl Lower {
                     self.out.push_str(p);
                 }
                 self.out.push('"');
-            }
+            },
             CppExpr::Ident(s) => {
                 // 当前在类方法内, 且 s 是该类的成员, 改写为 this->s
                 if let Some(cls) = &self.current_class {
@@ -10785,7 +12264,7 @@ impl Lower {
                     }
                 }
                 self.out.push_str(s);
-            }
+            },
             CppExpr::This => self.out.push_str("this"),
             CppExpr::ThisMember(s) => {
                 // M26.3: 虚基成员 -> vbtable this-adjust 访问
@@ -10797,7 +12276,7 @@ impl Lower {
                     }
                 }
                 self.out.push_str(&format!("this->{}", s));
-            }
+            },
             CppExpr::QualifiedAccess(_, s) => self.out.push_str(s),
             CppExpr::TplStaticAccess { name, args, member } => {
                 // M29: `Tpl<Args>::member` - 先触发模板类实例化 (保证类内
@@ -10812,7 +12291,7 @@ impl Lower {
                 } else {
                     self.out.push_str(member);
                 }
-            }
+            },
             CppExpr::Member(b, s) => {
                 // M18.0: 若 b 是指针/引用类型 (e.g. const path& 参数, 或 dccpp_* 指针),
                 // 输出 `b->s` 而不是 `b.s`.
@@ -10857,7 +12336,7 @@ impl Lower {
                         self.out.push_str(&format!(".{}", s));
                     }
                 }
-            }
+            },
             CppExpr::PtrMember(b, s) => {
                 // M26.3: 虚基成员 -> vbtable this-adjust 访问 (指针 obj 用 ->)
                 if let Some(class) = self.lookup_var_class(b) {
@@ -10884,17 +12363,17 @@ impl Lower {
                     self.emit_expr(b);
                     self.out.push_str(&format!("->{}", s));
                 }
-            }
+            },
             CppExpr::MemberPtr { class, name } => {
                 // M10+: &Class::method -> 成员函数指针
                 // 降级为带 self 参数的函数指针: void (void* self, ...) __member_fn
                 self.out
                     .push_str(&format!("&_member_fn_{}_{}", class, name));
-            }
+            },
             CppExpr::TemplateIdent { name, args } => {
                 // M26: 非调用上下文的模板名 (e.g. `&foo<int>`): 输出实例化函数名
                 self.out.push_str(&Self::tplfn_c_name(name, args));
-            }
+            },
             CppExpr::InitList(elems) => {
                 // M10+: initializer_list {1, 2, 3}
                 // 降级为复合字面量: (int[]){1, 2, 3}
@@ -10912,7 +12391,7 @@ impl Lower {
                     self.emit_expr(e);
                 }
                 self.out.push_str("})");
-            }
+            },
             CppExpr::TypedInitList { ty, elems } => {
                 // M10+: initializer_list<T> T{1, 2, 3}
                 self.out
@@ -10924,7 +12403,7 @@ impl Lower {
                     self.emit_expr(e);
                 }
                 self.out.push_str("})");
-            }
+            },
             CppExpr::Call(f, args) => {
                 // M26: 模板函数调用 (显式实参 foo<int>(...) / 隐式推导 foo(...))
                 if let CppExpr::TemplateIdent { name, args: targs } = &**f {
@@ -11021,7 +12500,7 @@ impl Lower {
                     self.emit_expr(a);
                 }
                 self.out.push(')');
-            }
+            },
             CppExpr::New(ty, args) => {
                 // P2.4: 走 mangle_op_new / mangle_op_new_array /
                 // mangle_op_delete / mangle_op_delete_array 命名常量,
@@ -11048,7 +12527,7 @@ impl Lower {
                     }
                     self.out.push(')');
                 }
-            }
+            },
             // M17.0: `new T[n]` 真数组分配 - 调用 _Znam (array new) 而非 _Znwm (scalar)
             CppExpr::NewArr { ty, count } => {
                 // _Znam(size): Itanium C++ ABI 数组 operator new;
@@ -11081,7 +12560,7 @@ impl Lower {
                 ));
                 self.emit_expr(count);
                 self.out.push_str(")))");
-            }
+            },
             // M17.0: placement new - 构造在已有 ptr 上, 不分配新内存
             CppExpr::PlacementNew { ptr, ty, args } => {
                 // 形如: ((T*)ptr)->ctor_init(ptr, args)
@@ -11100,18 +12579,18 @@ impl Lower {
                     self.emit_expr(a);
                 }
                 self.out.push_str("))");
-            }
+            },
             CppExpr::Delete(p) => {
                 self.out.push_str(&format!("{}(", mangle_op_delete()));
                 self.emit_expr(p);
                 self.out.push(')');
-            }
+            },
             // M17.0: `delete[] p` 数组释放 - 调用 _ZdaPv
             CppExpr::DeleteArr(p) => {
                 self.out.push_str(&format!("{}(", mangle_op_delete_array()));
                 self.emit_expr(p);
                 self.out.push(')');
-            }
+            },
             CppExpr::BinOp(op, l, r) => {
                 self.emit_expr(l);
                 let op_s = match op {
@@ -11149,13 +12628,13 @@ impl Lower {
                         self.emit_expr(r);
                         self.out.push(']');
                         return;
-                    }
+                    },
                 };
                 self.out.push_str(op_s);
                 if !matches!(op, BinOpKind::Index) {
                     self.emit_expr(r);
                 }
-            }
+            },
             CppExpr::UnaryOp(op, e) => {
                 let s = match op {
                     UnaryOpKind::Neg => "-",
@@ -11168,25 +12647,25 @@ impl Lower {
                         self.emit_expr(e);
                         self.out.push_str("++");
                         return;
-                    }
+                    },
                     UnaryOpKind::PostDec => {
                         self.emit_expr(e);
                         self.out.push_str("--");
                         return;
-                    }
+                    },
                     UnaryOpKind::Deref => "*",
                 };
                 self.out.push_str(s);
                 self.emit_expr(e);
-            }
+            },
             CppExpr::Ref(e) => {
                 self.out.push('&');
                 self.emit_expr(e);
-            }
+            },
             CppExpr::AddrOf(e) => {
                 self.out.push('&');
                 self.emit_expr(e);
-            }
+            },
             CppExpr::Cast(ty, e) => {
                 // M26.3: 虚基 this-adjust 上转型: (Base*)&obj / (Base*)p / (Base)obj
                 // 目标是源类的传递虚基时, 指针需经 vbtable 调整到虚基子对象
@@ -11225,7 +12704,7 @@ impl Lower {
                 }
                 self.out.push_str(&format!("({})", self.mangle_to_c_ns(ty)));
                 self.emit_expr(e);
-            }
+            },
             CppExpr::Sizeof(arg) => {
                 self.out.push_str("sizeof(");
                 match arg {
@@ -11233,7 +12712,7 @@ impl Lower {
                     SizeofArg::Expr(x) => self.emit_expr(x),
                 }
                 self.out.push(')');
-            }
+            },
             CppExpr::Typeid(e) => {
                 // M27: 动态 RTTI - 多态表达式通过 vtable RTTI slot 获取真实类型
                 // 非多态表达式仍用静态类 RTTI (与 C++ 标准一致)
@@ -11255,7 +12734,7 @@ impl Lower {
                     self.out.push_str(&cls);
                     self.out.push(')');
                 }
-            }
+            },
             // M17.0: 静态 typeid(T) -> &_ZTI<T>
             CppExpr::TypeidType(ty) => {
                 let cname = match ty {
@@ -11265,7 +12744,7 @@ impl Lower {
                     other => self.mangle_to_c_ns(other),
                 };
                 self.out.push_str(&format!("(&__dcc_ti_{})", cname));
-            }
+            },
             CppExpr::DynamicCast { ty, expr } => {
                 // M10+: 完整 dynamic_cast 跨虚继承
                 // Itanium C++ ABI: __cxa_* 跨虚继承通过 vtable RTTI 查找
@@ -11275,25 +12754,25 @@ impl Lower {
                 self.out.push_str(")__dynamic_cast((void*)(");
                 self.emit_expr(expr);
                 self.out.push_str("), 0, 0, -1))");
-            }
+            },
             CppExpr::StaticCast { ty, expr } => {
                 self.out
                     .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
-            }
+            },
             CppExpr::ConstCast { ty, expr } => {
                 self.out
                     .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
-            }
+            },
             CppExpr::ReinterpretCast { ty, expr } => {
                 self.out
                     .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
-            }
+            },
             CppExpr::Lambda(lam) => {
                 let n = format!("__lambda_{}", self.lambda_counter);
                 self.lambda_counter += 1;
@@ -11311,12 +12790,12 @@ impl Lower {
                         Capture::This => self.out.push_str("this, "),
                         Capture::ByRef(n) | Capture::ByVal(n) => {
                             self.out.push_str(&format!("{}, ", n));
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 self.out.push('}');
-            }
+            },
             CppExpr::OpCall { op, args } => {
                 // 运算符调用: 简化调用
                 self.out.push_str(&format!("{}(", op.clone().encode_name()));
@@ -11327,7 +12806,7 @@ impl Lower {
                     self.emit_expr(a);
                 }
                 self.out.push(')');
-            }
+            },
             CppExpr::Ternary { cond, then, els } => {
                 self.out.push('(');
                 self.emit_expr(cond);
@@ -11336,7 +12815,7 @@ impl Lower {
                 self.out.push_str(" : ");
                 self.emit_expr(els);
                 self.out.push(')');
-            }
+            },
             CppExpr::Comma(exprs) => {
                 self.out.push('(');
                 for (i, e) in exprs.iter().enumerate() {
@@ -11346,7 +12825,7 @@ impl Lower {
                     self.emit_expr(e);
                 }
                 self.out.push(')');
-            }
+            },
             // M17.0: `obj.*ptr_to_member` 真解引用
             // ptr 是 size_t 偏移 (M17.0 简化: 我们用 mangle 时把 &T::f 编码为 size_t)
             // 实际语义: 取 obj 地址 + 偏移, 按字段类型 deref
@@ -11356,7 +12835,8 @@ impl Lower {
                 // 找出 obj 的类名 (用 lookup_var_class 启发式), 取偏移
                 let class = self.lookup_var_class(obj).unwrap_or_default();
                 // M27: 查找字段真实类型, 不再硬编码 int*
-                let field_ty = self.member_field_type(obj, member)
+                let field_ty = self
+                    .member_field_type(obj, member)
                     .unwrap_or(MangleType::Int);
                 let c_ty = self.mangle_to_c_ns(&field_ty);
                 self.out.push_str(&format!("(*({}*)((char*)(", c_ty));
@@ -11366,13 +12846,14 @@ impl Lower {
                 self.out.push('_');
                 self.out.push_str(member);
                 self.out.push_str("()))");
-            }
+            },
             // M17.0: `obj->*ptr_to_member` 真解引用
             CppExpr::PtrMemberStar(obj, member) => {
                 // M17.0: `obj->*p` 真解引用 (obj 是指针, 偏移同上)
                 let class = self.lookup_var_class(obj).unwrap_or_default();
                 // M27: 查找字段真实类型, 不再硬编码 int*
-                let field_ty = self.member_field_type(obj, member)
+                let field_ty = self
+                    .member_field_type(obj, member)
                     .unwrap_or(MangleType::Int);
                 let c_ty = self.mangle_to_c_ns(&field_ty);
                 self.out.push_str(&format!("(*({}*)((char*)(", c_ty));
@@ -11382,7 +12863,7 @@ impl Lower {
                 self.out.push('_');
                 self.out.push_str(member);
                 self.out.push_str("()))");
-            }
+            },
             // M17.0: `noexcept(expr)` 编译期 bool.
             // M26.1: 分析 expr 是否可能抛异常, 输出 0/1 (不再恒为 true).
             CppExpr::Noexcept(e) => {
@@ -11391,7 +12872,7 @@ impl Lower {
                 } else {
                     self.out.push('1');
                 }
-            }
+            },
             // M18.0: C++23 多维下标 `obj[i, j, k]` 改写为
             // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数
             // (N = 2..4, 真实实现在 dccpp_runtime.c)
@@ -11404,7 +12885,7 @@ impl Lower {
                     self.emit_expr(i);
                 }
                 self.out.push(')');
-            }
+            },
         }
     }
 
@@ -11425,7 +12906,7 @@ impl Lower {
                 };
                 self.out.push_str(prefix);
                 self.emit_static_assert_condition(inner);
-            }
+            },
             crate::cpp::parser::CppExpr::BinOp(op, lhs, rhs) => {
                 use crate::cpp::parser::BinOpKind::*;
                 let sym = match op {
@@ -11458,11 +12939,11 @@ impl Lower {
                 } else {
                     self.out.push_str("?"); // placeholder
                 }
-            }
+            },
             crate::cpp::parser::CppExpr::Ident(name) => {
                 // true/false/nullptr are keywords, const vars would be in locals
                 self.out.push_str(name);
-            }
+            },
             crate::cpp::parser::CppExpr::Call(f, args) => {
                 if let crate::cpp::parser::CppExpr::Ident(n) = &**f {
                     if n == "sizeof" && args.len() == 1 {
@@ -11476,15 +12957,17 @@ impl Lower {
                 }
                 self.out.push_str("call_");
                 self.out.push_str(&format!("{:?}", f));
-            }
+            },
             crate::cpp::parser::CppExpr::Sizeof(arg) => {
                 self.out.push_str("sizeof(");
                 match arg {
-                    crate::cpp::parser::SizeofArg::Type(t) => self.out.push_str(&format!("{:?}", t)),
+                    crate::cpp::parser::SizeofArg::Type(t) => {
+                        self.out.push_str(&format!("{:?}", t))
+                    },
                     crate::cpp::parser::SizeofArg::Expr(x) => self.emit_static_assert_condition(x),
                 }
                 self.out.push(')');
-            }
+            },
             crate::cpp::parser::CppExpr::Noexcept(_) => self.out.push_str("1"),
             crate::cpp::parser::CppExpr::Ternary { cond, then, els } => {
                 self.out.push('(');
@@ -11494,12 +12977,13 @@ impl Lower {
                 self.out.push_str(" : ");
                 self.emit_static_assert_condition(els);
                 self.out.push(')');
-            }
-            crate::cpp::parser::CppExpr::Cast(_, inner) | crate::cpp::parser::CppExpr::StaticCast { expr: inner, .. } => {
+            },
+            crate::cpp::parser::CppExpr::Cast(_, inner)
+            | crate::cpp::parser::CppExpr::StaticCast { expr: inner, .. } => {
                 self.out.push_str("cast(");
                 self.emit_static_assert_condition(inner);
                 self.out.push(')');
-            }
+            },
             _ => self.out.push_str("expr_"),
         }
     }
@@ -11514,11 +12998,11 @@ impl Lower {
                 match cap {
                     Capture::This => {
                         // 暂不处理 this (无类型信息)
-                    }
+                    },
                     Capture::ByRef(n) | Capture::ByVal(n) => {
                         self.out.push_str(&format!("    int {};\n", n));
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
             // 形参
@@ -11567,12 +13051,7 @@ impl Lower {
         params: &[(String, MangleType)],
     ) -> String {
         let args: Vec<String> = params.iter().map(|(_, t)| self.mangle_to_c_ns(t)).collect();
-        format!(
-            "{} {}({})",
-            self.mangle_to_c_ns(ret),
-            mangled,
-            args.join(", ")
-        )
+        format!("{} {}({})", self.mangle_to_c_ns(ret), mangled, args.join(", "))
     }
 
     /// M26.4: 注入导入模块 (BMF) 的 C 声明, 并注册名字供调用点降级:
@@ -11607,17 +13086,17 @@ impl Lower {
                         self.fn_ret_types.insert(e.name.clone(), ret);
                     }
                     self.out.push_str(&format!("extern {};\n", e.signature));
-                }
+                },
                 BmfKind::Class => {
                     // 已在第一遍输出
-                }
+                },
                 BmfKind::Variable => {
                     self.out.push_str(&format!("extern {};\n", e.signature));
-                }
+                },
                 BmfKind::Template => {
                     self.out
                         .push_str(&format!("/* import template {} */\n", e.name));
-                }
+                },
             }
         }
     }
@@ -11704,7 +13183,7 @@ fn infer_c_decl_ret_type(decl: &str) -> MangleType {
             } else {
                 MangleType::Long
             }
-        }
+        },
         "unsigned" => MangleType::Uint,
         "struct" => MangleType::Class(toks.next().unwrap_or("").trim_end_matches('*').to_string()),
         _ => MangleType::Int,
@@ -11799,11 +13278,7 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            s.contains("struct Counter c;"),
-            "expected 'struct Counter c;' in: {}",
-            s
-        );
+        assert!(s.contains("struct Counter c;"), "expected 'struct Counter c;' in: {}", s);
     }
 
     #[test]
@@ -11827,11 +13302,7 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            s.contains("struct Counter c ="),
-            "expected 'struct Counter c =' in: {}",
-            s
-        );
+        assert!(s.contains("struct Counter c ="), "expected 'struct Counter c =' in: {}", s);
     }
 
     #[test]
@@ -11981,16 +13452,8 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            s.contains("static void* _ZTV"),
-            "vtable must be static: {}",
-            s
-        );
-        assert!(
-            s.contains("static void* _ZTI"),
-            "typeinfo must be static: {}",
-            s
-        );
+        assert!(s.contains("static void* _ZTV"), "vtable must be static: {}", s);
+        assert!(s.contains("static void* _ZTI"), "typeinfo must be static: {}", s);
         assert!(
             s.contains("static inline size_t __dcc_mbr_"),
             "member offset must be static inline: {}",
@@ -12042,11 +13505,7 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         // M26: 模板类只注册, 不展开; 命名空间输出保留
-        assert!(
-            s.contains("std_complex") || s.contains("registered"),
-            "{}",
-            s
-        );
+        assert!(s.contains("std_complex") || s.contains("registered"), "{}", s);
         assert!(s.contains("template"), "{}", s);
     }
 
@@ -12147,16 +13606,8 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            s.contains("_ZN7Counter3incEv(&c)"),
-            "expected method call rewrite, got: {}",
-            s
-        );
-        assert!(
-            s.contains("_ZN7Counter3getEv(&c)"),
-            "expected method call rewrite, got: {}",
-            s
-        );
+        assert!(s.contains("_ZN7Counter3incEv(&c)"), "expected method call rewrite, got: {}", s);
+        assert!(s.contains("_ZN7Counter3getEv(&c)"), "expected method call rewrite, got: {}", s);
     }
 
     #[test]
@@ -12169,16 +13620,8 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            !s.contains("#include <stddef.h>"),
-            "should not include stddef.h, got: {}",
-            s
-        );
-        assert!(
-            !s.contains("#include <stdint.h>"),
-            "should not include stdint.h, got: {}",
-            s
-        );
+        assert!(!s.contains("#include <stddef.h>"), "should not include stddef.h, got: {}", s);
+        assert!(!s.contains("#include <stdint.h>"), "should not include stdint.h, got: {}", s);
         assert!(
             s.contains("typedef unsigned long size_t;"),
             "should provide fallback size_t, got: {}",
@@ -12365,11 +13808,7 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         // 验证包含 Base::Base 子结构 (M10+ 简化为重复 ctor)
-        assert!(
-            s.contains("struct Base") && s.contains("struct Derived"),
-            "{}",
-            s
-        );
+        assert!(s.contains("struct Base") && s.contains("struct Derived"), "{}", s);
     }
 
     #[test]
@@ -12596,10 +14035,7 @@ mod tests {
             .get("Final")
             .cloned()
             .unwrap_or_default();
-        assert_eq!(
-            vbs,
-            vec!["Mid1".to_string(), "Base".to_string(), "Mid2".to_string()]
-        );
+        assert_eq!(vbs, vec!["Mid1".to_string(), "Base".to_string(), "Mid2".to_string()]);
         // vbtable 前 4 项: 0(自身) + 3 个虚基
         let tbl = l.vbase_tables.get("Final").cloned().unwrap_or_default();
         assert_eq!(tbl.len(), 4, "tbl={:?}", tbl);
@@ -12635,11 +14071,7 @@ mod tests {
         assert!(s.contains("GREEN = 5"), "{}", s);
         assert!(s.contains("BLUE"), "{}", s);
         // scoped + 底层类型保留
-        assert!(
-            s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"),
-            "{}",
-            s
-        );
+        assert!(s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"), "{}", s);
         // 匿名枚举只产常量, 不产类型名
         assert!(s.contains("enum { ANON_X = 42 };"), "{}", s);
         // 不应再出现 typedef int 降级
@@ -12701,11 +14133,7 @@ mod tests {
         assert!(s.contains("r|=16;"), "{}", s);
         assert!(s.contains("r|=64;"), "{}", s);
         // noexcept 函数定义应带 nothrow 属性
-        assert!(
-            s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"),
-            "{}",
-            s
-        );
+        assert!(s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"), "{}", s);
     }
 
     #[test]
@@ -12747,11 +14175,7 @@ mod tests {
         assert!(s.contains("double fw = w.weight;"), "{}", s);
         // 成员调用: w.get_id() -> int, w.get_weight() -> double
         assert!(s.contains("int mid = _ZN6Widget6get_idEv(&w);"), "{}", s);
-        assert!(
-            s.contains("double mw = _ZN6Widget10get_weightEv(&w);"),
-            "{}",
-            s
-        );
+        assert!(s.contains("double mw = _ZN6Widget10get_weightEv(&w);"), "{}", s);
     }
 
     #[test]
@@ -12856,11 +14280,7 @@ mod tests {
         // Child 的继承成员 x (来自 GrandParent, 通过 Parent)
         assert!(s.contains("__dcc_mbr_Child_x"), "{}", s);
         // 应该使用完整 __base_ 链
-        assert!(
-            s.contains("__f.__base_Parent.__base_GrandParent.x"),
-            "{}",
-            s
-        );
+        assert!(s.contains("__f.__base_Parent.__base_GrandParent.x"), "{}", s);
         // Child 的继承成员 y (来自 Parent)
         assert!(s.contains("__dcc_mbr_Child_y"), "{}", s);
         assert!(s.contains("__f.__base_Parent.y"), "{}", s);

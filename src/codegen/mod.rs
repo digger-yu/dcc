@@ -55,12 +55,12 @@ fn validate_inline_asm_decl(decl: &Decl, diags: &mut Vec<Diagnostic>) {
             if let Some(body) = &f.body {
                 validate_inline_asm_block(body, diags);
             }
-        }
+        },
         Decl::Var(v) => {
             if let Some(init) = &v.init {
                 validate_inline_asm_expr(init, diags);
             }
-        }
+        },
         Decl::GlobalAsm {
             outputs,
             output_constraints,
@@ -76,7 +76,7 @@ fn validate_inline_asm_decl(decl: &Decl, diags: &mut Vec<Diagnostic>) {
             span,
             diags,
         ),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -95,7 +95,7 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
             if let Some(e) = val {
                 validate_inline_asm_expr(e, diags);
             }
-        }
+        },
         Stmt::Expr { e, .. } => validate_inline_asm_expr(e, diags),
         Stmt::If {
             cond, then_, else_, ..
@@ -105,11 +105,11 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
             if let Some(e) = else_ {
                 validate_inline_asm_stmt(e, diags);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             validate_inline_asm_expr(cond, diags);
             validate_inline_asm_stmt(body, diags);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -127,7 +127,7 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
                 validate_inline_asm_expr(step, diags);
             }
             validate_inline_asm_stmt(body, diags);
-        }
+        },
         Stmt::Block { b, .. } => validate_inline_asm_block(b, diags),
         Stmt::GotoIndirect { expr, .. } => validate_inline_asm_expr(expr, diags),
         Stmt::Label { stmt, .. } => validate_inline_asm_stmt(stmt, diags),
@@ -142,7 +142,7 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
                 }
                 validate_inline_asm_block(&case.body, diags);
             }
-        }
+        },
         Stmt::AsmGoto {
             outputs,
             output_constraints,
@@ -159,8 +159,11 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
                 span,
                 diags,
             );
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Fallthrough { .. } => {}
+        },
+        Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Goto { .. }
+        | Stmt::Fallthrough { .. } => {},
     }
 }
 
@@ -169,7 +172,7 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
         Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             validate_inline_asm_expr(l, diags);
             validate_inline_asm_expr(r, diags);
-        }
+        },
         Expr::Unary { e, .. }
         | Expr::Cast { e, .. }
         | Expr::SizeofExpr { e, .. }
@@ -187,25 +190,25 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
             for arg in args {
                 validate_inline_asm_expr(arg, diags);
             }
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             validate_inline_asm_expr(cond, diags);
             validate_inline_asm_expr(then_, diags);
             validate_inline_asm_expr(else_, diags);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             validate_inline_asm_expr(arr, diags);
             validate_inline_asm_expr(idx, diags);
-        }
+        },
         Expr::Member { expr, .. } => validate_inline_asm_expr(expr, diags),
         Expr::StmtExpr { block, .. } => validate_inline_asm_block(block, diags),
         Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
             for init in inits {
                 validate_inline_asm_init(init, diags);
             }
-        }
+        },
         Expr::AsmExpr {
             outputs,
             output_constraints,
@@ -222,7 +225,7 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
                 span,
                 diags,
             );
-        }
+        },
         Expr::VaArg { ap, .. } => validate_inline_asm_expr(ap, diags),
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -233,7 +236,7 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. }
         | Expr::LabelAddr { .. }
-        | Expr::Offsetof { .. } => {}
+        | Expr::Offsetof { .. } => {},
     }
 }
 
@@ -243,7 +246,7 @@ fn validate_inline_asm_init(init: &InitItem, diags: &mut Vec<Diagnostic>) {
         InitItem::Designated { designator, value } => {
             validate_inline_asm_designator(designator, diags);
             validate_inline_asm_expr(value, diags);
-        }
+        },
     }
 }
 
@@ -253,13 +256,13 @@ fn validate_inline_asm_designator(designator: &Designator, diags: &mut Vec<Diagn
         Designator::Range(l, r) => {
             validate_inline_asm_expr(l, diags);
             validate_inline_asm_expr(r, diags);
-        }
+        },
         Designator::Chain(items) => {
             for item in items {
                 validate_inline_asm_designator(item, diags);
             }
-        }
-        Designator::Field(_) => {}
+        },
+        Designator::Field(_) => {},
     }
 }
 
@@ -305,10 +308,7 @@ fn validate_inline_asm_operands(
             diags.push(
                 Diagnostic::err(
                     "E0014",
-                    format!(
-                        "output operand {} constraint '{}' missing '=' or '+' prefix",
-                        i, c
-                    ),
+                    format!("output operand {} constraint '{}' missing '=' or '+' prefix", i, c),
                     span.clone(),
                 )
                 .with_hint("add '=' for write-only or '+' for read-write output"),
@@ -376,13 +376,9 @@ fn validate_inline_asm_operands(
             .get(idx)
             .map(String::as_str)
             .unwrap_or("=r");
-        let effective = matched_constraint(
-            constraint,
-            output_constraints,
-            input_constraints,
-            outputs.len(),
-        )
-        .unwrap_or(constraint);
+        let effective =
+            matched_constraint(constraint, output_constraints, input_constraints, outputs.len())
+                .unwrap_or(constraint);
         validate_inline_asm_operand(expr, effective, true, span, diags);
     }
     for (idx, expr) in inputs.iter().enumerate() {
@@ -390,25 +386,20 @@ fn validate_inline_asm_operands(
             .get(idx)
             .map(String::as_str)
             .unwrap_or("r");
-        let effective = matched_constraint(
-            constraint,
-            output_constraints,
-            input_constraints,
-            outputs.len(),
-        )
-        .unwrap_or(constraint);
+        let effective =
+            matched_constraint(constraint, output_constraints, input_constraints, outputs.len())
+                .unwrap_or(constraint);
         validate_inline_asm_operand(expr, effective, false, span, diags);
     }
 
     // 4. P0-5: 早期约束模式验证 — 拒绝不支持的约束字母
-    let constraint_errors = shared::asm_constraints::validate_asm_constraints(
-        output_constraints,
-        input_constraints,
-    );
+    let constraint_errors =
+        shared::asm_constraints::validate_asm_constraints(output_constraints, input_constraints);
     for err_msg in &constraint_errors {
         diags.push(
-            Diagnostic::warn("W0311", err_msg.clone(), span.clone())
-                .with_hint("use supported constraints: r, m, i, g, n, q, =r, =m, +r, +m, memory, cc"),
+            Diagnostic::warn("W0311", err_msg.clone(), span.clone()).with_hint(
+                "use supported constraints: r, m, i, g, n, q, =r, =m, +r, +m, memory, cc",
+            ),
         );
     }
 }
@@ -486,16 +477,16 @@ fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32
             Some('=') => {
                 is_output = true;
                 s = &s[1..];
-            }
+            },
             Some('+') => {
                 is_output = true;
                 is_inout = true;
                 s = &s[1..];
-            }
+            },
             Some('&') => {
                 early = true;
                 s = &s[1..];
-            }
+            },
             Some('%') => s = &s[1..],
             Some(c) if c.is_ascii_digit() => {
                 let mut val: u32 = 0;
@@ -507,7 +498,7 @@ fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32
                     s = &s[1..];
                 }
                 match_digit = Some(val);
-            }
+            },
             _ => break,
         }
     }
@@ -616,8 +607,21 @@ fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static st
     if letters.iter().any(|c| {
         matches!(
             c,
-            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P'
-            | 'X' | 'E' | 'F' | 'G' | 'H' | 's'
+            'i' | 'n'
+                | 'I'
+                | 'J'
+                | 'K'
+                | 'L'
+                | 'M'
+                | 'N'
+                | 'O'
+                | 'P'
+                | 'X'
+                | 'E'
+                | 'F'
+                | 'G'
+                | 'H'
+                | 's'
         )
     }) {
         return "i";
@@ -684,7 +688,13 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
                 (64, false) => "long unsigned int",
                 (128, true) => "__int128",
                 (128, false) => "unsigned __int128",
-                _ => if *signed { "int" } else { "unsigned int" },
+                _ => {
+                    if *signed {
+                        "int"
+                    } else {
+                        "unsigned int"
+                    }
+                },
             };
             debug::DwarfType {
                 name: name.to_string(),
@@ -695,7 +705,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
                     debug::TypeEncoding::Unsigned
                 }),
             }
-        }
+        },
         ValueType::Float { bits } => {
             let name = match *bits {
                 32 => "float",
@@ -708,7 +718,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
                 byte_size: (*bits as u64).div_ceil(8),
                 kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
             }
-        }
+        },
         ValueType::Pointer(inner) => debug::DwarfType {
             name: format!("{}*", value_type_to_dwarf(inner).name),
             byte_size: 8,
@@ -727,7 +737,11 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
             byte_size: 0,
             kind: debug::DwarfTypeKind::Pointer(Box::new(value_type_to_dwarf(elem))),
         },
-        ValueType::Aggregate { name, size, is_union } => {
+        ValueType::Aggregate {
+            name,
+            size,
+            is_union,
+        } => {
             if *is_union {
                 debug::DwarfType {
                     name: name.clone(),
@@ -741,7 +755,7 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
                     kind: debug::DwarfTypeKind::Struct { members: vec![] },
                 }
             }
-        }
+        },
         ValueType::Function { ret, params } => debug::DwarfType {
             name: "function".to_string(),
             byte_size: 0,
@@ -927,7 +941,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                 byte_size: 8,
                 kind: debug::DwarfTypeKind::Pointer(Box::new(inner_dw)),
             }
-        }
+        },
         Type::Array(elem, count) => {
             let elem_dw = ast_type_to_dwarf(&elem.base);
             let cnt = match count {
@@ -942,10 +956,10 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                     count: cnt,
                 },
             }
-        }
+        },
         Type::Named(name) => debug::DwarfType {
             name: name.clone(),
-            byte_size: 0, // 未知大小，稍后解析
+            byte_size: 0,                     // 未知大小，稍后解析
             kind: debug::DwarfTypeKind::Void, // 占位
         },
         Type::Struct(name, fields, size, _) => {
@@ -971,7 +985,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                 byte_size: *size as u64,
                 kind: debug::DwarfTypeKind::Struct { members },
             }
-        }
+        },
         Type::Union(name, fields, size, _) => {
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
@@ -985,7 +999,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                 byte_size: *size as u64,
                 kind: debug::DwarfTypeKind::Union { members },
             }
-        }
+        },
         Type::Enum(name, variants, _underlying) => {
             let members: Vec<(String, i128)> = variants
                 .iter()
@@ -1003,7 +1017,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                     }),
                 },
             }
-        }
+        },
         Type::Func(ret, params) => debug::DwarfType {
             name: "function".to_string(),
             byte_size: 0,
@@ -1043,7 +1057,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
                     count: *count as u64,
                 },
             }
-        }
+        },
     }
 }
 
@@ -1068,7 +1082,7 @@ fn build_dwarf_cu(
                     .map(|p| p.name.as_ref().map(|id| id.name.clone()))
                     .collect();
                 Some((fd.name.name.as_str(), names))
-            }
+            },
             _ => None,
         })
         .collect();
@@ -1112,8 +1126,7 @@ fn build_dwarf_cu(
 
     let low_pc = functions.first().map(|f| f.low_pc).unwrap_or(0);
     let high_pc = functions.last().map(|f| f.high_pc).unwrap_or(0);
-    let func_ranges: Vec<(u64, u64)> =
-        functions.iter().map(|f| (f.low_pc, f.high_pc)).collect();
+    let func_ranges: Vec<(u64, u64)> = functions.iter().map(|f| (f.low_pc, f.high_pc)).collect();
 
     // 从 AST 声明中收集类型信息（struct/union/enum/typedef）
     let mut types: Vec<debug::DwarfType> = Vec::new();
@@ -1138,15 +1151,17 @@ fn build_dwarf_cu(
                         }
                     })
                     .collect();
-                let size = sd.fields.last().map(|f| {
-                    f.offset + f.ty.size()
-                }).unwrap_or(0);
+                let size = sd
+                    .fields
+                    .last()
+                    .map(|f| f.offset + f.ty.size())
+                    .unwrap_or(0);
                 types.push(debug::DwarfType {
                     name: format!("struct {}", sd.name.name),
                     byte_size: size as u64,
                     kind: debug::DwarfTypeKind::Struct { members },
                 });
-            }
+            },
             crate::ast::Decl::UnionDef(sd) => {
                 let members: Vec<debug::DwarfMember> = sd
                     .fields
@@ -1162,7 +1177,7 @@ fn build_dwarf_cu(
                     byte_size: size as u64,
                     kind: debug::DwarfTypeKind::Union { members },
                 });
-            }
+            },
             crate::ast::Decl::EnumDef(ed) => {
                 let mut variants: Vec<(String, i128)> = Vec::new();
                 let mut next_val: i128 = 0;
@@ -1183,7 +1198,7 @@ fn build_dwarf_cu(
                         }),
                     },
                 });
-            }
+            },
             crate::ast::Decl::Typedef { name, ty, .. } => {
                 let target = ast_type_to_dwarf(ty);
                 types.push(debug::DwarfType {
@@ -1194,8 +1209,8 @@ fn build_dwarf_cu(
                         target: Box::new(target),
                     },
                 });
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -1236,7 +1251,11 @@ fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
 /// Unified code generation entry point
 /// First Principle: use registry to find backend, then delegate
 /// This replaces the giant match statement with a clean abstraction
-pub fn emit(module: &Module, target: &Target, opts: EmitOptions) -> Result<Vec<u8>, Vec<Diagnostic>> {
+pub fn emit(
+    module: &Module,
+    target: &Target,
+    opts: EmitOptions,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
     // -S 与 -c 都需后端以可重定位模式构建 (旧行为: relocatable || emit_asm)
     let relocatable = opts.relocatable || opts.emit_asm;
     // Check if backend exists for this architecture (no panic!)
@@ -1249,7 +1268,11 @@ pub fn emit(module: &Module, target: &Target, opts: EmitOptions) -> Result<Vec<u
     })?;
 
     // Prepare compilation input
-    let input = CompileInput { module, target, opts: &opts };
+    let input = CompileInput {
+        module,
+        target,
+        opts: &opts,
+    };
 
     // -S 路径: 直接返回汇编文本字节, 不做 ELF 打包
     if opts.emit_asm {

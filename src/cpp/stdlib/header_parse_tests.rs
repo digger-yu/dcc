@@ -13,7 +13,7 @@ fn parse_header(name: &str, src: &str) -> bool {
         Err(e) => {
             eprintln!("[{}] parse error: {:?}", name, e);
             false
-        }
+        },
     }
 }
 
@@ -47,10 +47,7 @@ fn header_type_traits_parses() {
     // is_same 偏特化, enum value 成员) 应完整解析
     let src =
         std::fs::read_to_string("src/cpp/stdlib/headers/type_traits").expect("read type_traits");
-    assert!(
-        parse_header("type_traits", &src),
-        "type_traits should parse"
-    );
+    assert!(parse_header("type_traits", &src), "type_traits should parse");
 }
 
 #[test]
@@ -70,7 +67,7 @@ fn header_string_parses() {
     let src = std::fs::read_to_string("src/cpp/stdlib/headers/string").expect("read string");
     let mut p = CppParser::new(src.as_bytes(), "string");
     match p.parse_top_level() {
-        Ok(_) => {}
+        Ok(_) => {},
         Err(e) => panic!("string header parse error: {:?}", e),
     }
 }
@@ -120,10 +117,7 @@ fn header_typeinfo_parses() {
 fn header_initializer_list_parses() {
     let src = std::fs::read_to_string("src/cpp/stdlib/headers/initializer_list")
         .expect("read initializer_list");
-    assert!(
-        parse_header("initializer_list", &src),
-        "initializer_list should parse"
-    );
+    assert!(parse_header("initializer_list", &src), "initializer_list should parse");
 }
 
 #[test]
@@ -162,7 +156,7 @@ fn all_stdlib_headers_parse() {
         };
         let mut p = CppParser::new(src.as_bytes(), h);
         match p.parse_top_level() {
-            Ok(_) => {}
+            Ok(_) => {},
             Err(e) => panic!("header {} failed to parse: {:?}", h, e),
         }
     }
@@ -227,4 +221,3 @@ fn stdlib_iostream_cout_usage_parses() {
     });
     assert!(has_main, "expected main function");
 }
-

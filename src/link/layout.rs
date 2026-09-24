@@ -17,9 +17,9 @@ use std::collections::{HashMap, HashSet};
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::shared::elf::{
-    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY,
-    SHT_NOBITS, SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
-    STB_LOCAL, STT_NOTYPE, STT_SECTION,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY, SHT_NOBITS,
+    SHT_PREINIT_ARRAY, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, STB_LOCAL, STT_NOTYPE,
+    STT_SECTION,
 };
 use crate::debug::ArchKind;
 
@@ -496,7 +496,10 @@ impl LayoutBuilder {
                 kind: OutputSectionKind::Named(script_sec.name.clone()),
                 name: script_sec.name.clone(),
                 sh_name_off: 0,
-                ty: section_type_for_kind(&OutputSectionKind::Named(script_sec.name.clone()), &script_sec.name),
+                ty: section_type_for_kind(
+                    &OutputSectionKind::Named(script_sec.name.clone()),
+                    &script_sec.name,
+                ),
                 flags: script_sec.flags,
                 align: script_sec.align,
                 data: script_sec.data.clone(),
@@ -512,11 +515,7 @@ impl LayoutBuilder {
                 },
                 vaddr: script_sec.vma,
                 file_off: 0, // computed below
-                input_offsets: script_sec
-                    .input_sections
-                    .iter()
-                    .map(|m| m.offset)
-                    .collect(),
+                input_offsets: script_sec.input_sections.iter().map(|m| m.offset).collect(),
                 input_sections: script_sec
                     .input_sections
                     .iter()
@@ -546,9 +545,8 @@ impl LayoutBuilder {
         }
 
         // 构建输出符号表
-        let mut symbols = self.build_symbols(
-            bundle, resolved, &sections, &script_result.common_placements,
-        );
+        let mut symbols =
+            self.build_symbols(bundle, resolved, &sections, &script_result.common_placements);
 
         // 添加脚本定义的符号
         for script_sym in &script_result.symbols {
@@ -629,17 +627,13 @@ impl LayoutBuilder {
         };
 
         // 入口地址
-        let entry = script_result
-            .entry
-            .unwrap_or_else(|| {
-                symbols
-                    .iter()
-                    .find(|s| s.name == self.entry_name)
-                    .map(|s| s.vaddr)
-                    .unwrap_or_else(|| {
-                        sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr)
-                    })
-            });
+        let entry = script_result.entry.unwrap_or_else(|| {
+            symbols
+                .iter()
+                .find(|s| s.name == self.entry_name)
+                .map(|s| s.vaddr)
+                .unwrap_or_else(|| sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr))
+        });
 
         // 转换重定位
         let output_relas = self.translate_relocations(bundle, resolved, &sections, &symbols);
@@ -1407,7 +1401,7 @@ fn classify_section(name: &str) -> Option<OutputSectionKind> {
         ".text" => Some(OutputSectionKind::Text),
         ".rodata" | ".rodata.str1.1" | ".rodata.str4.4" | ".rodata.str8.8" => {
             Some(OutputSectionKind::Rodata)
-        }
+        },
         ".data" | ".data.rel.ro" => Some(OutputSectionKind::Data),
         ".bss" => Some(OutputSectionKind::Bss),
         ".tdata" => Some(OutputSectionKind::Tdata),
@@ -1574,14 +1568,8 @@ mod tests {
         assert_eq!(classify_section(".data"), Some(OutputSectionKind::Data));
         assert_eq!(classify_section(".bss"), Some(OutputSectionKind::Bss));
         assert_eq!(classify_section(".debug_info"), None);
-        assert_eq!(
-            classify_section(".init_array"),
-            Some(OutputSectionKind::InitArray)
-        );
-        assert_eq!(
-            classify_section(".fini_array"),
-            Some(OutputSectionKind::FiniArray)
-        );
+        assert_eq!(classify_section(".init_array"), Some(OutputSectionKind::InitArray));
+        assert_eq!(classify_section(".fini_array"), Some(OutputSectionKind::FiniArray));
     }
 
     #[test]
@@ -1595,17 +1583,11 @@ mod tests {
             SHT_FINI_ARRAY
         );
         assert_eq!(
-            section_type_for_kind(
-                &OutputSectionKind::Named(".init_array".into()),
-                ".init_array"
-            ),
+            section_type_for_kind(&OutputSectionKind::Named(".init_array".into()), ".init_array"),
             SHT_INIT_ARRAY
         );
         assert_eq!(
-            section_type_for_kind(
-                &OutputSectionKind::Named(".fini_array".into()),
-                ".fini_array"
-            ),
+            section_type_for_kind(&OutputSectionKind::Named(".fini_array".into()), ".fini_array"),
             SHT_FINI_ARRAY
         );
         assert_eq!(
@@ -1615,13 +1597,7 @@ mod tests {
             ),
             SHT_PREINIT_ARRAY
         );
-        assert_eq!(
-            section_type_for_kind(&OutputSectionKind::Bss, ".bss"),
-            SHT_NOBITS
-        );
-        assert_eq!(
-            section_type_for_kind(&OutputSectionKind::Text, ".text"),
-            SHT_PROGBITS
-        );
+        assert_eq!(section_type_for_kind(&OutputSectionKind::Bss, ".bss"), SHT_NOBITS);
+        assert_eq!(section_type_for_kind(&OutputSectionKind::Text, ".text"), SHT_PROGBITS);
     }
 }

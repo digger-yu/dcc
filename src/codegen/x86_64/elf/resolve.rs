@@ -1,8 +1,8 @@
 // src/codegen/x86_64/elf/resolve.rs
 // ET_EXEC/ET_REL final symbol resolution and relocation patching.
 
-use crate::codegen::x86_64::{Codegen, PendingCodeRel};
 use crate::codegen::shared::elf::R_X86_64_PC32;
+use crate::codegen::x86_64::{Codegen, PendingCodeRel};
 
 impl Codegen {
     pub fn resolve(&mut self, rodata_start: u64, data_start: u64) {

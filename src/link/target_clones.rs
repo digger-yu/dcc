@@ -249,7 +249,7 @@ pub fn generate_resolver_code(tcf: &TargetClonesFunc) -> (Vec<u8>, Vec<(usize, u
 
             // xgetbv(ecx=0) 检查 XCR0
             code.extend_from_slice(&[0x0F, 0x01, 0xD0]); // xgetbv
-            // and eax, 0x6 (XCR0[2:1])
+                                                         // and eax, 0x6 (XCR0[2:1])
             code.extend_from_slice(&[0x83, 0xE0, 0x06]);
             // cmp eax, 0x6
             code.extend_from_slice(&[0x83, 0xF8, 0x06]);
@@ -303,9 +303,7 @@ pub fn generate_resolver_code(tcf: &TargetClonesFunc) -> (Vec<u8>, Vec<(usize, u
 /// 为所有 target_clones 函数生成 resolver 代码 blob.
 ///
 /// 返回: (combined_code, Vec<(resolver_name, offset, size)>)
-pub fn generate_resolver_blob(
-    table: &TargetClonesTable,
-) -> (Vec<u8>, Vec<(String, usize, usize)>) {
+pub fn generate_resolver_blob(table: &TargetClonesTable) -> (Vec<u8>, Vec<(String, usize, usize)>) {
     let mut blob = Vec::new();
     let mut entries = Vec::new();
 
@@ -344,8 +342,7 @@ pub fn patch_all_resolvers(
             for (variant_idx, patch_off) in &patches {
                 if *variant_idx < tcf.variants.len() {
                     let vaddr = tcf.variants[*variant_idx].vaddr;
-                    code_slice[*patch_off..*patch_off + 8]
-                        .copy_from_slice(&vaddr.to_le_bytes());
+                    code_slice[*patch_off..*patch_off + 8].copy_from_slice(&vaddr.to_le_bytes());
                 }
             }
             let _ = resolver_vaddr;
@@ -553,7 +550,7 @@ mod tests {
         // Check vaddr in immediate (before patching it's 0)
         let vaddr_before = u64::from_le_bytes(code[2..10].try_into().unwrap());
         assert_eq!(vaddr_before, 0); // not yet patched
-        // Check RET
+                                     // Check RET
         assert_eq!(code[10], 0xC3);
     }
 
@@ -618,20 +615,10 @@ mod tests {
         };
         let (code, _patches) = generate_resolver_code(&tcf);
         // Should have at least 2 CPUID instructions (leaf 1 + leaf 7)
-        let cpuid_count = code
-            .windows(2)
-            .filter(|w| *w == [0x0F, 0xA2])
-            .count();
-        assert!(
-            cpuid_count >= 2,
-            "expected >= 2 CPUID, got {}",
-            cpuid_count
-        );
+        let cpuid_count = code.windows(2).filter(|w| *w == [0x0F, 0xA2]).count();
+        assert!(cpuid_count >= 2, "expected >= 2 CPUID, got {}", cpuid_count);
         // Should have XGETBV for AVX OS check
-        let xgetbv_count = code
-            .windows(3)
-            .filter(|w| *w == [0x0F, 0x01, 0xD0])
-            .count();
+        let xgetbv_count = code.windows(3).filter(|w| *w == [0x0F, 0x01, 0xD0]).count();
         assert!(xgetbv_count >= 1, "expected XGETBV");
     }
 
@@ -657,8 +644,7 @@ mod tests {
         // Patch vaddrs
         for (variant_idx, patch_off) in &patches {
             let vaddr = tcf.variants[*variant_idx].vaddr;
-            code[*patch_off..*patch_off + 8]
-                .copy_from_slice(&vaddr.to_le_bytes());
+            code[*patch_off..*patch_off + 8].copy_from_slice(&vaddr.to_le_bytes());
         }
         // Verify sse4.2 vaddr is in the code
         let sse42_bytes = 0xAAAA_BBBB_CCCC_DDDD_u64.to_le_bytes();

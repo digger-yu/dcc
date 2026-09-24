@@ -236,7 +236,7 @@ impl OffloadSection {
                 Some(a) => {
                     out.push(1);
                     push_str16(&mut out, a);
-                }
+                },
                 None => out.push(0),
             }
         }
@@ -415,10 +415,7 @@ mod tests {
         assert_eq!(arch_to_triple("sm_80"), Some("nvptx64-nvidia-cuda"));
         assert_eq!(arch_to_triple("sm90"), Some("nvptx64-nvidia-cuda"));
         assert_eq!(arch_to_triple("gfx906"), Some("amdgcn-amd-amdhsa"));
-        assert_eq!(
-            arch_to_triple("nvptx64-nvidia-cuda"),
-            Some("nvptx64-nvidia-cuda")
-        );
+        assert_eq!(arch_to_triple("nvptx64-nvidia-cuda"), Some("nvptx64-nvidia-cuda"));
         assert_eq!(arch_to_triple("sparc"), None);
         assert_eq!(arch_to_triple(""), None);
     }
@@ -429,10 +426,7 @@ mod tests {
         cfg.target_triples.push("mips64-unknown-linux".into());
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("mips64-unknown-linux"), "{err}");
-        assert!(
-            err.contains("unknown OpenMP offload target triple"),
-            "{err}"
-        );
+        assert!(err.contains("unknown OpenMP offload target triple"), "{err}");
 
         let mut cfg2 = OffloadConfig::default();
         cfg2.target_archs.push("sparc".into());

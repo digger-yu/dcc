@@ -2,7 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{BlockItem, Decl, Expr, Stmt};
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, aggregate_size, classify_rv_hfa};
+use crate::codegen::riscv64::codegen::{aggregate_size, classify_rv_hfa, Riscv64Codegen};
 use crate::codegen::shared::asm_constraints::{self, resolve_asm_operands};
 use crate::ir::{TypedStmt, ValueType};
 
@@ -19,8 +19,8 @@ impl Riscv64Codegen {
                     self.gen_expr_from_ast(init);
                     self.store_a0(off);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -65,14 +65,14 @@ impl Riscv64Codegen {
                 }
                 self.ret();
                 self.emitted_return = true;
-            }
+            },
             Stmt::Expr { e, .. } => {
                 if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
                     self.gen_expr_from_ast(e);
                 }
-            }
+            },
             Stmt::If { then_, else_, .. } => {
                 if let Some(cond) = ir.expressions.first() {
                     self.gen_expr(cond);
@@ -91,13 +91,14 @@ impl Riscv64Codegen {
                     }
                 }
                 self.label(&lbl_end);
-            }
+            },
             Stmt::While { body, .. } | Stmt::Do { body, .. } => {
                 let lbl_loop = self.fresh_label("Lwhile");
                 let lbl_exit = self.fresh_label("Lwend");
                 self.maybe_align_loop();
                 self.label(&lbl_loop);
-                self.break_continue_stack.push((lbl_exit.clone(), lbl_loop.clone()));
+                self.break_continue_stack
+                    .push((lbl_exit.clone(), lbl_loop.clone()));
                 if let Some(cond) = ir.expressions.first() {
                     self.gen_expr(cond);
                     self.beqz_a0(&lbl_exit);
@@ -106,7 +107,7 @@ impl Riscv64Codegen {
                 self.j(&lbl_loop);
                 self.label(&lbl_exit);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::For {
                 init,
                 cond,
@@ -123,7 +124,8 @@ impl Riscv64Codegen {
                 let lbl_exit = self.fresh_label("Lfend");
                 self.maybe_align_loop();
                 self.label(&lbl_loop);
-                self.break_continue_stack.push((lbl_exit.clone(), lbl_cont.clone()));
+                self.break_continue_stack
+                    .push((lbl_exit.clone(), lbl_cont.clone()));
                 if cond.is_some() {
                     if let Some(ir_cond) = ir.expressions.first() {
                         self.gen_expr(ir_cond);
@@ -140,12 +142,12 @@ impl Riscv64Codegen {
                 self.j(&lbl_loop);
                 self.label(&lbl_exit);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::Block { b, .. } => {
                 for (item, nested_ir) in b.items.iter().zip(ir.nested.iter()) {
                     self.gen_block_item(item, nested_ir);
                 }
-            }
+            },
             Stmt::AsmGoto {
                 asm_str,
                 outputs,
@@ -228,7 +230,7 @@ impl Riscv64Codegen {
                 if clobbers.iter().any(|c| c == "memory") {
                     self.emit_fence(); // fence iorw, iorw
                 }
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 // switch: 计算表达式值存入栈临时槽, 逐一比较 case 值
                 let l_end = self.fresh_label("Lsw_end");
@@ -242,7 +244,8 @@ impl Riscv64Codegen {
                 }
                 // a0 -> 栈临时 (sw a0, sw_tmp(sp))
                 self.store_a0(sw_tmp);
-                self.break_continue_stack.push((l_end.clone(), String::new()));
+                self.break_continue_stack
+                    .push((l_end.clone(), String::new()));
                 let mut has_default = false;
                 let mut case_labels: Vec<(String, &crate::ast::Case)> = Vec::new();
                 for case in cases {
@@ -257,7 +260,7 @@ impl Riscv64Codegen {
                             self.emit_mv(6, 10); // a6 = a0 (low)
                             self.gen_expr_from_ast(hi); // a0 = high
                             self.emit_mv(7, 10); // a7 = a0 (high)
-                            // bge a5, a6, skip_lo (switch >= low)
+                                                 // bge a5, a6, skip_lo (switch >= low)
                             let l_skip_lo = self.fresh_label("Lsw_skip_lo");
                             self.emit_bge_label(15, 6, &l_skip_lo);
                             self.j(&l_skip_lo);
@@ -270,7 +273,7 @@ impl Riscv64Codegen {
                         } else {
                             // case N: 精确匹配
                             self.gen_expr_from_ast(val_expr); // a0 = case value
-                            // beq a5, a0, l_case
+                                                              // beq a5, a0, l_case
                             self.emit_beq_label(15, 10, &l_case);
                         }
                         case_labels.push((l_case, case));
@@ -301,21 +304,20 @@ impl Riscv64Codegen {
                 }
                 self.label(&l_end);
                 self.break_continue_stack.pop();
-            }
+            },
             Stmt::Break { .. } => {
                 if let Some((l_break, _)) = self.break_continue_stack.last().cloned() {
                     self.j(&l_break);
                 }
-            }
+            },
             Stmt::Continue { .. } => {
                 if let Some((_, l_cont)) = self.break_continue_stack.last().cloned() {
                     if !l_cont.is_empty() {
                         self.j(&l_cont);
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
-
 }

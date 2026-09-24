@@ -178,9 +178,6 @@ mod tests {
         let data = b.gen_fini_array_data();
         assert_eq!(data.len(), 16);
         assert_eq!(u64::from_le_bytes(data[0..8].try_into().unwrap()), 0x401000);
-        assert_eq!(
-            u64::from_le_bytes(data[8..16].try_into().unwrap()),
-            0x401100
-        );
+        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), 0x401100);
     }
 }

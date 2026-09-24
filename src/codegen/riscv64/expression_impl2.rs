@@ -1,8 +1,10 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::ast::{BinOp};
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size};
+use crate::ast::BinOp;
+use crate::codegen::riscv64::codegen::{
+    is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size, Riscv64Codegen,
+};
 use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Riscv64Codegen {
@@ -13,7 +15,7 @@ impl Riscv64Codegen {
                     self.load_float_fa0(v as f32);
                     return true;
                 }
-            }
+            },
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 self.gen_float_expr(&expr.children[0]);
                 self.mv_fa1_fa0(); // save left to fa1
@@ -21,17 +23,17 @@ impl Riscv64Codegen {
                 // Now fa0 = right, fa1 = left
                 self.float_binop_fa0(*op, &expr.ty);
                 return true;
-            }
+            },
             // M25: 浮点型 __builtin_va_arg(ap, double) — fa0..fa7 已在入口保存到 va_save_base+64
             ExprKind::VaArg { ap, .. } => {
                 self.gen_va_arg_float(ap);
                 return true;
-            }
+            },
             // 浮点返回值沿用普通调用路径；RISC-V ABI 约定结果留在 fa0。
             ExprKind::Call if !expr.children.is_empty() => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             // Float local variable: load from stack to fa0
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
@@ -59,7 +61,7 @@ impl Riscv64Codegen {
                 // For float-typed locals not in map, just load 0.0
                 self.load_float_fa0(0.0);
                 return true;
-            }
+            },
             // Float conditional: cond ? true_val : false_val
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 let lbl_false = self.fresh_label(".Lflt_cond_f");
@@ -72,7 +74,7 @@ impl Riscv64Codegen {
                 self.gen_float_expr(&expr.children[2]);
                 self.label(&lbl_end);
                 return true;
-            }
+            },
             // Float assignment: evaluate rhs and store to lhs
             ExprKind::Assign if expr.children.len() >= 2 => {
                 self.gen_float_expr(&expr.children[1]);
@@ -94,7 +96,7 @@ impl Riscv64Codegen {
                             }
                             return true;
                         }
-                    }
+                    },
                     ExprKind::Member(ref field_name) if !lhs.children.is_empty() => {
                         let child = &lhs.children[0];
                         if let ExprKind::Local(ref name) = child.kind {
@@ -103,11 +105,14 @@ impl Riscv64Codegen {
                                     ValueType::Aggregate { name, .. } => Some(name.clone()),
                                     _ => None,
                                 };
-                                let field_off = struct_name.and_then(|name| {
-                                    self.aggregate_fields.get(&name).and_then(|(fields, _)| {
-                                        crate::ast::find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                                let field_off = struct_name
+                                    .and_then(|name| {
+                                        self.aggregate_fields.get(&name).and_then(|(fields, _)| {
+                                            crate::ast::find_field(fields, field_name)
+                                                .map(|(f, extra)| f.offset + extra)
+                                        })
                                     })
-                                }).unwrap_or(0);
+                                    .unwrap_or(0);
                                 let bits = match &lhs.ty {
                                     ValueType::Float { bits } => *bits,
                                     _ => 32,
@@ -122,10 +127,10 @@ impl Riscv64Codegen {
                                 return true;
                             }
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
-            }
+            },
             // Float member access: load from struct field
             ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
                 let child = &expr.children[0];
@@ -135,11 +140,14 @@ impl Riscv64Codegen {
                             ValueType::Aggregate { name, .. } => Some(name.clone()),
                             _ => None,
                         };
-                        let field_off = struct_name.and_then(|name| {
-                            self.aggregate_fields.get(&name).and_then(|(fields, _)| {
-                                crate::ast::find_field(fields, field_name).map(|(f, extra)| f.offset + extra)
+                        let field_off = struct_name
+                            .and_then(|name| {
+                                self.aggregate_fields.get(&name).and_then(|(fields, _)| {
+                                    crate::ast::find_field(fields, field_name)
+                                        .map(|(f, extra)| f.offset + extra)
+                                })
                             })
-                        }).unwrap_or(0);
+                            .unwrap_or(0);
                         let bits = match &expr.ty {
                             ValueType::Float { bits } => *bits,
                             _ => 32,
@@ -155,7 +163,7 @@ impl Riscv64Codegen {
                         return true;
                     }
                 }
-            }
+            },
             // Cast: float→float or int→float
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
@@ -168,8 +176,7 @@ impl Riscv64Codegen {
                 if !is_float_ty(&child.ty) && is_float_ty(&expr.ty) {
                     // Int → Float: gen_expr put integer in a0,
                     // emit FCVT.S.W to convert to float in fa0
-                    let is_unsigned = matches!(&child.ty,
-                        ValueType::Integer { signed: false, .. });
+                    let is_unsigned = matches!(&child.ty, ValueType::Integer { signed: false, .. });
                     if is_unsigned {
                         // FCVT.S.WU fa0, a0
                         self.emit_fcvt_s_wu(10, 10);
@@ -179,28 +186,23 @@ impl Riscv64Codegen {
                     }
                 }
                 return true;
-            }
+            },
             _ => {
                 // expr.ty 已是 float/vector 时不能再回 gen_expr (死循环).
                 if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) && self.gen_expr(expr) {
                     self.emit_fcvt_s_w_fa0();
                     return true;
                 }
-            }
+            },
         }
         // Unsupported float expression: emit diagnostic and load 0.0
         let span = expr.span.clone();
         let mut diag = crate::diagnostics::Diagnostic::err(
             "E0314",
-            format!(
-                "unsupported float IR expression on riscv64: {:?}",
-                expr.kind
-            ),
+            format!("unsupported float IR expression on riscv64: {:?}", expr.kind),
             span,
         );
-        diag.hint = Some(
-            "add handling in gen_float_expr".to_string(),
-        );
+        diag.hint = Some("add handling in gen_float_expr".to_string());
         self.diagnostics.push(diag);
         self.load_float_fa0(0.0);
         false
@@ -212,9 +214,12 @@ impl Riscv64Codegen {
                 self.gen_vector_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_vector_expr(&expr.children[1]);
-                self.binop_a0_a1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
+                self.binop_a0_a1(
+                    *op,
+                    matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }),
+                );
                 return true;
-            }
+            },
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_a0(off);
@@ -222,7 +227,7 @@ impl Riscv64Codegen {
                     self.li_a0(0);
                 }
                 return true;
-            }
+            },
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.li_a0(trunc_i32(v) as i32);
@@ -230,7 +235,7 @@ impl Riscv64Codegen {
                     self.li_a0(0);
                 }
                 return true;
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if is_vector_ty(&child.ty) {
@@ -239,7 +244,7 @@ impl Riscv64Codegen {
                     self.gen_expr(child);
                 }
                 return true;
-            }
+            },
             ExprKind::Assign if expr.children.len() >= 2 => {
                 self.gen_vector_expr(&expr.children[1]);
                 if let ExprKind::Local(ref name) = expr.children[0].kind {
@@ -248,11 +253,11 @@ impl Riscv64Codegen {
                     }
                 }
                 return true;
-            }
+            },
             ExprKind::Call if !expr.children.is_empty() => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 let false_label = self.fresh_label("Lvec_false");
                 let end_label = self.fresh_label("Lvec_end");
@@ -264,10 +269,10 @@ impl Riscv64Codegen {
                 self.gen_vector_expr(&expr.children[2]);
                 self.label(&end_label);
                 return true;
-            }
+            },
             _ => {
                 self.li_a0(0);
-            }
+            },
         }
         false
     }
@@ -307,31 +312,31 @@ impl Riscv64Codegen {
                 self.mv_fa1_fa0();
                 self.load_float_fa0(0.0);
                 return true;
-            }
+            },
             // Complex constant: real = literal, imag = 0
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
                     self.load_float_fa0(v as f32);
                     self.mv_fa1_fa0(); // save real to fa1
                     self.load_float_fa0(0.0); // imag = 0
-                    // Swap: fa0 should be real, fa1 should be imag
-                    // Actually we need: fa0=real, fa1=imag=0
-                    // Current: fa0=0, fa1=real
-                    // Need to swap
+                                              // Swap: fa0 should be real, fa1 should be imag
+                                              // Actually we need: fa0=real, fa1=imag=0
+                                              // Current: fa0=0, fa1=real
+                                              // Need to swap
                     self.mv_fa2_fa1(); // fa2 = real
                     self.load_float_fa0(0.0); // fa0 = 0 (imag)
-                    // Now swap fa2 and fa0: fa0=real, fa1=0
-                    // Use fa1 as temp
+                                              // Now swap fa2 and fa0: fa0=real, fa1=0
+                                              // Use fa1 as temp
                     self.mv_fa1_fa0(); // fa1 = 0
-                    // Hmm, this is getting complex. Let me simplify:
-                    // Just load real to fa0, zero to fa1
+                                       // Hmm, this is getting complex. Let me simplify:
+                                       // Just load real to fa0, zero to fa1
                     self.load_float_fa0(v as f32);
                     // Zero fa1: FSGNJ.S fa1, fa0, fa0 then zero it
                     // Actually just load 0.0 to fa1
                     self.mv_fa1_fa0(); // save real to fa1
                     self.load_float_fa0(0.0); // fa0 = 0
-                    // Now swap fa0 and fa1
-                    // Use FSGNJ to copy: fa2 = fa1 (real), fa1 = fa0 (0), fa0 = fa2 (real)
+                                              // Now swap fa0 and fa1
+                                              // Use FSGNJ to copy: fa2 = fa1 (real), fa1 = fa0 (0), fa0 = fa2 (real)
                     self.emit_fsgnj_s(12, 11, 11); // fa2 = fa1 (real)
                     self.emit_fsgnj_s(11, 10, 10); // fa1 = fa0 (0)
                     self.emit_fsgnj_s(10, 12, 12); // fa0 = fa2 (real)
@@ -343,7 +348,7 @@ impl Riscv64Codegen {
                     self.emit_fcvt_s_w_fa0();
                     self.mv_fa1_fa0(); // save real to fa1
                     self.load_float_fa0(0.0); // fa0 = 0 (imag)
-                    // Swap fa0 and fa1
+                                              // Swap fa0 and fa1
                     self.emit_fsgnj_s(12, 11, 11); // fa2 = fa1 (real)
                     self.emit_fsgnj_s(11, 10, 10); // fa1 = fa0 (0)
                     self.emit_fsgnj_s(10, 12, 12); // fa0 = fa2 (real)
@@ -353,7 +358,7 @@ impl Riscv64Codegen {
                 self.mv_fa1_fa0();
                 self.load_float_fa0(0.0);
                 return true;
-            }
+            },
             // Complex binary ops: component-wise add/sub
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 // Evaluate left -> (fa0, fa1)
@@ -408,22 +413,22 @@ impl Riscv64Codegen {
                         self.emit_fadd_s(10, 12, 10);
                         // imag: fa1 = fa3 + fa1
                         self.emit_fadd_s(11, 13, 11);
-                    }
+                    },
                     BinOp::Sub => {
                         // real: fa0 = fa2 - fa0
                         self.emit_fsub_s(10, 12, 10);
                         // imag: fa1 = fa3 - fa1
                         self.emit_fsub_s(11, 13, 11);
-                    }
+                    },
                     _ => {
                         // Unsupported complex binop: zero result
                         self.load_float_fa0(0.0);
                         self.mv_fa1_fa0();
                         self.load_float_fa0(0.0);
-                    }
+                    },
                 }
                 return true;
-            }
+            },
             // Complex cast: component-wise cast
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
@@ -442,18 +447,18 @@ impl Riscv64Codegen {
                     }
                     self.mv_fa1_fa0(); // save real to fa1
                     self.load_float_fa0(0.0); // fa0 = 0 (imag)
-                    // Swap fa0 and fa1
+                                              // Swap fa0 and fa1
                     self.emit_fsgnj_s(12, 11, 11);
                     self.emit_fsgnj_s(11, 10, 10);
                     self.emit_fsgnj_s(10, 12, 12);
                 }
                 return true;
-            }
+            },
             // Complex call: result in (fa0, fa1)
             ExprKind::Call => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             // Complex conditional: branch-based
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 let lbl_false = self.fresh_label(".Lcx_cond_f");
@@ -466,17 +471,14 @@ impl Riscv64Codegen {
                 self.gen_complex_expr(&expr.children[2]);
                 self.label(&lbl_end);
                 return true;
-            }
-            _ => {}
+            },
+            _ => {},
         }
         // Fallback: zero both parts
         let span = expr.span.clone();
         let mut diag = crate::diagnostics::Diagnostic::err(
             "E0315",
-            format!(
-                "unsupported complex IR expression on riscv64: {:?}",
-                expr.kind
-            ),
+            format!("unsupported complex IR expression on riscv64: {:?}", expr.kind),
             span,
         );
         diag.hint = Some("add handling in gen_complex_expr".to_string());
@@ -486,5 +488,4 @@ impl Riscv64Codegen {
         self.load_float_fa0(0.0);
         false
     }
-
 }

@@ -137,7 +137,7 @@ impl LbrProfile {
                     if let Ok(c) = token.parse::<u64>() {
                         cycles = Some(c);
                     }
-                }
+                },
             }
         }
 
@@ -259,10 +259,7 @@ impl LbrProfile {
     ///   nr(u64) + entries[]: from(u64) to(u64) flags(u64) cycles(u16)
     pub fn read_perf_data_binary(data: &[u8]) -> io::Result<Self> {
         if data.len() < 8 || &data[0..8] != b"PERFILE2" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a perf.data file",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a perf.data file"));
         }
         let mut profile = LbrProfile::default();
         // Parse header to find record offset
@@ -404,10 +401,7 @@ mod tests {
         let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 M 10\nmain 0x1000 foo 0x2000 P 8\n")
             .unwrap();
         assert_eq!(p.hot_edge_count("main", "foo"), 2);
-        assert_eq!(
-            p.mispred_edges.get(&("main".into(), "foo".into())),
-            Some(&1)
-        );
+        assert_eq!(p.mispred_edges.get(&("main".into(), "foo".into())), Some(&1));
         let rate = p.mispred_rate("main", "foo");
         assert!((rate - 0.5).abs() < 0.01);
     }
@@ -416,10 +410,7 @@ mod tests {
     fn parse_with_cycles() {
         let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 100\nmain 0x1000 foo 0x2000 200\n")
             .unwrap();
-        assert_eq!(
-            p.edge_cycles.get(&("main".into(), "foo".into())),
-            Some(&300)
-        );
+        assert_eq!(p.edge_cycles.get(&("main".into(), "foo".into())), Some(&300));
     }
 
     #[test]
@@ -470,11 +461,7 @@ mod tests {
     #[test]
     fn read_from_file() {
         let tmp = std::env::temp_dir().join("dcc-lbr-test-v1.txt");
-        std::fs::write(
-            &tmp,
-            b"main 0x1000 foo 0x2000 5\nfoo 0x2010 main 0x1020 7\n",
-        )
-        .unwrap();
+        std::fs::write(&tmp, b"main 0x1000 foo 0x2000 5\nfoo 0x2010 main 0x1020 7\n").unwrap();
         let p = LbrProfile::read_perf_brstack(&tmp).unwrap();
         assert_eq!(p.hot_edge_count("main", "foo"), 1);
         let _ = std::fs::remove_file(&tmp);
@@ -558,8 +545,9 @@ mod tests {
     /// serialize() produces text output compatible with brstack.
     #[test]
     fn lbr_serialize_roundtrip() {
-        let p = LbrProfile::parse_text("main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n")
-            .unwrap();
+        let p =
+            LbrProfile::parse_text("main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n")
+                .unwrap();
         let text = p.serialize();
         assert!(text.contains("main 0x1000 foo 0x2000 M 100"));
         assert!(text.contains("foo 0x2000 bar 0x3000 P 200"));

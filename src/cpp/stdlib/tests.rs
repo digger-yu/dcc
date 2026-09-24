@@ -72,12 +72,7 @@ fn stdlib_headers_have_namespace_std() {
     for (h, pat) in headers.iter() {
         let path = format!("src/cpp/stdlib/headers/{}", h);
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
-        assert!(
-            src.contains(pat),
-            "{}: missing `{}` (not in std namespace)",
-            h,
-            pat
-        );
+        assert!(src.contains(pat), "{}: missing `{}` (not in std namespace)", h, pat);
     }
 }
 

@@ -11,17 +11,9 @@ pub fn parse_asm_lines(text: &str) -> Vec<String> {
     text.split('\n')
         .map(|l| {
             // Strip AT&T style comment (# ...)
-            let l = if let Some(pos) = l.find('#') {
-                &l[..pos]
-            } else {
-                l
-            };
+            let l = if let Some(pos) = l.find('#') { &l[..pos] } else { l };
             // Strip // style comment
-            let l = if let Some(pos) = l.find("//") {
-                &l[..pos]
-            } else {
-                l
-            };
+            let l = if let Some(pos) = l.find("//") { &l[..pos] } else { l };
             l.trim().to_string()
         })
         .filter(|l| !l.is_empty())
@@ -84,7 +76,7 @@ pub fn parse_aarch64_reg(name: &str) -> Option<(u8, bool)> {
             } else {
                 None
             }
-        }
+        },
     }
 }
 
@@ -100,8 +92,11 @@ fn is_neon_reg(s: &str) -> bool {
     let s = s.trim().to_lowercase();
     // Strip arrangement specifier like .16b, .4s, .2d
     let s = s.split('.').next().unwrap_or(&s);
-    (s.starts_with('v') || s.starts_with('d') || s.starts_with('s')
-        || s.starts_with('h') || s.starts_with('b'))
+    (s.starts_with('v')
+        || s.starts_with('d')
+        || s.starts_with('s')
+        || s.starts_with('h')
+        || s.starts_with('b'))
         && s[1..].parse::<u8>().is_ok()
 }
 
@@ -140,7 +135,11 @@ fn parse_sve_reg(s: &str) -> Option<u8> {
     let s = s.split('.').next().unwrap_or(&s);
     let num_str = s.strip_prefix('z')?;
     let num: u8 = num_str.parse().ok()?;
-    if num > 31 { None } else { Some(num) }
+    if num > 31 {
+        None
+    } else {
+        Some(num)
+    }
 }
 
 /// Check if operand is a SVE P register (p0-p15).
@@ -156,7 +155,11 @@ fn parse_sve_pred_reg(s: &str) -> Option<u8> {
     let s = s.split('.').next().unwrap_or(&s);
     let num_str = s.strip_prefix('p')?;
     let num: u8 = num_str.parse().ok()?;
-    if num > 15 { None } else { Some(num) }
+    if num > 15 {
+        None
+    } else {
+        Some(num)
+    }
 }
 
 /// Encode AArch64 instruction from mnemonic + operands.
@@ -191,7 +194,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // DMB: base = D50330BF, option at bits [11:8]
             let insn: u32 = 0xd50330bf | ((option as u32 & 0xf) << 8);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // DSB variants
         "dsb" => {
@@ -217,24 +220,26 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // DSB: base = D503309F, option at bits [11:8]
             let insn: u32 = 0xd503309f | ((option as u32 & 0xf) << 8);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ISB
         "isb" => {
             let insn: u32 = 0xd5033fdf;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // RET {Rn}
         "ret" => {
             let rn = if operands.is_empty() {
                 30 // default: x30 (LR)
             } else {
-                parse_aarch64_reg(&operands[0]).map(|(r, _)| r).unwrap_or(30)
+                parse_aarch64_reg(&operands[0])
+                    .map(|(r, _)| r)
+                    .unwrap_or(30)
             };
             let insn: u32 = 0xd65f0000 | ((rn as u32 & 0x1f) << 5);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SVC #imm
         "svc" => {
@@ -244,7 +249,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(0);
             let insn: u32 = 0xd4000001 | ((imm & 0xffff) << 5);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // BR Xn
         "br" => {
@@ -254,7 +259,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(0);
             let insn: u32 = 0xd61f0000 | ((rn as u32 & 0x1f) << 5);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // BLR Xn
         "blr" => {
@@ -264,57 +269,45 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(0);
             let insn: u32 = 0xd63f0000 | ((rn as u32 & 0x1f) << 5);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // MOV Wd, Wm / MOV Xd, Xm (alias for ORR Rd, RZR, Rm)
         "mov" if operands.len() == 2 => {
-            if let (Some((rd, is64)), Some((rm, _))) = (
-                parse_aarch64_reg(&operands[0]),
-                parse_aarch64_reg(&operands[1]),
-            ) {
+            if let (Some((rd, is64)), Some((rm, _))) =
+                (parse_aarch64_reg(&operands[0]), parse_aarch64_reg(&operands[1]))
+            {
                 if is64 {
                     // ORR Xd, XZR, Xm: sf=1, 0a 01010 000 11111 rm rd
-                    let insn: u32 = 0xaa0003e0
-                        | ((rm as u32 & 0x1f) << 16)
-                        | (rd as u32 & 0x1f);
+                    let insn: u32 = 0xaa0003e0 | ((rm as u32 & 0x1f) << 16) | (rd as u32 & 0x1f);
                     Some(insn.to_le_bytes().to_vec())
                 } else {
                     // ORR Wd, WZR, Xm
-                    let insn: u32 = 0x2a0003e0
-                        | ((rm as u32 & 0x1f) << 16)
-                        | (rd as u32 & 0x1f);
+                    let insn: u32 = 0x2a0003e0 | ((rm as u32 & 0x1f) << 16) | (rd as u32 & 0x1f);
                     Some(insn.to_le_bytes().to_vec())
                 }
             } else {
                 None
             }
-        }
+        },
 
         // MOVZ Wd, #imm / MOVZ Xd, #imm
         "movz" if operands.len() == 2 => {
             if let Some((rd, is64)) = parse_aarch64_reg(&operands[0]) {
-                let imm = operands[1]
-                    .trim_start_matches('#')
-                    .parse::<u32>()
-                    .ok()?;
+                let imm = operands[1].trim_start_matches('#').parse::<u32>().ok()?;
                 let sf = if is64 { 1u32 << 31 } else { 0 };
                 let insn: u32 = sf | 0x52800000 | ((imm & 0xffff) << 5) | (rd as u32 & 0x1f);
                 Some(insn.to_le_bytes().to_vec())
             } else {
                 None
             }
-        }
+        },
 
         // ADD Wd, Wn, Wm / ADD Xd, Xn, Xm (GP only; NEON/SVE vector ADD handled below)
-        "add" if operands.len() == 3
-            && !is_neon_reg(&operands[0]) && !is_sve_reg(&operands[0]) =>
-        {
+        "add" if operands.len() == 3 && !is_neon_reg(&operands[0]) && !is_sve_reg(&operands[0]) => {
             let rd_res = parse_aarch64_reg(&operands[0]);
             let rn_res = parse_aarch64_reg(&operands[1]);
             let rm_res = parse_aarch64_reg(&operands[2]);
-            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) =
-                (rd_res, rn_res, rm_res)
-            {
+            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) = (rd_res, rn_res, rm_res) {
                 let sf = if is64 { 1u32 << 31 } else { 0 };
                 // ADD: sf 0001011 shift 0 Rm Rn Rd
                 let insn: u32 = sf
@@ -326,18 +319,14 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             } else {
                 None
             }
-        }
+        },
 
         // SUB Wd, Wn, Wm / SUB Xd, Xn, Xm (GP only; NEON vector SUB handled below)
-        "sub" if operands.len() == 3
-            && !is_neon_reg(&operands[0]) =>
-        {
+        "sub" if operands.len() == 3 && !is_neon_reg(&operands[0]) => {
             let rd_res = parse_aarch64_reg(&operands[0]);
             let rn_res = parse_aarch64_reg(&operands[1]);
             let rm_res = parse_aarch64_reg(&operands[2]);
-            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) =
-                (rd_res, rn_res, rm_res)
-            {
+            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) = (rd_res, rn_res, rm_res) {
                 let sf = if is64 { 1u32 << 31 } else { 0 };
                 let insn: u32 = sf
                     | 0x4b000000
@@ -348,7 +337,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             } else {
                 None
             }
-        }
+        },
 
         // MSR/MRS system register access - encode as NOP (complex encoding)
         "msr" | "mrs" => Some(encode_aarch64_nop().to_vec()),
@@ -357,7 +346,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
         "clrex" => {
             let insn: u32 = 0xd5033f5f;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SEV / SEVL / WFE / WFI / YIELD
         "sev" => Some(0xd503209fu32.to_le_bytes().to_vec()),
@@ -374,7 +363,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(0);
             let insn: u32 = 0xd503201f | ((imm & 0xf) << 5);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ===== NEON SIMD instructions =====
 
@@ -403,7 +392,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // FSUB (vector) Vd.T, Vn.T, Vm.T
         "fsub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
@@ -425,7 +414,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // FMUL (vector) Vd.T, Vn.T, Vm.T
         "fmul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
@@ -447,7 +436,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ADD (vector) Vd.T, Vn.T, Vm.T
         "add" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
@@ -462,7 +451,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SUB (vector) Vd.T, Vn.T, Vm.T
         "sub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
@@ -477,7 +466,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // MUL (vector) Vd.T, Vn.T, Vm.T
         "mul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
@@ -492,29 +481,25 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rn as u32 & 0x1f) << 5)
                 | (rd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // LD1 {Vt.T}, [Xn] - load 128-bit vector
         "ld1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
             let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
             let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
             // LD1 (single structure, 128-bit): 0x4C007400 | Rn | Vt
-            let insn: u32 = 0x4c407400
-                | ((xn as u32 & 0x1f) << 5)
-                | (vt as u32 & 0x1f);
+            let insn: u32 = 0x4c407400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ST1 {Vt.T}, [Xn] - store 128-bit vector
         "st1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
             let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
             let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
             // ST1 (single structure, 128-bit): 0x4C006400 | Rn | Vt
-            let insn: u32 = 0x4c006400
-                | ((xn as u32 & 0x1f) << 5)
-                | (vt as u32 & 0x1f);
+            let insn: u32 = 0x4c006400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ===== SVE instructions =====
 
@@ -524,7 +509,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // PTRUE: 0x25B86000 | Pd
             let insn: u32 = 0x25b86000 | (pd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // WHILELT Pd, Rn, Rm
         "whilelt" if operands.len() == 3 && is_sve_pred_reg(&operands[0]) => {
@@ -537,7 +522,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((rm as u32 & 0x1f) << 5)
                 | (pd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SVE FADD Zzd.Pg/M, Zzn, Zzm
         "fadd" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
@@ -550,7 +535,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((zn as u32 & 0x1f) << 5)
                 | (zd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SVE ADD Zzd.Pg/M, Zzn, Zzm
         "add" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
@@ -563,29 +548,25 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 | ((zn as u32 & 0x1f) << 5)
                 | (zd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // LD1W {Zt.Pg}, [Xn] - SVE load vector of words
         "ld1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
             let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
             let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
             // LD1W (vector): 0x85800000 | Rn | Zt (simplified)
-            let insn: u32 = 0x85800000
-                | ((xn as u32 & 0x1f) << 5)
-                | (zt as u32 & 0x1f);
+            let insn: u32 = 0x85800000 | ((xn as u32 & 0x1f) << 5) | (zt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ST1W {Zt.Pg}, [Xn] - SVE store vector of words
         "st1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
             let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
             let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
             // ST1W (vector): 0xE5800000 | Rn | Zt (simplified)
-            let insn: u32 = 0xe5800000
-                | ((xn as u32 & 0x1f) << 5)
-                | (zt as u32 & 0x1f);
+            let insn: u32 = 0xe5800000 | ((xn as u32 & 0x1f) << 5) | (zt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         _ => None,
     }
@@ -636,7 +617,7 @@ pub fn parse_riscv_reg(name: &str) -> Option<u8> {
             } else {
                 None
             }
-        }
+        },
     }
 }
 
@@ -648,7 +629,7 @@ pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // ADDI x0, x0, 0
             let insn: u32 = 0x00000013;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // FENCE pred, succ
         "fence" => {
@@ -664,69 +645,61 @@ pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 let s = parse_riscv_fence_arg(&operands[1]);
                 (p, s)
             };
-            let insn: u32 =
-                0x0000000f | (pred << 24) | (succ << 20);
+            let insn: u32 = 0x0000000f | (pred << 24) | (succ << 20);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         "fence.i" => {
             let insn: u32 = 0x0000100f;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // EBREAK
         "ebreak" => {
             let insn: u32 = 0x00100073;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ECALL
         "ecall" => {
             let insn: u32 = 0x00000073;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // RET = JALR x0, x1, 0
         "ret" => {
             let insn: u32 = 0x00008067;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ADDI rd, rs1, imm
         "addi" if operands.len() == 3 => {
             let rd = parse_riscv_reg(&operands[0])?;
             let rs1 = parse_riscv_reg(&operands[1])?;
             let imm = parse_riscv_imm(&operands[2])?;
-            let insn: u32 = ((imm as u32 & 0xfff) << 20)
-                | ((rs1 as u32) << 15)
-                | ((rd as u32) << 7)
-                | 0x13;
+            let insn: u32 =
+                ((imm as u32 & 0xfff) << 20) | ((rs1 as u32) << 15) | ((rd as u32) << 7) | 0x13;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ADD rd, rs1, rs2
         "add" if operands.len() == 3 => {
             let rd = parse_riscv_reg(&operands[0])?;
             let rs1 = parse_riscv_reg(&operands[1])?;
             let rs2 = parse_riscv_reg(&operands[2])?;
-            let insn: u32 = ((rs2 as u32) << 20)
-                | ((rs1 as u32) << 15)
-                | ((rd as u32) << 7)
-                | 0x33;
+            let insn: u32 = ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | ((rd as u32) << 7) | 0x33;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SUB rd, rs1, rs2
         "sub" if operands.len() == 3 => {
             let rd = parse_riscv_reg(&operands[0])?;
             let rs1 = parse_riscv_reg(&operands[1])?;
             let rs2 = parse_riscv_reg(&operands[2])?;
-            let insn: u32 = 0x40000033
-                | ((rs2 as u32) << 20)
-                | ((rs1 as u32) << 15)
-                | ((rd as u32) << 7);
+            let insn: u32 =
+                0x40000033 | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | ((rd as u32) << 7);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SFENCE.VMA rs1, rs2
         "sfence.vma" => {
@@ -738,23 +711,21 @@ pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .get(1)
                 .and_then(|r| parse_riscv_reg(r))
                 .unwrap_or(0);
-            let insn: u32 = 0x12000073
-                | ((rs1 as u32) << 15)
-                | ((rs2 as u32) << 20);
+            let insn: u32 = 0x12000073 | ((rs1 as u32) << 15) | ((rs2 as u32) << 20);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // WFI
         "wfi" => {
             let insn: u32 = 0x10500073;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // PAUSE (Zihintpause, encoded as FENCE tso or ADDI x0,x0,0x010)
         "pause" => {
             let insn: u32 = 0x0100000f; // FENCE tso
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         _ => None,
     }
@@ -769,7 +740,7 @@ fn parse_riscv_fence_arg(s: &str) -> u32 {
             'o' => val |= 4,
             'r' => val |= 2,
             'w' => val |= 1,
-            _ => {}
+            _ => {},
         }
     }
     val
@@ -801,7 +772,7 @@ pub fn parse_arm_reg(name: &str) -> Option<u8> {
             } else {
                 None
             }
-        }
+        },
     }
 }
 
@@ -813,7 +784,7 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // MOV r0, r0 (conditional: AL)
             let insn: u32 = 0xe1a00000;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // DMB variants (ARMv7+)
         "dmb" => {
@@ -840,7 +811,7 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // Encoding: F57FF050 | option
             let insn: u32 = 0xf57ff050 | (option & 0xf);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // DSB variants
         "dsb" => {
@@ -858,13 +829,13 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             // DSB: F57FF040 | option
             let insn: u32 = 0xf57ff040 | (option & 0xf);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // ISB
         "isb" => {
             let insn: u32 = 0xf57ff06f;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // BX Rn
         "bx" => {
@@ -874,21 +845,18 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(14); // default LR
             let insn: u32 = 0xe12fff10 | (rn as u32 & 0xf);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // MOV Rd, Rm
         "mov" if operands.len() == 2 => {
-            if let (Some(rd), Some(rm)) = (
-                parse_arm_reg(&operands[0]),
-                parse_arm_reg(&operands[1]),
-            ) {
-                let insn: u32 =
-                    0xe1a00000 | ((rd as u32 & 0xf) << 12) | (rm as u32 & 0xf);
+            if let (Some(rd), Some(rm)) = (parse_arm_reg(&operands[0]), parse_arm_reg(&operands[1]))
+            {
+                let insn: u32 = 0xe1a00000 | ((rd as u32 & 0xf) << 12) | (rm as u32 & 0xf);
                 Some(insn.to_le_bytes().to_vec())
             } else {
                 None
             }
-        }
+        },
 
         // ADD Rd, Rn, Rm
         "add" if operands.len() == 3 => {
@@ -905,7 +873,7 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             } else {
                 None
             }
-        }
+        },
 
         // SUB Rd, Rn, Rm
         "sub" if operands.len() == 3 => {
@@ -922,7 +890,7 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             } else {
                 None
             }
-        }
+        },
 
         // SVC / SWI
         "svc" | "swi" => {
@@ -932,13 +900,13 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
                 .unwrap_or(0);
             let insn: u32 = 0xef000000 | (imm & 0x00ffffff);
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // CLREX
         "clrex" => {
             let insn: u32 = 0xf57ff01f;
             Some(insn.to_le_bytes().to_vec())
-        }
+        },
 
         // SEV / SEVL / WFE / WFI / YIELD
         "sev" => Some(0xe320f040u32.to_le_bytes().to_vec()),
@@ -993,7 +961,7 @@ pub fn parse_mips_reg(name: &str) -> Option<u8> {
             // Try $N form
             let s = name.strip_prefix('$').unwrap_or(&name);
             s.parse::<u8>().ok().filter(|&r| r < 32)
-        }
+        },
     }
 }
 
@@ -1019,7 +987,7 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
             } else {
                 Some([0u8; 4].to_vec())
             }
-        }
+        },
 
         // SYNC
         "sync" => {
@@ -1030,7 +998,7 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
                 .unwrap_or(0) as u32;
             let insn: u32 = (stype & 0x1f) << 6 | 0x0f;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // JR rs
         "jr" => {
@@ -1040,7 +1008,7 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
                 .unwrap_or(31); // default $ra
             let insn: u32 = ((rs as u32) << 21) | 0x08;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // JALR rd, rs (or JALR rs => rd=$ra)
         "jalr" => {
@@ -1054,7 +1022,7 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
             };
             let insn: u32 = ((rs as u32) << 21) | ((rd as u32) << 11) | 0x09;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // ADDU / OR (for move aliases)
         "move" if operands.len() == 2 => {
@@ -1063,57 +1031,52 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
             let rs = parse_mips_reg(&operands[1])?;
             let insn: u32 = ((rs as u32) << 21) | ((rd as u32) << 11) | (rd as u32) | 0x25;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // ADDU rd, rs, rt
         "addu" if operands.len() == 3 => {
             let rd = parse_mips_reg(&operands[0])?;
             let rs = parse_mips_reg(&operands[1])?;
             let rt = parse_mips_reg(&operands[2])?;
-            let insn: u32 =
-                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x21;
+            let insn: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x21;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // ADD rd, rs, rt
         "add" if operands.len() == 3 => {
             let rd = parse_mips_reg(&operands[0])?;
             let rs = parse_mips_reg(&operands[1])?;
             let rt = parse_mips_reg(&operands[2])?;
-            let insn: u32 =
-                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x20;
+            let insn: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x20;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // SUB rd, rs, rt
         "sub" if operands.len() == 3 => {
             let rd = parse_mips_reg(&operands[0])?;
             let rs = parse_mips_reg(&operands[1])?;
             let rt = parse_mips_reg(&operands[2])?;
-            let insn: u32 =
-                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x22;
+            let insn: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x22;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // SUBU rd, rs, rt
         "subu" if operands.len() == 3 => {
             let rd = parse_mips_reg(&operands[0])?;
             let rs = parse_mips_reg(&operands[1])?;
             let rt = parse_mips_reg(&operands[2])?;
-            let insn: u32 =
-                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x23;
+            let insn: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x23;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // DADDU (MIPS64)
         "daddu" if operands.len() == 3 && is_64bit => {
             let rd = parse_mips_reg(&operands[0])?;
             let rs = parse_mips_reg(&operands[1])?;
             let rt = parse_mips_reg(&operands[2])?;
-            let insn: u32 =
-                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x2d;
+            let insn: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x2d;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // BREAK
         "break" => {
@@ -1123,7 +1086,7 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
                 .unwrap_or(0) as u32;
             let insn: u32 = (code << 6) | 0x0d;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // SYSCALL
         "syscall" => {
@@ -1133,14 +1096,14 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
                 .unwrap_or(0) as u32;
             let insn: u32 = (code << 6) | 0x0c;
             Some(insn.to_be_bytes().to_vec())
-        }
+        },
 
         // CACHE / PREF (hint instructions, encode with operands)
         "cache" | "pref" => {
             // These need immediate + base register, complex encoding
             // Fall through to NOP for now
             Some([0u8; 4].to_vec())
-        }
+        },
 
         _ => None,
     }
@@ -1179,7 +1142,7 @@ pub fn encode_asm_lines_for_arch(
                             operands.join(", ")
                         }
                     ));
-                }
+                },
             }
         }
         // Directives and labels are silently skipped
@@ -1281,10 +1244,7 @@ mod tests {
 
     #[test]
     fn test_parse_instruction() {
-        assert_eq!(
-            parse_instruction("nop"),
-            Some(("nop".to_string(), vec![]))
-        );
+        assert_eq!(parse_instruction("nop"), Some(("nop".to_string(), vec![])));
         assert_eq!(
             parse_instruction("dmb ish"),
             Some(("dmb".to_string(), vec!["ish".to_string()]))

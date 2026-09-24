@@ -17,7 +17,7 @@ pub struct Binding {
 
 impl Codegen {
     /// 发射内联汇编模板
-    /// 
+    ///
     /// This function extracts the complete emit_inline_asm implementation
     /// originally at line 32455-32543 in mod.rs (~90 lines of code)
     pub fn emit_inline_asm(

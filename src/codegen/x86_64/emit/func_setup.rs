@@ -90,49 +90,40 @@ impl Codegen {
             Some(BlockItem::Stmt(Stmt::Break { .. })) => true,
             Some(BlockItem::Stmt(Stmt::Continue { .. })) => true,
             Some(BlockItem::Stmt(Stmt::Block { b, .. })) => Self::ends_with_return(&b.items),
-            Some(BlockItem::Stmt(Stmt::If {
-                then_, else_, ..
-            })) => {
+            Some(BlockItem::Stmt(Stmt::If { then_, else_, .. })) => {
                 Self::ends_with_return(&[BlockItem::Stmt(*then_.clone())])
                     && else_
                         .as_ref()
                         .is_some_and(|e| Self::ends_with_return(&[BlockItem::Stmt(*e.clone())]))
-            }
+            },
             _ => false,
         }
     }
 
     /// Collect all label names defined in a statement tree.
     /// Used for non-local goto detection in nested functions.
-    pub fn collect_local_labels_stmt(
-        stmt: &Stmt,
-        out: &mut std::collections::HashSet<String>,
-    ) {
+    pub fn collect_local_labels_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
         match stmt {
-            Stmt::Label {
-                name, stmt, ..
-            } => {
+            Stmt::Label { name, stmt, .. } => {
                 out.insert(name.name.clone());
                 Self::collect_local_labels_stmt(stmt, out);
-            }
+            },
             Stmt::Block { b, .. } => {
                 for item in &b.items {
                     if let BlockItem::Stmt(s) = item {
                         Self::collect_local_labels_stmt(s, out);
                     }
                 }
-            }
-            Stmt::If {
-                then_, else_, ..
-            } => {
+            },
+            Stmt::If { then_, else_, .. } => {
                 Self::collect_local_labels_stmt(then_, out);
                 if let Some(e) = else_ {
                     Self::collect_local_labels_stmt(e, out);
                 }
-            }
+            },
             Stmt::While { body, .. } | Stmt::Do { body, .. } => {
                 Self::collect_local_labels_stmt(body, out);
-            }
+            },
             Stmt::For { body, .. } => Self::collect_local_labels_stmt(body, out),
             Stmt::Switch { cases, .. } => {
                 for c in cases {
@@ -142,8 +133,8 @@ impl Codegen {
                         }
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -154,7 +145,7 @@ impl Codegen {
             .map(|item| match item {
                 BlockItem::Decl(Decl::Var(v)) => {
                     v.init.as_ref().map_or(0, Self::max_expr_depth_expr)
-                }
+                },
                 BlockItem::Stmt(s) => Self::max_expr_depth_stmt_inner(s),
                 _ => 0,
             })
@@ -166,12 +157,9 @@ impl Codegen {
         match s {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::max_expr_depth_expr(e)
-            }
+            },
             Stmt::If {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => {
                 let d = Self::max_expr_depth_expr(cond);
                 d.max(Self::max_expr_depth_stmt_inner(then_)).max(
@@ -179,10 +167,10 @@ impl Codegen {
                         .as_ref()
                         .map_or(0, |e| Self::max_expr_depth_stmt_inner(e)),
                 )
-            }
+            },
             Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
                 Self::max_expr_depth_expr(cond).max(Self::max_expr_depth_stmt_inner(body))
-            }
+            },
             Stmt::For { cond, body, .. } => cond
                 .as_ref()
                 .map_or(0, Self::max_expr_depth_expr)
@@ -196,7 +184,7 @@ impl Codegen {
         match e {
             Expr::Binop { l, r, .. } => {
                 1 + Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))
-            }
+            },
             Expr::Call { callee, args, .. } => {
                 1 + Self::max_expr_depth_expr(callee).max(
                     args.iter()
@@ -204,13 +192,13 @@ impl Codegen {
                         .max()
                         .unwrap_or(0),
                 )
-            }
+            },
             Expr::Comma { l, r, .. } => {
                 Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))
-            }
+            },
             Expr::Assign { l, r, .. } => {
                 1 + Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))
-            }
+            },
             Expr::Unary { e, .. }
             | Expr::Cast { e, .. }
             | Expr::AddrOf { e, .. }
@@ -221,13 +209,10 @@ impl Codegen {
             | Expr::PreDec { e, .. } => Self::max_expr_depth_expr(e),
             Expr::Index { arr, idx, .. } => {
                 Self::max_expr_depth_expr(arr).max(Self::max_expr_depth_expr(idx))
-            }
+            },
             Expr::Member { expr, .. } => Self::max_expr_depth_expr(expr),
             Expr::Cond {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => Self::max_expr_depth_expr(cond)
                 .max(Self::max_expr_depth_expr(then_))
                 .max(Self::max_expr_depth_expr(else_)),
@@ -282,7 +267,7 @@ impl Codegen {
                             var_map.entry(rz_name).or_insert((rz_off, Type::Void));
                         }
                     }
-                }
+                },
                 BlockItem::Stmt(s) => {
                     Self::pre_register_stmt(
                         var_map,
@@ -293,8 +278,8 @@ impl Codegen {
                         func_name,
                         total_slots,
                     );
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -319,10 +304,8 @@ impl Codegen {
                     func_name,
                     total_slots,
                 );
-            }
-            Stmt::If {
-                then_, else_, ..
-            } => {
+            },
+            Stmt::If { then_, else_, .. } => {
                 Self::pre_register_stmt(
                     var_map,
                     then_,
@@ -343,10 +326,8 @@ impl Codegen {
                         total_slots,
                     );
                 }
-            }
-            Stmt::While { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::Do { body, .. } => {
+            },
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
                 Self::pre_register_stmt(
                     var_map,
                     body,
@@ -356,7 +337,7 @@ impl Codegen {
                     func_name,
                     total_slots,
                 );
-            }
+            },
             Stmt::Switch { cases, .. } => {
                 for case in cases {
                     Self::pre_register_vars(
@@ -369,8 +350,8 @@ impl Codegen {
                         total_slots,
                     );
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -379,7 +360,7 @@ impl Codegen {
             match item {
                 BlockItem::Decl(Decl::Func(f)) if f.body.is_some() => out.push(f.clone()),
                 BlockItem::Stmt(s) => Self::collect_direct_nested_funcs_stmt(s, out),
-                _ => {}
+                _ => {},
             }
         }
     }
@@ -387,20 +368,16 @@ impl Codegen {
     fn collect_direct_nested_funcs_stmt(s: &Stmt, out: &mut Vec<FuncDecl>) {
         match s {
             Stmt::Block { b, .. } => Self::collect_direct_nested_funcs(&b.items, out),
-            Stmt::If {
-                then_, else_, ..
-            } => {
+            Stmt::If { then_, else_, .. } => {
                 Self::collect_direct_nested_funcs_stmt(then_, out);
                 if let Some(e) = else_ {
                     Self::collect_direct_nested_funcs_stmt(e, out);
                 }
-            }
-            Stmt::While { body, .. }
-            | Stmt::Do { body, .. }
-            | Stmt::For { body, .. } => {
+            },
+            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
                 Self::collect_direct_nested_funcs_stmt(body, out);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 

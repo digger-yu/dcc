@@ -38,8 +38,7 @@ int repro(void) {
 "#;
 
 fn write_tmp(name: &str, content: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("dcc-repro-{name}-{}.c", std::process::id()));
+    let path = std::env::temp_dir().join(format!("dcc-repro-{name}-{}.c", std::process::id()));
     fs::write(&path, content).expect("write reproducibility fixture");
     path
 }
@@ -53,10 +52,8 @@ fn write_tmp(name: &str, content: &str) -> PathBuf {
 fn compile_runs(src: &PathBuf, args: &[&str], tag: &str, runs: usize) -> Vec<Vec<u8>> {
     let mut outputs = Vec::with_capacity(runs);
     for i in 0..runs {
-        let out = std::env::temp_dir().join(format!(
-            "dcc-repro-{}-{tag}-{i}.out",
-            std::process::id()
-        ));
+        let out =
+            std::env::temp_dir().join(format!("dcc-repro-{}-{tag}-{i}.out", std::process::id()));
         let status = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .arg("--target")
             .arg("x86_64-linux-gnu")
@@ -267,8 +264,7 @@ int many(void) {
 }
 "#;
 
-    let expected: Vec<&str> =
-        vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    let expected: Vec<&str> = vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
 
     for round in 0..30 {
         let (prog, diags) = dcc::parser::parse(MULTI_LOCAL_SOURCE.as_bytes(), "many.c");
@@ -300,8 +296,7 @@ int many(void) {
             .collect();
 
         assert_eq!(
-            emitted,
-            expected,
+            emitted, expected,
             "round {round}: rebuild_block 的局部声明序不再是源码声明序 \
              (HashSet 迭代序泄漏会直接改写栈槽偏移, 使 -O2 产物不可复现)"
         );

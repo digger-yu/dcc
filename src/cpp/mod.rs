@@ -105,7 +105,7 @@ impl std::fmt::Display for CppError {
                     writeln!(f, "{}", d)?;
                 }
                 Ok(())
-            }
+            },
             CppError::Io(e) => write!(f, "I/O error: {}", e),
         }
     }

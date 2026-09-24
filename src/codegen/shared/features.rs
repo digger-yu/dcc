@@ -2,7 +2,7 @@
 // 第一性原理：显式声明每个架构的能力，避免"静默 no-op"或虚假宣称支持
 
 /// Feature flags for codegen capabilities
-/// 
+///
 /// **Tier Classification:**
 /// - **Tier-1**: Core/Kernel/Libiberty deep support, CI fully enabled
 /// - **Tier-2**: Hello/cross smoke tests (may return E0xxx errors)
@@ -11,51 +11,51 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Feature {
     // Core computational features
-    CoreArith,      // Basic arithmetic operations
-    CoreCall,       // Function calls (syscall vs library)
-    Float,          // Floating point support
-    LongDouble,     // 80/128-bit floating point
-    Int128,         // __int128 support
-    Bitfield,       // Bit field structs
-    
+    CoreArith,  // Basic arithmetic operations
+    CoreCall,   // Function calls (syscall vs library)
+    Float,      // Floating point support
+    LongDouble, // 80/128-bit floating point
+    Int128,     // __int128 support
+    Bitfield,   // Bit field structs
+
     // Variable and memory management
-    VaList,         // Variable arguments
-    Tls,            // Thread-local storage
-    Atomics,        // Atomic operations
-    
+    VaList,  // Variable arguments
+    Tls,     // Thread-local storage
+    Atomics, // Atomic operations
+
     // Code generation features
-    InlineAsm(AsmLevel),    // Inline assembly capability level
-    Vector,               // SIMD/vector operations
-    
+    InlineAsm(AsmLevel), // Inline assembly capability level
+    Vector,              // SIMD/vector operations
+
     // Debugging and safety
-    Sanitizer(SanKind),   // Specific sanitizer type
-    CfiUnwind,            // Cross-platform unwind info
-    StackProtect,         // Stack protection cookies
-    
+    Sanitizer(SanKind), // Specific sanitizer type
+    CfiUnwind,          // Cross-platform unwind info
+    StackProtect,       // Stack protection cookies
+
     // Performance features
-    ParallelCodegen,      // Parallel code generation (currently x86-only)
-    
+    ParallelCodegen, // Parallel code generation (currently x86-only)
+
     // Optimization features
-    Lto,                  // Link-time optimization
-    BoundsCheck,          // Array bounds checking
-    Trapv,                // Trap on overflow
-    
+    Lto,         // Link-time optimization
+    BoundsCheck, // Array bounds checking
+    Trapv,       // Trap on overflow
+
     // Output format
-    ObjectFormat(ObjectFmt),  // Elf / Coff (Coff only on x86+Windows)
-    
+    ObjectFormat(ObjectFmt), // Elf / Coff (Coff only on x86+Windows)
+
     // Debugging info
-    Dwarf(u8),          // DWARF version (0 if not supported)
-    
+    Dwarf(u8), // DWARF version (0 if not supported)
+
     // Architecture-specific
-    RiscVBorrowedRegs,  // RISC-V borrowed registers
+    RiscVBorrowedRegs, // RISC-V borrowed registers
 }
 
 /// Inline assembly level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AsmLevel {
-    Minimal,    // Basic inline asm
-    Partial,    // Limited constraints
-    Full,       // Full GCC-style asm
+    Minimal, // Basic inline asm
+    Partial, // Limited constraints
+    Full,    // Full GCC-style asm
 }
 
 /// Sanitizer kinds
@@ -81,7 +81,7 @@ impl Default for Feature {
 }
 
 /// Feature set for a backend implementation
-/// 
+///
 /// This represents what capabilities the backend actually supports.
 /// It should match behavior probes from tests (see `check_feature_matrix` job).
 #[derive(Debug, Clone, Default)]
@@ -94,12 +94,12 @@ impl FeatureSet {
     pub fn has(&self, feature: Feature) -> bool {
         self.features.contains(&feature)
     }
-    
+
     /// Get list of all supported features
     pub fn all_features(&self) -> &[Feature] {
         &self.features
     }
-    
+
     /// Create a feature set with core capabilities only
     pub fn tier1_core() -> Self {
         Self {
@@ -113,7 +113,7 @@ impl FeatureSet {
             ],
         }
     }
-    
+
     /// Create a feature set with full support
     pub fn full() -> Self {
         Self {
@@ -145,7 +145,7 @@ impl FeatureSet {
             ],
         }
     }
-    
+
     /// Tier-1 交叉后端能力集 (aarch64)。
     ///
     /// 每一项都以 `scripts/probe_backend_features.sh` 的**产物指纹级**判据
@@ -262,8 +262,8 @@ impl FeatureSet {
 /// Behavior probe result codes (for CI verification)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeResult {
-    Ok,              // Feature works as expected
-    Err(String),     // Feature returns error code
-    MissingFixture,  // No test fixture available
-    Unsupported,     // Architecture doesn't support this feature
+    Ok,             // Feature works as expected
+    Err(String),    // Feature returns error code
+    MissingFixture, // No test fixture available
+    Unsupported,    // Architecture doesn't support this feature
 }

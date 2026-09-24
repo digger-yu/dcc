@@ -42,14 +42,14 @@ impl Aarch64Codegen {
                     0 | 3 => {
                         // RELAXED/RELEASE: plain LDR
                         self.emit_ldr_x(0, 1, 0, sz);
-                    }
+                    },
                     _ => {
                         // SEQ_CST/ACQUIRE/ACQ_REL: LDAR
                         self.emit_ldar(sz, 0, 1);
-                    }
+                    },
                 }
                 true
-            }
+            },
             "__atomic_store_n" => {
                 if args.len() < 3 {
                     return false;
@@ -65,14 +65,14 @@ impl Aarch64Codegen {
                     0 => {
                         // RELAXED: plain STR
                         self.emit_str_x(0, 1, 0, sz);
-                    }
+                    },
                     _ => {
                         // SEQ_CST/ACQUIRE/RELEASE/ACQ_REL: STLR
                         self.emit_stlr(sz, 0, 1);
-                    }
+                    },
                 }
                 true
-            }
+            },
             "__atomic_exchange_n" => {
                 if args.len() < 3 {
                     return false;
@@ -94,7 +94,7 @@ impl Aarch64Codegen {
                 self.label(&l_done);
                 // x0 已包含旧值
                 true
-            }
+            },
             "__atomic_fetch_add" => {
                 if args.len() < 3 {
                     return false;
@@ -121,7 +121,7 @@ impl Aarch64Codegen {
                 self.label(&l_done);
                 // x0 已包含旧值
                 true
-            }
+            },
             "__atomic_fetch_sub" => {
                 if args.len() < 3 {
                     return false;
@@ -147,7 +147,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &l_retry);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_fetch_and" => {
                 if args.len() < 3 {
                     return false;
@@ -167,7 +167,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &l_retry);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_fetch_or" => {
                 if args.len() < 3 {
                     return false;
@@ -187,7 +187,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &l_retry);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_fetch_xor" => {
                 if args.len() < 3 {
                     return false;
@@ -207,7 +207,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &l_retry);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_fetch_nand" => {
                 if args.len() < 3 {
                     return false;
@@ -228,7 +228,7 @@ impl Aarch64Codegen {
                 self.label(&l_done);
                 // x0 = old value
                 true
-            }
+            },
             "__atomic_compare_exchange_n" => {
                 // args: (ptr, expected, desired, weak, success_order, failure_order)
                 if args.len() < 3 {
@@ -275,7 +275,7 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_compare_exchange" => {
                 // Non-_n variant: desired is also a pointer (must dereference)
                 // args: (ptr, expected_ptr, desired_ptr, weak, succ_order, fail_order)
@@ -314,16 +314,16 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_thread_fence" => {
                 // args: (mem_order)
                 self.emit_dmb_ish();
                 true
-            }
+            },
             "__atomic_signal_fence" => {
                 // Compiler barrier only, no hardware instruction
                 true
-            }
+            },
             "__atomic_test_and_set" => {
                 // args: (ptr, mem_order)
                 if args.len() < 2 {
@@ -342,7 +342,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(3, &l_retry);
                 self.label(&l_done);
                 true
-            }
+            },
             "__atomic_clear" => {
                 // args: (ptr, mem_order)
                 if args.len() < 2 {
@@ -354,12 +354,12 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
                 self.emit_stlr(sz, 0, 1);
                 true
-            }
+            },
             "__atomic_is_lock_free" => {
                 // On AArch64, all standard integer sizes are always lock-free
                 self.mov_w0_imm(1);
                 true
-            }
+            },
             // ===== __sync_* legacy atomic operations =====
             "__sync_fetch_and_add" => {
                 if args.len() < 2 {
@@ -379,7 +379,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_fetch_and_sub" => {
                 if args.len() < 2 {
                     return false;
@@ -398,7 +398,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_fetch_and_or" => {
                 if args.len() < 2 {
                     return false;
@@ -417,7 +417,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_fetch_and_and" => {
                 if args.len() < 2 {
                     return false;
@@ -436,7 +436,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_fetch_and_xor" => {
                 if args.len() < 2 {
                     return false;
@@ -455,7 +455,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_fetch_and_nand" => {
                 if args.len() < 2 {
                     return false;
@@ -475,7 +475,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_add_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -494,7 +494,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_sub_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -513,7 +513,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_or_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -532,7 +532,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_and_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -551,7 +551,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_xor_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -570,7 +570,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_nand_and_fetch" => {
                 if args.len() < 2 {
                     return false;
@@ -590,7 +590,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(4, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_bool_compare_and_swap" => {
                 if args.len() < 3 {
                     return false;
@@ -619,7 +619,7 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_val_compare_and_swap" => {
                 if args.len() < 3 {
                     return false;
@@ -646,7 +646,7 @@ impl Aarch64Codegen {
                 self.emit_clrex();
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_lock_test_and_set" => {
                 if args.len() < 2 {
                     return false;
@@ -664,7 +664,7 @@ impl Aarch64Codegen {
                 self.emit_cbnz(3, &lr);
                 self.label(&ld);
                 true
-            }
+            },
             "__sync_lock_release" => {
                 if args.is_empty() {
                     return false;
@@ -675,11 +675,11 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
                 self.emit_str_x(0, 1, 0, sz);
                 true
-            }
+            },
             "__sync_synchronize" => {
                 self.emit_dmb_ish();
                 true
-            }
+            },
             _ => false,
         }
     }

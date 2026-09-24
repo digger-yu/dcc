@@ -3,6 +3,6 @@
 // Extracted from src/codegen/x86_64/mod.rs (PR-A2 Phase - Part 3)
 
 // Re-export from orchestration module
-pub use orchestration::{AsmRegisterPlanner, AsmRegUse};
+pub use orchestration::{AsmRegUse, AsmRegisterPlanner};
 
 mod orchestration;

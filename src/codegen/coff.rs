@@ -92,7 +92,7 @@ fn elf_sym_to_coff_storage(bind: u8, ty: u8) -> u8 {
             } else {
                 IMAGE_SYM_CLASS_EXTERNAL
             }
-        }
+        },
     }
 }
 
@@ -152,7 +152,9 @@ pub fn build_coff_rel_x86_64(
         secs.push(CoffSec {
             name: ".text".into(),
             data: text.to_vec(),
-            characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ
+            characteristics: IMAGE_SCN_CNT_CODE
+                | IMAGE_SCN_MEM_EXECUTE
+                | IMAGE_SCN_MEM_READ
                 | align_to_coff(text_align),
             align: text_align.max(16) as u32,
             is_bss: false,
@@ -165,7 +167,8 @@ pub fn build_coff_rel_x86_64(
         secs.push(CoffSec {
             name: ".rdata".into(),
             data: rodata.to_vec(),
-            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
+                | IMAGE_SCN_MEM_READ
                 | align_to_coff(text_align.max(4)),
             align: 4,
             is_bss: false,
@@ -216,7 +219,8 @@ pub fn build_coff_rel_x86_64(
         secs.push(CoffSec {
             name: ".rdata$T".into(),
             data: tdata.to_vec(),
-            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA
+                | IMAGE_SCN_MEM_READ
                 | align_to_coff(tdata_align.max(4)),
             align: tdata_align.max(4) as u32,
             is_bss: false,
@@ -275,9 +279,8 @@ pub fn build_coff_rel_x86_64(
     // For COFF we just need to know which COFF section each ELF symbol
     // belongs to. We'll build a mapping from ELF section index to COFF
     // section number.
-    let elf_to_coff_sec = build_elf_to_coff_section_map(
-        rodata, data, bss_size, tdata, tbss_size, extra_sections,
-    );
+    let elf_to_coff_sec =
+        build_elf_to_coff_section_map(rodata, data, bss_size, tdata, tbss_size, extra_sections);
 
     // String table for long symbol names
     // COFF string table: 4-byte length + string data

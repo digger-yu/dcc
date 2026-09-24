@@ -115,12 +115,12 @@ impl Aarch64Codegen {
                 let imm12 = (off as u32) & 0xfff;
                 let insn = 0x39000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             2 => {
                 let imm12 = ((off / 2) as u32) & 0xfff;
                 let insn = 0x79000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             4 => self.str_wt_sp(rt, off),
             _ => self.emit_str_x(rt, 31, off as u32, 8),
         }
@@ -136,7 +136,7 @@ impl Aarch64Codegen {
                 let insn =
                     0x39800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             (2, false) => self.emit_ldr_x(rt, rs1, imm, 2),
             (2, true) => {
                 // LDRSH Xd, [Xn, #imm] = 0x79800000
@@ -144,7 +144,7 @@ impl Aarch64Codegen {
                 let insn =
                     0x79800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             (4, _) => self.emit_ldr_x(rt, rs1, imm, 4),
             _ => self.emit_ldr_x(rt, rs1, imm, 8),
         }
@@ -158,19 +158,19 @@ impl Aarch64Codegen {
                 let insn =
                     0x39000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             2 => {
                 let imm12 = (imm / 2) & 0xfff;
                 let insn =
                     0x79000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             4 => {
                 let imm12 = (imm / 4) & 0xfff;
                 let insn =
                     0xb9000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             _ => self.emit_str_x(rt, rs1, imm, 8),
         }
     }

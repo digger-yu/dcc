@@ -7,7 +7,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::{Codegen, VaListAddress};
 
-
 impl Codegen {
     /// gen_expr VaArg 分支 (batch F8 逐字搬迁: Expr::VaArg arm)。
     pub fn gen_expr_va_arg(&mut self, e: &Expr, dst: u8) {
@@ -39,14 +38,14 @@ impl Codegen {
                 match va_addr {
                     VaListAddress::Named(name) => {
                         self.gen_va_arg(&name, arg_ty, dst);
-                    }
+                    },
                     VaListAddress::InReg | VaListAddress::Lvalue(_) => {
                         // rcx 已有 va_list 指针地址
                         self.gen_va_arg_ptr(arg_ty, dst);
-                    }
+                    },
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

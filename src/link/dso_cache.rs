@@ -83,7 +83,7 @@ impl DsoCache {
             Some((k, info)) if *k == key => {
                 self.hits += 1;
                 Some(info.clone())
-            }
+            },
             _ => None,
         }
     }
@@ -96,7 +96,7 @@ impl DsoCache {
                 // 无 metadata, 不上缓存. 调用方再调用 get() 也会失败.
                 self.misses += 1;
                 return Arc::new(info);
-            }
+            },
         };
         self.misses += 1;
         let arc = Arc::new(info);
@@ -268,26 +268,23 @@ pub fn parse_dso_file(path: &Path) -> std::io::Result<DsoInfo> {
             ".dynsym" | ".symtab" if symtab_off.is_none() => {
                 let off =
                     u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
-                let sz =
-                    u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
+                let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
                 let entsize = u64::from_le_bytes(buf[base + 56..base + 64].try_into().unwrap());
                 symtab_off = Some((off, sz, entsize));
-            }
+            },
             ".dynstr" | ".strtab" if strtab_off.is_none() => {
                 let off =
                     u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
-                let sz =
-                    u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
+                let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
                 strtab_off = Some((off, sz));
-            }
+            },
             ".text" if text_off.is_none() => {
                 let off =
                     u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
-                let sz =
-                    u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
+                let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
                 text_off = Some((off, sz));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -305,10 +302,7 @@ pub fn parse_dso_file(path: &Path) -> std::io::Result<DsoInfo> {
     if let (Some((sym_off, sym_size, sym_entsize)), Some((str_off, str_size))) =
         (symtab_off, strtab_off)
     {
-        if sym_entsize >= 24
-            && sym_off + sym_size <= buf.len()
-            && str_off + str_size <= buf.len()
-        {
+        if sym_entsize >= 24 && sym_off + sym_size <= buf.len() && str_off + str_size <= buf.len() {
             let symtab_data = &buf[sym_off..sym_off + sym_size];
             let strtab_data = &buf[str_off..str_off + str_size];
             let sym_count = sym_size / sym_entsize as usize;

@@ -21,19 +21,19 @@ impl Aarch64Codegen {
                     self.emit(&[0x00, 0x00, 0x18, 0x1e]);
                     return true;
                 }
-            }
+            },
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 self.gen_float_expr(&expr.children[0]);
                 self.mov_s1_s0();
                 self.gen_float_expr(&expr.children[1]);
                 self.float_binop_s0_s1(*op);
                 return true;
-            }
+            },
             ExprKind::Unary(UnOp::Neg) if !expr.children.is_empty() => {
                 self.gen_float_expr(&expr.children[0]);
                 self.neg_s0();
                 return true;
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
@@ -55,7 +55,7 @@ impl Aarch64Codegen {
                                 // SCVTF S0, W0: 0x1E180000
                                 self.emit(&0x1E180000u32.to_le_bytes());
                             }
-                        }
+                        },
                         ValueType::Float { bits: 64 } => {
                             if is_unsigned {
                                 // UCVTF D0, W0: 0x9E190000
@@ -64,12 +64,12 @@ impl Aarch64Codegen {
                                 // SCVTF D0, W0: 0x9E180000
                                 self.emit(&0x9E180000u32.to_le_bytes());
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 return true;
-            }
+            },
             // M25: 浮点型 __builtin_va_arg(ap, T) — v0..v7 已在入口保存到 va_save_base+64
             // 按类型分派: double 用 ldr d0 (64-bit), float 用 ldr s0 (32-bit)
             ExprKind::VaArg { ap, ref arg_ty, .. } => {
@@ -78,19 +78,19 @@ impl Aarch64Codegen {
                     _ => self.gen_va_arg_float(ap),
                 }
                 return true;
-            }
+            },
             // 浮点返回值沿用普通调用路径；AAPCS64 约定结果留在 s0/d0。
             ExprKind::Call if !expr.children.is_empty() => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             // M25: 浮点局部变量从栈加载到 s0 (避免回退 0.0)
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.ldr_s0_sp(off);
                     return true;
                 }
-            }
+            },
             // Float assignment: evaluate rhs and store to lhs
             ExprKind::Assign if expr.children.len() >= 2 => {
                 self.gen_float_expr(&expr.children[1]);
@@ -101,7 +101,7 @@ impl Aarch64Codegen {
                             self.str_s0_sp(off);
                             return true;
                         }
-                    }
+                    },
                     ExprKind::Member(ref field_name) if !lhs.children.is_empty() => {
                         let child = &lhs.children[0];
                         if let ExprKind::Local(ref name) = child.kind {
@@ -124,10 +124,10 @@ impl Aarch64Codegen {
                                 return true;
                             }
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
-            }
+            },
             // Float member access: load from struct field
             ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
                 let child = &expr.children[0];
@@ -150,7 +150,7 @@ impl Aarch64Codegen {
                         return true;
                     }
                 }
-            }
+            },
             // M25: 浮点条件表达式: cond ? true_val : false_val
             // 用分支实现, 避免 fcsel 寄存器约束
             ExprKind::Conditional if expr.children.len() >= 3 => {
@@ -165,7 +165,7 @@ impl Aarch64Codegen {
                 self.gen_float_expr(&expr.children[2]);
                 self.label(&lbl_end);
                 return true;
-            }
+            },
             _ => {
                 // 已经是 float/vector 走到这里, 不能再回 gen_expr (死循环).
                 // 整数/复合字面量进 gen_float_expr 是为了 int→float 转换, 但
@@ -175,16 +175,13 @@ impl Aarch64Codegen {
                     self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
                     return true;
                 }
-            }
+            },
         }
         // 无法处理的浮点表达式: 加载 0.0 作为 fallback 并报告诊断
         let span = expr.span.clone();
         let mut diag = crate::diagnostics::Diagnostic::err(
             "E0314",
-            format!(
-                "unsupported float IR expression on aarch64: {:?}",
-                expr.kind
-            ),
+            format!("unsupported float IR expression on aarch64: {:?}", expr.kind),
             span,
         );
         diag.hint = Some("add handling in gen_float_expr".to_string());
@@ -201,7 +198,7 @@ impl Aarch64Codegen {
                 self.gen_vector_expr(&expr.children[0]);
                 self.vector_binop_v0_v1(op);
                 return true;
-            }
+            },
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.ldr_q0_sp(off);
@@ -209,7 +206,7 @@ impl Aarch64Codegen {
                     self.zero_v0();
                 }
                 return true;
-            }
+            },
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.mov_w0_imm(trunc_i32(v));
@@ -218,11 +215,11 @@ impl Aarch64Codegen {
                     self.zero_v0();
                 }
                 return true;
-            }
+            },
             ExprKind::Aggregate => {
                 self.materialize_vector_aggregate(expr);
                 return true;
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if is_vector_ty(&child.ty) {
@@ -232,7 +229,7 @@ impl Aarch64Codegen {
                     self.dup_v0_4s_w0();
                 }
                 return true;
-            }
+            },
             ExprKind::Assign if expr.children.len() >= 2 => {
                 self.gen_vector_expr(&expr.children[1]);
                 if let ExprKind::Local(ref name) = expr.children[0].kind {
@@ -241,11 +238,11 @@ impl Aarch64Codegen {
                     }
                 }
                 return true;
-            }
+            },
             ExprKind::Call if !expr.children.is_empty() => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 let false_label = self.fresh_label("Lvec_false");
                 let end_label = self.fresh_label("Lvec_end");
@@ -257,10 +254,10 @@ impl Aarch64Codegen {
                 self.gen_vector_expr(&expr.children[2]);
                 self.label(&end_label);
                 return true;
-            }
+            },
             _ => {
                 self.zero_v0();
-            }
+            },
         }
         false
     }
@@ -289,7 +286,7 @@ impl Aarch64Codegen {
                 self.zero_v0();
                 self.zero_v1();
                 return true;
-            }
+            },
             // Complex constant: real = literal, imag = 0
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
@@ -307,7 +304,7 @@ impl Aarch64Codegen {
                 self.zero_v0();
                 self.zero_v1();
                 return true;
-            }
+            },
             // Complex binary ops: component-wise add/sub
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 // Evaluate left -> (v0, v1)
@@ -330,21 +327,21 @@ impl Aarch64Codegen {
                         self.emit_fadd_s0_v2_v0();
                         // imag: v1 = v3 + v1
                         self.emit_fadd_s1_v3_v1();
-                    }
+                    },
                     BinOp::Sub => {
                         // real: v0 = v2 - v0
                         self.emit_fsub_s0_v2_v0();
                         // imag: v1 = v3 - v1
                         self.emit_fsub_s1_v3_v1();
-                    }
+                    },
                     _ => {
                         // Unsupported complex binop: zero result
                         self.zero_v0();
                         self.zero_v1();
-                    }
+                    },
                 }
                 return true;
-            }
+            },
             // Complex cast: component-wise cast
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
@@ -366,13 +363,13 @@ impl Aarch64Codegen {
                     self.zero_v1();
                 }
                 return true;
-            }
+            },
             // Complex call: result in (v0, v1)
             ExprKind::Call => {
                 self.gen_call(expr);
                 // gen_call should leave result in v0, v1 for complex returns
                 return true;
-            }
+            },
             // Complex conditional: branch-based
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 let lbl_false = self.fresh_label(".Lcx_cond_f");
@@ -386,17 +383,14 @@ impl Aarch64Codegen {
                 self.gen_complex_expr(&expr.children[2]);
                 self.label(&lbl_end);
                 return true;
-            }
-            _ => {}
+            },
+            _ => {},
         }
         // Fallback: zero both parts
         let span = expr.span.clone();
         let mut diag = crate::diagnostics::Diagnostic::err(
             "E0315",
-            format!(
-                "unsupported complex IR expression on aarch64: {:?}",
-                expr.kind
-            ),
+            format!("unsupported complex IR expression on aarch64: {:?}", expr.kind),
             span,
         );
         diag.hint = Some("add handling in gen_complex_expr".to_string());

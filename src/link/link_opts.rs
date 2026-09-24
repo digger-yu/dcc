@@ -123,7 +123,7 @@ impl LinkOpts {
                     Some("partial") => self.relro_partial = true,
                     Some(v) => return Err(format!("unsupported -z relro mode '{v}'")),
                 }
-            }
+            },
             "norelro" => self.relro = false,
             "now" => self.bind_now = true,
             "lazy" => self.bind_now = false,
@@ -135,12 +135,12 @@ impl LinkOpts {
                 let v = val.ok_or_else(|| "missing value for -z max-page-size".to_string())?;
                 self.max_page_size = parse_size(v)
                     .map_err(|_| format!("invalid value for -z max-page-size: {v}"))?;
-            }
+            },
             "common-page-size" => {
                 let v = val.ok_or_else(|| "missing value for -z common-page-size".to_string())?;
                 self.common_page_size = parse_size(v)
                     .map_err(|_| format!("invalid value for -z common-page-size: {v}"))?;
-            }
+            },
             "ibt" => self.ibt = true,
             "noibt" => self.ibt = false,
             "shstk" => self.shstk = true,
@@ -253,11 +253,11 @@ pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String>
             "zlib" | "zlib-gnu" | "zlib-gabi" => {
                 compress_type = 1;
                 deflate_compress(&sec.data)
-            }
+            },
             "zstd" => {
                 compress_type = 2;
                 zstd_compress(&sec.data)
-            }
+            },
             _ => continue,
         };
         if let Some(cdata) = compressed_data {

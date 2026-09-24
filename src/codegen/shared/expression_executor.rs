@@ -9,9 +9,9 @@ pub type ExprResult<T> = Result<T, String>;
 /// Register class identifier
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RegisterClass {
-    GPR,  // General Purpose Register
-    FPR,  // Floating Point Register
-    XMM,  // SIMD Register
+    GPR, // General Purpose Register
+    FPR, // Floating Point Register
+    XMM, // SIMD Register
 }
 
 /// Register value tracking
@@ -22,11 +22,11 @@ pub struct RegValue {
 }
 
 /// Expression executor trait - defines interface for ISA-specific expression evaluation
-/// 
+///
 /// This trait must be implemented by each backend (x86_64, AArch64, RISC-V, etc.)
 pub trait ExpressionExecutor: Sized {
     // ========== BINARY OPERATIONS ==========
-    
+
     fn emit_binary_op(
         &self,
         op: &BinOp,
@@ -37,7 +37,7 @@ pub trait ExpressionExecutor: Sized {
     ) -> ExprResult<()>;
 
     // ========== UNARY OPERATIONS ==========
-    
+
     fn emit_unary_op(
         &self,
         op: &UnOp,
@@ -47,7 +47,7 @@ pub trait ExpressionExecutor: Sized {
     ) -> ExprResult<()>;
 
     // ========== TYPE CONVERSIONS ==========
-    
+
     fn convert_float_to_int(
         &self,
         src_reg: u8,
@@ -75,7 +75,7 @@ pub trait ExpressionExecutor: Sized {
     ) -> ExprResult<()>;
 
     // ========== MEMORY OPERATIONS ==========
-    
+
     fn load_from_register(
         &self,
         addr_reg: u8,
@@ -84,15 +84,10 @@ pub trait ExpressionExecutor: Sized {
         signed: bool,
     ) -> ExprResult<()>;
 
-    fn store_to_register(
-        &self,
-        src_reg: u8,
-        addr_reg: u8,
-        size: usize,
-    ) -> ExprResult<()>;
+    fn store_to_register(&self, src_reg: u8, addr_reg: u8, size: usize) -> ExprResult<()>;
 
     // ========== REGISTER ALLOCATION ==========
-    
+
     fn allocate_gpr(&mut self, ty: &Type) -> ExprResult<u8>;
 
     fn allocate_fpr(&mut self, ty: &Type) -> ExprResult<u8>;
@@ -100,10 +95,11 @@ pub trait ExpressionExecutor: Sized {
     fn spill_register(&mut self, reg: u8, stack_offset: i64) -> ExprResult<()>;
 
     // ========== ADDITIONAL BACKEND HOOKS ==========
-    
+
     fn load_immediate_constant(&mut self, value: u64, dest_reg: u8, ty: &Type) -> ExprResult<()>;
 
-    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type) -> ExprResult<()>;
+    fn load_from_symbol_address(&mut self, symbol: &str, dest_reg: u8, ty: &Type)
+        -> ExprResult<()>;
 
     fn shift_left(&mut self, src_reg: u8, dest_reg: u8, count: u8) -> ExprResult<()>;
 

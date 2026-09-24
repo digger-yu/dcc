@@ -36,8 +36,8 @@
 //   关闭对应 sanitizer 通道。
 
 use crate::ast::{
-    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, QualType, Stmt, Type,
-    UnOp, VarDecl,
+    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, QualType,
+    Stmt, Type, UnOp, VarDecl,
 };
 use crate::cli::{Arch, CliError};
 use crate::diagnostics::Span;
@@ -122,26 +122,21 @@ impl SanitizerFlags {
             "trace-cmp" => {
                 f.kcov = true;
                 f.cov_trace_cmp = true;
-            }
+            },
             "trace-switch" => {
                 f.kcov = true;
                 f.cov_trace_switch = true;
-            }
+            },
             "8bit-counters" => {
                 f.kcov = true;
                 f.cov_8bit_counters = true;
-            }
+            },
             "pc-table" => {
                 f.kcov = true;
                 f.cov_pc_table = true;
-            }
-            "" => {}
-            _ => {
-                return Err(CliError::new(&format!(
-                    "unsupported sanitizer coverage: {}",
-                    name
-                )))
-            }
+            },
+            "" => {},
+            _ => return Err(CliError::new(&format!("unsupported sanitizer coverage: {}", name))),
         }
         Ok(())
     }
@@ -152,18 +147,18 @@ impl SanitizerFlags {
             "kernel-address" => {
                 f.kasan = true;
                 f.kernel_mode = true;
-            }
+            },
             "hwaddress" => f.hwasan = true,
             "kernel-hwaddress" => {
                 f.hwasan = true;
                 f.kernel_mode = true;
-            }
+            },
             "undefined" => f.ubsan = true,
             "thread" => f.kcsan = true,
             "kernel-kcsan" => {
                 f.kcsan = true;
                 f.kernel_mode = true;
-            }
+            },
             "memory" => f.msan = true,
             "dataflow" => f.dfsan = true,
             "cfi" => {
@@ -173,7 +168,7 @@ impl SanitizerFlags {
                 f.cfi_derived_cast = true;
                 f.cfi_unrelated_cast = true;
                 f.cfi_mfcall = true;
-            }
+            },
             "cfi-icall" => f.cfi_icall = true,
             "cfi-vcall" => f.cfi_vcall = true,
             "cfi-nvcall" => f.cfi_nvcall = true,
@@ -185,7 +180,7 @@ impl SanitizerFlags {
                 f.kcov = true;
                 f.cov_trace_cmp = true;
                 f.cov_trace_switch = true;
-            }
+            },
             "coverage" | "trace-pc" | "trace-pc-guard" => f.kcov = true,
             _ => return Err(CliError::new(&format!("unsupported sanitizer: {}", name))),
         }
@@ -392,8 +387,7 @@ fn build_inline_map(prog: &Program, ctx: &mut InstrumentCtx) {
     for (func, callers) in &caller_count {
         if callers.len() == 1 {
             ctx.inlined_funcs.insert(func.clone());
-            ctx.inline_callers
-                .insert(func.clone(), callers[0].clone());
+            ctx.inline_callers.insert(func.clone(), callers[0].clone());
         }
     }
 }
@@ -413,8 +407,8 @@ fn collect_calls_in_block(block: &Block, callees: &mut HashSet<String>) {
                 if let Some(body) = &f.body {
                     collect_calls_in_block(body, callees);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -423,19 +417,27 @@ fn collect_calls_in_stmt(stmt: &Stmt, callees: &mut HashSet<String>) {
     match stmt {
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
             collect_calls_in_expr(e, callees);
-        }
-        Stmt::If { cond, then_, else_, .. } => {
+        },
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             collect_calls_in_expr(cond, callees);
             collect_calls_in_stmt(then_, callees);
             if let Some(e) = else_ {
                 collect_calls_in_stmt(e, callees);
             }
-        }
+        },
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             collect_calls_in_expr(cond, callees);
             collect_calls_in_stmt(body, callees);
-        }
-        Stmt::For { init, cond, step, body, .. } => {
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 collect_calls_in_stmt(i, callees);
             }
@@ -446,16 +448,16 @@ fn collect_calls_in_stmt(stmt: &Stmt, callees: &mut HashSet<String>) {
                 collect_calls_in_expr(s, callees);
             }
             collect_calls_in_stmt(body, callees);
-        }
+        },
         Stmt::Block { b, .. } => collect_calls_in_block(b, callees),
         Stmt::Switch { expr, cases, .. } => {
             collect_calls_in_expr(expr, callees);
             for c in cases {
                 collect_calls_in_block(&c.body, callees);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => collect_calls_in_stmt(stmt, callees),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -468,49 +470,55 @@ fn collect_calls_in_expr(expr: &Expr, callees: &mut HashSet<String>) {
             for a in args {
                 collect_calls_in_expr(a, callees);
             }
-        }
+        },
         Expr::Binop { l, r, .. } => {
             collect_calls_in_expr(l, callees);
             collect_calls_in_expr(r, callees);
-        }
-        Expr::Unary { e, .. } | Expr::AddrOf { e, .. } | Expr::Deref { e, .. }
-        | Expr::Cast { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+        },
+        Expr::Unary { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. } => {
             collect_calls_in_expr(e, callees);
-        }
-        Expr::Cond { cond, then_, else_, .. } => {
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             collect_calls_in_expr(cond, callees);
             collect_calls_in_expr(then_, callees);
             collect_calls_in_expr(else_, callees);
-        }
+        },
         Expr::Comma { l, r, .. } => {
             collect_calls_in_expr(l, callees);
             collect_calls_in_expr(r, callees);
-        }
+        },
         Expr::Index { arr, idx, .. } => {
             collect_calls_in_expr(arr, callees);
             collect_calls_in_expr(idx, callees);
-        }
+        },
         Expr::Member { expr, .. } => collect_calls_in_expr(expr, callees),
         Expr::Assign { l, r, .. } => {
             collect_calls_in_expr(l, callees);
             collect_calls_in_expr(r, callees);
-        }
-        Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
-        | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+        },
+        Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. } => {
             collect_calls_in_expr(e, callees);
-        }
+        },
         Expr::StmtExpr { block, .. } => collect_calls_in_block(block, callees),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             for init in inits {
                 match init {
                     InitItem::Expr(e) => collect_calls_in_expr(e, callees),
-                    InitItem::Designated { value, .. } => {
-                        collect_calls_in_expr(value, callees)
-                    }
+                    InitItem::Designated { value, .. } => collect_calls_in_expr(value, callees),
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -607,13 +615,7 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
 
     if let Some(body) = &mut func.body {
         // 插桩函数体
-        instrument_block(
-            &mut body.items,
-            func_flags,
-            ctx,
-            guard_var.as_deref(),
-            func_guard_base,
-        );
+        instrument_block(&mut body.items, func_flags, ctx, guard_var.as_deref(), func_guard_base);
         // 拼接 prologue
         if !prologue.is_empty() {
             let mut combined = prologue;
@@ -668,7 +670,7 @@ fn instrument_block(
                         }
                     }
                 }
-            }
+            },
             BlockItem::Decl(Decl::Var(v)) => {
                 // VLA 边界检查: 在变长数组声明前插入
                 // `__ubsan_handle_vla_bound_not_positive(bound_expr)`
@@ -703,11 +705,11 @@ fn instrument_block(
                         });
                     }
                 }
-            }
-            BlockItem::Decl(_) => {}
+            },
+            BlockItem::Decl(_) => {},
             BlockItem::Stmt(stmt) => {
                 instrument_stmt(stmt, flags, ctx, guard_var, guard_base);
-            }
+            },
         }
     }
 }
@@ -724,10 +726,10 @@ fn instrument_stmt(
             if let Some(e) = val {
                 instrument_expr(e, flags, ctx, guard_var, guard_base);
             }
-        }
+        },
         Stmt::Expr { e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
-        }
+        },
         Stmt::If {
             cond, then_, else_, ..
         } => {
@@ -749,7 +751,7 @@ fn instrument_stmt(
                 }
                 instrument_stmt(e, flags, ctx, guard_var, guard_base);
             }
-        }
+        },
         Stmt::While { cond, body, .. } => {
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
             if let Some(gv) = guard_var {
@@ -759,7 +761,7 @@ fn instrument_stmt(
                 **body = new_body;
             }
             instrument_stmt(body, flags, ctx, guard_var, guard_base);
-        }
+        },
         Stmt::Do { body, cond, .. } => {
             instrument_stmt(body, flags, ctx, guard_var, guard_base);
             if let Some(gv) = guard_var {
@@ -769,7 +771,7 @@ fn instrument_stmt(
                 **body = new_body;
             }
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -793,10 +795,10 @@ fn instrument_stmt(
             if let Some(s) = step {
                 instrument_expr(s, flags, ctx, guard_var, guard_base);
             }
-        }
+        },
         Stmt::Block { b, .. } => {
             instrument_block(&mut b.items, flags, ctx, guard_var, guard_base);
-        }
+        },
         Stmt::Switch { expr, cases, .. } => {
             // switch dispatch trace:fuzzer 模式下,把 expr 与 cases[].val
             // 收集后 emit `__sanitizer_cov_trace_switch`.
@@ -821,7 +823,7 @@ fn instrument_stmt(
                 }
                 instrument_block(&mut case.body.items, flags, ctx, guard_var, guard_base);
             }
-        }
+        },
         Stmt::Label { stmt, .. } => {
             if let Some(gv) = guard_var {
                 let g = ctx.next_guard();
@@ -830,7 +832,7 @@ fn instrument_stmt(
                 **stmt = new_stmt;
             }
             instrument_stmt(stmt, flags, ctx, guard_var, guard_base);
-        }
+        },
         Stmt::Goto { .. }
         | Stmt::GotoIndirect { .. }
         | Stmt::Break { .. }
@@ -841,9 +843,9 @@ fn instrument_stmt(
                 let wrapped = wrap_stmt_with_guard(stmt, gv, g, &span);
                 *stmt = wrapped;
             }
-        }
-        Stmt::AsmGoto { .. } => {}
-        Stmt::Fallthrough { .. } => {}
+        },
+        Stmt::AsmGoto { .. } => {},
+        Stmt::Fallthrough { .. } => {},
     }
 }
 
@@ -906,11 +908,11 @@ fn instrument_expr(
             instrument_expr(l, flags, ctx, guard_var, guard_base);
             instrument_expr(r, flags, ctx, guard_var, guard_base);
             ExprKind::Binop(*op)
-        }
+        },
         Expr::Unary { op, e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Unary(*op, e.ty())
-        }
+        },
         Expr::Assign { l, r, .. } => {
             // 先插桩右值 (右值可能在求值时触发 load/store)
             instrument_expr(r, flags, ctx, guard_var, guard_base);
@@ -925,16 +927,16 @@ fn instrument_expr(
                 instrument_expr(l, flags, ctx, guard_var, guard_base);
             }
             ExprKind::Assign(target_kind)
-        }
+        },
         Expr::Deref { e, ty, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Deref(ty.size().max(1), e.as_ref().clone())
-        }
+        },
         Expr::Index { arr, idx, ty, .. } => {
             instrument_expr(arr, flags, ctx, guard_var, guard_base);
             instrument_expr(idx, flags, ctx, guard_var, guard_base);
             ExprKind::Index(ty.size().max(1), arr.as_ref().clone())
-        }
+        },
         Expr::Member {
             expr: base,
             ty,
@@ -947,7 +949,7 @@ fn instrument_expr(
             } else {
                 ExprKind::Trivial
             }
-        }
+        },
         Expr::Call { callee, args, .. } => {
             instrument_expr(callee, flags, ctx, guard_var, guard_base);
             for a in args.iter_mut() {
@@ -959,7 +961,7 @@ fn instrument_expr(
             } else {
                 ExprKind::Trivial
             }
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
@@ -967,7 +969,7 @@ fn instrument_expr(
             instrument_expr(then_, flags, ctx, guard_var, guard_base);
             instrument_expr(else_, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::Cast { e, ty: cast_ty, .. } => {
             // float→int cast: emit __ubsan_handle_float_cast_overflow.
             // NaN/范围检查在运行时做;本侧仅插入调用,cast 本身的值仍正确。
@@ -985,24 +987,24 @@ fn instrument_expr(
             }
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::Comma { l, r, .. } => {
             instrument_expr(l, flags, ctx, guard_var, guard_base);
             instrument_expr(r, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::StmtExpr { block, .. } => {
             instrument_block(&mut block.items, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::VaArg { ap, .. } => {
             instrument_expr(ap, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. }
         | Expr::PostInc { e, .. }
@@ -1017,22 +1019,22 @@ fn instrument_expr(
             let lhs = e.as_ref().clone();
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::IncDec(target_kind, Box::new(lhs))
-        }
+        },
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             for item in inits.iter_mut() {
                 match item {
                     InitItem::Expr(e) => instrument_expr(e, flags, ctx, guard_var, guard_base),
                     InitItem::Designated { value, .. } => {
                         instrument_expr(value, flags, ctx, guard_var, guard_base);
-                    }
+                    },
                 }
             }
             ExprKind::Trivial
-        }
+        },
         Expr::AddrOf { e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::Ident { .. }
         | Expr::Int { .. }
         | Expr::Char { .. }
@@ -1042,7 +1044,7 @@ fn instrument_expr(
             // 实/虚部提取: 插桩内层表达式, 自身无内存访问
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
-        }
+        },
         Expr::String { .. }
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. }
@@ -1054,7 +1056,7 @@ fn instrument_expr(
     // 现在 expr 已经被 match 释放借,可以安全地 mutate
     let span = expr.span();
     match kind {
-        ExprKind::Trivial => {}
+        ExprKind::Trivial => {},
         ExprKind::IndirectCall(ref callee_ty) => {
             // CFI indirect call type check: wrap callee with
             // `__cfi_check(callee, type_hash)` before the call executes.
@@ -1063,7 +1065,7 @@ fn instrument_expr(
                 let wrapped_callee = wrap_with_cfi_check(callee, type_hash, &span);
                 **callee = wrapped_callee;
             }
-        }
+        },
         ExprKind::Binop(op) => {
             // 比较 trace (fuzzer)
             if flags.needs_compare_trace() && is_compare_op(op) {
@@ -1076,16 +1078,17 @@ fn instrument_expr(
                     *expr = w;
                 }
             }
-        }
+        },
         ExprKind::Unary(op, ty) => {
             if flags.needs_ubsan() && matches!(op, UnOp::Neg) && is_signed_int(&ty) {
                 let wrapped = wrap_with_ubsan_check(expr, "negate_overflow", &span);
                 *expr = wrapped;
             }
-        }
+        },
         ExprKind::Deref(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
+                let wrapped =
+                    wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -1101,10 +1104,11 @@ fn instrument_expr(
                 let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
-        }
+        },
         ExprKind::Index(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
+                let wrapped =
+                    wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -1120,10 +1124,11 @@ fn instrument_expr(
                 let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
-        }
+        },
         ExprKind::ArrowMember(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
+                let wrapped =
+                    wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             if flags.needs_msan_check() {
@@ -1139,7 +1144,7 @@ fn instrument_expr(
                 let wrapped = wrap_with_null_check(expr, &ptr, align, &span);
                 *expr = wrapped;
             }
-        }
+        },
         ExprKind::Assign(Some(check_kind)) => {
             // 对赋值,需要的是 LHS 的地址 (不读取),所以单独走
             // `wrap_with_mem_check_assign` 路径: 取 &lhs 当作
@@ -1150,7 +1155,8 @@ fn instrument_expr(
                 None
             };
             if let Some(l) = lhs_clone {
-                let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags, ctx.arch);
+                let wrapped =
+                    wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags, ctx.arch);
                 *expr = wrapped;
             }
             // MSAN store check on assign target
@@ -1167,7 +1173,8 @@ fn instrument_expr(
                 if let Expr::Assign { l, .. } = expr {
                     let store_sz = l.ty().size().max(1);
                     let lhs_for_dfsan = l.as_ref().clone();
-                    let wrapped = wrap_with_dfsan_store_label(&lhs_for_dfsan, expr, store_sz, &span);
+                    let wrapped =
+                        wrap_with_dfsan_store_label(&lhs_for_dfsan, expr, store_sz, &span);
                     *expr = wrapped;
                 }
             }
@@ -1197,15 +1204,16 @@ fn instrument_expr(
                     }
                 }
             }
-        }
-        ExprKind::Assign(None) => {}
+        },
+        ExprKind::Assign(None) => {},
         ExprKind::IncDec(Some(check_kind), lhs) => {
             // 对 ++/-- 内存目标 (Deref/Index/ArrowMember) 补 store 检查:
             // 用插桩前 lvalue 的地址作入参, 检查在自增/自减求值前执行。
-            let wrapped = wrap_with_mem_check_assign(&lhs, expr, check_kind, &span, flags, ctx.arch);
+            let wrapped =
+                wrap_with_mem_check_assign(&lhs, expr, check_kind, &span, flags, ctx.arch);
             *expr = wrapped;
-        }
-        ExprKind::IncDec(None, _) => {}
+        },
+        ExprKind::IncDec(None, _) => {},
     }
 }
 
@@ -1353,7 +1361,7 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
                 return Some(wrapped);
             }
             None
-        }
+        },
         BinOp::Shl | BinOp::Shr => {
             if let Expr::Binop { l, r, .. } = expr {
                 if is_integer_ty(&l.ty()) && is_integer_ty(&r.ty()) {
@@ -1362,7 +1370,7 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
                 }
             }
             None
-        }
+        },
         BinOp::Add | BinOp::Sub | BinOp::Mul => {
             if let Expr::Binop { l, r, .. } = expr {
                 if is_signed_int(&l.ty()) && is_signed_int(&r.ty()) && !is_const_arith(expr) {
@@ -1377,7 +1385,7 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
                 }
             }
             None
-        }
+        },
         _ => None,
     }
 }
@@ -1423,7 +1431,10 @@ fn null_deref_check(span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
         }),
         args: vec![Expr::Int {
             v: 0,
@@ -1464,7 +1475,11 @@ fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![val_ty.into(), target_ty.clone().into(), target_ty.clone().into()],
+                vec![
+                    val_ty.into(),
+                    target_ty.clone().into(),
+                    target_ty.clone().into(),
+                ],
             ),
         }),
         args: vec![*value, min_expr, max_expr],
@@ -1518,7 +1533,10 @@ fn wrap_with_ubsan_check_arg(expr: &Expr, check_arg: &Expr, kind: &str, span: &S
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![Type::Ptr(Box::new(Type::Void.into())).into(), inner_ty.clone().into()],
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    inner_ty.clone().into(),
+                ],
             ),
         }),
         args: vec![
@@ -1553,7 +1571,10 @@ fn wrap_with_ubsan_check(expr: &Expr, kind: &str, span: &Span) -> Expr {
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![Type::Ptr(Box::new(Type::Void.into())).into(), inner_ty.clone().into()],
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    inner_ty.clone().into(),
+                ],
             ),
         }),
         args: vec![
@@ -1732,7 +1753,13 @@ fn make_tsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) ->
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), param_tys.into_iter().map(|p: Type| p.into()).collect::<Vec<QualType>>()),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                param_tys
+                    .into_iter()
+                    .map(|p: Type| p.into())
+                    .collect::<Vec<QualType>>(),
+            ),
         }),
         args,
         span: span.clone(),
@@ -1752,7 +1779,11 @@ fn make_kcsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into(), Type::Int.into()],
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    Type::ULong.into(),
+                    Type::Int.into(),
+                ],
             ),
         }),
         args: vec![
@@ -1828,7 +1859,13 @@ fn make_asan_call(
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), param_tys.into_iter().map(|p: Type| p.into()).collect::<Vec<QualType>>()),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                param_tys
+                    .into_iter()
+                    .map(|p: Type| p.into())
+                    .collect::<Vec<QualType>>(),
+            ),
         }),
         args,
         span: span.clone(),
@@ -1871,7 +1908,13 @@ pub fn kasan_shadow_offset_for_arch(arch: Arch) -> i128 {
 /// - AArch64:    `0xdfff600000000000` (VA_BITS=48)
 /// - RISC-V 64:  `0xdffffe0000000000` (SV39/SV48)
 /// - 其他:        回退到 x86_64 偏移
-fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span, arch: Arch) -> Expr {
+fn make_kernel_kasan_check(
+    addr: Expr,
+    size: usize,
+    is_write: bool,
+    span: &Span,
+    arch: Arch,
+) -> Expr {
     let shadow_offset = kasan_shadow_offset_for_arch(arch);
 
     let ul = |v: i128| Expr::Int {
@@ -1912,12 +1955,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span,
         // 读取 granule g 的 shadow 字节 (零扩展, 值域 0..=255)
         let vg = Expr::Deref {
             e: Box::new(Expr::Cast {
-                e: Box::new(bop(
-                    BinOp::Add,
-                    shadow_base.clone(),
-                    ul(g as i128),
-                    Type::ULong,
-                )),
+                e: Box::new(bop(BinOp::Add, shadow_base.clone(), ul(g as i128), Type::ULong)),
                 ty: Type::Ptr(Box::new(Type::UChar.into())),
                 span: span.clone(),
             }),
@@ -1947,11 +1985,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span,
         let term = if g == 0 {
             pg
         } else {
-            cmp(
-                BinOp::AndAnd,
-                cmp(BinOp::Gt, need.clone(), ul((8 * g) as i128)),
-                pg,
-            )
+            cmp(BinOp::AndAnd, cmp(BinOp::Gt, need.clone(), ul((8 * g) as i128)), pg)
         };
         poisoned = Some(match poisoned {
             None => term,
@@ -1959,11 +1993,7 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span,
         });
     }
 
-    let report_name = format!(
-        "__asan_report_{}{}",
-        if is_write { "store" } else { "load" },
-        size
-    );
+    let report_name = format!("__asan_report_{}{}", if is_write { "store" } else { "load" }, size);
     let report_call = Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
@@ -1971,7 +2001,10 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span,
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
         }),
         args: vec![addr],
         span: span.clone(),
@@ -2040,12 +2073,7 @@ fn make_kernel_hwasan_check(addr: Expr, size: usize, is_write: bool, span: &Span
 
     // 读取内存 tag: *(u8*)(untagged_addr >> 4)
     // untagged_addr = addr & 0x00FFFFFFFFFFFFFF
-    let untagged = bop(
-        BinOp::And,
-        addr_u.clone(),
-        ul(0x00FFFFFFFFFFFFFFu64 as i128),
-        Type::ULong,
-    );
+    let untagged = bop(BinOp::And, addr_u.clone(), ul(0x00FFFFFFFFFFFFFFu64 as i128), Type::ULong);
     let tag_addr = bop(BinOp::Shr, untagged, ul(4), Type::ULong);
     let mem_tag = Expr::Deref {
         e: Box::new(Expr::Cast {
@@ -2289,7 +2317,10 @@ fn wrap_with_msan_load_check(expr: &Expr, size: usize, span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -2320,7 +2351,10 @@ fn wrap_with_msan_store_check(lhs: &Expr, assign: &Expr, size: usize, span: &Spa
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -2364,7 +2398,10 @@ fn wrap_with_dfsan_load_label(expr: &Expr, size: usize, span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Short.into()), vec![Type::Ptr(Box::new(Type::Void.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Short.into()),
+                vec![Type::Ptr(Box::new(Type::Void.into())).into()],
+            ),
         }),
         args: vec![addr_expr],
         span: span.clone(),
@@ -2408,7 +2445,10 @@ fn wrap_with_dfsan_store_label(lhs: &Expr, assign: &Expr, size: usize, span: &Sp
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::Short.into()],
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    Type::Short.into(),
+                ],
             ),
         }),
         args: vec![
@@ -2452,7 +2492,10 @@ fn wrap_with_cfi_check(callee: &Expr, type_hash: u64, span: &Span) -> Expr {
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void.into()),
-                vec![Type::Ptr(Box::new(Type::Void.into())).into(), Type::ULong.into()],
+                vec![
+                    Type::Ptr(Box::new(Type::Void.into())).into(),
+                    Type::ULong.into(),
+                ],
             ),
         }),
         args: vec![
@@ -2508,7 +2551,10 @@ fn wrap_with_compare_trace(expr: &Expr, span: &Span) -> Expr {
                     span: span.clone(),
                 },
                 span: span.clone(),
-                ty: Type::Func(Box::new(Type::Void.into()), vec![l_ty.clone().into(), l_ty.clone().into()]),
+                ty: Type::Func(
+                    Box::new(Type::Void.into()),
+                    vec![l_ty.clone().into(), l_ty.clone().into()],
+                ),
             }),
             args: vec![a, b],
             span: span.clone(),
@@ -2603,7 +2649,10 @@ fn guard_init(base: &u32, span: &Span) -> BlockItem {
                 span: span.clone(),
                 ty: Type::Func(
                     Box::new(Type::Void.into()),
-                    vec![Type::UInt.into(), Type::Ptr(Box::new(Type::UInt.into())).into()],
+                    vec![
+                        Type::UInt.into(),
+                        Type::Ptr(Box::new(Type::UInt.into())).into(),
+                    ],
                 ),
             }),
             args: vec![
@@ -2634,7 +2683,10 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void.into()), vec![Type::Ptr(Box::new(Type::UInt.into())).into()]),
+            ty: Type::Func(
+                Box::new(Type::Void.into()),
+                vec![Type::Ptr(Box::new(Type::UInt.into())).into()],
+            ),
         }),
         args: vec![Expr::Index {
             arr: Box::new(Expr::Ident {
@@ -2756,7 +2808,7 @@ fn effective_flags(no_sanitize: &[String], flags: SanitizerFlags) -> SanitizerFl
             | "no_address_safety_analysis" => {
                 out.kasan = false;
                 out.hwasan = false;
-            }
+            },
             "undefined" => out.ubsan = false,
             "thread" | "kernel-kcsan" | "no_sanitize_thread" => out.kcsan = false,
             "memory" | "no_sanitize_memory" => out.msan = false,
@@ -2780,8 +2832,8 @@ fn effective_flags(no_sanitize: &[String], flags: SanitizerFlags) -> SanitizerFl
                 out.cfi_derived_cast = false;
                 out.cfi_unrelated_cast = false;
                 out.cfi_mfcall = false;
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     out
@@ -2840,7 +2892,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -2882,7 +2934,7 @@ mod tests {
             is_sentinel: false,
             format_arg_idx: None,
             is_nodiscard: false,
-        asm_label: None,
+            asm_label: None,
         }
     }
 
@@ -2899,7 +2951,7 @@ mod tests {
             BlockItem::Stmt(Stmt::Expr { e, .. }) => collect_call_names_expr(e, out),
             BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) => {
                 collect_call_names_expr(e, out);
-            }
+            },
             BlockItem::Stmt(Stmt::If {
                 cond, then_, else_, ..
             }) => {
@@ -2908,12 +2960,12 @@ mod tests {
                 if let Some(e) = else_ {
                     collect_call_names_stmt(e, out);
                 }
-            }
+            },
             BlockItem::Stmt(Stmt::While { cond, body, .. })
             | BlockItem::Stmt(Stmt::Do { body, cond, .. }) => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(body, out);
-            }
+            },
             BlockItem::Stmt(Stmt::For {
                 cond, step, body, ..
             }) => {
@@ -2924,21 +2976,21 @@ mod tests {
                     collect_call_names_expr(s, out);
                 }
                 collect_call_names_stmt(body, out);
-            }
+            },
             BlockItem::Stmt(Stmt::Block { b, .. }) => {
                 for it in &b.items {
                     collect_call_names(it, out);
                 }
-            }
-            BlockItem::Decl(Decl::Var(_)) => {}
+            },
+            BlockItem::Decl(Decl::Var(_)) => {},
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &f.body {
                     for it in &b.items {
                         collect_call_names(it, out);
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -2949,7 +3001,7 @@ mod tests {
                 for it in &b.items {
                     collect_call_names(it, out);
                 }
-            }
+            },
             Stmt::Return { val: Some(e), .. } => collect_call_names_expr(e, out),
             Stmt::If {
                 cond, then_, else_, ..
@@ -2959,7 +3011,7 @@ mod tests {
                 if let Some(e) = else_ {
                     collect_call_names_stmt(e, out);
                 }
-            }
+            },
             Stmt::Switch { expr, cases, .. } => {
                 collect_call_names_expr(expr, out);
                 for case in cases {
@@ -2967,11 +3019,11 @@ mod tests {
                         collect_call_names(it, out);
                     }
                 }
-            }
+            },
             Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(body, out);
-            }
+            },
             Stmt::For {
                 cond, step, body, ..
             } => {
@@ -2982,9 +3034,9 @@ mod tests {
                     collect_call_names_expr(s, out);
                 }
                 collect_call_names_stmt(body, out);
-            }
+            },
             Stmt::Label { stmt, .. } => collect_call_names_stmt(stmt, out),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -2999,29 +3051,29 @@ mod tests {
                 for a in args {
                     collect_call_names_expr(a, out);
                 }
-            }
+            },
             Expr::Comma { l, r, .. } => {
                 collect_call_names_expr(l, out);
                 collect_call_names_expr(r, out);
-            }
+            },
             Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } => {
                 collect_call_names_expr(l, out);
                 collect_call_names_expr(r, out);
-            }
+            },
             Expr::Unary { e, .. } | Expr::Deref { e, .. } | Expr::AddrOf { e, .. } => {
                 collect_call_names_expr(e, out);
-            }
+            },
             Expr::Cond {
                 cond, then_, else_, ..
             } => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_expr(then_, out);
                 collect_call_names_expr(else_, out);
-            }
+            },
             Expr::Index { arr, idx, .. } => {
                 collect_call_names_expr(arr, out);
                 collect_call_names_expr(idx, out);
-            }
+            },
             Expr::Member { expr, .. } => collect_call_names_expr(expr, out),
             Expr::Cast { e, .. } => collect_call_names_expr(e, out),
             Expr::SizeofExpr { e, .. }
@@ -3030,7 +3082,7 @@ mod tests {
             | Expr::PreDec { e, .. }
             | Expr::PostInc { e, .. }
             | Expr::PostDec { e, .. } => collect_call_names_expr(e, out),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -3168,7 +3220,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -3195,22 +3247,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -3271,7 +3323,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -3302,22 +3354,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -3609,7 +3661,7 @@ mod tests {
             quals: crate::ast::QualifierFlags::NONE,
             addr_space: crate::ast::AddrSpace::None,
             tls_model: None,
-        asm_label: None,
+            asm_label: None,
         };
         f.body = Some(Block {
             items: vec![
@@ -4399,11 +4451,7 @@ mod tests {
             } else {
                 panic!("callee should be Ident");
             }
-            assert_eq!(
-                args.len(),
-                3,
-                "KCSAN check must have 3 args (addr, size, is_write)"
-            );
+            assert_eq!(args.len(), 3, "KCSAN check must have 3 args (addr, size, is_write)");
             // is_write arg should be 1 for store
             if let Expr::Int { v, .. } = &args[2] {
                 assert_eq!(*v, 1, "is_write must be 1 for store");
@@ -5196,10 +5244,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Func(
-                            Box::new(Type::Int.into()),
-                            vec![Type::Int.into()],
-                        ),
+                        ty: Type::Func(Box::new(Type::Int.into()), vec![Type::Int.into()]),
                     }),
                     args: vec![Expr::Int {
                         v: 42,
@@ -5256,16 +5301,13 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Func(
-                                Box::new(Type::Int.into()),
-                                vec![Type::Int.into()],
-                            ).into())),
+                            ty: Type::Ptr(Box::new(
+                                Type::Func(Box::new(Type::Int.into()), vec![Type::Int.into()])
+                                    .into(),
+                            )),
                         }),
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Func(
-                            Box::new(Type::Int.into()),
-                            vec![Type::Int.into()],
-                        ),
+                        ty: Type::Func(Box::new(Type::Int.into()), vec![Type::Int.into()]),
                     }),
                     args: vec![Expr::Int {
                         v: 42,
@@ -5371,7 +5413,7 @@ mod tests {
         });
         assert_eq!(&meta[..8], b"DCC_SAN\0");
         assert_eq!(meta[8], 3); // version v3
-        // msan at offset 15
+                                // msan at offset 15
         assert_eq!(meta[15], 1);
         // dfsan at offset 16
         assert_eq!(meta[16], 1);
@@ -5404,34 +5446,22 @@ mod tests {
 
     #[test]
     fn kasan_shadow_offset_x86_64() {
-        assert_eq!(
-            kasan_shadow_offset_for_arch(Arch::X86_64),
-            0xdffffc0000000000u64 as i128
-        );
+        assert_eq!(kasan_shadow_offset_for_arch(Arch::X86_64), 0xdffffc0000000000u64 as i128);
     }
 
     #[test]
     fn kasan_shadow_offset_aarch64() {
-        assert_eq!(
-            kasan_shadow_offset_for_arch(Arch::AArch64),
-            0xdfff600000000000u64 as i128
-        );
+        assert_eq!(kasan_shadow_offset_for_arch(Arch::AArch64), 0xdfff600000000000u64 as i128);
     }
 
     #[test]
     fn kasan_shadow_offset_riscv64() {
-        assert_eq!(
-            kasan_shadow_offset_for_arch(Arch::RiscV64),
-            0xdffffe0000000000u64 as i128
-        );
+        assert_eq!(kasan_shadow_offset_for_arch(Arch::RiscV64), 0xdffffe0000000000u64 as i128);
     }
 
     #[test]
     fn kasan_shadow_offset_fallback() {
-        assert_eq!(
-            kasan_shadow_offset_for_arch(Arch::Mips64),
-            0xdffffc0000000000u64 as i128
-        );
+        assert_eq!(kasan_shadow_offset_for_arch(Arch::Mips64), 0xdffffc0000000000u64 as i128);
     }
 
     // ── HWASAN kernel inline tag check ────────────────────────────────
@@ -5620,9 +5650,6 @@ mod tests {
         assert!(main_guard_var.is_some(), "main should have guard array");
         // helper (always_inline, single caller) should NOT declare its own
         // guard array; it reuses main's array
-        assert!(
-            !helper_has_guard_decl,
-            "inlined helper should not declare its own guard array"
-        );
+        assert!(!helper_has_guard_decl, "inlined helper should not declare its own guard array");
     }
 }

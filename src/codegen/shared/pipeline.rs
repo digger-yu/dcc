@@ -4,9 +4,9 @@
 // 第一性原理：编译阶段划分在所有 ISA 后端中是相同的
 // 目标：提取通用编译器流水线逻辑
 
-use crate::ir::Module;
 use crate::codegen::EmitOptions;
 use crate::diagnostics::{Diagnostic, Severity};
+use crate::ir::Module;
 use std::collections::HashMap;
 
 /// Compilation phases (ISA-independent)
@@ -94,8 +94,14 @@ pub struct CompilationResult {
 
 impl CompilationResult {
     pub fn from_diagnostics(diagnostics: &[Diagnostic]) -> Self {
-        let errors = diagnostics.iter().filter(|d| d.sev == Severity::Error).count();
-        let warnings = diagnostics.iter().filter(|d| d.sev == Severity::Warning).count();
+        let errors = diagnostics
+            .iter()
+            .filter(|d| d.sev == Severity::Error)
+            .count();
+        let warnings = diagnostics
+            .iter()
+            .filter(|d| d.sev == Severity::Warning)
+            .count();
 
         Self {
             success: errors == 0,
@@ -114,10 +120,7 @@ pub trait PipelineStage {
     fn name(&self) -> &'static str;
 
     /// Execute this stage
-    fn execute(
-        &self,
-        input: &PipelineInput,
-    ) -> Result<PipelineOutput, Vec<Diagnostic>>;
+    fn execute(&self, input: &PipelineInput) -> Result<PipelineOutput, Vec<Diagnostic>>;
 
     /// Check prerequisites
     fn prerequisites_met(&self, _input: &PipelineInput) -> bool {
@@ -179,15 +182,12 @@ impl PipelineStage for IRGenerationStage {
         "IRGeneration"
     }
 
-    fn execute(
-        &self,
-        input: &PipelineInput,
-    ) -> Result<PipelineOutput, Vec<Diagnostic>> {
+    fn execute(&self, input: &PipelineInput) -> Result<PipelineOutput, Vec<Diagnostic>> {
         // Convert AST → IR
         // This is where the actual IR generation happens
         let source = input.module.source().clone();
         let (ir_module, _diags) = crate::ir::lower(source)?;
-        
+
         Ok(PipelineOutput::with_module(ir_module))
     }
 
@@ -216,13 +216,10 @@ impl PipelineStage for OptimizationPassStage {
         &self.pass_name
     }
 
-    fn execute(
-        &self,
-        _input: &PipelineInput,
-    ) -> Result<PipelineOutput, Vec<Diagnostic>> {
+    fn execute(&self, _input: &PipelineInput) -> Result<PipelineOutput, Vec<Diagnostic>> {
         // TODO: Implement optimization passes
         // SROA, DSE, CSE, etc.
-        
+
         let result = PipelineOutput::new();
         Ok(result)
     }
@@ -245,10 +242,7 @@ impl<'a, C: crate::codegen::shared::control_flow::ControlFlowBackend> PipelineSt
         "CodeGeneration"
     }
 
-    fn execute(
-        &self,
-        input: &PipelineInput,
-    ) -> Result<PipelineOutput, Vec<Diagnostic>> {
+    fn execute(&self, input: &PipelineInput) -> Result<PipelineOutput, Vec<Diagnostic>> {
         // Code generation placeholder - actual implementation needs &mut backend
         let _ctx = input.module;
 
@@ -324,8 +318,8 @@ mod tests {
             fp_contract: false,
             cx_limited_range: false,
         };
-        let (module, _warnings) = crate::ir::lower(empty_program)
-            .expect("lowering an empty program should succeed");
+        let (module, _warnings) =
+            crate::ir::lower(empty_program).expect("lowering an empty program should succeed");
         let options = EmitOptions {
             relocatable: false,
             emit_asm: false,

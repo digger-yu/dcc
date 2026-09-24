@@ -13,11 +13,11 @@ impl AsmLocalLabels {
         let mut result = Vec::new();
         let mut label_map: HashMap<String, usize> = HashMap::new();
         let mut label_counter = 0;
-        
+
         for line in lines {
             let expanded = Self::expand_local_labels(&line, &label_map);
             result.push(expanded.clone());
-            
+
             // Track named labels for forward/backward reference
             if let Some(label) = Self::parse_asm_named_label(&line) {
                 if !label.chars().all(|c| c.is_ascii_digit()) {
@@ -26,7 +26,7 @@ impl AsmLocalLabels {
                 }
             }
         }
-        
+
         result
     }
 
@@ -35,7 +35,7 @@ impl AsmLocalLabels {
         let line = Self::strip_asm_comment(line).trim();
         let (label, _) = line.split_once(':')?;
         let label = label.trim();
-        
+
         if label.is_empty()
             || label.chars().all(|c| c.is_ascii_digit())
             || Self::is_asm_directive(label)
@@ -44,7 +44,7 @@ impl AsmLocalLabels {
         {
             return None;
         }
-        
+
         Some(label)
     }
 
@@ -167,6 +167,8 @@ impl AsmLocalLabels {
 
 // Simple string pattern check for local label references (number+f/b)
 fn is_local_label_ref(s: &str) -> bool {
-    s.len() >= 2 && s.chars().last().unwrap() != 'f' && s.chars().last().unwrap() != 'b'
-        && s[..s.len()-1].chars().all(|c| c.is_ascii_digit())
+    s.len() >= 2
+        && s.chars().last().unwrap() != 'f'
+        && s.chars().last().unwrap() != 'b'
+        && s[..s.len() - 1].chars().all(|c| c.is_ascii_digit())
 }

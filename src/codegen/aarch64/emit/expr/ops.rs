@@ -47,20 +47,20 @@ impl Aarch64Codegen {
             Type::Char | Type::SChar | Type::Bool => {
                 // SXTB W0, W0: 0x13000000
                 self.emit(&[0x00, 0x00, 0x18, 0x13]);
-            }
+            },
             Type::Short => {
                 // SXTH W0, W0: 0x13000400
                 self.emit(&[0x00, 0x04, 0x18, 0x13]);
-            }
+            },
             Type::UChar => {
                 // UXTB W0, W0: 0x53000000
                 self.emit(&[0x00, 0x00, 0x00, 0x53]);
-            }
+            },
             Type::UShort => {
                 // UXTH W0, W0: 0x53000400
                 self.emit(&[0x00, 0x04, 0x00, 0x53]);
-            }
-            _ => {} // int/long/ptr 等不需要提升
+            },
+            _ => {}, // int/long/ptr 等不需要提升
         }
     }
 
@@ -71,20 +71,20 @@ impl Aarch64Codegen {
                 (1, _) | (8, true) => {
                     // SXTB W0, W0 (bool/char → sign-extend from 8 bits)
                     self.emit(&[0x00, 0x00, 0x18, 0x13]);
-                }
+                },
                 (8, false) => {
                     // UXTB W0, W0 (uchar → zero-extend from 8 bits)
                     self.emit(&[0x00, 0x00, 0x00, 0x53]);
-                }
+                },
                 (16, true) => {
                     // SXTH W0, W0 (short → sign-extend from 16 bits)
                     self.emit(&[0x00, 0x04, 0x18, 0x13]);
-                }
+                },
                 (16, false) => {
                     // UXTH W0, W0 (ushort → zero-extend from 16 bits)
                     self.emit(&[0x00, 0x04, 0x00, 0x53]);
-                }
-                _ => {} // 32-bit 及以上不需要提升
+                },
+                _ => {}, // 32-bit 及以上不需要提升
             }
         }
     }
@@ -115,27 +115,27 @@ impl Aarch64Codegen {
                 signed: true,
             } => {
                 self.emit(&[0x00, 0x00, 0x18, 0x13]);
-            }
+            },
             ValueType::Integer {
                 bits: 8,
                 signed: false,
             } => {
                 self.emit(&[0x00, 0x00, 0x14, 0x13]);
-            }
+            },
             ValueType::Integer {
                 bits: 16,
                 signed: true,
             } => {
                 self.emit(&[0x00, 0x00, 0x18, 0x12]);
-            }
+            },
             ValueType::Integer {
                 bits: 16,
                 signed: false,
             } => {
                 self.emit(&[0x00, 0x00, 0x14, 0x12]);
-            }
-            ValueType::Integer { bits: 32, .. } => {}
-            _ => {}
+            },
+            ValueType::Integer { bits: 32, .. } => {},
+            _ => {},
         }
     }
 
@@ -178,7 +178,7 @@ impl Aarch64Codegen {
                     // lsrv: 逻辑右移, 高位补 0
                     self.emit(&[0x00, 0x20, 0x34, 0x1a]);
                 }
-            }
+            },
             // M7 修复: 真 sdiv / msub 替代 0
             // binop_w0_w1 之前已把 w0=left, w1=right, w14=left (保存)
             //   Div: sdiv w0, w0, w1   => 0x9AC00C20
@@ -190,7 +190,7 @@ impl Aarch64Codegen {
             BinOp::Mod => {
                 self.emit(&[0x20, 0x0c, 0xc0, 0x9a]); // sdiv w0, w0, w1
                 self.emit(&[0xa0, 0x83, 0xb0, 0x9b]); // msub w0, w1, w0, w14
-            }
+            },
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.cmp_w0_w1();
                 let cond = match op {
@@ -204,7 +204,7 @@ impl Aarch64Codegen {
                 };
                 let insn = 0x1a9f_0000u32 | (cond << 12) | 0x20;
                 self.emit(&insn.to_le_bytes());
-            }
+            },
             BinOp::AndAnd | BinOp::OrOr => self.cmp_w0_zero(),
         }
     }
@@ -218,7 +218,7 @@ impl Aarch64Codegen {
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.fcmp_s0_s1();
                 self.fset_w0_from_fcmp(op);
-            }
+            },
             _ => self.emit(&[0x20, 0x00, 0x21, 0x1e]),
         }
     }

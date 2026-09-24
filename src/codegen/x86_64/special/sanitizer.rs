@@ -14,7 +14,6 @@
 use crate::ast::*;
 use crate::codegen::x86_64::Codegen;
 
-
 impl Codegen {
     // 指令发射
     /// UBSAN 诊断用 C 类型名 (仅用于打印, 不追求与编译器完全一致)。

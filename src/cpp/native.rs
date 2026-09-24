@@ -93,7 +93,7 @@ fn collect_templates_from_decl(d: &CppDecl, reg: &mut TemplateRegistry) {
             reg.register(params, requires, decl);
             // 递归收集嵌套模板
             collect_templates_from_decl(decl, reg);
-        }
+        },
         CppDecl::PartialSpec {
             params,
             pattern_text,
@@ -103,22 +103,26 @@ fn collect_templates_from_decl(d: &CppDecl, reg: &mut TemplateRegistry) {
                 let names: Vec<String> = params.params.iter().map(|p| p.name.clone()).collect();
                 reg.register_partial(c.name.clone(), &names, pattern_text.clone(), decl);
             }
-        }
+        },
         // G13: Collect full specializations
-        CppDecl::FullSpec { primary_name, specific_args, body } => {
+        CppDecl::FullSpec {
+            primary_name,
+            specific_args,
+            body,
+        } => {
             reg.register_full(primary_name.clone(), specific_args.clone(), body);
-        }
+        },
         CppDecl::Namespace { body, .. } => {
             for inner in body {
                 collect_templates_from_decl(inner, reg);
             }
-        }
+        },
         CppDecl::Class(c) => {
             for m in &c.members {
                 collect_templates_from_decl(m, reg);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -126,8 +130,14 @@ fn collect_templates_from_decl(d: &CppDecl, reg: &mut TemplateRegistry) {
 fn rename_tpl_fn_inst(decl: &CppDecl, name: &str, args: &[MangleType]) -> CppDecl {
     let new_name = tplfn_c_name(name, args);
     match decl {
-        CppDecl::FreeFn { ret, name: _, params, body, is_noexcept,
-            trailing_ret_type } => CppDecl::FreeFn {
+        CppDecl::FreeFn {
+            ret,
+            name: _,
+            params,
+            body,
+            is_noexcept,
+            trailing_ret_type,
+        } => CppDecl::FreeFn {
             ret: ret.clone(),
             name: new_name,
             params: params.clone(),
@@ -211,14 +221,16 @@ fn collect_template_refs_from_decl(d: &CppDecl, out: &mut Vec<(String, Vec<Mangl
     match d {
         CppDecl::GlobalVar { ty, .. } => {
             collect_template_refs_from_type(ty, out);
-        }
-        CppDecl::FreeFn { ret, params, body, .. } => {
+        },
+        CppDecl::FreeFn {
+            ret, params, body, ..
+        } => {
             collect_template_refs_from_type(ret, out);
             for (_, t) in params {
                 collect_template_refs_from_type(t, out);
             }
             collect_template_refs_from_body(body, out);
-        }
+        },
         CppDecl::Class(c) => {
             // 基类中的模板引用
             for base in &c.bases {
@@ -229,35 +241,37 @@ fn collect_template_refs_from_decl(d: &CppDecl, out: &mut Vec<(String, Vec<Mangl
             for m in &c.members {
                 collect_template_refs_from_decl(m, out);
             }
-        }
+        },
         CppDecl::MemberVar { ty, .. } => {
             collect_template_refs_from_type(ty, out);
-        }
-        CppDecl::MemberFn { ret, params, body, .. } => {
+        },
+        CppDecl::MemberFn {
+            ret, params, body, ..
+        } => {
             collect_template_refs_from_type(ret, out);
             for (_, t) in params {
                 collect_template_refs_from_type(t, out);
             }
             collect_template_refs_from_body(body, out);
-        }
+        },
         CppDecl::Ctor { params, body, .. } => {
             for (_, t) in params {
                 collect_template_refs_from_type(t, out);
             }
             collect_template_refs_from_body(body, out);
-        }
+        },
         CppDecl::Dtor { body, .. } => {
             collect_template_refs_from_body(body, out);
-        }
+        },
         CppDecl::Typedef { target, .. } => {
             collect_template_refs_from_type(target, out);
-        }
+        },
         CppDecl::Namespace { body, .. } => {
             for inner in body {
                 collect_template_refs_from_decl(inner, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -270,17 +284,17 @@ fn collect_template_refs_from_type(ty: &MangleType, out: &mut Vec<(String, Vec<M
             for a in args {
                 collect_template_refs_from_type(a, out);
             }
-        }
+        },
         MangleType::Pointer(t) | MangleType::Reference(t) => {
             collect_template_refs_from_type(t, out);
-        }
+        },
         MangleType::TplMember { name, args, .. } => {
             out.push((name.clone(), args.clone()));
             for a in args {
                 collect_template_refs_from_type(a, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -299,22 +313,27 @@ fn collect_template_refs_from_stmt(s: &CppStmt, out: &mut Vec<(String, Vec<Mangl
             if let Some(e) = init {
                 collect_template_refs_from_expr(e, out);
             }
-        }
+        },
         CppStmt::Expr(e) | CppStmt::Return(Some(e)) => {
             collect_template_refs_from_expr(e, out);
-        }
+        },
         CppStmt::If { cond, then, els } => {
             collect_template_refs_from_expr(cond, out);
             collect_template_refs_from_body(then, out);
             if let Some(e) = els {
                 collect_template_refs_from_body(e, out);
             }
-        }
+        },
         CppStmt::While { cond, body } => {
             collect_template_refs_from_expr(cond, out);
             collect_template_refs_from_body(body, out);
-        }
-        CppStmt::For { init, cond, step, body } => {
+        },
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
             if let Some(i) = init {
                 collect_template_refs_from_stmt(i, out);
             }
@@ -325,10 +344,10 @@ fn collect_template_refs_from_stmt(s: &CppStmt, out: &mut Vec<(String, Vec<Mangl
                 collect_template_refs_from_stmt(s, out);
             }
             collect_template_refs_from_body(body, out);
-        }
+        },
         CppStmt::Block(b) => collect_template_refs_from_body(b, out),
         CppStmt::Decl(d) => collect_template_refs_from_decl(d, out),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -338,41 +357,41 @@ fn collect_template_refs_from_expr(e: &CppExpr, out: &mut Vec<(String, Vec<Mangl
         CppExpr::Cast(ty, inner) | CppExpr::StaticCast { ty, expr: inner } => {
             collect_template_refs_from_type(ty, out);
             collect_template_refs_from_expr(inner, out);
-        }
+        },
         CppExpr::Call(f, args) => {
             collect_template_refs_from_expr(f, out);
             for a in args {
                 collect_template_refs_from_expr(a, out);
             }
-        }
+        },
         CppExpr::New(_, args) => {
             for a in args {
                 collect_template_refs_from_expr(a, out);
             }
-        }
+        },
         CppExpr::NewArr { count, .. } => {
             collect_template_refs_from_expr(count, out);
-        }
+        },
         CppExpr::BinOp(_, l, r) => {
             collect_template_refs_from_expr(l, out);
             collect_template_refs_from_expr(r, out);
-        }
+        },
         CppExpr::UnaryOp(_, x) | CppExpr::Ref(x) | CppExpr::AddrOf(x) => {
             collect_template_refs_from_expr(x, out);
-        }
+        },
         CppExpr::Member(o, _) | CppExpr::PtrMember(o, _) => {
             collect_template_refs_from_expr(o, out);
-        }
+        },
         CppExpr::TypedInitList { ty, elems } => {
             collect_template_refs_from_type(ty, out);
             for e in elems {
                 collect_template_refs_from_expr(e, out);
             }
-        }
+        },
         CppExpr::TplStaticAccess { name, args, .. } => {
             out.push((name.clone(), args.clone()));
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -381,27 +400,27 @@ fn collect_template_fn_calls_from_decl(d: &CppDecl, out: &mut Vec<(String, Vec<M
     match d {
         CppDecl::FreeFn { body, .. } => {
             collect_template_fn_calls_from_body(body, out);
-        }
+        },
         CppDecl::MemberFn { body, .. } => {
             collect_template_fn_calls_from_body(body, out);
-        }
+        },
         CppDecl::Ctor { body, .. } => {
             collect_template_fn_calls_from_body(body, out);
-        }
+        },
         CppDecl::Dtor { body, .. } => {
             collect_template_fn_calls_from_body(body, out);
-        }
+        },
         CppDecl::Class(c) => {
             for m in &c.members {
                 collect_template_fn_calls_from_decl(m, out);
             }
-        }
+        },
         CppDecl::Namespace { body, .. } => {
             for inner in body {
                 collect_template_fn_calls_from_decl(inner, out);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -417,24 +436,29 @@ fn collect_template_fn_calls_from_stmt(s: &CppStmt, out: &mut Vec<(String, Vec<M
     match s {
         CppStmt::Expr(e) | CppStmt::Return(Some(e)) => {
             collect_template_fn_calls_from_expr(e, out);
-        }
+        },
         CppStmt::LocalVar { init, .. } | CppStmt::StaticLocal { init, .. } => {
             if let Some(e) = init {
                 collect_template_fn_calls_from_expr(e, out);
             }
-        }
+        },
         CppStmt::If { cond, then, els } => {
             collect_template_fn_calls_from_expr(cond, out);
             collect_template_fn_calls_from_body(then, out);
             if let Some(e) = els {
                 collect_template_fn_calls_from_body(e, out);
             }
-        }
+        },
         CppStmt::While { cond, body } => {
             collect_template_fn_calls_from_expr(cond, out);
             collect_template_fn_calls_from_body(body, out);
-        }
-        CppStmt::For { init, cond, step, body } => {
+        },
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
             if let Some(i) = init {
                 collect_template_fn_calls_from_stmt(i, out);
             }
@@ -445,9 +469,9 @@ fn collect_template_fn_calls_from_stmt(s: &CppStmt, out: &mut Vec<(String, Vec<M
                 collect_template_fn_calls_from_stmt(s, out);
             }
             collect_template_fn_calls_from_body(body, out);
-        }
+        },
         CppStmt::Block(b) => collect_template_fn_calls_from_body(b, out),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -464,21 +488,21 @@ fn collect_template_fn_calls_from_expr(e: &CppExpr, out: &mut Vec<(String, Vec<M
                 collect_template_fn_calls_from_expr(a, out);
             }
             collect_template_fn_calls_from_expr(f, out);
-        }
+        },
         CppExpr::BinOp(_, l, r) => {
             collect_template_fn_calls_from_expr(l, out);
             collect_template_fn_calls_from_expr(r, out);
-        }
+        },
         CppExpr::UnaryOp(_, x) | CppExpr::Ref(x) | CppExpr::AddrOf(x) => {
             collect_template_fn_calls_from_expr(x, out);
-        }
+        },
         CppExpr::Member(o, _) | CppExpr::PtrMember(o, _) => {
             collect_template_fn_calls_from_expr(o, out);
-        }
+        },
         CppExpr::Cast(_, inner) | CppExpr::StaticCast { expr: inner, .. } => {
             collect_template_fn_calls_from_expr(inner, out);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -494,15 +518,29 @@ fn replace_template_types_in_decls(decls: &[CppDecl], reg: &TemplateRegistry) ->
 /// 替换单个声明中的模板类型
 fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDecl {
     match d {
-        CppDecl::GlobalVar { ty, name, init, is_static, is_volatile } => CppDecl::GlobalVar {
+        CppDecl::GlobalVar {
+            ty,
+            name,
+            init,
+            is_static,
+            is_volatile,
+        } => CppDecl::GlobalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
-            init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
+            init: init
+                .as_ref()
+                .map(|e| replace_template_types_in_expr(e, reg)),
             is_static: *is_static,
             is_volatile: *is_volatile,
         },
-        CppDecl::FreeFn { ret, name, params, body, is_noexcept,
-            trailing_ret_type } => CppDecl::FreeFn {
+        CppDecl::FreeFn {
+            ret,
+            name,
+            params,
+            body,
+            is_noexcept,
+            trailing_ret_type,
+        } => CppDecl::FreeFn {
             ret: replace_template_type(ret, reg),
             name: name.clone(),
             params: params
@@ -511,7 +549,9 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                 .collect(),
             body: replace_template_types_in_body(body, reg),
             is_noexcept: *is_noexcept,
-            trailing_ret_type: trailing_ret_type.as_ref().map(|t| replace_template_type(t, reg)),
+            trailing_ret_type: trailing_ret_type
+                .as_ref()
+                .map(|t| replace_template_type(t, reg)),
         },
         CppDecl::Class(c) => {
             let new_bases = c
@@ -541,8 +581,13 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                     .map(|m| replace_template_types_in_decl(m, reg))
                     .collect(),
             })
-        }
-        CppDecl::MemberVar { ty, name, is_mutable, is_volatile } => CppDecl::MemberVar {
+        },
+        CppDecl::MemberVar {
+            ty,
+            name,
+            is_mutable,
+            is_volatile,
+        } => CppDecl::MemberVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             is_mutable: *is_mutable,
@@ -643,23 +688,15 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
                     args: new_args,
                 }
             }
-        }
-        MangleType::Pointer(t) => {
-            MangleType::Pointer(Box::new(replace_template_type(t, reg)))
-        }
-        MangleType::Reference(t) => {
-            MangleType::Reference(Box::new(replace_template_type(t, reg)))
-        }
+        },
+        MangleType::Pointer(t) => MangleType::Pointer(Box::new(replace_template_type(t, reg))),
+        MangleType::Reference(t) => MangleType::Reference(Box::new(replace_template_type(t, reg))),
         MangleType::TplMember { name, args, member } => {
             // 模板成员访问：先替换模板类名
             let key = TemplateRegistry::key_for(name, args);
             if reg.inst_cache.contains_key(&key) {
                 // 简化：转为普通类成员访问类型
-                MangleType::Class(format!(
-                    "{}::{}",
-                    instantiated_class_name(name, args),
-                    member
-                ))
+                MangleType::Class(format!("{}::{}", instantiated_class_name(name, args), member))
             } else {
                 let new_args: Vec<MangleType> =
                     args.iter().map(|a| replace_template_type(a, reg)).collect();
@@ -669,7 +706,7 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
                     member: member.clone(),
                 }
             }
-        }
+        },
         other => other.clone(),
     }
 }
@@ -689,22 +726,36 @@ fn replace_template_types_in_body(body: &CppBody, reg: &TemplateRegistry) -> Cpp
 /// 替换语句中的模板类型
 fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStmt {
     match s {
-        CppStmt::LocalVar { ty, name, init, is_volatile } => CppStmt::LocalVar {
+        CppStmt::LocalVar {
+            ty,
+            name,
+            init,
+            is_volatile,
+        } => CppStmt::LocalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
-            init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
+            init: init
+                .as_ref()
+                .map(|e| replace_template_types_in_expr(e, reg)),
             is_volatile: *is_volatile,
         },
-        CppStmt::StaticLocal { ty, name, init, is_volatile } => CppStmt::StaticLocal {
+        CppStmt::StaticLocal {
+            ty,
+            name,
+            init,
+            is_volatile,
+        } => CppStmt::StaticLocal {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
-            init: init.as_ref().map(|e| replace_template_types_in_expr(e, reg)),
+            init: init
+                .as_ref()
+                .map(|e| replace_template_types_in_expr(e, reg)),
             is_volatile: *is_volatile,
         },
         CppStmt::Expr(e) => CppStmt::Expr(replace_template_types_in_expr(e, reg)),
         CppStmt::Return(e) => {
             CppStmt::Return(e.as_ref().map(|x| replace_template_types_in_expr(x, reg)))
-        }
+        },
         CppStmt::If { cond, then, els } => CppStmt::If {
             cond: replace_template_types_in_expr(cond, reg),
             then: Box::new(replace_template_types_in_body(then, reg)),
@@ -716,11 +767,18 @@ fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStm
             cond: replace_template_types_in_expr(cond, reg),
             body: Box::new(replace_template_types_in_body(body, reg)),
         },
-        CppStmt::For { init, cond, step, body } => CppStmt::For {
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => CppStmt::For {
             init: init
                 .as_ref()
                 .map(|x| Box::new(replace_template_types_in_stmt(x, reg))),
-            cond: cond.as_ref().map(|x| replace_template_types_in_expr(x, reg)),
+            cond: cond
+                .as_ref()
+                .map(|x| replace_template_types_in_expr(x, reg)),
             step: step
                 .as_ref()
                 .map(|x| Box::new(replace_template_types_in_stmt(x, reg))),
@@ -769,17 +827,15 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
         ),
         CppExpr::UnaryOp(op, x) => {
             CppExpr::UnaryOp(*op, Box::new(replace_template_types_in_expr(x, reg)))
-        }
+        },
         CppExpr::Ref(x) => CppExpr::Ref(Box::new(replace_template_types_in_expr(x, reg))),
         CppExpr::AddrOf(x) => CppExpr::AddrOf(Box::new(replace_template_types_in_expr(x, reg))),
-        CppExpr::Member(o, s) => CppExpr::Member(
-            Box::new(replace_template_types_in_expr(o, reg)),
-            s.clone(),
-        ),
-        CppExpr::PtrMember(o, s) => CppExpr::PtrMember(
-            Box::new(replace_template_types_in_expr(o, reg)),
-            s.clone(),
-        ),
+        CppExpr::Member(o, s) => {
+            CppExpr::Member(Box::new(replace_template_types_in_expr(o, reg)), s.clone())
+        },
+        CppExpr::PtrMember(o, s) => {
+            CppExpr::PtrMember(Box::new(replace_template_types_in_expr(o, reg)), s.clone())
+        },
         CppExpr::TypedInitList { ty, elems } => CppExpr::TypedInitList {
             ty: replace_template_type(ty, reg),
             elems: elems
@@ -792,14 +848,11 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
             let key = TemplateRegistry::key_for(name, args);
             if reg.inst_cache.contains_key(&key) {
                 let class_name = instantiated_class_name(name, args);
-                CppExpr::Member(
-                    Box::new(CppExpr::Ident(class_name)),
-                    member.clone(),
-                )
+                CppExpr::Member(Box::new(CppExpr::Ident(class_name)), member.clone())
             } else {
                 e.clone()
             }
-        }
+        },
         CppExpr::TemplateIdent { name, args } => {
             // 模板标识：可能是函数模板调用，也可能是类模板构造
             // 先检查是否是类模板实例
@@ -812,12 +865,12 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
                             // 类模板：替换为实例化后的类名（用于构造函数调用）
                             let class_name = instantiated_class_name(name, args);
                             CppExpr::Ident(class_name)
-                        }
+                        },
                         CppDecl::FreeFn { .. } => {
                             // 函数模板：替换为实例化后的函数名
                             let fn_name = tplfn_c_name(name, args);
                             CppExpr::Ident(fn_name)
-                        }
+                        },
                         _ => e.clone(),
                     }
                 } else {
@@ -826,7 +879,7 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
             } else {
                 e.clone()
             }
-        }
+        },
         other => other.clone(),
     }
 }
@@ -835,7 +888,12 @@ fn replace_template_types_in_expr(e: &CppExpr, reg: &TemplateRegistry) -> CppExp
 fn filter_template_decls(decls: &[CppDecl]) -> Vec<CppDecl> {
     decls
         .iter()
-        .filter(|d| !matches!(d, CppDecl::Template { .. } | CppDecl::PartialSpec { .. } | CppDecl::Concept { .. }))
+        .filter(|d| {
+            !matches!(
+                d,
+                CppDecl::Template { .. } | CppDecl::PartialSpec { .. } | CppDecl::Concept { .. }
+            )
+        })
         .cloned()
         .collect()
 }
@@ -1239,10 +1297,8 @@ fn collect_flat_struct_fields(
             .first()
             .and_then(|vt| {
                 vt.components.iter().find_map(|comp| {
-                    if let crate::cpp::abi_layout::VTableComponent::VBaseOffset {
-                        target,
-                        offset,
-                    } = comp
+                    if let crate::cpp::abi_layout::VTableComponent::VBaseOffset { target, offset } =
+                        comp
                     {
                         if *target == vb.base {
                             Some(*offset as usize)
@@ -1398,14 +1454,16 @@ pub fn detect_features(decls: &[CppDecl]) -> HashSet<CppFeature> {
 /// 从单个声明中检测特性
 fn detect_features_from_decl(d: &CppDecl, features: &mut HashSet<CppFeature>) {
     match d {
-        CppDecl::FreeFn { ret, params, body, .. } => {
+        CppDecl::FreeFn {
+            ret, params, body, ..
+        } => {
             features.insert(CppFeature::FreeFunction);
             detect_features_from_type(ret, features);
             for (_, t) in params {
                 detect_features_from_type(t, features);
             }
             detect_features_from_body(body, features);
-        }
+        },
         CppDecl::MemberFn {
             ret,
             params,
@@ -1423,22 +1481,24 @@ fn detect_features_from_decl(d: &CppDecl, features: &mut HashSet<CppFeature>) {
                 detect_features_from_type(t, features);
             }
             detect_features_from_body(body, features);
-        }
+        },
         CppDecl::Ctor { params, body, .. } => {
             features.insert(CppFeature::CtorDtor);
             for (_, t) in params {
                 detect_features_from_type(t, features);
             }
             detect_features_from_body(body, features);
-        }
-        CppDecl::Dtor { body, is_virtual, .. } => {
+        },
+        CppDecl::Dtor {
+            body, is_virtual, ..
+        } => {
             features.insert(CppFeature::CtorDtor);
             if *is_virtual {
                 features.insert(CppFeature::VirtualFunction);
                 features.insert(CppFeature::VPtrInit);
             }
             detect_features_from_body(body, features);
-        }
+        },
         CppDecl::Class(c) => {
             features.insert(CppFeature::PlainClass);
             // 检查继承
@@ -1471,81 +1531,90 @@ fn detect_features_from_decl(d: &CppDecl, features: &mut HashSet<CppFeature>) {
                 detect_features_from_decl(m, features);
             }
             // 检查是否有虚函数（用于 vptr 初始化）
-            let has_virtual_method = c.members.iter().any(|m| matches!(
-                m,
-                CppDecl::MemberFn { is_virtual: true, .. }
-                    | CppDecl::Dtor { is_virtual: true, .. }
-            ));
+            let has_virtual_method = c.members.iter().any(|m| {
+                matches!(
+                    m,
+                    CppDecl::MemberFn {
+                        is_virtual: true,
+                        ..
+                    } | CppDecl::Dtor {
+                        is_virtual: true,
+                        ..
+                    }
+                )
+            });
             if has_virtual_method {
                 features.insert(CppFeature::ThisAdjustThunk);
             }
-        }
+        },
         CppDecl::Namespace { body, .. } => {
             features.insert(CppFeature::Namespace);
             for inner in body {
                 detect_features_from_decl(inner, features);
             }
-        }
+        },
         CppDecl::Using { .. } | CppDecl::UsingEnum { .. } => {
             features.insert(CppFeature::Namespace);
-        }
-        CppDecl::OperatorFn { body, ret, params, .. } => {
+        },
+        CppDecl::OperatorFn {
+            body, ret, params, ..
+        } => {
             features.insert(CppFeature::OperatorOverload);
             detect_features_from_type(ret, features);
             for (_, t) in params {
                 detect_features_from_type(t, features);
             }
             detect_features_from_body(body, features);
-        }
+        },
         CppDecl::Template { decl, .. } => {
             // 根据内部声明类型判断是函数模板还是类模板
             match &**decl {
                 CppDecl::Class(_) => {
                     features.insert(CppFeature::ClassTemplate);
-                }
+                },
                 CppDecl::FreeFn { .. } | CppDecl::MemberFn { .. } => {
                     features.insert(CppFeature::FunctionTemplate);
-                }
-                _ => {}
+                },
+                _ => {},
             }
             detect_features_from_decl(decl, features);
-        }
+        },
         CppDecl::PartialSpec { .. } => {
             features.insert(CppFeature::PartialSpecialization);
-        }
+        },
         CppDecl::Concept { .. } => {
             features.insert(CppFeature::Concept);
-        }
+        },
         CppDecl::Module { .. } | CppDecl::Import { .. } | CppDecl::PrivateFragment => {
             features.insert(CppFeature::Module);
-        }
+        },
         CppDecl::ExportBlock(body) => {
             features.insert(CppFeature::Module);
             for inner in body {
                 detect_features_from_decl(inner, features);
             }
-        }
+        },
         CppDecl::GlobalVar { ty, init, .. } => {
             detect_features_from_type(ty, features);
             if let Some(e) = init {
                 detect_features_from_expr(e, features);
             }
-        }
+        },
         CppDecl::MemberVar { ty, .. } => {
             detect_features_from_type(ty, features);
-        }
+        },
         CppDecl::Typedef { target, .. } => {
             detect_features_from_type(target, features);
-        }
+        },
         CppDecl::AnonAggr { members, .. } => {
             for m in members {
                 detect_features_from_decl(m, features);
             }
-        }
+        },
         CppDecl::InheritingCtor { .. } => {
             features.insert(CppFeature::NonVirtualInheritance);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1554,23 +1623,23 @@ fn detect_features_from_type(ty: &MangleType, features: &mut HashSet<CppFeature>
     match ty {
         MangleType::Reference(_) => {
             features.insert(CppFeature::ReferenceType);
-        }
+        },
         MangleType::Template { args, .. } => {
             features.insert(CppFeature::ClassTemplate);
             for a in args {
                 detect_features_from_type(a, features);
             }
-        }
+        },
         MangleType::Pointer(t) | MangleType::Reference(t) => {
             detect_features_from_type(t, features);
-        }
+        },
         MangleType::TplMember { args, .. } => {
             features.insert(CppFeature::ClassTemplate);
             for a in args {
                 detect_features_from_type(a, features);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1586,26 +1655,31 @@ fn detect_features_from_stmt(s: &CppStmt, features: &mut HashSet<CppFeature>) {
     match s {
         CppStmt::Expr(e) | CppStmt::Return(Some(e)) => {
             detect_features_from_expr(e, features);
-        }
+        },
         CppStmt::If { cond, then, els } => {
             detect_features_from_expr(cond, features);
             detect_features_from_body(then, features);
             if let Some(e) = els {
                 detect_features_from_body(e, features);
             }
-        }
+        },
         CppStmt::IfConstexpr { cond, then, els } => {
             detect_features_from_expr(cond, features);
             detect_features_from_body(then, features);
             if let Some(e) = els {
                 detect_features_from_body(e, features);
             }
-        }
+        },
         CppStmt::While { cond, body } => {
             detect_features_from_expr(cond, features);
             detect_features_from_body(body, features);
-        }
-        CppStmt::For { init, cond, step, body } => {
+        },
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
             if let Some(i) = init {
                 detect_features_from_stmt(i, features);
             }
@@ -1616,24 +1690,24 @@ fn detect_features_from_stmt(s: &CppStmt, features: &mut HashSet<CppFeature>) {
                 detect_features_from_stmt(s, features);
             }
             detect_features_from_body(body, features);
-        }
+        },
         CppStmt::Block(b) => detect_features_from_body(b, features),
         CppStmt::ThisMember(_, stmt) => {
             detect_features_from_stmt(stmt, features);
-        }
+        },
         CppStmt::LocalVar { ty, init, .. } => {
             detect_features_from_type(ty, features);
             if let Some(e) = init {
                 detect_features_from_expr(e, features);
             }
-        }
+        },
         CppStmt::StaticLocal { ty, init, .. } => {
             features.insert(CppFeature::StaticInitGuard);
             detect_features_from_type(ty, features);
             if let Some(e) = init {
                 detect_features_from_expr(e, features);
             }
-        }
+        },
         CppStmt::Try { body, catches } => {
             features.insert(CppFeature::Exception);
             features.insert(CppFeature::DtorCleanup);
@@ -1641,21 +1715,21 @@ fn detect_features_from_stmt(s: &CppStmt, features: &mut HashSet<CppFeature>) {
             for c in catches {
                 detect_features_from_body(&c.body, features);
             }
-        }
+        },
         CppStmt::Throw(_) => {
             features.insert(CppFeature::Exception);
-        }
+        },
         CppStmt::Switch { expr, arms, .. } => {
             detect_features_from_expr(expr, features);
             for (_, body) in arms {
                 detect_features_from_body(body, features);
             }
-        }
+        },
         CppStmt::CoAwait(_) | CppStmt::CoYield(_) | CppStmt::CoReturn(_) => {
             features.insert(CppFeature::Coroutine);
-        }
+        },
         CppStmt::Decl(d) => detect_features_from_decl(d, features),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1664,85 +1738,90 @@ fn detect_features_from_expr(e: &CppExpr, features: &mut HashSet<CppFeature>) {
     match e {
         CppExpr::Typeid(_) | CppExpr::TypeidType(_) => {
             features.insert(CppFeature::TypeId);
-        }
+        },
         CppExpr::DynamicCast { expr, .. } => {
             features.insert(CppFeature::DynamicCast);
             detect_features_from_expr(expr, features);
-        }
-        CppExpr::New(_, _) | CppExpr::NewArr { .. } | CppExpr::PlacementNew { .. }
-        | CppExpr::Delete(_) | CppExpr::DeleteArr(_) => {
+        },
+        CppExpr::New(_, _)
+        | CppExpr::NewArr { .. }
+        | CppExpr::PlacementNew { .. }
+        | CppExpr::Delete(_)
+        | CppExpr::DeleteArr(_) => {
             features.insert(CppFeature::NewDelete);
-        }
+        },
         CppExpr::InitList(_) | CppExpr::TypedInitList { .. } => {
             features.insert(CppFeature::InitializerList);
-        }
+        },
         CppExpr::Call(f, args) => {
             detect_features_from_expr(f, features);
             for a in args {
                 detect_features_from_expr(a, features);
             }
-        }
+        },
         CppExpr::BinOp(_, l, r) => {
             detect_features_from_expr(l, features);
             detect_features_from_expr(r, features);
-        }
+        },
         CppExpr::UnaryOp(_, x) | CppExpr::Ref(x) | CppExpr::AddrOf(x) => {
             detect_features_from_expr(x, features);
-        }
-        CppExpr::Member(o, _) | CppExpr::PtrMember(o, _)
-        | CppExpr::MemberStar(o, _) | CppExpr::PtrMemberStar(o, _) => {
+        },
+        CppExpr::Member(o, _)
+        | CppExpr::PtrMember(o, _)
+        | CppExpr::MemberStar(o, _)
+        | CppExpr::PtrMemberStar(o, _) => {
             detect_features_from_expr(o, features);
-        }
+        },
         CppExpr::Cast(ty, inner)
         | CppExpr::StaticCast { ty, expr: inner }
         | CppExpr::ConstCast { ty, expr: inner }
         | CppExpr::ReinterpretCast { ty, expr: inner } => {
             detect_features_from_type(ty, features);
             detect_features_from_expr(inner, features);
-        }
+        },
         CppExpr::TemplateIdent { args, .. } => {
             features.insert(CppFeature::FunctionTemplate);
             for a in args {
                 detect_features_from_type(a, features);
             }
-        }
+        },
         CppExpr::TplStaticAccess { args, .. } => {
             features.insert(CppFeature::ClassTemplate);
             for a in args {
                 detect_features_from_type(a, features);
             }
-        }
+        },
         CppExpr::OpCall { args, .. } => {
             features.insert(CppFeature::OperatorOverload);
             for a in args {
                 detect_features_from_expr(a, features);
             }
-        }
+        },
         CppExpr::Ternary { cond, then, els } => {
             detect_features_from_expr(cond, features);
             detect_features_from_expr(then, features);
             detect_features_from_expr(els, features);
-        }
+        },
         CppExpr::Comma(elems) => {
             for e in elems {
                 detect_features_from_expr(e, features);
             }
-        }
+        },
         CppExpr::MultiIndex(obj, idxs) => {
             detect_features_from_expr(obj, features);
             for i in idxs {
                 detect_features_from_expr(i, features);
             }
-        }
+        },
         CppExpr::Lambda(_) => {
             // lambda 暂不单独作为 feature，降级为普通函数处理
-        }
+        },
         CppExpr::Sizeof(arg) => {
             if let crate::cpp::parser::SizeofArg::Type(t) = arg {
                 detect_features_from_type(t, features);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -1775,11 +1854,8 @@ pub fn native_supported(decls: &[CppDecl]) -> Result<(), NativeError> {
         Ok(()) => Ok(()),
         Err(unsupported) => {
             let names: Vec<&str> = unsupported.iter().map(|f| f.name()).collect();
-            Err(NativeError::Unsupported(format!(
-                "unsupported features: {}",
-                names.join(", ")
-            )))
-        }
+            Err(NativeError::Unsupported(format!("unsupported features: {}", names.join(", "))))
+        },
     }
 }
 
@@ -1843,11 +1919,7 @@ int global = 0;\n\
             .iter()
             .filter(|d| matches!(d, ast::Decl::Func(_)))
             .count();
-        assert!(
-            fn_count >= 2,
-            "expected at least 2 functions, got {}",
-            fn_count
-        );
+        assert!(fn_count >= 2, "expected at least 2 functions, got {}", fn_count);
     }
 
     #[test]
@@ -1942,10 +2014,7 @@ class Derived : public Base { int y; };\n\
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
         let result = native_supported(&decls);
-        assert!(
-            result.is_ok(),
-            "non-virtual inheritance should be supported"
-        );
+        assert!(result.is_ok(), "non-virtual inheritance should be supported");
     }
 
     #[test]
@@ -1986,10 +2055,7 @@ class Derived : public virtual Base { int y; };\n\
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
         let result = native_supported(&decls);
-        assert!(
-            result.is_ok(),
-            "virtual inheritance should be supported in Stage 6"
-        );
+        assert!(result.is_ok(), "virtual inheritance should be supported in Stage 6");
     }
 
     #[test]
@@ -2131,10 +2197,7 @@ void test(Base* b) { dynamic_cast<Derived*>(b); }\n\
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
         let result = native_supported(&decls);
-        assert!(
-            result.is_ok(),
-            "dynamic_cast should be supported in Stage 7"
-        );
+        assert!(result.is_ok(), "dynamic_cast should be supported in Stage 7");
     }
 
     #[test]
@@ -2204,10 +2267,7 @@ Derived* test(Base* b) {\n\
 
         // rodata 中应该有 typeinfo 符号（src 和 dst 两个）
         let typeinfo_count = out.rodata.iter().filter(|s| s.starts_with("_ZTI")).count();
-        assert!(
-            typeinfo_count >= 2,
-            "should have at least 2 typeinfo symbols (src and dst)"
-        );
+        assert!(typeinfo_count >= 2, "should have at least 2 typeinfo symbols (src and dst)");
     }
 
     // === Stage 8: 模板测试 ===

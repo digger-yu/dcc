@@ -13,20 +13,15 @@ impl Codegen {
         for info in &infos {
             let needs_rt = self.register_static_global(info);
             if needs_rt {
-                self.static_local_map.mark_runtime_init(
-                    &info.owner_func,
-                    &info.source_name,
-                );
+                self.static_local_map
+                    .mark_runtime_init(&info.owner_func, &info.source_name);
             }
         }
     }
 
     /// 注册单个 static local 到 data/bss 段.
     /// 返回 true 表示需要运行时初始化.
-    fn register_static_global(
-        &mut self,
-        info: &crate::static_locals::StaticLocalInfo,
-    ) -> bool {
+    fn register_static_global(&mut self, info: &crate::static_locals::StaticLocalInfo) -> bool {
         let sz = info.size;
         let align = info.alignment;
         let initialized = info.init.is_some();
@@ -36,18 +31,9 @@ impl Codegen {
                 Expr::String { .. } => true,
                 Expr::InitList { .. } => true, // 尝试, 可能失败
                 _ => {
-                    let is_float = matches!(
-                        info.ty,
-                        Type::Float | Type::Double | Type::LongDouble
-                    );
-                    global_init_bytes(
-                        info.init.as_ref().unwrap(),
-                        sz,
-                        is_float,
-                        &info.ty,
-                    )
-                    .is_some()
-                }
+                    let is_float = matches!(info.ty, Type::Float | Type::Double | Type::LongDouble);
+                    global_init_bytes(info.init.as_ref().unwrap(), sz, is_float, &info.ty).is_some()
+                },
             }
         } else {
             true // 无初始化式 → BSS 零初始化
@@ -88,7 +74,7 @@ impl Codegen {
                             }
                         }
                         true
-                    }
+                    },
                     Expr::InitList { inits, .. } => {
                         let base = self.data_section.len() as u64;
                         if let Some(init_data) =
@@ -102,24 +88,17 @@ impl Codegen {
                         } else {
                             false
                         }
-                    }
+                    },
                     _ => {
-                        let is_float = matches!(
-                            info.ty,
-                            Type::Float | Type::Double | Type::LongDouble
-                        );
-                        if let Some(bytes) = global_init_bytes(
-                            init,
-                            sz,
-                            is_float,
-                            &info.ty,
-                        ) {
+                        let is_float =
+                            matches!(info.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if let Some(bytes) = global_init_bytes(init, sz, is_float, &info.ty) {
                             self.data_section.extend_from_slice(&bytes);
                             true
                         } else {
                             false
                         }
-                    }
+                    },
                 }
             } else {
                 false

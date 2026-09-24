@@ -212,8 +212,7 @@ impl Riscv64Codegen {
 
     /// FADD.S fd, fs1, fs2: single-precision add
     pub(crate) fn emit_fadd_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn =
-            (((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7) | 0x53;
+        let insn = (((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7) | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -312,5 +311,4 @@ impl Riscv64Codegen {
             | 0x53;
         self.emit(&insn.to_le_bytes());
     }
-
 }

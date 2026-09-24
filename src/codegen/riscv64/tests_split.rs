@@ -6,8 +6,7 @@ use crate::ir::{lower, validate};
 
 #[test]
 fn riscv64_ir_return_add() {
-    let (program, diags) =
-        crate::parser::parse(b"int main(void) { return 10 + 32; }\n", "rv.c");
+    let (program, diags) = crate::parser::parse(b"int main(void) { return 10 + 32; }\n", "rv.c");
     assert!(diags.is_empty(), "{diags:?}");
     let (module, _) = lower(program).expect("lower");
     validate(&module).expect("validate");
@@ -91,16 +90,11 @@ fn riscv64_aggregate_arg_by_ref() {
         if w.len() < 4 {
             return false;
         }
-        let insn = (w[0] as u32)
-            | ((w[1] as u32) << 8)
-            | ((w[2] as u32) << 16)
-            | ((w[3] as u32) << 24);
+        let insn =
+            (w[0] as u32) | ((w[1] as u32) << 8) | ((w[2] as u32) << 16) | ((w[3] as u32) << 24);
         (insn & 0x7F) == 0x13 && ((insn >> 12) & 7) == 0 && ((insn >> 15) & 0x1F) == 2
     });
-    assert!(
-        has_addi_sp,
-        "expected addi rd, sp, #off (M7 by-ref aggregate)"
-    );
+    assert!(has_addi_sp, "expected addi rd, sp, #off (M7 by-ref aggregate)");
 }
 
 // M8: JAL 范围校验
@@ -141,11 +135,7 @@ fn riscv64_fadd_d_emit() {
     assert!(code.len() >= 4);
     let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
     assert_eq!(insn & 0x7f, 0x53, "opcode should be 0x53 (FP)");
-    assert_eq!(
-        (insn >> 25) & 0x7f,
-        0x01,
-        "funct7 should be 0000001 (FADD.D)"
-    );
+    assert_eq!((insn >> 25) & 0x7f, 0x01, "funct7 should be 0000001 (FADD.D)");
 }
 
 // M8: CSR 访问指令 CSRRS 编码
@@ -239,17 +229,10 @@ fn riscv64_d_extension_full() {
     // FLE.D x16, f17, f18
     cg.emit_fle_d(16, 17, 18);
     let code = &cg.code;
-    assert!(
-        code.len() >= 24,
-        "expected 24 bytes for 6 D-extension instructions"
-    );
+    assert!(code.len() >= 24, "expected 24 bytes for 6 D-extension instructions");
     // FSQRT.D: funct7=0101101
     let insn_sqrt = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
-    assert_eq!(
-        (insn_sqrt >> 25) & 0x7f,
-        0b0101101,
-        "FSQRT.D funct7=0101101"
-    );
+    assert_eq!((insn_sqrt >> 25) & 0x7f, 0b0101101, "FSQRT.D funct7=0101101");
     // FMIN.D: funct7=0010101, funct3=000
     let insn_min = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
     assert_eq!((insn_min >> 25) & 0x7f, 0b0010101, "FMIN.D funct7=0010101");
@@ -289,10 +272,7 @@ fn riscv64_va_save_area_stores_a0_through_a7() {
     // 验证: 8 条 sd aN, off(sp) 指令, LE 编码:
     //   byte0 低 7 位 = opcode = 0x23 (SD)
     //   byte1 位 6:4  = funct3 = 0b011
-    assert!(
-        cg.code.len() >= 32,
-        "expected at least 32 bytes of SD instructions"
-    );
+    assert!(cg.code.len() >= 32, "expected at least 32 bytes of SD instructions");
     let sd_count = cg
         .code
         .windows(4)
@@ -319,11 +299,7 @@ fn riscv64_va_arg_int_reads_sequentially_from_save_area() {
     });
     assert!(has_bge, "expected BGE instruction");
     // 验证: 代码非空且长度合理
-    assert!(
-        cg.code.len() > 20,
-        "expected > 20 bytes of code, got {}",
-        cg.code.len()
-    );
+    assert!(cg.code.len() > 20, "expected > 20 bytes of code, got {}", cg.code.len());
 }
 
 // ===== 压缩指令自动选择测试 =====
@@ -334,11 +310,7 @@ fn riscv64_compress_addi_to_c_addi() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // ADDI x10, x10, 5 => C.ADDI x10, 5 (2 bytes)
     cg.emit_addi(10, 10, 5);
-    assert_eq!(
-        cg.code.len(),
-        2,
-        "ADDI rd==rs1 should compress to C.ADDI (2 bytes)"
-    );
+    assert_eq!(cg.code.len(), 2, "ADDI rd==rs1 should compress to C.ADDI (2 bytes)");
     // Verify it's a valid C.ADDI: bits[1:0]=01, funct3[15:13]=000
     let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
     assert_eq!(insn & 0x3, 0x01, "C.ADDI opcode should be 01");
@@ -363,11 +335,7 @@ fn riscv64_compress_lui_to_c_lui() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // LUI x10, 5 => C.LUI x10, 5 (2 bytes)
     cg.emit_lui(10, 5);
-    assert_eq!(
-        cg.code.len(),
-        2,
-        "LUI with small imm should compress to C.LUI (2 bytes)"
-    );
+    assert_eq!(cg.code.len(), 2, "LUI with small imm should compress to C.LUI (2 bytes)");
     let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
     assert_eq!(insn & 0x3, 0x01, "C.LUI opcode should be 01");
     assert_eq!((insn >> 13) & 0x7, 0b011, "C.LUI funct3 should be 011");
@@ -379,11 +347,7 @@ fn riscv64_compress_add_to_c_mv() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // ADD x10, x0, x11 => C.MV x10, x11 (2 bytes)
     cg.emit_add(10, 0, 11);
-    assert_eq!(
-        cg.code.len(),
-        2,
-        "ADD rd, x0, rs2 should compress to C.MV (2 bytes)"
-    );
+    assert_eq!(cg.code.len(), 2, "ADD rd, x0, rs2 should compress to C.MV (2 bytes)");
     let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
     assert_eq!(insn & 0x3, 0x02, "C.MV opcode should be 10");
 }
@@ -394,11 +358,7 @@ fn riscv64_compress_add_to_c_add() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // ADD x10, x10, x11 => C.ADD x10, x11 (2 bytes)
     cg.emit_add(10, 10, 11);
-    assert_eq!(
-        cg.code.len(),
-        2,
-        "ADD rd==rs1 should compress to C.ADD (2 bytes)"
-    );
+    assert_eq!(cg.code.len(), 2, "ADD rd==rs1 should compress to C.ADD (2 bytes)");
     let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
     assert_eq!(insn & 0x3, 0x02, "C.ADD opcode should be 10");
 }
@@ -473,11 +433,7 @@ fn riscv64_no_compress_addi_out_of_range() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // ADDI x10, x10, 100 => 4 bytes (out of C.ADDI range -32..31)
     cg.emit_addi(10, 10, 100);
-    assert_eq!(
-        cg.code.len(),
-        4,
-        "ADDI with large imm should not compress (4 bytes)"
-    );
+    assert_eq!(cg.code.len(), 4, "ADDI with large imm should not compress (4 bytes)");
 }
 
 #[test]
@@ -486,11 +442,7 @@ fn riscv64_no_compress_lw_wrong_regs() {
     let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
     // LW x5, 8(x10) => 4 bytes (rd not in x8-x15)
     cg.emit_lw(5, 10, 8);
-    assert_eq!(
-        cg.code.len(),
-        4,
-        "LW with rd not in x8-x15 should not compress (4 bytes)"
-    );
+    assert_eq!(cg.code.len(), 4, "LW with rd not in x8-x15 should not compress (4 bytes)");
 }
 
 // -ftrivial-auto-var-init=zero: 验证 RISC-V64 后端发射 sd zero, offset(sp) 指令
@@ -515,7 +467,10 @@ fn riscv64_auto_var_init_zero_emits_sd() {
             opcode == 0x23 && funct3 == 3 && rs2 == 0 && rs1 == 2
         })
         .count();
-    assert_eq!(sd_count, 4, "expected 4 sd zero, offset(sp) instructions for 32-byte frame, got {sd_count}");
+    assert_eq!(
+        sd_count, 4,
+        "expected 4 sd zero, offset(sp) instructions for 32-byte frame, got {sd_count}"
+    );
 }
 
 // D 扩展新增指令: FSQRT.S, FMIN.S, FMAX.S, FCLASS.S/D

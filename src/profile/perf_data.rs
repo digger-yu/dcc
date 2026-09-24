@@ -82,10 +82,7 @@ impl PerfDataFile {
         let buf = fs::read(path)?;
         let file_size = buf.len() as u64;
         if buf.len() < 24 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "perf.data too short",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "perf.data too short"));
         }
         if &buf[0..8] != PERF_DATA_MAGIC {
             return Err(io::Error::new(

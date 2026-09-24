@@ -300,7 +300,7 @@ mod tests {
             (Stmt::Return { val: a, .. }, Stmt::Return { val: b, .. }) => {
                 assert!(a.is_some());
                 assert!(b.is_some());
-            }
+            },
             _ => panic!("expected Return variant"),
         }
         assert_eq!(pool.stmt_count(), 1);
@@ -344,7 +344,7 @@ mod tests {
             (Decl::Var(a), Decl::Var(b)) => {
                 assert_eq!(a.name.name, b.name.name);
                 assert!(matches!(a.ty, Type::Int));
-            }
+            },
             _ => panic!("expected Var variant"),
         }
         assert_eq!(pool.decl_count(), 1);

@@ -228,10 +228,7 @@ impl Profraw {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
         if buf.len() < 12 || &buf[0..4] != b"PROF" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad profraw magic",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad profraw magic"));
         }
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         if ver != PROFRAW_VERSION_CURRENT {
@@ -244,19 +241,13 @@ impl Profraw {
 
         // Read checksum.
         if off + 8 > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated profraw checksum",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated profraw checksum"));
         }
         let checksum = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
         off += 8;
 
         if off + 4 > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated profraw site count",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated profraw site count"));
         }
         let n = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
@@ -467,10 +458,7 @@ impl Profraw {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
         if buf.len() < 8 || &buf[0..4] != PROFDATA_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad profdata magic",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad profdata magic"));
         }
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         if ver != PROFDATA_VERSION {
@@ -842,7 +830,7 @@ fn c_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
                 let _ = write!(&mut out, "\\x{:02x}", c as u32);
-            }
+            },
             c => out.push(c),
         }
     }
@@ -1148,7 +1136,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -1175,26 +1163,26 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
                 section: None,
                 alignment: None,
                 alias_name: None,
                 visibility: None,
-            asm_label: None,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1265,7 +1253,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -1311,7 +1299,7 @@ mod tests {
             alignment: None,
             alias_name: None,
             visibility: None,
-        asm_label: None,
+            asm_label: None,
         }));
         // 旧 body 顶部是 return 0, 跑 instrument 后应变为
         // call __dcc_pgo_count_fn(0)  +  return 0
@@ -1343,7 +1331,7 @@ mod tests {
                     } else {
                         panic!("first stmt not Call");
                     }
-                }
+                },
                 _ => panic!("first item not Stmt::Expr"),
             }
         } else {
@@ -1389,7 +1377,7 @@ mod tests {
             is_hot: false,
             is_noinline: false,
             is_always_inline: false,
-                    is_inline: false,
+            is_inline: false,
             is_variadic: false,
             is_constructor: false,
             is_destructor: false,
@@ -1435,7 +1423,7 @@ mod tests {
             alignment: None,
             alias_name: None,
             visibility: None,
-        asm_label: None,
+            asm_label: None,
         }));
         let cfg = PgoConfig {
             generate: false,
@@ -1597,7 +1585,7 @@ mod tests {
                 is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_variadic: false,
                 is_constructor: false,
                 is_destructor: false,
@@ -1624,26 +1612,26 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
                 section: None,
                 alignment: None,
                 alias_name: None,
                 visibility: None,
-            asm_label: None,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,

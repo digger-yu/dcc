@@ -74,10 +74,8 @@ impl FuzzerProtocol {
         let mut wrapper = String::new();
         wrapper.push_str("// libFuzzer entry wrapper\n");
         wrapper.push_str("extern int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size);\n");
-        wrapper.push_str(&format!(
-            "extern int {}(const uint8_t *Data, size_t Size);\n\n",
-            user_func
-        ));
+        wrapper
+            .push_str(&format!("extern int {}(const uint8_t *Data, size_t Size);\n\n", user_func));
         wrapper.push_str("int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {\n");
         wrapper.push_str(&format!("    return {}(Data, Size);\n", user_func));
         wrapper.push_str("}\n");
@@ -120,10 +118,7 @@ impl FuzzerProtocol {
         ));
         code.push_str("__attribute__((constructor))\n");
         code.push_str("static void __dcc_fuzzer_init_counters(void) {\n");
-        code.push_str(&format!(
-            "    for (int i = 0; i < {}; i++) {{\n",
-            self.counters.len()
-        ));
+        code.push_str(&format!("    for (int i = 0; i < {}; i++) {{\n", self.counters.len()));
         code.push_str("        __dcc_fuzzer_counters[i] = 0;\n");
         code.push_str("    }\n");
         code.push_str("}\n");
@@ -290,13 +285,8 @@ mod tests {
 
     #[test]
     fn test_build_fuzzer_protocol() {
-        let protocol = build_fuzzer_protocol(
-            Some("fuzz_target"),
-            &[0x1000, 0x2000, 0x3000],
-            512,
-            true,
-            true,
-        );
+        let protocol =
+            build_fuzzer_protocol(Some("fuzz_target"), &[0x1000, 0x2000, 0x3000], 512, true, true);
 
         assert_eq!(protocol.entry_fn, Some("fuzz_target".to_string()));
         assert_eq!(protocol.pc_table.len(), 3);

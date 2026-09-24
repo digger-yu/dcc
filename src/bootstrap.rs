@@ -101,10 +101,7 @@ fn read_sections(elf: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
         let name = read_cstr(shstrtab, name_idx)?;
         // 只读 PROGBITS / NOBITS 之外还要 .text / .rodata / .data
         if name.starts_with(".text") || name.starts_with(".rodata") || name.starts_with(".data") {
-            out.insert(
-                name.to_string(),
-                elf[data_off..data_off + data_size].to_vec(),
-            );
+            out.insert(name.to_string(), elf[data_off..data_off + data_size].to_vec());
         }
     }
     Some(out)
@@ -334,13 +331,13 @@ fn struct_diff_sections(left: &[(String, u32, u64)], right: &[(String, u32, u64)
                         l.0, l.1, r.0, r.1
                     ));
                 }
-            }
+            },
             (Some(_), None) => {
                 diffs.push(format!("section {name}: removed in right"));
-            }
+            },
             (None, Some(_)) => {
                 diffs.push(format!("section {name}: added in right"));
-            }
+            },
             (None, None) => unreachable!(),
         }
     }
@@ -384,31 +381,33 @@ fn semantic_diff(left_elf: &[u8], right_elf: &[u8]) -> (Vec<SymbolDiff>, Vec<Str
                         detail: format!("bind {} -> {}", b(l.1), b(r.1)),
                     });
                 }
-            }
+            },
             (Some(l), None) => {
                 sym_diffs.push(SymbolDiff {
                     kind: SymbolDiffKind::Removed,
                     name: name.to_string(),
                     detail: format!("size={} bind={}", l.0, l.1),
                 });
-            }
+            },
             (None, Some(r)) => {
                 sym_diffs.push(SymbolDiff {
                     kind: SymbolDiffKind::Added,
                     name: name.to_string(),
                     detail: format!("size={} bind={}", r.0, r.1),
                 });
-            }
+            },
             (None, None) => unreachable!(),
         }
     }
     // 引用关系 diff
-    let left_refs: BTreeSet<String> = crate::codegen::shared::elf::referenced_symbol_names(left_elf)
-        .into_iter()
-        .collect();
-    let right_refs: BTreeSet<String> = crate::codegen::shared::elf::referenced_symbol_names(right_elf)
-        .into_iter()
-        .collect();
+    let left_refs: BTreeSet<String> =
+        crate::codegen::shared::elf::referenced_symbol_names(left_elf)
+            .into_iter()
+            .collect();
+    let right_refs: BTreeSet<String> =
+        crate::codegen::shared::elf::referenced_symbol_names(right_elf)
+            .into_iter()
+            .collect();
     let mut ref_diffs = Vec::new();
     for n in left_refs.difference(&right_refs) {
         ref_diffs.push(format!("ref removed: {n}"));
@@ -465,10 +464,7 @@ impl DiffReport {
             return out;
         }
         if !self.byte_diffs.is_empty() {
-            out.push_str(&format!(
-                "byte diffs: {} sections differ\n",
-                self.byte_diffs.len()
-            ));
+            out.push_str(&format!("byte diffs: {} sections differ\n", self.byte_diffs.len()));
             for d in &self.byte_diffs {
                 out.push_str(&format!(
                     "  .{}: {}B vs {}B, first offsets: {:?}\n",
@@ -494,10 +490,7 @@ impl DiffReport {
                 out.push_str(&format!("  {s}\n"));
             }
         }
-        out.push_str(&format!(
-            "semantically_equivalent: {}\n",
-            self.semantically_equivalent
-        ));
+        out.push_str(&format!("semantically_equivalent: {}\n", self.semantically_equivalent));
         out
     }
 }

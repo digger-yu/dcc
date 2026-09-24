@@ -10,6 +10,6 @@
 //! 注意: 这些是 legacy 路径（C 文本降级），新代码应走 sema → hir →
 //! abi_layout → lower_ir 的 native 路径。
 
-pub mod runtime;
-pub mod layout;
 pub mod expr;
+pub mod layout;
+pub mod runtime;

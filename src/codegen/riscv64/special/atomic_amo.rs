@@ -1,7 +1,7 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen};
+use crate::codegen::riscv64::codegen::Riscv64Codegen;
 
 impl Riscv64Codegen {
     // ===== 原子操作辅助指令 =====
@@ -9,14 +9,18 @@ impl Riscv64Codegen {
     /// AMOSWAP - 原子交换
     pub(crate) fn emit_amoswap(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x0800202fu32 // amoswap.w.aq
+            4 => {
+                0x0800202fu32 // amoswap.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x0800302fu32 // amoswap.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x0800302fu32 // amoswap.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -24,14 +28,18 @@ impl Riscv64Codegen {
     /// AMOADD - 原子加
     pub(crate) fn emit_amoadd(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x0000202fu32 // amoadd.w.aq
+            4 => {
+                0x0000202fu32 // amoadd.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x0000302fu32 // amoadd.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x0000302fu32 // amoadd.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -39,14 +47,18 @@ impl Riscv64Codegen {
     /// AMOAND - 原子与
     pub(crate) fn emit_amoand(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x6000202fu32 // amoand.w.aq
+            4 => {
+                0x6000202fu32 // amoand.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x6000302fu32 // amoand.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x6000302fu32 // amoand.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -54,14 +66,18 @@ impl Riscv64Codegen {
     /// AMOOR - 原子或
     pub(crate) fn emit_amoor(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x4000202fu32 // amoor.w.aq
+            4 => {
+                0x4000202fu32 // amoor.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x4000302fu32 // amoor.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x4000302fu32 // amoor.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -69,14 +85,18 @@ impl Riscv64Codegen {
     /// AMOXOR - 原子异或
     pub(crate) fn emit_amoxor(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x2000202fu32 // amoxor.w.aq
+            4 => {
+                0x2000202fu32 // amoxor.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x2000302fu32 // amoxor.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x2000302fu32 // amoxor.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -84,12 +104,16 @@ impl Riscv64Codegen {
     /// LR (Load Reserved) - 原子加载
     pub(crate) fn emit_lr(&mut self, sz: usize, rd: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x1000202fu32 // lr.w.aq
+            4 => {
+                0x1000202fu32 // lr.w.aq
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x1000302fu32 // lr.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x1000302fu32 // lr.d.aq
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -97,14 +121,18 @@ impl Riscv64Codegen {
     /// SC (Store Conditional) - 条件存储
     pub(crate) fn emit_sc(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
         let insn = match sz {
-            4 => 0x1800202fu32 // sc.w.aq
+            4 => {
+                0x1800202fu32 // sc.w.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
-            _ => 0x1800302fu32 // sc.d.aq
+                | ((rd as u32 & 0x1f) << 7)
+            },
+            _ => {
+                0x1800302fu32 // sc.d.aq
                 | ((rs2 as u32 & 0x1f) << 20)
                 | ((rs1 as u32 & 0x1f) << 15)
-                | ((rd as u32 & 0x1f) << 7),
+                | ((rd as u32 & 0x1f) << 7)
+            },
         };
         self.emit(&insn.to_le_bytes());
     }
@@ -142,5 +170,4 @@ impl Riscv64Codegen {
     // ========================================================================
     // TLS 访问序列 (Local Exec)
     // ========================================================================
-
 }

@@ -18,15 +18,15 @@ impl Codegen {
                 // 0x00000000FFFFFFFF 而非 0xFFFFFFFFFFFFFFFF).
                 let masked = Self::mask_imm_to_type(*v, ty);
                 self.mov_imm(dst, masked);
-            }
+            },
             Expr::Char { v, ty, .. } => {
                 let masked = Self::mask_imm_to_type(*v, ty);
                 self.mov_imm(dst, masked);
-            }
+            },
             Expr::Float { v, ty, .. } => {
                 // 浮点字面量: 存入 .rodata, 用 movsd/movss 加载到 xmm0
                 self.gen_float_imm_load(*v, ty);
-            }
+            },
             Expr::String { data, .. } => {
                 // 将字符串加入 .rodata 池, 生成 RIP-relative LEA
                 let data = data.clone();
@@ -40,11 +40,11 @@ impl Codegen {
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
                 self.string_refs.push((at, data));
-            }
+            },
             _ => {
                 // gen_expr 只在上述四种字面量 arm 调用本方法, 其他 arm 不可达。
                 let _ = (dst, std::mem::discriminant(&Type::Int));
-            }
+            },
         }
     }
     /// gen_expr sizeof 分支统一入口 (batch F1 逐字搬迁: Expr::SizeofTy / Expr::SizeofExpr arm)。
@@ -70,7 +70,7 @@ impl Codegen {
                 } else {
                     self.mov_imm(dst, ty.size() as i128);
                 }
-            }
+            },
             Expr::SizeofExpr { e, .. } => match e.as_ref() {
                 // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
                 Expr::String { data, .. } => self.mov_imm(dst, data.len() as i128),
@@ -88,9 +88,9 @@ impl Codegen {
                             self.mov_imm(dst, ty.size() as i128);
                         }
                     }
-                }
+                },
             },
-            _ => {}
+            _ => {},
         }
     }
     /// gen_expr alignof/offsetof 分支统一入口 (batch F2 逐字搬迁: Expr::AlignofTy /
@@ -111,7 +111,12 @@ impl Codegen {
                     self.mov_imm(dst, e.ty().align() as i128);
                 }
             },
-            Expr::Offsetof { ty, ref member, ref indices, .. } => {
+            Expr::Offsetof {
+                ty,
+                ref member,
+                ref indices,
+                ..
+            } => {
                 let base_off = Self::compute_offset(ty, member);
                 if indices.is_empty() {
                     self.mov_imm(dst, base_off as i128);
@@ -123,44 +128,44 @@ impl Codegen {
                     // 对每个下标: dst += idx * stride
                     let mut cur_ty = field_ty;
                     for idx_expr in indices.iter() {
-                            if let Type::Array(elem, _) = &cur_ty {
-                                // 计算下标值到 rcx
-                                self.gen_expr(idx_expr, 1); // rcx = idx
-                                // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
-                                let idx_ty = idx_expr.ty();
-                                if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
-                                    // movslq %ecx, %rcx: 48 63 C9
-                                    self.emit(&[0x48, 0x63, 0xC9]);
-                                }
-                                // 计算 stride = sizeof(elem) 并乘到 rcx
-                                if Self::type_has_vla(&elem.base) {
-                                    // VLA: 运行时计算 stride 到 r11
-                                    self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
-                                    // rcx *= r11
-                                    self.imul_reg(1, 11);
-                                } else {
-                                    // 常量 stride
-                                    let stride = elem.size() as u128;
-                                    if stride > 1 {
-                                        if stride.is_power_of_two() {
-                                            let shift = (stride.trailing_zeros() as u8).min(31);
-                                            self.emit(&[0x48, 0xC1, 0xE1, shift]); // shl rcx, shift
-                                        } else {
-                                            self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
-                                        }
+                        if let Type::Array(elem, _) = &cur_ty {
+                            // 计算下标值到 rcx
+                            self.gen_expr(idx_expr, 1); // rcx = idx
+                                                        // 有符号 32 位或更小整数需先符号扩展, 否则负索引乘 stride 错误
+                            let idx_ty = idx_expr.ty();
+                            if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
+                                // movslq %ecx, %rcx: 48 63 C9
+                                self.emit(&[0x48, 0x63, 0xC9]);
+                            }
+                            // 计算 stride = sizeof(elem) 并乘到 rcx
+                            if Self::type_has_vla(&elem.base) {
+                                // VLA: 运行时计算 stride 到 r11
+                                self.gen_sizeof_runtime(&elem.base, 11); // r11 = stride
+                                                                         // rcx *= r11
+                                self.imul_reg(1, 11);
+                            } else {
+                                // 常量 stride
+                                let stride = elem.size() as u128;
+                                if stride > 1 {
+                                    if stride.is_power_of_two() {
+                                        let shift = (stride.trailing_zeros() as u8).min(31);
+                                        self.emit(&[0x48, 0xC1, 0xE1, shift]); // shl rcx, shift
+                                    } else {
+                                        self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
                                     }
                                 }
-                                // dst += rcx
-                                // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
-                                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                                self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
-                                // 下降到元素类型
-                                cur_ty = elem.base.clone();
                             }
+                            // dst += rcx
+                            // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
+                            // 下降到元素类型
+                            cur_ty = elem.base.clone();
                         }
+                    }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }

@@ -2,7 +2,10 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{find_field, BinOp, UnOp};
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, is_aggregate, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size};
+use crate::codegen::riscv64::codegen::{
+    is_aggregate, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size,
+    Riscv64Codegen,
+};
 use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Riscv64Codegen {
@@ -28,8 +31,10 @@ impl Riscv64Codegen {
                             ValueType::Pointer(inner) => {
                                 if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                                     Some(name.clone())
-                                } else { None }
-                            }
+                                } else {
+                                    None
+                                }
+                            },
                             _ => None,
                         };
                         let bf = sn.as_ref().and_then(|n| {
@@ -44,8 +49,12 @@ impl Riscv64Codegen {
                         if let Some((f_off, bw, b_off, cty)) = bf {
                             if bw < (cty.size() * 8) as u32 {
                                 self.gen_bitfield_store_riscv64(
-                                    &lhs.children[0], &expr.children[1],
-                                    f_off, bw, b_off, &cty,
+                                    &lhs.children[0],
+                                    &expr.children[1],
+                                    f_off,
+                                    bw,
+                                    b_off,
+                                    &cty,
                                 );
                                 return true;
                             }
@@ -72,7 +81,7 @@ impl Riscv64Codegen {
                             let sz = value_type_size(&lhs.ty).max(1);
                             self.emit_store_sz(11, 10, 0, sz);
                         }
-                    }
+                    },
                     _ => {
                         self.gen_lvalue_addr(lhs); // a0 = addr
                         self.emit_addi(12, 10, 0); // a2 = addr (save)
@@ -93,7 +102,7 @@ impl Riscv64Codegen {
                                 self.emit_store_sz(13, 12, off, sz - off as usize);
                             }
                         }
-                    }
+                    },
                 }
                 // Result of assignment is the rhs value
                 self.emit_ld(10, 2, save_off); // a0 = rhs
@@ -125,7 +134,7 @@ impl Riscv64Codegen {
                     return true;
                 }
                 self.li_a0(0);
-            }
+            },
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_a0(off);
@@ -138,25 +147,20 @@ impl Riscv64Codegen {
                     return true;
                 }
                 self.li_a0(0);
-            }
+            },
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 // Float comparison: children are float, result is integer
                 if is_float_ty(&expr.children[0].ty)
                     && is_float_ty(&expr.children[1].ty)
                     && matches!(
                         op,
-                        BinOp::EqEq
-                            | BinOp::Ne
-                            | BinOp::Lt
-                            | BinOp::Le
-                            | BinOp::Gt
-                            | BinOp::Ge
+                        BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                     )
                 {
                     // Evaluate left float -> fa0
                     self.gen_float_expr(&expr.children[0]);
                     self.mv_fa1_fa0(); // save left to fa1
-                    // Evaluate right float -> fa0
+                                       // Evaluate right float -> fa0
                     self.gen_float_expr(&expr.children[1]);
                     // Now fa0 = right, fa1 = left
                     // Compare and set a0 from result
@@ -173,27 +177,29 @@ impl Riscv64Codegen {
                 self.gen_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_expr(&expr.children[1]);
-                self.binop_a0_a1(*op, matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }));
+                self.binop_a0_a1(
+                    *op,
+                    matches!(&expr.children[0].ty, ValueType::Integer { signed: true, .. }),
+                );
                 return true;
-            }
+            },
             ExprKind::Unary(op) if !expr.children.is_empty() => {
                 self.gen_expr(&expr.children[0]);
                 match op {
                     UnOp::Neg => self.neg_a0(),
-                    UnOp::Plus => {}
+                    UnOp::Plus => {},
                     UnOp::Not => self.cmp_a0_zero(),
                     UnOp::BitNot => self.not_a0(),
                 }
                 return true;
-            }
+            },
             ExprKind::Cast if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if is_float_ty(&child.ty) && !is_float_ty(&expr.ty) {
                     // Float → Int: child eval puts float in fa0,
                     // emit FCVT.W.S/FCVT.WU.S to convert to int in a0
                     self.gen_expr(child);
-                    let is_unsigned = matches!(&expr.ty,
-                        ValueType::Integer { signed: false, .. });
+                    let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
                     match &child.ty {
                         ValueType::Float { bits: 32 } => {
                             if is_unsigned {
@@ -203,7 +209,7 @@ impl Riscv64Codegen {
                                 // FCVT.W.S a0, fa0
                                 self.emit_fcvt_w_s(10, 10);
                             }
-                        }
+                        },
                         ValueType::Float { bits: 64 } => {
                             if is_unsigned {
                                 // FCVT.WU.D a0, fa0
@@ -212,14 +218,14 @@ impl Riscv64Codegen {
                                 // FCVT.W.D a0, fa0
                                 self.emit_fcvt_w_d(10, 10);
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 } else {
                     self.gen_expr(child);
                 }
                 return true;
-            }
+            },
             ExprKind::VaArg { ap, ref arg_ty, .. } => {
                 // M25: __builtin_va_arg(ap, T)
                 // 聚合类型走 gen_va_arg_struct, 整数/指针走 gen_va_arg_int
@@ -229,11 +235,11 @@ impl Riscv64Codegen {
                     self.gen_va_arg_int(ap);
                 }
                 return true;
-            }
+            },
             ExprKind::Call if !expr.children.is_empty() => {
                 self.gen_call(expr);
                 return true;
-            }
+            },
             ExprKind::Conditional if expr.children.len() >= 3 => {
                 self.gen_expr(&expr.children[0]);
                 let lbl_else = self.fresh_label("Lc0");
@@ -245,7 +251,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&expr.children[2]);
                 self.label(&lbl_end);
                 return true;
-            }
+            },
             ExprKind::Address if !expr.children.is_empty() => {
                 // Extended: support &member, &deref, &index via gen_lvalue_addr
                 match &expr.children[0].kind {
@@ -258,22 +264,22 @@ impl Riscv64Codegen {
                             self.load_global_addr_a0(name);
                             return true;
                         }
-                    }
+                    },
                     _ => {
                         self.gen_lvalue_addr(&expr.children[0]);
                         return true;
-                    }
+                    },
                 }
                 self.li_a0(0);
                 return true;
-            }
+            },
             ExprKind::Dereference if !expr.children.is_empty() => {
                 // *ptr: evaluate pointer, load value
                 self.gen_expr(&expr.children[0]);
                 let sz = value_type_size(&expr.ty).max(1);
                 self.emit_load_sz(10, 10, 0, sz);
                 return true;
-            }
+            },
             ExprKind::Member(ref field_name) if !expr.children.is_empty() => {
                 let child = &expr.children[0];
                 if let ExprKind::Dereference = &child.kind {
@@ -287,8 +293,10 @@ impl Riscv64Codegen {
                     ValueType::Pointer(inner) | ValueType::Array(inner, _) => {
                         if let ValueType::Aggregate { name, .. } = inner.as_ref() {
                             Some(name.clone())
-                        } else { None }
-                    }
+                        } else {
+                            None
+                        }
+                    },
                     _ => None,
                 };
                 let field_info = struct_name.as_ref().and_then(|n| {
@@ -300,9 +308,9 @@ impl Riscv64Codegen {
                 });
                 let field_off = field_info.as_ref().map(|(off, _, _, _)| *off).unwrap_or(0);
                 // Check if this is a bitfield read
-                let bf_info = field_info.as_ref().and_then(|(_, bw, bo, fty)| {
-                    bw.map(|w| (w, *bo, fty.clone()))
-                });
+                let bf_info = field_info
+                    .as_ref()
+                    .and_then(|(_, bw, bo, fty)| bw.map(|w| (w, *bo, fty.clone())));
                 if let Some((bit_width, bit_offset, container_ty)) = bf_info {
                     if bit_width < (container_ty.size() * 8) as u32 {
                         // Bitfield extraction
@@ -324,21 +332,22 @@ impl Riscv64Codegen {
                             } else {
                                 // Save shifted value, load mask to a1, reload, AND
                                 let sv = self.alloc_local("<bf_m>", 8);
-                                self.emit_sd(10, 2, sv);       // save
-                                self.load_const64_a0(mask);     // a0 = mask
-                                self.emit_addi(11, 10, 0);     // a1 = mask
-                                self.emit_ld(10, 2, sv);       // a0 = shifted
-                                self.emit_and(10, 10, 11);     // a0 &= mask
+                                self.emit_sd(10, 2, sv); // save
+                                self.load_const64_a0(mask); // a0 = mask
+                                self.emit_addi(11, 10, 0); // a1 = mask
+                                self.emit_ld(10, 2, sv); // a0 = shifted
+                                self.emit_and(10, 10, 11); // a0 &= mask
                             }
                         }
                         // Sign extend for signed bitfields
-                        let is_unsigned = matches!(&expr.ty, ValueType::Integer { signed: false, .. });
+                        let is_unsigned =
+                            matches!(&expr.ty, ValueType::Integer { signed: false, .. });
                         if !is_unsigned && bit_width < 64 {
                             let sign_bit = 1u64 << (bit_width - 1);
                             let inv_mask: u64 = !((1u64 << bit_width) - 1);
                             let sv2 = self.alloc_local("<bf_v>", 8);
-                            self.emit_sd(10, 2, sv2);          // save masked value
-                            // Test sign bit
+                            self.emit_sd(10, 2, sv2); // save masked value
+                                                      // Test sign bit
                             if sign_bit <= 0x7FF {
                                 self.emit_andi(10, 10, sign_bit as i32);
                             } else {
@@ -354,14 +363,14 @@ impl Riscv64Codegen {
                             let lbl_do = format!(".Lbf_do_{}", self.pos());
                             self.emit_bnez(10, &lbl_do);
                             // Sign bit NOT set: reload value, skip extension
-                            self.emit_ld(10, 2, sv2);          // a0 = masked value
+                            self.emit_ld(10, 2, sv2); // a0 = masked value
                             self.j(&lbl_end);
                             // Sign bit set: OR with inv_mask
                             self.label(&lbl_do);
-                            self.load_const64_a0(inv_mask);    // a0 = inv_mask
-                            self.emit_addi(11, 10, 0);         // a1 = inv_mask
-                            self.emit_ld(10, 2, sv2);          // a0 = masked value
-                            self.emit_or(10, 10, 11);          // a0 |= inv_mask
+                            self.load_const64_a0(inv_mask); // a0 = inv_mask
+                            self.emit_addi(11, 10, 0); // a1 = inv_mask
+                            self.emit_ld(10, 2, sv2); // a0 = masked value
+                            self.emit_or(10, 10, 11); // a0 |= inv_mask
                             self.label(&lbl_end);
                         }
                         return true;
@@ -374,13 +383,17 @@ impl Riscv64Codegen {
                 let sz = value_type_size(&expr.ty).max(1);
                 self.emit_load_sz(10, 10, 0, sz);
                 return true;
-            }
+            },
             ExprKind::Index if expr.children.len() >= 2 => {
                 let arr = &expr.children[0];
                 let idx = &expr.children[1];
                 match &arr.ty {
-                    ValueType::Array(_, _) => { self.gen_lvalue_addr(arr); }
-                    _ => { self.gen_expr(arr); }
+                    ValueType::Array(_, _) => {
+                        self.gen_lvalue_addr(arr);
+                    },
+                    _ => {
+                        self.gen_expr(arr);
+                    },
                 }
                 // a0 = base address
                 self.emit_addi(12, 10, 0); // a2 = base (save)
@@ -393,44 +406,38 @@ impl Riscv64Codegen {
                 }
                 // a2 = base, a0 = scaled offset
                 self.emit_add(10, 12, 10); // a0 = base + offset
-                // Load value
+                                           // Load value
                 let sz = value_type_size(&expr.ty).max(1);
                 self.emit_load_sz(10, 10, 0, sz);
                 return true;
-            }
+            },
             ExprKind::Opaque => {
                 // Opaque represents inline asm or label addresses that cannot be
                 // represented in the typed IR. These should be handled at the AST
                 // level via gen_expr_from_ast. For now, return 0 as a placeholder.
                 self.li_a0(0);
                 return true;
-            }
+            },
             ExprKind::Aggregate => {
                 // Aggregate expressions (struct/array values) are not yet fully
                 // supported in the riscv64 backend. Return 0 as a placeholder.
                 self.li_a0(0);
                 return true;
-            }
+            },
             _ => {
                 // Unhandled IR expression: emit diagnostic instead of
                 // silently producing wrong code (li a0, 0).
                 let span = expr.span.clone();
                 let mut diag = crate::diagnostics::Diagnostic::err(
                     "E0312",
-                    format!(
-                        "unsupported IR expression on riscv64: {:?}",
-                        expr.kind
-                    ),
+                    format!("unsupported IR expression on riscv64: {:?}", expr.kind),
                     span,
                 );
-                diag.hint = Some(
-                    "add handling in gen_expr or lower in SSA pass".to_string(),
-                );
+                diag.hint = Some("add handling in gen_expr or lower in SSA pass".to_string());
                 self.diagnostics.push(diag);
                 self.li_a0(0);
-            }
+            },
         }
         false
     }
-
 }

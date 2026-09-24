@@ -59,25 +59,25 @@ impl Aarch64Codegen {
                     | ((rs as u32 & 0x1f) << 16)
                     | ((rn as u32 & 0x1f) << 5)
                     | (rt as u32 & 0x1f)
-            }
+            },
             2 => {
                 0x4800fc00u32
                     | ((rs as u32 & 0x1f) << 16)
                     | ((rn as u32 & 0x1f) << 5)
                     | (rt as u32 & 0x1f)
-            }
+            },
             4 => {
                 0x8800fc00u32
                     | ((rs as u32 & 0x1f) << 16)
                     | ((rn as u32 & 0x1f) << 5)
                     | (rt as u32 & 0x1f)
-            }
+            },
             _ => {
                 0xc800fc00u32
                     | ((rs as u32 & 0x1f) << 16)
                     | ((rn as u32 & 0x1f) << 5)
                     | (rt as u32 & 0x1f)
-            }
+            },
         };
         self.emit(&insn.to_le_bytes());
     }

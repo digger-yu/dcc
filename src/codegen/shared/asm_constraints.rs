@@ -110,63 +110,174 @@ pub fn arm_reg_pool() -> ArchRegPool {
 
 fn aarch64_x_name(i: u8) -> &'static str {
     match i {
-        0 => "x0", 1 => "x1", 2 => "x2", 3 => "x3", 4 => "x4", 5 => "x5",
-        6 => "x6", 7 => "x7", 8 => "x8", 9 => "x9", 10 => "x10", 11 => "x11",
-        12 => "x12", 13 => "x13", 14 => "x14", 15 => "x15", 16 => "x16",
-        17 => "x17", 18 => "x18", 19 => "x19", 20 => "x20", 21 => "x21",
-        22 => "x22", 23 => "x23", 24 => "x24", 25 => "x25", 26 => "x26",
-        27 => "x27", 28 => "x28", 29 => "x29", 30 => "x30", 31 => "sp",
+        0 => "x0",
+        1 => "x1",
+        2 => "x2",
+        3 => "x3",
+        4 => "x4",
+        5 => "x5",
+        6 => "x6",
+        7 => "x7",
+        8 => "x8",
+        9 => "x9",
+        10 => "x10",
+        11 => "x11",
+        12 => "x12",
+        13 => "x13",
+        14 => "x14",
+        15 => "x15",
+        16 => "x16",
+        17 => "x17",
+        18 => "x18",
+        19 => "x19",
+        20 => "x20",
+        21 => "x21",
+        22 => "x22",
+        23 => "x23",
+        24 => "x24",
+        25 => "x25",
+        26 => "x26",
+        27 => "x27",
+        28 => "x28",
+        29 => "x29",
+        30 => "x30",
+        31 => "sp",
         _ => "xzr",
     }
 }
 
 fn aarch64_w_name(i: u8) -> &'static str {
     match i {
-        0 => "w0", 1 => "w1", 2 => "w2", 3 => "w3", 4 => "w4", 5 => "w5",
-        6 => "w6", 7 => "w7", 8 => "w8", 9 => "w9", 10 => "w10", 11 => "w11",
-        12 => "w12", 13 => "w13", 14 => "w14", 15 => "w15", 16 => "w16",
-        17 => "w17", 18 => "w18", 19 => "w19", 20 => "w20", 21 => "w21",
-        22 => "w22", 23 => "w23", 24 => "w24", 25 => "w25", 26 => "w26",
-        27 => "w27", 28 => "w28", 29 => "w29", 30 => "w30", 31 => "wsp",
+        0 => "w0",
+        1 => "w1",
+        2 => "w2",
+        3 => "w3",
+        4 => "w4",
+        5 => "w5",
+        6 => "w6",
+        7 => "w7",
+        8 => "w8",
+        9 => "w9",
+        10 => "w10",
+        11 => "w11",
+        12 => "w12",
+        13 => "w13",
+        14 => "w14",
+        15 => "w15",
+        16 => "w16",
+        17 => "w17",
+        18 => "w18",
+        19 => "w19",
+        20 => "w20",
+        21 => "w21",
+        22 => "w22",
+        23 => "w23",
+        24 => "w24",
+        25 => "w25",
+        26 => "w26",
+        27 => "w27",
+        28 => "w28",
+        29 => "w29",
+        30 => "w30",
+        31 => "wsp",
         _ => "wzr",
     }
 }
 
 fn riscv_abi_name(x: u8) -> &'static str {
     match x {
-        0 => "zero", 1 => "ra", 2 => "sp", 3 => "gp", 4 => "tp",
-        5 => "t0", 6 => "t1", 7 => "t2",
-        8 => "s0", 9 => "s1",
-        10 => "a0", 11 => "a1", 12 => "a2", 13 => "a3",
-        14 => "a4", 15 => "a5", 16 => "a6", 17 => "a7",
-        18 => "s2", 19 => "s3", 20 => "s4", 21 => "s5",
-        22 => "s6", 23 => "s7", 24 => "s8", 25 => "s9",
-        26 => "s10", 27 => "s11",
-        28 => "t3", 29 => "t4", 30 => "t5", 31 => "t6",
+        0 => "zero",
+        1 => "ra",
+        2 => "sp",
+        3 => "gp",
+        4 => "tp",
+        5 => "t0",
+        6 => "t1",
+        7 => "t2",
+        8 => "s0",
+        9 => "s1",
+        10 => "a0",
+        11 => "a1",
+        12 => "a2",
+        13 => "a3",
+        14 => "a4",
+        15 => "a5",
+        16 => "a6",
+        17 => "a7",
+        18 => "s2",
+        19 => "s3",
+        20 => "s4",
+        21 => "s5",
+        22 => "s6",
+        23 => "s7",
+        24 => "s8",
+        25 => "s9",
+        26 => "s10",
+        27 => "s11",
+        28 => "t3",
+        29 => "t4",
+        30 => "t5",
+        31 => "t6",
         _ => "??",
     }
 }
 
 fn mips_reg_name(r: u8) -> &'static str {
     match r {
-        0 => "$zero", 1 => "$at", 2 => "$v0", 3 => "$v1",
-        4 => "$a0", 5 => "$a1", 6 => "$a2", 7 => "$a3",
-        8 => "$t0", 9 => "$t1", 10 => "$t2", 11 => "$t3",
-        12 => "$t4", 13 => "$t5", 14 => "$t6", 15 => "$t7",
-        16 => "$s0", 17 => "$s1", 18 => "$s2", 19 => "$s3",
-        20 => "$s4", 21 => "$s5", 22 => "$s6", 23 => "$s7",
-        24 => "$t8", 25 => "$t9", 26 => "$k0", 27 => "$k1",
-        28 => "$gp", 29 => "$sp", 30 => "$fp", 31 => "$ra",
+        0 => "$zero",
+        1 => "$at",
+        2 => "$v0",
+        3 => "$v1",
+        4 => "$a0",
+        5 => "$a1",
+        6 => "$a2",
+        7 => "$a3",
+        8 => "$t0",
+        9 => "$t1",
+        10 => "$t2",
+        11 => "$t3",
+        12 => "$t4",
+        13 => "$t5",
+        14 => "$t6",
+        15 => "$t7",
+        16 => "$s0",
+        17 => "$s1",
+        18 => "$s2",
+        19 => "$s3",
+        20 => "$s4",
+        21 => "$s5",
+        22 => "$s6",
+        23 => "$s7",
+        24 => "$t8",
+        25 => "$t9",
+        26 => "$k0",
+        27 => "$k1",
+        28 => "$gp",
+        29 => "$sp",
+        30 => "$fp",
+        31 => "$ra",
         _ => "$??",
     }
 }
 
 fn arm_reg_name(r: u8) -> &'static str {
     match r {
-        0 => "r0", 1 => "r1", 2 => "r2", 3 => "r3",
-        4 => "r4", 5 => "r5", 6 => "r6", 7 => "r7",
-        8 => "r8", 9 => "r9", 10 => "r10", 11 => "fp",
-        12 => "ip", 13 => "sp", 14 => "lr", 15 => "pc",
+        0 => "r0",
+        1 => "r1",
+        2 => "r2",
+        3 => "r3",
+        4 => "r4",
+        5 => "r5",
+        6 => "r6",
+        7 => "r7",
+        8 => "r8",
+        9 => "r9",
+        10 => "r10",
+        11 => "fp",
+        12 => "ip",
+        13 => "sp",
+        14 => "lr",
+        15 => "pc",
         _ => "r?",
     }
 }
@@ -257,7 +368,7 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             }
             // 递归解析去掉 '%' 后的约束
             parse_single_constraint(rest)
-        }
+        },
         // '&' 前缀: early-clobber 标记, 跳过前缀解析剩余部分
         '&' => {
             let rest = &c[1..];
@@ -266,7 +377,7 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             }
             // 递归解析去掉 '&' 后的约束
             parse_single_constraint(rest)
-        }
+        },
         '=' => {
             let rest = &c[1..];
             match rest.chars().next() {
@@ -276,7 +387,7 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
                 // 未知字符一样按寄存器处理
                 _ => ConstraintKind::OutputReg,
             }
-        }
+        },
         '+' => {
             let rest = &c[1..];
             match rest.chars().next() {
@@ -286,20 +397,44 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
                 // 未知字符一样按寄存器处理
                 _ => ConstraintKind::InOutReg,
             }
-        }
+        },
         'r' => ConstraintKind::InputReg,
-        'q' => ConstraintKind::FixedReg { letter: 'q', fixed_reg: None },
-        'Q' => ConstraintKind::FixedReg { letter: 'Q', fixed_reg: None },
-        'a' => ConstraintKind::FixedReg { letter: 'a', fixed_reg: Some(0) },
-        'b' => ConstraintKind::FixedReg { letter: 'b', fixed_reg: Some(3) },
-        'c' => ConstraintKind::FixedReg { letter: 'c', fixed_reg: Some(1) },
-        'd' => ConstraintKind::FixedReg { letter: 'd', fixed_reg: Some(2) },
-        'S' => ConstraintKind::FixedReg { letter: 'S', fixed_reg: Some(6) },
-        'D' => ConstraintKind::FixedReg { letter: 'D', fixed_reg: Some(7) },
+        'q' => ConstraintKind::FixedReg {
+            letter: 'q',
+            fixed_reg: None,
+        },
+        'Q' => ConstraintKind::FixedReg {
+            letter: 'Q',
+            fixed_reg: None,
+        },
+        'a' => ConstraintKind::FixedReg {
+            letter: 'a',
+            fixed_reg: Some(0),
+        },
+        'b' => ConstraintKind::FixedReg {
+            letter: 'b',
+            fixed_reg: Some(3),
+        },
+        'c' => ConstraintKind::FixedReg {
+            letter: 'c',
+            fixed_reg: Some(1),
+        },
+        'd' => ConstraintKind::FixedReg {
+            letter: 'd',
+            fixed_reg: Some(2),
+        },
+        'S' => ConstraintKind::FixedReg {
+            letter: 'S',
+            fixed_reg: Some(6),
+        },
+        'D' => ConstraintKind::FixedReg {
+            letter: 'D',
+            fixed_reg: Some(7),
+        },
         'p' => ConstraintKind::InputReg, // 合法地址 → 按寄存器处理
         'm' => ConstraintKind::InputMem,
         'i' => ConstraintKind::Immediate,
-        'g' => ConstraintKind::InputReg, // "g" 通用 → 按寄存器处理
+        'g' => ConstraintKind::InputReg,  // "g" 通用 → 按寄存器处理
         'n' => ConstraintKind::Immediate, // "n" 已知整数常量
         'X' => ConstraintKind::Immediate, // "X" 任意常量
         // 多重约束: 取第一个有效选项
@@ -311,25 +446,37 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
                 ConstraintKind::InputMem
             } else if c.contains('i') || c.contains('n') {
                 ConstraintKind::Immediate
-            } else if c.contains('a') || c.contains('b') || c.contains('c')
-                || c.contains('d') || c.contains('S') || c.contains('D')
-                || c.contains('q') || c.contains('Q')
+            } else if c.contains('a')
+                || c.contains('b')
+                || c.contains('c')
+                || c.contains('d')
+                || c.contains('S')
+                || c.contains('D')
+                || c.contains('q')
+                || c.contains('Q')
             {
                 // x86 固定寄存器约束在多重约束中
-                let letter = c.chars().find(|ch| {
-                    matches!(ch, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q')
-                }).unwrap();
+                let letter = c
+                    .chars()
+                    .find(|ch| matches!(ch, 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'q' | 'Q'))
+                    .unwrap();
                 let fixed = match letter {
-                    'a' => Some(0), 'b' => Some(3),
-                    'c' => Some(1), 'd' => Some(2),
-                    'S' => Some(6), 'D' => Some(7),
+                    'a' => Some(0),
+                    'b' => Some(3),
+                    'c' => Some(1),
+                    'd' => Some(2),
+                    'S' => Some(6),
+                    'D' => Some(7),
                     _ => None,
                 };
-                ConstraintKind::FixedReg { letter, fixed_reg: fixed }
+                ConstraintKind::FixedReg {
+                    letter,
+                    fixed_reg: fixed,
+                }
             } else {
                 ConstraintKind::Other
             }
-        }
+        },
         _ => ConstraintKind::Other,
     }
 }
@@ -455,7 +602,7 @@ pub fn resolve_asm_operands(
                     used_regs.push(r.idx);
                     op.reg = Some(r);
                 }
-            }
+            },
             ConstraintKind::FixedReg { fixed_reg, .. } => {
                 // 固定寄存器约束: 尝试分配指定寄存器, 或从池中分配
                 if let Some(fixed_idx) = fixed_reg {
@@ -470,8 +617,8 @@ pub fn resolve_asm_operands(
                     used_regs.push(r.idx);
                     op.reg = Some(r);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         result.push(op);
     }
@@ -545,11 +692,7 @@ fn alloc_reg(pool: &ArchRegPool, used: &[u8]) -> Option<AllocReg> {
 /// - 链式运算: `+a-b+0x10`
 ///
 /// 返回解析后的新位置索引。
-fn parse_label_offset_expr(
-    chars: &[char],
-    mut pos: usize,
-    result: &mut String,
-) -> usize {
+fn parse_label_offset_expr(chars: &[char], mut pos: usize, result: &mut String) -> usize {
     let len = chars.len();
     while pos < len && (chars[pos] == '+' || chars[pos] == '-') {
         let sign = chars[pos];
@@ -583,7 +726,8 @@ fn parse_label_offset_expr(
         if chars[pos].is_ascii_digit() {
             let start = pos;
             // 检查是否是 0x 前缀
-            if chars[pos] == '0' && pos + 1 < len
+            if chars[pos] == '0'
+                && pos + 1 < len
                 && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
             {
                 pos += 2;
@@ -603,9 +747,7 @@ fn parse_label_offset_expr(
         if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' || chars[pos] == '.' {
             let start = pos;
             while pos < len
-                && (chars[pos].is_ascii_alphanumeric()
-                    || chars[pos] == '_'
-                    || chars[pos] == '.')
+                && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_' || chars[pos] == '.')
             {
                 pos += 1;
             }
@@ -660,7 +802,7 @@ pub fn resolve_asm_template_enhanced(
                 '%' => {
                     result.push('%');
                     i += 2;
-                }
+                },
                 // %[name] → 按名称查找
                 '[' => {
                     if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
@@ -683,7 +825,7 @@ pub fn resolve_asm_template_enhanced(
                         result.push(chars[i]);
                         i += 1;
                     }
-                }
+                },
                 // %l → asm goto 标签
                 'l' if i + 2 < chars.len() => {
                     if chars[i + 2] == '[' {
@@ -698,9 +840,7 @@ pub fn resolve_asm_template_enhanced(
                             result.push_str(&resolved);
                             let mut new_i = i + 3 + end + 1;
                             // Support complex label expressions: %l[name]±offset
-                            new_i = parse_label_offset_expr(
-                                &chars, new_i, &mut result,
-                            );
+                            new_i = parse_label_offset_expr(&chars, new_i, &mut result);
                             i = new_i;
                         } else {
                             result.push(chars[i]);
@@ -723,15 +863,13 @@ pub fn resolve_asm_template_enhanced(
                         }
                         let mut new_i = num_end;
                         // Support complex label expressions: %lN±offset
-                        new_i = parse_label_offset_expr(
-                            &chars, new_i, &mut result,
-                        );
+                        new_i = parse_label_offset_expr(&chars, new_i, &mut result);
                         i = new_i;
                     } else {
                         result.push(chars[i]);
                         i += 1;
                     }
-                }
+                },
                 // %c[label] → strip immediate prefix, resolve to label name
                 'c' if i + 2 < chars.len() && chars[i + 2] == '[' => {
                     if let Some(end) = chars[i + 3..].iter().position(|&c| c == ']') {
@@ -748,7 +886,7 @@ pub fn resolve_asm_template_enhanced(
                         result.push(chars[i]);
                         i += 1;
                     }
-                }
+                },
                 // 架构特定修饰符
                 'w' | 'x' if arch == AsmArch::AArch64 && i + 2 < chars.len() => {
                     let modifier = chars[i + 1];
@@ -762,8 +900,7 @@ pub fn resolve_asm_template_enhanced(
                                 if n.as_ref().map(|s| s.as_str()) == Some(&name) {
                                     if let Some(op) = operands.get(idx) {
                                         let force64 = modifier == 'x';
-                                        result
-                                            .push_str(&format_reg(op, arch, force64, None));
+                                        result.push_str(&format_reg(op, arch, force64, None));
                                     }
                                     break;
                                 }
@@ -794,7 +931,7 @@ pub fn resolve_asm_template_enhanced(
                         result.push(chars[i]);
                         i += 1;
                     }
-                }
+                },
                 // %cN → 立即数 (去前缀)
                 'c' if i + 2 < chars.len() && chars[i + 2].is_ascii_digit() => {
                     let num_start = i + 2;
@@ -811,7 +948,7 @@ pub fn resolve_asm_template_enhanced(
                         }
                     }
                     i = num_end;
-                }
+                },
                 // %N → 寄存器名
                 c if c.is_ascii_digit() => {
                     let num_start = i + 1;
@@ -828,11 +965,11 @@ pub fn resolve_asm_template_enhanced(
                         }
                     }
                     i = num_end;
-                }
+                },
                 _ => {
                     result.push(chars[i]);
                     i += 1;
-                }
+                },
             }
         } else {
             result.push(chars[i]);
@@ -859,14 +996,14 @@ fn format_reg(
                         AsmArch::Mips => name.to_string(), // $t0 → $t0
                         _ => name.to_string(),
                     }
-                }
+                },
                 _ => name.to_string(),
             }
-        }
+        },
         None => {
             // 无寄存器分配, 保持 %N 形式
             format!("%{}", op.index)
-        }
+        },
     }
 }
 
@@ -956,13 +1093,8 @@ mod tests {
     #[test]
     fn resolve_simple_output_input() {
         let pool = aarch64_reg_pool();
-        let ops = resolve_asm_operands(
-            &["=r".to_string()],
-            &["r".to_string()],
-            &[None],
-            &[None],
-            &pool,
-        );
+        let ops =
+            resolve_asm_operands(&["=r".to_string()], &["r".to_string()], &[None], &[None], &pool);
         assert_eq!(ops.len(), 2);
         assert!(ops[0].is_output);
         assert!(ops[0].reg.is_some());
@@ -975,31 +1107,18 @@ mod tests {
     #[test]
     fn resolve_matched_constraint() {
         let pool = aarch64_reg_pool();
-        let ops = resolve_asm_operands(
-            &["=r".to_string()],
-            &["0".to_string()],
-            &[None],
-            &[None],
-            &pool,
-        );
+        let ops =
+            resolve_asm_operands(&["=r".to_string()], &["0".to_string()], &[None], &[None], &pool);
         assert_eq!(ops.len(), 2);
         // 匹配约束应复用 output 的寄存器
-        assert_eq!(
-            ops[0].reg.as_ref().unwrap().idx,
-            ops[1].reg.as_ref().unwrap().idx
-        );
+        assert_eq!(ops[0].reg.as_ref().unwrap().idx, ops[1].reg.as_ref().unwrap().idx);
     }
 
     #[test]
     fn template_substitution_basic() {
         let pool = aarch64_reg_pool();
-        let ops = resolve_asm_operands(
-            &["=r".to_string()],
-            &["r".to_string()],
-            &[None],
-            &[None],
-            &pool,
-        );
+        let ops =
+            resolve_asm_operands(&["=r".to_string()], &["r".to_string()], &[None], &[None], &pool);
         let result = resolve_asm_template_enhanced(
             "\"mov %0, %1\"",
             &ops,
@@ -1122,7 +1241,10 @@ mod tests {
         // 'a' → eax/rax (reg 0)
         assert_eq!(
             parse_single_constraint("a"),
-            ConstraintKind::FixedReg { letter: 'a', fixed_reg: Some(0) }
+            ConstraintKind::FixedReg {
+                letter: 'a',
+                fixed_reg: Some(0)
+            }
         );
     }
 
@@ -1131,7 +1253,10 @@ mod tests {
         // 'b' → ebx/rbx (reg 3)
         assert_eq!(
             parse_single_constraint("b"),
-            ConstraintKind::FixedReg { letter: 'b', fixed_reg: Some(3) }
+            ConstraintKind::FixedReg {
+                letter: 'b',
+                fixed_reg: Some(3)
+            }
         );
     }
 
@@ -1140,7 +1265,10 @@ mod tests {
         // 'c' → ecx/rcx (reg 1)
         assert_eq!(
             parse_single_constraint("c"),
-            ConstraintKind::FixedReg { letter: 'c', fixed_reg: Some(1) }
+            ConstraintKind::FixedReg {
+                letter: 'c',
+                fixed_reg: Some(1)
+            }
         );
     }
 
@@ -1149,7 +1277,10 @@ mod tests {
         // 'd' → edx/rdx (reg 2)
         assert_eq!(
             parse_single_constraint("d"),
-            ConstraintKind::FixedReg { letter: 'd', fixed_reg: Some(2) }
+            ConstraintKind::FixedReg {
+                letter: 'd',
+                fixed_reg: Some(2)
+            }
         );
     }
 
@@ -1158,7 +1289,10 @@ mod tests {
         // 'S' → esi/rsi (reg 6)
         assert_eq!(
             parse_single_constraint("S"),
-            ConstraintKind::FixedReg { letter: 'S', fixed_reg: Some(6) }
+            ConstraintKind::FixedReg {
+                letter: 'S',
+                fixed_reg: Some(6)
+            }
         );
     }
 
@@ -1167,7 +1301,10 @@ mod tests {
         // 'D' → edi/rdi (reg 7)
         assert_eq!(
             parse_single_constraint("D"),
-            ConstraintKind::FixedReg { letter: 'D', fixed_reg: Some(7) }
+            ConstraintKind::FixedReg {
+                letter: 'D',
+                fixed_reg: Some(7)
+            }
         );
     }
 
@@ -1176,7 +1313,10 @@ mod tests {
         // 'q' → byte-addressable regs (a/b/c/d), no fixed index
         assert_eq!(
             parse_single_constraint("q"),
-            ConstraintKind::FixedReg { letter: 'q', fixed_reg: None }
+            ConstraintKind::FixedReg {
+                letter: 'q',
+                fixed_reg: None
+            }
         );
     }
 
@@ -1185,7 +1325,10 @@ mod tests {
         // 'Q' → broader byte-addressable regs, no fixed index
         assert_eq!(
             parse_single_constraint("Q"),
-            ConstraintKind::FixedReg { letter: 'Q', fixed_reg: None }
+            ConstraintKind::FixedReg {
+                letter: 'Q',
+                fixed_reg: None
+            }
         );
     }
 
@@ -1227,7 +1370,7 @@ mod tests {
             ConstraintKind::FixedReg { letter, fixed_reg } => {
                 assert_eq!(letter, 'a');
                 assert_eq!(fixed_reg, Some(0));
-            }
+            },
             _ => panic!("expected FixedReg, got {:?}", kind),
         }
     }
@@ -1279,37 +1422,29 @@ mod tests {
         let pool = aarch64_reg_pool();
         // Test that each fixed reg constraint resolves to the expected index
         let constraints = vec![
-            ("a", 0u8),  // eax → reg 0
-            ("c", 1),    // ecx → reg 1
-            ("d", 2),    // edx → reg 2
-            ("b", 3),    // ebx → reg 3
-            ("S", 6),    // esi → reg 6
-            ("D", 7),    // edi → reg 7
+            ("a", 0u8), // eax → reg 0
+            ("c", 1),   // ecx → reg 1
+            ("d", 2),   // edx → reg 2
+            ("b", 3),   // ebx → reg 3
+            ("S", 6),   // esi → reg 6
+            ("D", 7),   // edi → reg 7
         ];
         for (c_str, expected_idx) in constraints {
-            let ops = resolve_asm_operands(
-                &[],
-                &[c_str.to_string()],
-                &[],
-                &[None],
-                &pool,
-            );
+            let ops = resolve_asm_operands(&[], &[c_str.to_string()], &[], &[None], &pool);
             assert_eq!(ops.len(), 1, "constraint '{}'", c_str);
             let reg_idx = ops[0].reg.as_ref().unwrap().idx;
-            assert_eq!(reg_idx, expected_idx, "constraint '{}': expected reg {}, got {}", c_str, expected_idx, reg_idx);
+            assert_eq!(
+                reg_idx, expected_idx,
+                "constraint '{}': expected reg {}, got {}",
+                c_str, expected_idx, reg_idx
+            );
         }
     }
 
     #[test]
     fn resolve_x86_q_allocates_from_legacy_pool() {
         let pool = aarch64_reg_pool();
-        let ops = resolve_asm_operands(
-            &[],
-            &["q".to_string()],
-            &[],
-            &[None],
-            &pool,
-        );
+        let ops = resolve_asm_operands(&[], &["q".to_string()], &[], &[None], &pool);
         assert_eq!(ops.len(), 1);
         // 'q' has no fixed_reg, so it gets first available from pool
         assert!(ops[0].reg.is_some());

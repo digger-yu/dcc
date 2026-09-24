@@ -28,8 +28,11 @@ pub fn default_stdlib_include() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
             // target/release/dcc → ../../.. 回到项目根
-            for ancestor in [bin_dir, bin_dir.parent().unwrap_or(bin_dir),
-                             bin_dir.parent().and_then(|p| p.parent()).unwrap_or(bin_dir)] {
+            for ancestor in [
+                bin_dir,
+                bin_dir.parent().unwrap_or(bin_dir),
+                bin_dir.parent().and_then(|p| p.parent()).unwrap_or(bin_dir),
+            ] {
                 let candidate = ancestor.join("src/cpp/stdlib/headers");
                 if candidate.is_dir() {
                     return Some(candidate);
@@ -49,10 +52,7 @@ pub fn compile_cpp(
     opt_level: u8,
 ) -> Result<(), CppError> {
     let src = fs::read_to_string(cpp_src).map_err(|e| {
-        CppError::Io(std::io::Error::new(
-            e.kind(),
-            format!("read {}: {}", cpp_src.display(), e),
-        ))
+        CppError::Io(std::io::Error::new(e.kind(), format!("read {}: {}", cpp_src.display(), e)))
     })?;
     let bytes = src.as_bytes();
     let file = cpp_src.to_str().unwrap_or("input.cpp");
@@ -137,13 +137,11 @@ pub fn compile_cpp(
     if !out.status.success() {
         let mut span = crate::diagnostics::Span::point(file, 0, 0);
         span.file = std::sync::Arc::from(file);
-        return Err(CppError::Diagnostics(vec![
-            crate::diagnostics::Diagnostic::err(
-                "C0100",
-                format!("dcc failed: {}", String::from_utf8_lossy(&out.stderr)),
-                span,
-            ),
-        ]));
+        return Err(CppError::Diagnostics(vec![crate::diagnostics::Diagnostic::err(
+            "C0100",
+            format!("dcc failed: {}", String::from_utf8_lossy(&out.stderr)),
+            span,
+        )]));
     }
     Ok(())
 }
@@ -164,11 +162,7 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(
-            s.contains("struct Counter"),
-            "missing struct Counter in: {}",
-            s
-        );
+        assert!(s.contains("struct Counter"), "missing struct Counter in: {}", s);
         assert!(s.contains("_ZN7CounterC1Ev"), "missing ctor in: {}", s);
     }
 

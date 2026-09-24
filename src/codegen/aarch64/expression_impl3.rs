@@ -23,7 +23,7 @@ impl Aarch64Codegen {
                 } else {
                     self.mov_w0_imm(0);
                 }
-            }
+            },
             Expr::Binop { op, l, r, .. } => {
                 self.gen_expr_from_ast(l);
                 self.mov_w14_w0();
@@ -31,16 +31,16 @@ impl Aarch64Codegen {
                 self.mov_w1_w0();
                 self.mov_w0_w14();
                 self.binop_w0_w1(*op, Self::is_signed_ast_type(&l.ty()));
-            }
+            },
             Expr::Unary { op, e, .. } => {
                 self.gen_expr_from_ast(e);
                 match op {
                     UnOp::Neg => self.neg_w0(),
-                    UnOp::Plus => {}
+                    UnOp::Plus => {},
                     UnOp::Not => self.cmp_w0_zero(),
                     UnOp::BitNot => self.mvn_w0(),
                 }
-            }
+            },
             Expr::Cast { e, .. } => self.gen_expr_from_ast(e),
             Expr::Call { callee, args, .. } => {
                 // GCC 兼容内建函数: AST 路径编译期折叠
@@ -53,7 +53,7 @@ impl Aarch64Codegen {
                                 self.mov_w0_imm(0);
                             }
                             return;
-                        }
+                        },
                         "__builtin_nonzero_p" => {
                             let v = args
                                 .first()
@@ -61,23 +61,23 @@ impl Aarch64Codegen {
                                 .map_or(0, |v| if v != 0 { 1i128 } else { 0i128 });
                             self.mov_w0_imm(trunc_i32(v));
                             return;
-                        }
+                        },
                         "__builtin_constant_p" => {
                             let v = args
                                 .first()
                                 .map_or(0u32, |a| crate::const_eval::is_constant(a) as u32);
                             self.mov_w0_imm(v);
                             return;
-                        }
+                        },
                         "__builtin_object_size" | "__builtin_dynamic_object_size" => {
                             self.mov_w0_imm(u32::MAX);
                             return;
-                        }
+                        },
                         "__builtin_mul_loop" => {
                             self.mov_w0_imm(0);
                             return;
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 for (i, arg) in args.iter().enumerate().take(8) {
@@ -87,7 +87,7 @@ impl Aarch64Codegen {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     self.emit_bl_to(&name.name);
                 }
-            }
+            },
             Expr::AsmExpr {
                 asm_str,
                 outputs,
@@ -114,7 +114,7 @@ impl Aarch64Codegen {
                     span.line,
                     *volatile,
                 );
-            }
+            },
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
                     self.mov_w0_imm(trunc_i32(v));
@@ -129,7 +129,7 @@ impl Aarch64Codegen {
                     self.diagnostics.push(diag);
                     self.mov_w0_imm(0);
                 }
-            }
+            },
         }
     }
 }

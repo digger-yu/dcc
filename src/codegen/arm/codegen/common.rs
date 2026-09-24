@@ -1,10 +1,10 @@
 // ARM backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::ast::{BinOp, BlockItem, FuncDecl};
-use crate::codegen::shared::elf::{ElfSym, STB_GLOBAL, STT_FUNC};
 use super::struct_def::ArmCodegen;
 use super::BranchKind;
+use crate::ast::{BinOp, BlockItem, FuncDecl};
+use crate::codegen::shared::elf::{ElfSym, STB_GLOBAL, STT_FUNC};
 
 impl ArmCodegen {
     // ===== 局部变量分配 =====
@@ -41,7 +41,7 @@ impl ArmCodegen {
                 self.emit_push(vec![14]); // push lr
                 self.emit_bl("__aeabi_idiv");
                 self.emit_pop(vec![14]); // pop lr
-            }
+            },
             BinOp::Mod => {
                 // 简化: a % b = a - (a/b)*b
                 self.emit_push(vec![0, 1]); // save both
@@ -54,7 +54,7 @@ impl ArmCodegen {
                                         // 简化: 直接返回 0
                 self.emit_pop(vec![14]);
                 self.emit_load_imm(0, 0);
-            }
+            },
             BinOp::And => self.emit_and(0, 1, 0),
             BinOp::Or => self.emit_orr(0, 1, 0),
             BinOp::Xor => self.emit_eor(0, 1, 0),
@@ -64,44 +64,44 @@ impl ArmCodegen {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movlt(0, 1);
-            }
+            },
             BinOp::Gt => {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movgt(0, 1);
-            }
+            },
             BinOp::Le => {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movle(0, 1);
-            }
+            },
             BinOp::Ge => {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movge(0, 1);
-            }
+            },
             BinOp::EqEq => {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_moveq(0, 1);
-            }
+            },
             BinOp::Ne => {
                 self.emit_cmp(1, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movne(0, 1);
-            }
+            },
             BinOp::AndAnd => {
                 self.emit_and(0, 1, 0);
                 self.emit_cmp_imm(0, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movne(0, 1);
-            }
+            },
             BinOp::OrOr => {
                 self.emit_orr(0, 1, 0);
                 self.emit_cmp_imm(0, 0);
                 self.emit_mov_imm(0, 0);
                 self.emit_movne(0, 1);
-            }
+            },
         }
     }
 

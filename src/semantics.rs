@@ -59,14 +59,30 @@ pub enum StorageClass {
 /// 与完整 Type 的区别: 不包含 qualifiers, 不区分 signed/unsigned char 等。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageType {
-    Scalar { size: usize },
-    Array { elem_size: usize, count: Option<usize> },
-    Pointer { pointee_size: usize },
-    Aggregate { size: usize },
-    Vector { elem_size: usize, count: usize },
-    Complex { inner_size: usize },
+    Scalar {
+        size: usize,
+    },
+    Array {
+        elem_size: usize,
+        count: Option<usize>,
+    },
+    Pointer {
+        pointee_size: usize,
+    },
+    Aggregate {
+        size: usize,
+    },
+    Vector {
+        elem_size: usize,
+        count: usize,
+    },
+    Complex {
+        inner_size: usize,
+    },
     /// VLA: 元素大小已知, 但总大小/计数在运行时确定。
-    Vla { elem_size: usize },
+    Vla {
+        elem_size: usize,
+    },
 }
 
 // ============================================================================
@@ -128,7 +144,10 @@ pub enum ElementKind {
     /// 标量: 直接加载/存储
     Scalar,
     /// 数组元素: 需要衰减为首元素地址
-    Array { elem_size: usize, count: Option<usize> },
+    Array {
+        elem_size: usize,
+        count: Option<usize>,
+    },
     /// 聚合 (struct/union >8B): 需要地址或整体拷贝
     Aggregate { size: usize },
     /// 复数: 实部 + 虚部
@@ -208,9 +227,14 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
             let id = resolver.resolve_identity(&name.name);
             let storage = resolver.resolve_storage(&id, &name.name);
             address_from_storage(storage, ty)
-        }
+        },
 
-        Expr::Index { arr, idx, ty: elem_ty, .. } => {
+        Expr::Index {
+            arr,
+            idx,
+            ty: elem_ty,
+            ..
+        } => {
             // 数组/向量对象下标: 基址就是对象地址。
             // 指针成员下标 (如 s.p[i]): 先读取成员中保存的指针值。
             let mut base_addr = compute_lvalue_address(resolver, arr, ctx);
@@ -225,7 +249,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
             }
             let idx_offset = compute_index_offset(idx, elem_ty);
             combine_address(base_addr, idx_offset, elem_ty)
-        }
+        },
 
         Expr::Member {
             expr: base,
@@ -253,7 +277,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
                     ..combined
                 }
             }
-        }
+        },
 
         Expr::Deref { e, ty, .. } => {
             // *p: p 的值就是目标地址。
@@ -265,7 +289,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
                 offset: ByteOffset::Constant(0),
                 element_info: element_info_from_type(ty),
             }
-        }
+        },
 
         Expr::Cast { e, ty, .. } => {
             // (T)e 作为 lvalue: 穿透 cast, 直接计算内层地址
@@ -274,7 +298,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
                 element_info: element_info_from_type(ty),
                 ..inner
             }
-        }
+        },
 
         _ => {
             // 不应该到达这里: 只有 lvalue 表达式才会被传入。
@@ -287,7 +311,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
                     kind: ElementKind::Scalar,
                 },
             }
-        }
+        },
     }
 }
 
@@ -307,10 +331,7 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
     match elem_ty {
         // VLA 元素: stride 在运行时才知道
         _ if elem_ty.has_vla() => ByteOffset::VlaRuntime { addend: 0 },
-        _ => ByteOffset::Runtime {
-            stride,
-            addend: 0,
-        },
+        _ => ByteOffset::Runtime { stride, addend: 0 },
     }
 }
 
@@ -351,7 +372,7 @@ fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
             AddressBase::GlobalSymbolLoad {
                 symbol_key: storage.symbol_key.unwrap_or_default(),
             }
-        }
+        },
         // Upvar: 从父帧加载
         (StorageClass::Upvar, _) => AddressBase::UpvarLoad {
             offset: storage.stack_offset.unwrap_or(0),
@@ -388,13 +409,11 @@ fn add_byte_offsets(a: ByteOffset, b: ByteOffset) -> ByteOffset {
                 stride,
                 addend: addend + c,
             }
-        }
+        },
         (ByteOffset::Constant(c), ByteOffset::VlaRuntime { addend })
         | (ByteOffset::VlaRuntime { addend }, ByteOffset::Constant(c)) => {
-            ByteOffset::VlaRuntime {
-                addend: addend + c,
-            }
-        }
+            ByteOffset::VlaRuntime { addend: addend + c }
+        },
         // 两个运行时偏移不能简单合并 (需要两个寄存器)
         // 保留第一个, 第二个由物化阶段处理
         (other, _) => other,
@@ -455,7 +474,7 @@ fn member_field_offset(base_expr: &Expr, field: &ast::Ident) -> i64 {
                 }
             }
             0
-        }
+        },
         _ => 0,
     }
 }
@@ -470,21 +489,21 @@ pub fn determine_action(elem_ty: &Type, is_load: bool) -> MaterializeAction {
             } else {
                 MaterializeAction::AggregateStore
             }
-        }
+        },
         Type::Complex(_) => {
             if is_load {
                 MaterializeAction::ComplexLoad
             } else {
                 MaterializeAction::ComplexStore
             }
-        }
+        },
         _ => {
             if is_load {
                 MaterializeAction::LoadScalar
             } else {
                 MaterializeAction::StoreScalar
             }
-        }
+        },
     }
 }
 
@@ -513,7 +532,9 @@ pub fn storage_type_from_ast(ty: &Type) -> StorageType {
         Type::Complex(inner) => StorageType::Complex {
             inner_size: inner.size(),
         },
-        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => StorageType::Aggregate { size: ty.size() },
+        Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+            StorageType::Aggregate { size: ty.size() }
+        },
         _ => StorageType::Scalar { size: ty.size() },
     }
 }

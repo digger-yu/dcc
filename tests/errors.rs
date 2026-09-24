@@ -513,9 +513,7 @@ fn validate_diagnostic_snapshot(text: &str, name: &str) -> Result<(), String> {
         || head.starts_with("note[")
         || head.starts_with("dcc: error:");
     if !head_ok {
-        return Err(format!(
-            "{name}: 首行应为 error[...]/warning[...]/dcc: error:"
-        ));
+        return Err(format!("{name}: 首行应为 error[...]/warning[...]/dcc: error:"));
     }
     if head.starts_with("error[") || head.starts_with("warning[") || head.starts_with("note[") {
         // 某些 I/O 类错误 (E0100/E0101/E0102/E0300) 不携带源位置行 (line=0),
@@ -570,12 +568,12 @@ fn dcc_args_for(case: &ErrorCase) -> Vec<String> {
                     .to_string_lossy()
                     .into_owned(),
             );
-        }
+        },
         Mode::CompileObjectCustom => {
             args.push("-c".to_string());
             args.push("-o".to_string());
             args.push(case.custom_output.unwrap_or("a.out").to_string());
-        }
+        },
     }
     args
 }
@@ -616,10 +614,7 @@ fn diagnostic_error_snapshots() {
             );
             continue;
         }
-        if matches!(
-            case.name,
-            "e1001" | "e1004" | "e1009" | "e1010" | "e0300" | "e0010"
-        ) {
+        if matches!(case.name, "e1001" | "e1004" | "e1009" | "e1010" | "e0300" | "e0010") {
             let arg_strings = dcc_args_for(case);
             let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
             let (stderr, status) = run_dcc(&args, &source);
@@ -645,11 +640,7 @@ fn diagnostic_error_snapshots() {
         let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
         let (stderr, status) = run_dcc(&args, &source);
         let plain = stderr_text(&stderr);
-        assert!(
-            status != 0,
-            "case {} should fail to compile (exit={status})",
-            case.name
-        );
+        assert!(status != 0, "case {} should fail to compile (exit={status})", case.name);
         assert!(
             plain.contains(&format!("error[{}]", case.code)),
             "case {} should contain error[{}], stderr:\n{plain}",
@@ -690,10 +681,7 @@ fn w0001_implicit_int_warning_snapshot() {
     let source = fixtures_dir().join("w0001.c");
     let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
     let plain = stderr_text(&stderr);
-    assert!(
-        status == 0,
-        "W0001 隐式 int 仅警告，应编译成功，stderr:\n{plain}"
-    );
+    assert!(status == 0, "W0001 隐式 int 仅警告，应编译成功，stderr:\n{plain}");
     assert!(plain.contains("warning[W0001]:"), "stderr:\n{plain}");
     let normalized = normalize_stderr(&stderr, &source);
     assert_snapshot("w0001", &normalized);
@@ -704,10 +692,7 @@ fn w0004_asm_goto_missing_label_warning_snapshot() {
     let source = fixtures_dir().join("w0004.c");
     let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
     let plain = stderr_text(&stderr);
-    assert!(
-        status == 0,
-        "W0004 asm goto missing label 仅警告，应编译成功，stderr:\n{plain}"
-    );
+    assert!(status == 0, "W0004 asm goto missing label 仅警告，应编译成功，stderr:\n{plain}");
     assert!(plain.contains("warning[W0004]:"), "stderr:\n{plain}");
     assert!(
         plain.contains("missing_label"),
@@ -724,10 +709,7 @@ fn w0501_implicit_fallthrough_warning_snapshot() {
     let source = fixtures_dir().join("w0501.c");
     let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
     let plain = stderr_text(&stderr);
-    assert!(
-        status == 0,
-        "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}"
-    );
+    assert!(status == 0, "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}");
     assert!(plain.contains("warning[W0501]:"), "stderr:\n{plain}");
     // 恰好一条警告: 只有 implicit_fallthrough 的 case 1 未标注
     assert_eq!(
@@ -747,10 +729,7 @@ fn w0501_cpp_implicit_fallthrough_warning_snapshot() {
     let source = fixtures_dir().join("w0501_cpp.cpp");
     let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
     let plain = stderr_text(&stderr);
-    assert!(
-        status == 0,
-        "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}"
-    );
+    assert!(status == 0, "W0501 隐式贯穿仅警告，应编译成功，stderr:\n{plain}");
     assert!(plain.contains("warning[W0501]:"), "stderr:\n{plain}");
     assert!(plain.contains("warning[W0502]:"), "stderr:\n{plain}");
     // 恰好两条 W0501: implicit_fallthrough 的 case 1 与
@@ -780,17 +759,12 @@ fn e0205_unreadable_include_snapshot() {
 
     let fixtures = fixtures_dir();
     let source = fixtures.join("e0205.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-I", dir.to_str().unwrap()],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-I", dir.to_str().unwrap()], &source);
 
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
-    assert!(
-        stderr_text(&stderr).contains("error[E0205]:"),
-        "stderr:\n{stderr}"
-    );
+    assert!(stderr_text(&stderr).contains("error[E0205]:"), "stderr:\n{stderr}");
     let normalized = normalize_stderr(&stderr, &source);
     assert_snapshot("e0205", &normalized);
 }
@@ -818,10 +792,7 @@ fn e0209_force_include_unreadable_snapshot() {
 
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
-    assert!(
-        stderr_text(&stderr).contains("error[E0209]:"),
-        "stderr:\n{stderr}"
-    );
+    assert!(stderr_text(&stderr).contains("error[E0209]:"), "stderr:\n{stderr}");
     let normalized = normalize_stderr(&stderr, &source);
     assert_snapshot("e0209", &normalized);
 }
@@ -962,40 +933,28 @@ fn diagnostic_format_has_location_and_caret() {
 #[test]
 fn diag_color_never_strips_ansi() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=never"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=never"], &source);
     assert!(status != 0);
-    assert!(
-        !stderr.contains("\x1b["),
-        "color=never 不应输出 ANSI 转义, stderr:\n{stderr}"
-    );
+    assert!(!stderr.contains("\x1b["), "color=never 不应输出 ANSI 转义, stderr:\n{stderr}");
 }
 
 /// 颜色策略: -fdiagnostics-color=always 强制输出 ANSI 转义
 #[test]
 fn diag_color_always_emits_ansi() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=always"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=always"], &source);
     assert!(status != 0);
-    assert!(
-        stderr.contains("\x1b["),
-        "color=always 应输出 ANSI 转义, stderr:\n{stderr}"
-    );
+    assert!(stderr.contains("\x1b["), "color=always 应输出 ANSI 转义, stderr:\n{stderr}");
 }
 
 /// 颜色策略: 非法取值应报错 (dcc: error: ...)
 #[test]
 fn diag_color_rejects_unknown_value() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=rainbow"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-color=rainbow"], &source);
     assert!(status != 0);
     assert!(
         stderr.contains("dcc: error:") && stderr.contains("fdiagnostics-color"),
@@ -1007,10 +966,8 @@ fn diag_color_rejects_unknown_value() {
 #[test]
 fn diag_format_clang_strips_brackets() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=clang"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=clang"], &source);
     let plain = stderr_text(&stderr);
     assert!(status != 0);
     assert!(plain.contains("error: "), "stderr:\n{plain}");
@@ -1021,26 +978,19 @@ fn diag_format_clang_strips_brackets() {
 #[test]
 fn diag_format_msvc_uses_file_line_col() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=msvc"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=msvc"], &source);
     let plain = stderr_text(&stderr);
     assert!(status != 0);
-    assert!(
-        plain.contains(".c(") && plain.contains("): error E0004:"),
-        "stderr:\n{plain}"
-    );
+    assert!(plain.contains(".c(") && plain.contains("): error E0004:"), "stderr:\n{plain}");
 }
 
 /// 格式: vi 应只输出一行, 不含 caret
 #[test]
 fn diag_format_vi_is_single_line() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=vi"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=vi"], &source);
     let plain = stderr_text(&stderr);
     assert!(status != 0);
     let lines: Vec<&str> = plain.lines().collect();
@@ -1052,30 +1002,20 @@ fn diag_format_vi_is_single_line() {
 #[test]
 fn diag_format_sarif_emits_json() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=sarif"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=sarif"], &source);
     assert!(status != 0);
-    assert!(
-        stderr.contains("\"version\": \"2.1.0\""),
-        "stderr:\n{stderr}"
-    );
+    assert!(stderr.contains("\"version\": \"2.1.0\""), "stderr:\n{stderr}");
     assert!(stderr.contains("\"name\": \"dcc\""), "stderr:\n{stderr}");
-    assert!(
-        stderr.contains("\"ruleId\": \"E0004\""),
-        "stderr:\n{stderr}"
-    );
+    assert!(stderr.contains("\"ruleId\": \"E0004\""), "stderr:\n{stderr}");
 }
 
 /// 格式: 非法取值应报错
 #[test]
 fn diag_format_rejects_unknown_value() {
     let source = fixtures_dir().join("e0004.c");
-    let (stderr, status) = run_dcc(
-        &["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=rust"],
-        &source,
-    );
+    let (stderr, status) =
+        run_dcc(&["-std=gnu23", "-fsyntax-only", "-fdiagnostics-format=rust"], &source);
     assert!(status != 0);
     assert!(
         stderr.contains("dcc: error:") && stderr.contains("fdiagnostics-format"),

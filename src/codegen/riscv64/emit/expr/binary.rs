@@ -2,8 +2,8 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{BinOp, Type};
-use crate::codegen::riscv64::codegen::{BranchKind, Riscv64Codegen, align_rodata};
-use crate::ir::{ValueType};
+use crate::codegen::riscv64::codegen::{align_rodata, BranchKind, Riscv64Codegen};
+use crate::ir::ValueType;
 
 impl Riscv64Codegen {
     pub(crate) fn alloc_local(&mut self, name: &str, bytes: i32) -> i32 {
@@ -35,7 +35,7 @@ impl Riscv64Codegen {
                 self.li_a0(1);
                 self.emit_beq(12, 10, 8); // skip
                 self.li_a0(0);
-            }
+            },
             // M7 修复: 真 div/divu/rem/remu 替代 0 (RV64M 扩展)
             // binop_a0_a1 之前已把 a0=left, a1=right
             // 编码 (rd=a0, rs1=a0, rs2=a1):
@@ -60,7 +60,7 @@ impl Riscv64Codegen {
                     // srl: 逻辑右移, 高位补 0
                     self.emit_srl(10, 10, 11);
                 }
-            }
+            },
             BinOp::AndAnd | BinOp::OrOr => self.cmp_a0_zero(),
         }
     }
@@ -72,25 +72,40 @@ impl Riscv64Codegen {
         let is_double = matches!(ty, ValueType::Float { bits: 64 });
         match op {
             BinOp::Add => {
-                if is_double { self.emit_fadd_d(10, 11, 10); }
-                else { self.emit_fadd_s_fa0_fa1_fa0(); }
-            }
+                if is_double {
+                    self.emit_fadd_d(10, 11, 10);
+                } else {
+                    self.emit_fadd_s_fa0_fa1_fa0();
+                }
+            },
             BinOp::Sub => {
-                if is_double { self.emit_fsub_d(10, 11, 10); }
-                else { self.emit_fsub_s_fa0_fa1_fa0(); }
-            }
+                if is_double {
+                    self.emit_fsub_d(10, 11, 10);
+                } else {
+                    self.emit_fsub_s_fa0_fa1_fa0();
+                }
+            },
             BinOp::Mul => {
-                if is_double { self.emit_fmul_d(10, 11, 10); }
-                else { self.emit_fmul_s_fa0_fa1_fa0(); }
-            }
+                if is_double {
+                    self.emit_fmul_d(10, 11, 10);
+                } else {
+                    self.emit_fmul_s_fa0_fa1_fa0();
+                }
+            },
             BinOp::Div => {
-                if is_double { self.emit_fdiv_d(10, 11, 10); }
-                else { self.emit_fdiv_s_fa0_fa1_fa0(); }
-            }
+                if is_double {
+                    self.emit_fdiv_d(10, 11, 10);
+                } else {
+                    self.emit_fdiv_s_fa0_fa1_fa0();
+                }
+            },
             _ => {
-                if is_double { self.emit_fadd_d(10, 11, 10); }
-                else { self.emit_fadd_s_fa0_fa1_fa0(); }
-            }
+                if is_double {
+                    self.emit_fadd_d(10, 11, 10);
+                } else {
+                    self.emit_fadd_s_fa0_fa1_fa0();
+                }
+            },
         }
     }
 
@@ -100,25 +115,40 @@ impl Riscv64Codegen {
         let is_double = matches!(ty, ValueType::Float { bits: 64 });
         match op {
             BinOp::EqEq => {
-                if is_double { self.emit_feq_d(10, 11, 10); }
-                else { self.emit_feq_s(10, 11, 10); }
-            }
+                if is_double {
+                    self.emit_feq_d(10, 11, 10);
+                } else {
+                    self.emit_feq_s(10, 11, 10);
+                }
+            },
             BinOp::Lt => {
-                if is_double { self.emit_flt_d(10, 11, 10); }
-                else { self.emit_flt_s(10, 11, 10); }
-            }
+                if is_double {
+                    self.emit_flt_d(10, 11, 10);
+                } else {
+                    self.emit_flt_s(10, 11, 10);
+                }
+            },
             BinOp::Le => {
-                if is_double { self.emit_fle_d(10, 11, 10); }
-                else { self.emit_fle_s(10, 11, 10); }
-            }
+                if is_double {
+                    self.emit_fle_d(10, 11, 10);
+                } else {
+                    self.emit_fle_s(10, 11, 10);
+                }
+            },
             BinOp::Gt => {
-                if is_double { self.emit_flt_d(10, 10, 11); }
-                else { self.emit_flt_s(10, 10, 11); }
-            }
+                if is_double {
+                    self.emit_flt_d(10, 10, 11);
+                } else {
+                    self.emit_flt_s(10, 10, 11);
+                }
+            },
             BinOp::Ge => {
-                if is_double { self.emit_fle_d(10, 10, 11); }
-                else { self.emit_fle_s(10, 10, 11); }
-            }
+                if is_double {
+                    self.emit_fle_d(10, 10, 11);
+                } else {
+                    self.emit_fle_s(10, 10, 11);
+                }
+            },
             BinOp::Ne => {
                 if is_double {
                     self.emit_feq_d(10, 11, 10);
@@ -126,17 +156,22 @@ impl Riscv64Codegen {
                     self.emit_feq_s(10, 11, 10);
                 }
                 self.emit_xori(10, 10, 1);
-            }
+            },
             _ => {
-                if is_double { self.emit_feq_d(10, 11, 10); }
-                else { self.emit_feq_s(10, 11, 10); }
-            }
+                if is_double {
+                    self.emit_feq_d(10, 11, 10);
+                } else {
+                    self.emit_feq_s(10, 11, 10);
+                }
+            },
         }
     }
 
     /// 发射 NOP 填充到对齐边界 (RISC-V: NOP = addi x0, x0, 0 = 0x00000013, 4 字节)
     pub(crate) fn emit_align_padding(&mut self, alignment: u32) {
-        if alignment <= 1 { return; }
+        if alignment <= 1 {
+            return;
+        }
         let pos = self.code.len() as u64;
         let aligned = (pos + alignment as u64 - 1) & !(alignment as u64 - 1);
         let pad = (aligned - pos) as usize;
@@ -196,7 +231,7 @@ impl Riscv64Codegen {
                         _ => unreachable!(),
                     };
                     self.patch_branch(at, rs1, rs2, pos, funct3);
-                }
+                },
             }
         }
         self.pending_branches.retain(|(_, l, _)| l != name);
@@ -253,23 +288,23 @@ impl Riscv64Codegen {
                 // 符号扩展 8 位: SLLI a0, a0, 56; SRAI a0, a0, 56
                 self.emit_slli(10, 10, 56);
                 self.emit_srai(10, 10, 56);
-            }
+            },
             Type::Short => {
                 // 符号扩展 16 位: SLLI a0, a0, 48; SRAI a0, a0, 48
                 self.emit_slli(10, 10, 48);
                 self.emit_srai(10, 10, 48);
-            }
+            },
             Type::UChar => {
                 // 零扩展 8 位: SLLI a0, a0, 56; SRLI a0, a0, 56
                 self.emit_slli(10, 10, 56);
                 self.emit_srli(10, 10, 56);
-            }
+            },
             Type::UShort => {
                 // 零扩展 16 位: SLLI a0, a0, 48; SRLI a0, a0, 48
                 self.emit_slli(10, 10, 48);
                 self.emit_srli(10, 10, 48);
-            }
-            _ => {} // int/long/ptr 等不需要提升
+            },
+            _ => {}, // int/long/ptr 等不需要提升
         }
     }
 
@@ -280,20 +315,20 @@ impl Riscv64Codegen {
                 (1, _) | (8, true) => {
                     self.emit_slli(10, 10, 56);
                     self.emit_srai(10, 10, 56);
-                }
+                },
                 (8, false) => {
                     self.emit_slli(10, 10, 56);
                     self.emit_srli(10, 10, 56);
-                }
+                },
                 (16, true) => {
                     self.emit_slli(10, 10, 48);
                     self.emit_srai(10, 10, 48);
-                }
+                },
                 (16, false) => {
                     self.emit_slli(10, 10, 48);
                     self.emit_srli(10, 10, 48);
-                }
-                _ => {} // 32-bit 及以上不需要提升
+                },
+                _ => {}, // 32-bit 及以上不需要提升
             }
         }
     }
@@ -321,5 +356,4 @@ impl Riscv64Codegen {
             self.emit_sw(reg_x86, 2, off);
         }
     }
-
 }

@@ -108,13 +108,17 @@ mod tests {
 // Backend trait implementation (Phase 3b)
 mod backend {
     use super::*;
-    use crate::codegen::shared::backend::{Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage};
-    use crate::codegen::shared::features::FeatureSet;
     use crate::cli::Arch;
+    use crate::codegen::shared::backend::{
+        Backend, CommonImage, CompileInput, ExtraSection, ObjectRelocs, ObjectSymbols, TlsImage,
+    };
+    use crate::codegen::shared::features::FeatureSet;
     use crate::diagnostics::Diagnostic;
-    
+
     impl Backend for Mips64Codegen {
-        fn arch(&self) -> Arch { Arch::Mips64 }
+        fn arch(&self) -> Arch {
+            Arch::Mips64
+        }
         fn features(&self) -> FeatureSet {
             // NOTE: 本集里的 ObjectFormat(Elf) 与 Dwarf(4) 断言目前**无法由行为探针确证**：
             // mips64 的 `-c` 产出物 e_ident 声为大端而 ELF 头数值字段以小端写入，
@@ -129,13 +133,41 @@ mod backend {
             build_aux_sections(self, input);
             let inner = &self.inner;
             Ok(CommonImage {
-                code: inner.code.clone(), rodata: inner.rodata.clone(), data: vec![], bss: 0,
-                tls: TlsImage { offset: 0, size: 0, decl: None },
-                symbols: ObjectSymbols { globals: inner.symbols.iter().map(|s| s.name.clone()).collect(), locals: vec![], imports: vec![] },
-                relocs: ObjectRelocs { rellocs: inner.relocations.iter().map(|r| format!("{:?}", r)).collect() },
-                extra_sections: inner.extra_sections.iter().map(|sec| ExtraSection { name: sec.name.clone(), content: sec.data.clone() }).collect(),
+                code: inner.code.clone(),
+                rodata: inner.rodata.clone(),
+                data: vec![],
+                bss: 0,
+                tls: TlsImage {
+                    offset: 0,
+                    size: 0,
+                    decl: None,
+                },
+                symbols: ObjectSymbols {
+                    globals: inner.symbols.iter().map(|s| s.name.clone()).collect(),
+                    locals: vec![],
+                    imports: vec![],
+                },
+                relocs: ObjectRelocs {
+                    rellocs: inner
+                        .relocations
+                        .iter()
+                        .map(|r| format!("{:?}", r))
+                        .collect(),
+                },
+                extra_sections: inner
+                    .extra_sections
+                    .iter()
+                    .map(|sec| ExtraSection {
+                        name: sec.name.clone(),
+                        content: sec.data.clone(),
+                    })
+                    .collect(),
                 diagnostics: inner.diagnostics.clone(),
-                func_sizes: inner.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                func_sizes: inner
+                    .func_sizes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
             })
         }
         fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
@@ -162,7 +194,12 @@ mod backend {
             let func_pcs: Vec<(&str, u64, u64)> = module
                 .functions
                 .iter()
-                .filter_map(|f| cg.inner.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64)))
+                .filter_map(|f| {
+                    cg.inner
+                        .labels
+                        .get(&f.name)
+                        .map(|&pc| (f.name.as_str(), pc, pc + 64))
+                })
                 .collect();
             let dbg_opts = crate::debug::DebugOptions {
                 level: opts.debug_level,
@@ -187,7 +224,10 @@ mod backend {
             if !frames.is_empty() {
                 cg.push_extra_section(elf::ElfSection {
                     name: ".eh_frame".to_string(),
-                    data: crate::debug::build_eh_frame_with_arch(&frames, crate::debug::ArchKind::Mips64),
+                    data: crate::debug::build_eh_frame_with_arch(
+                        &frames,
+                        crate::debug::ArchKind::Mips64,
+                    ),
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 8,

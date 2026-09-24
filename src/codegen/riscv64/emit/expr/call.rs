@@ -1,7 +1,7 @@
 // RISC-V 64 backend - mechanically split from the monolithic
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
-use crate::codegen::riscv64::codegen::{Riscv64Codegen, aggregate_size, is_aggregate};
+use crate::codegen::riscv64::codegen::{aggregate_size, is_aggregate, Riscv64Codegen};
 use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Riscv64Codegen {
@@ -35,7 +35,7 @@ impl Riscv64Codegen {
                     self.gen_lvalue_addr(dst);
                 }
                 self.emit_mv(5, 10); // t0 = a0 = dst va_list 地址
-                // 解析 src 地址到 a0, 移动到 t1 (x6)
+                                     // 解析 src 地址到 a0, 移动到 t1 (x6)
                 let src_is_ptr = matches!(src.ty, ValueType::Pointer(_));
                 if src_is_ptr {
                     self.gen_expr(src);
@@ -43,14 +43,14 @@ impl Riscv64Codegen {
                     self.gen_lvalue_addr(src);
                 }
                 self.emit_mv(6, 10); // t1 = a0 = src va_list 地址
-                // 24 字节结构体拷贝: 3 个 doubleword (寄存器间接寻址)
-                // qword 1: gp_offset(4B) + fp_offset(4B)
-                self.emit_ld(10, 6, 0);  // ld a0, [t1]
-                self.emit_sd(10, 5, 0);  // sd a0, [t0]
-                // qword 2: overflow_arg_area
-                self.emit_ld(10, 6, 8);  // ld a0, [t1+8]
-                self.emit_sd(10, 5, 8);  // sd a0, [t0+8]
-                // qword 3: reg_save_area
+                                     // 24 字节结构体拷贝: 3 个 doubleword (寄存器间接寻址)
+                                     // qword 1: gp_offset(4B) + fp_offset(4B)
+                self.emit_ld(10, 6, 0); // ld a0, [t1]
+                self.emit_sd(10, 5, 0); // sd a0, [t0]
+                                        // qword 2: overflow_arg_area
+                self.emit_ld(10, 6, 8); // ld a0, [t1+8]
+                self.emit_sd(10, 5, 8); // sd a0, [t0+8]
+                                        // qword 3: reg_save_area
                 self.emit_ld(10, 6, 16); // ld a0, [t1+16]
                 self.emit_sd(10, 5, 16); // sd a0, [t0+16]
             }
@@ -78,18 +78,22 @@ impl Riscv64Codegen {
         }
         // __builtin_nonzero_p(x): x 为已知非常量返回 0
         if callee == "__builtin_nonzero_p" {
-            let value = args.first().and_then(|a| {
-                a.literal.as_ref().and_then(|l| match l {
-                    ExprLiteral::Int(v) => Some(if *v != 0 { 1i128 } else { 0i128 }),
-                    _ => None,
+            let value = args
+                .first()
+                .and_then(|a| {
+                    a.literal.as_ref().and_then(|l| match l {
+                        ExprLiteral::Int(v) => Some(if *v != 0 { 1i128 } else { 0i128 }),
+                        _ => None,
+                    })
                 })
-            }).unwrap_or(0);
+                .unwrap_or(0);
             self.li_a0(value as i32);
             return;
         }
         // __builtin_constant_p(x): 编译期常量判断
         if callee == "__builtin_constant_p" {
-            let value = args.first()
+            let value = args
+                .first()
                 .and_then(|a| a.literal.as_ref())
                 .map_or(0, |_| 1);
             self.li_a0(value);
@@ -109,15 +113,14 @@ impl Riscv64Codegen {
         // fenv.h 运行时调用 (C11 7.6): 内联为 CSR 指令序列,
         // 不依赖 libm (freestanding 无 libc).
         match callee.as_str() {
-            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept"
-            | "fetestexcept" | "fegetenv" | "fesetenv" | "feholdexcept"
-            | "feupdateenv"
+            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept" | "fetestexcept"
+            | "fegetenv" | "fesetenv" | "feholdexcept" | "feupdateenv"
                 if !self.labels.contains_key(&callee) =>
             {
                 self.gen_fenv_builtin(&callee, args);
                 return;
-            }
-            _ => {}
+            },
+            _ => {},
         }
 
         // D 扩展内建函数: sqrt/fmin/fmax 直接使用硬件浮点指令

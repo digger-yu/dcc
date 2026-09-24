@@ -44,13 +44,13 @@ impl CppParseError {
         match self {
             Self::Unexpected(want, got, _) => {
                 Diagnostic::err("C0001", format!("expected {}, got '{}'", want, got), span)
-            }
-            Self::Unsupported(what, _) => Diagnostic::err(
-                "C0002",
-                format!("C++ feature not yet supported: {}", what),
-                span,
-            )
-            .with_hint("M8 implements most C++ features; some advanced patterns may still fail"),
+            },
+            Self::Unsupported(what, _) => {
+                Diagnostic::err("C0002", format!("C++ feature not yet supported: {}", what), span)
+                    .with_hint(
+                        "M8 implements most C++ features; some advanced patterns may still fail",
+                    )
+            },
             Self::TooDeep(_) => Diagnostic::err("C0003", "nesting too deep", span),
             Self::TemplateDepthExceeded { depth, max, .. } => Diagnostic::err(
                 "C0004",
@@ -294,8 +294,8 @@ pub enum CppDecl {
     /// 注意：<>() 为空表示全特化；有具体参数也是全特化
     /// 与偏特化的区别：无模板形参列表，直接指定具体类型
     FullSpec {
-        primary_name: String,      // e.g., "Allocator"
-        specific_args: Vec<MangleType>,  // e.g., [void] or [int]
+        primary_name: String,           // e.g., "Allocator"
+        specific_args: Vec<MangleType>, // e.g., [void] or [int]
         body: CppBody,
     },
     /// `using Base::Base;` 继承构造函数 (M10+)
@@ -363,8 +363,7 @@ pub enum CppDecl {
     Opaque(String),
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CppBody {
     pub stmts: Vec<CppStmt>,
     /// M30.2: true = 纯声明 (类内 `Ret m() const;` 无 body). lower 端据此
@@ -802,11 +801,8 @@ impl<'a> CppParser<'a> {
                     text,
                     ..
                 })) => {
-                    text == "__attribute__"
-                        || text == "__asm__"
-                        || text == "__asm"
-                        || text == "asm"
-                }
+                    text == "__attribute__" || text == "__asm__" || text == "__asm" || text == "asm"
+                },
                 _ => false,
             };
             if !is_gnu {
@@ -829,7 +825,7 @@ impl<'a> CppParser<'a> {
                         }) => {
                             depth += 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::RParen,
                             ..
@@ -839,10 +835,10 @@ impl<'a> CppParser<'a> {
                             if depth == 0 {
                                 break;
                             }
-                        }
+                        },
                         _ => {
                             self.bump();
-                        }
+                        },
                     }
                 }
             }
@@ -864,7 +860,11 @@ impl<'a> CppParser<'a> {
             let cur_is_lbracket = self.at_tok(TokKind::LBracket);
             let cur_is_rbracket = self.at_tok(TokKind::RBracket);
             if cur_is_lbracket {
-                if let Some(CppTok::C(Tok { kind: TokKind::LBracket, .. })) = self.peek_token_at(1) {
+                if let Some(CppTok::C(Tok {
+                    kind: TokKind::LBracket,
+                    ..
+                })) = self.peek_token_at(1)
+                {
                     depth += 2;
                     self.bump();
                     self.bump();
@@ -872,7 +872,11 @@ impl<'a> CppParser<'a> {
                 }
             }
             if cur_is_rbracket {
-                if let Some(CppTok::C(Tok { kind: TokKind::RBracket, .. })) = self.peek_token_at(1) {
+                if let Some(CppTok::C(Tok {
+                    kind: TokKind::RBracket,
+                    ..
+                })) = self.peek_token_at(1)
+                {
                     depth -= 2;
                     if depth == 0 {
                         self.bump(); // ]
@@ -920,12 +924,8 @@ impl<'a> CppParser<'a> {
             Some(other) => {
                 let got = format!("{:?}", other);
                 Err(CppParseError::Unexpected("identifier", got, other.span()))
-            }
-            None => Err(CppParseError::Unexpected(
-                "identifier",
-                "EOF".into(),
-                self.span(),
-            )),
+            },
+            None => Err(CppParseError::Unexpected("identifier", "EOF".into(), self.span())),
         }
     }
 
@@ -1009,7 +1009,7 @@ impl<'a> CppParser<'a> {
                         return true;
                     }
                     i += 1;
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::Gt, ..
                 }) => {
@@ -1018,7 +1018,7 @@ impl<'a> CppParser<'a> {
                         return true;
                     }
                     i += 1;
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::Shr, ..
                 }) => {
@@ -1032,29 +1032,25 @@ impl<'a> CppParser<'a> {
                         return true;
                     }
                     i += 1;
-                }
+                },
                 // 仅在 depth==1 遇到语句/表达式终结符才判否
                 // 逗号在 depth==1 是模板实参分隔符, 合法
                 CppTok::C(Tok {
-                    kind:
-                        TokKind::Semi
-                        | TokKind::RParen
-                        | TokKind::LBrace
-                        | TokKind::RBrace,
+                    kind: TokKind::Semi | TokKind::RParen | TokKind::LBrace | TokKind::RBrace,
                     ..
                 }) if depth == 1 => {
                     return false;
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::Assign | TokKind::Question | TokKind::Colon,
                     ..
                 }) if depth == 1 => {
                     // `a < b ? c : d` / `a < b = c` 是表达式
                     return false;
-                }
+                },
                 _ => {
                     i += 1;
-                }
+                },
             }
         }
     }
@@ -1088,7 +1084,7 @@ impl<'a> CppParser<'a> {
                     if !text.trim().is_empty() {
                         decls.push(CppDecl::Opaque(text));
                     }
-                }
+                },
             }
         }
         self.check_implicit_fallthrough(&decls);
@@ -1100,19 +1096,38 @@ impl<'a> CppParser<'a> {
         let mut depth = 0i32;
         while let Some(tok) = &self.peek {
             match tok {
-                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }) if depth <= 0 => {
                     self.bump();
                     return;
-                }
-                CppTok::C(Tok { kind: TokKind::LBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::LParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Lt, ..
+                }) => {
                     depth += 1;
                     self.bump();
-                }
-                CppTok::C(Tok { kind: TokKind::RBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::RParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::RParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Gt, ..
+                }) => {
                     if depth > 0 {
                         depth -= 1;
                     }
@@ -1120,10 +1135,10 @@ impl<'a> CppParser<'a> {
                     if depth <= 0 {
                         return;
                     }
-                }
+                },
                 _ => {
                     self.bump();
-                }
+                },
             }
         }
     }
@@ -1157,31 +1172,53 @@ impl<'a> CppParser<'a> {
         let mut depth = 0i32;
         while let Some(tok) = &self.peek {
             match tok {
-                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }) if depth <= 0 => {
                     self.bump();
                     return;
-                }
-                CppTok::C(Tok { kind: TokKind::RBrace, .. }) if depth <= 0 => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                }) if depth <= 0 => {
                     // 不消耗 `}`, 留给外层循环
                     return;
-                }
-                CppTok::C(Tok { kind: TokKind::LBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::LParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Lt, ..
+                }) => {
                     depth += 1;
                     self.bump();
-                }
-                CppTok::C(Tok { kind: TokKind::RBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::RParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::RParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Gt, ..
+                }) => {
                     if depth > 0 {
                         depth -= 1;
                     }
                     self.bump();
-                }
+                },
                 _ => {
                     self.bump();
-                }
+                },
             }
         }
     }
@@ -1196,25 +1233,47 @@ impl<'a> CppParser<'a> {
         while let Some(tok) = &self.peek {
             match tok {
                 // 分号且不在嵌套内 → 语句结束, 消耗分号
-                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth <= 0 => {
+                CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }) if depth <= 0 => {
                     self.bump();
                     return;
-                }
+                },
                 // 花括号闭合且不在嵌套内 → 留给外层循环
-                CppTok::C(Tok { kind: TokKind::RBrace, .. }) if depth <= 0 => {
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                }) if depth <= 0 => {
                     return;
-                }
+                },
                 // 嵌套开始
-                CppTok::C(Tok { kind: TokKind::LBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::LParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Lt, ..
+                }) => {
                     depth += 1;
                     self.bump();
-                }
+                },
                 // 嵌套结束
-                CppTok::C(Tok { kind: TokKind::RBrace, .. })
-                | CppTok::C(Tok { kind: TokKind::RParen, .. })
-                | CppTok::C(Tok { kind: TokKind::Gt, .. }) => {
+                CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::RParen,
+                    ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Gt, ..
+                }) => {
                     if depth > 0 {
                         depth -= 1;
                         self.bump();
@@ -1222,10 +1281,10 @@ impl<'a> CppParser<'a> {
                         // 未平衡的 `}` → 不消耗, 留给外层
                         return;
                     }
-                }
+                },
                 _ => {
                     self.bump();
-                }
+                },
             }
         }
     }
@@ -1295,11 +1354,8 @@ impl<'a> CppParser<'a> {
             }))
         ) {
             self.bump(); // consume 'extern'
-            // Check for 'template'
-            if matches!(
-                self.peek_token_at(0),
-                Some(CppTok::Kw(CppKw::Template, ..))
-            ) {
+                         // Check for 'template'
+            if matches!(self.peek_token_at(0), Some(CppTok::Kw(CppKw::Template, ..))) {
                 return self.parse_extern_template_decl();
             } else {
                 return self.parse_decl();
@@ -1458,10 +1514,7 @@ impl<'a> CppParser<'a> {
             while let Some(tok) = self.peek_token_at(j) {
                 // C++ 关键字: inline, static, const, volatile, class
                 if let CppTok::Kw(k, _) = &tok {
-                    if matches!(
-                        k,
-                        CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile
-                    ) {
+                    if matches!(k, CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile) {
                         j += 1;
                         continue;
                     }
@@ -1504,10 +1557,7 @@ impl<'a> CppParser<'a> {
                     // M30.2: elaborated type `struct S` / `union U` / `enum E`
                     // 在返回类型位置 (如 `const struct line_map *fn(...)`).
                     // 吞关键字 + 后续标识符 (类型名).
-                    if matches!(
-                        t.kind,
-                        TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-                    ) {
+                    if matches!(t.kind, TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum) {
                         j += 1;
                         // 吞可选的类型名标识符
                         if matches!(
@@ -1640,7 +1690,7 @@ impl<'a> CppParser<'a> {
                 Err(_) => {
                     self.lex = saved_lex;
                     self.peek = saved_peek;
-                }
+                },
             }
         }
         Err(CppParseError::Unsupported("declaration form", self.span()))
@@ -1651,10 +1701,10 @@ impl<'a> CppParser<'a> {
     fn parse_extern_template_decl(&mut self) -> Result<CppDecl, CppParseError> {
         // Expect 'template'
         self.expect_kw(CppKw::Template)?;
-        
+
         // Parse the inner declaration (class/struct/function/etc.)
         let inner_decl = self.parse_decl()?;
-        
+
         Ok(CppDecl::ExternTemplate(Box::new(inner_decl)))
     }
 
@@ -1662,7 +1712,7 @@ impl<'a> CppParser<'a> {
     /// is_export: `export template` 时为 true
     fn parse_template_decl(&mut self, is_export: bool) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Template)?;
-        
+
         // G13: Check if this is a full specialization: `template<>` or `template<int>`
         // Key difference: no type parameters between <>
         if !matches!(
@@ -1672,26 +1722,22 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "<",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("<", format!("{:?}", self.peek), self.span()));
         }
-        
+
         let _saved_lex = self.lex.clone();
         let _saved_peek = self.peek.clone();
-        
+
         self.bump(); // consume <
-        
+
         // Look ahead to determine if this is full specialization or regular/partial
         let is_full_spec = self.lookahead_is_full_specialization();
-        
+
         if is_full_spec {
             // This is a full specialization: `template<>` or `template<void>` etc.
             return self.parse_full_specialization(None, None);
         }
-        
+
         // Regular partial/primary template with type parameters
         self.bump(); // consume <
         let mut params = vec![];
@@ -1758,15 +1804,22 @@ impl<'a> CppParser<'a> {
                 let saved_lex = self.lex.clone();
                 let saved_peek = self.peek.clone();
                 match self.parse_mangle_type() {
-                    Ok(ty) if matches!(
-                        &self.peek,
-                        Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
-                    ) => Some(ty),
+                    Ok(ty)
+                        if matches!(
+                            &self.peek,
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Ident,
+                                ..
+                            }))
+                        ) =>
+                    {
+                        Some(ty)
+                    },
                     _ => {
                         self.lex = saved_lex;
                         self.peek = saved_peek;
                         None
-                    }
+                    },
                 }
             };
             let name = self.expect_ident()?;
@@ -1793,7 +1846,11 @@ impl<'a> CppParser<'a> {
                 non_type: non_type.clone(),
                 is_pack,
                 // G11: Simple heuristic - class keyword without typename suggests template template param
-                template_params: if has_kw && !is_pack && !non_type.is_some() { Some(1) } else { None },
+                template_params: if has_kw && !is_pack && !non_type.is_some() {
+                    Some(1)
+                } else {
+                    None
+                },
             });
             if matches!(
                 &self.peek,
@@ -1814,11 +1871,7 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ">",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(">", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // M18.0: `template <T> requires Concept<T>` 后跟 `requires` 子句
@@ -1854,7 +1907,7 @@ impl<'a> CppParser<'a> {
                         })) => {
                             pattern_text.push('<');
                             depth += 1;
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Gt, ..
                         })) => {
@@ -1862,7 +1915,7 @@ impl<'a> CppParser<'a> {
                             if depth > 0 {
                                 pattern_text.push('>');
                             }
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Shr, ..
                         })) => {
@@ -1870,57 +1923,57 @@ impl<'a> CppParser<'a> {
                             if depth > 0 {
                                 pattern_text.push_str(">>");
                             }
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Colon,
                             ..
                         })) => {
                             pattern_text.push(':');
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Comma,
                             ..
                         })) => {
                             pattern_text.push(',');
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Star,
                             ..
                         })) => {
                             pattern_text.push('*');
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Ident,
                             text,
                             ..
                         })) => {
                             pattern_text.push_str(&text);
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::Number,
                             text,
                             ..
                         })) => {
                             pattern_text.push_str(&text);
-                        }
+                        },
                         Some(CppTok::ColonColon(_)) => {
                             pattern_text.push_str("::");
-                        }
+                        },
                         // M30.1: true/false 字面量转回文本 (非类型偏特化
                         // pattern 如 `picker<T, false>` 需要与 pick_partial
                         // 的 NonType key 匹配; Debug 格式含逗号会破坏
                         // pattern_text 的 split(',') 约定)
                         Some(CppTok::Kw(CppKw::True, _)) => {
                             pattern_text.push_str("true");
-                        }
+                        },
                         Some(CppTok::Kw(CppKw::False, _)) => {
                             pattern_text.push_str("false");
-                        }
+                        },
                         Some(other) => {
                             // 其他 token 转为文本
                             let s = format!("{:?}", other);
                             pattern_text.push_str(&s);
-                        }
+                        },
                         None => break,
                     }
                     if depth > 0 {
@@ -2001,7 +2054,7 @@ impl<'a> CppParser<'a> {
         if is_inline {
             self.bump();
         }
-        
+
         self.expect_kw(CppKw::Namespace)?;
         let real_name: Option<String> = if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
@@ -2024,11 +2077,7 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut body = vec![];
@@ -2045,7 +2094,7 @@ impl<'a> CppParser<'a> {
             body.push(self.parse_decl()?);
         }
         self.bump();
-        
+
         if is_inline {
             Ok(CppDecl::InlineNamespace {
                 name: real_name,
@@ -2074,7 +2123,13 @@ impl<'a> CppParser<'a> {
         ) {
             self.bump(); // consume 'enum'
             let name = self.expect_ident()?;
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
                 self.bump();
             }
             return Ok(CppDecl::UsingEnum { name });
@@ -2087,18 +2142,35 @@ impl<'a> CppParser<'a> {
         };
         let path = self.parse_qualified_name()?;
         // C++11: using Name = Type; (类型别名声明)
-        if !is_namespace && path.len() == 1
-            && matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
-                self.bump(); // consume '='
-                let target = self.parse_mangle_type()?;
-                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
-                    self.bump();
-                }
-                // Record in typedef_alias for template resolution
-                self.typedef_alias.insert(path[0].clone(),
-                    (format!("{:?}", target), vec![]));
-                return Ok(CppDecl::Typedef { target, name: path[0].clone() });
+        if !is_namespace
+            && path.len() == 1
+            && matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Assign,
+                    ..
+                }))
+            )
+        {
+            self.bump(); // consume '='
+            let target = self.parse_mangle_type()?;
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Semi,
+                    ..
+                }))
+            ) {
+                self.bump();
             }
+            // Record in typedef_alias for template resolution
+            self.typedef_alias
+                .insert(path[0].clone(), (format!("{:?}", target), vec![]));
+            return Ok(CppDecl::Typedef {
+                target,
+                name: path[0].clone(),
+            });
+        }
         // M10+: using Base::Base 形式 (继承构造)
         if path.len() == 2 && path[0] == path[1] {
             // `using Base::Base;` 继承构造
@@ -2137,60 +2209,87 @@ impl<'a> CppParser<'a> {
     fn lookahead_is_template_template(&self) -> bool {
         // Check pattern: `< typename/class Name > class/typename Name`
         self.peek_token_at(0).map_or(false, |t0| {
-            matches!(t0, CppTok::C(Tok { kind: TokKind::Lt, .. })) &&
-            self.peek_token_at(1).map_or(false, |t1| {
-                let is_type_kw = matches!(t1, CppTok::C(Tok { 
-                    kind: TokKind::Ident, text, .. 
+            matches!(
+                t0,
+                CppTok::C(Tok {
+                    kind: TokKind::Lt,
+                    ..
+                })
+            ) && self.peek_token_at(1).map_or(false, |t1| {
+                let is_type_kw = matches!(t1, CppTok::C(Tok {
+                    kind: TokKind::Ident, text, ..
                 }) if text == "typename" || text == "class")
-                    || self.at(CppKw::Typename) || self.at(CppKw::Class);
-                is_type_kw &&
-                self.peek_token_at(2).map_or(false, |t2| {
-                    matches!(t2, CppTok::C(Tok { kind: TokKind::Ident, .. })) &&
-                    self.peek_token_at(3).map_or(false, |t3| {
-                        matches!(t3, CppTok::C(Tok { 
-                            kind: TokKind::Ellipsis | TokKind::Gt, .. 
-                        })) &&
-                        self.peek_token_at(4).map_or(false, |t4| {
-                            matches!(t4, CppTok::C(Tok { kind: TokKind::Gt, .. })) &&
-                            self.peek_token_at(5).map_or(false, |t5| {
-                                let is_actual_name_kw = matches!(t5, CppTok::C(Tok { 
-                                    kind: TokKind::Ident, text, .. 
+                    || self.at(CppKw::Typename)
+                    || self.at(CppKw::Class);
+                is_type_kw
+                    && self.peek_token_at(2).map_or(false, |t2| {
+                        matches!(
+                            t2,
+                            CppTok::C(Tok {
+                                kind: TokKind::Ident,
+                                ..
+                            })
+                        ) && self.peek_token_at(3).map_or(false, |t3| {
+                            matches!(
+                                t3,
+                                CppTok::C(Tok {
+                                    kind: TokKind::Ellipsis | TokKind::Gt,
+                                    ..
+                                })
+                            ) && self.peek_token_at(4).map_or(false, |t4| {
+                                matches!(
+                                    t4,
+                                    CppTok::C(Tok {
+                                        kind: TokKind::Gt,
+                                        ..
+                                    })
+                                ) && self.peek_token_at(5).map_or(false, |t5| {
+                                    let is_actual_name_kw = matches!(t5, CppTok::C(Tok {
+                                    kind: TokKind::Ident, text, ..
                                 }) if text == "class")
-                                    || self.at(CppKw::Class) || self.at(CppKw::Typename);
-                                is_actual_name_kw
+                                        || self.at(CppKw::Class)
+                                        || self.at(CppKw::Typename);
+                                    is_actual_name_kw
+                                })
                             })
                         })
                     })
-                })
             })
         })
     }
 
-fn lookahead_is_full_specialization(&self) -> bool {
+    fn lookahead_is_full_specialization(&self) -> bool {
         let mut depth = 1;
-        
+
         // Peek at tokens starting from current position
         let mut idx = 0usize;
         while let Some(tok) = self.peek_token_at(idx) {
             match tok {
-                CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                CppTok::C(Tok {
+                    kind: TokKind::Lt, ..
+                }) => {
                     depth += 1;
-                }
-                CppTok::C(Tok { kind: TokKind::Gt, .. }) | CppTok::C(Tok { kind: TokKind::Shr, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::Gt, ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Shr, ..
+                }) => {
                     depth -= 1;
                     if depth == 0 {
                         return true; // Reached end without typename/class
                     }
-                }
+                },
                 // If we see typename/class as a type parameter keyword
                 CppTok::Kw(CppKw::Typename, _) | CppTok::Kw(CppKw::Class, _) => {
                     return false; // Has type parameters = not full spec
-                }
-                _ => {}
+                },
+                _ => {},
             }
             idx += 1;
         }
-        
+
         true // Default to full spec if uncertain
     }
 
@@ -2204,24 +2303,34 @@ fn lookahead_is_full_specialization(&self) -> bool {
         let mut specific_args: Vec<MangleType> = vec![];
         let mut depth = 1;
         let mut arg_buffer = String::new();
-        
+
         // Collect arguments inside <>
         while let Some(tok) = self.peek.clone() {
             match tok {
-                CppTok::C(Tok { kind: TokKind::Lt, .. }) => {
+                CppTok::C(Tok {
+                    kind: TokKind::Lt, ..
+                }) => {
                     self.bump();
                     depth += 1;
                     continue;
-                }
-                CppTok::C(Tok { kind: TokKind::Gt, .. }) | CppTok::C(Tok { kind: TokKind::Shr, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::Gt, ..
+                })
+                | CppTok::C(Tok {
+                    kind: TokKind::Shr, ..
+                }) => {
                     self.bump();
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
                     continue;
-                }
-                CppTok::C(Tok { kind: TokKind::Comma, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }) => {
                     if depth == 1 {
                         // End of args - parse what we have
                         if !arg_buffer.trim().is_empty() {
@@ -2235,27 +2344,37 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         arg_buffer.push(',');
                         continue;
                     }
-                }
-                CppTok::C(Tok { kind: TokKind::Ident, text, .. }) => {
+                },
+                CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                }) => {
                     if depth == 1 && !arg_buffer.is_empty() {
                         arg_buffer.push(' ');
                     }
                     arg_buffer.push_str(&text);
-                }
-                _ => {}
+                },
+                _ => {},
             }
             self.bump();
         }
-        
+
         // Now parse the primary name (class/struct/etc.)
         let primary_name = self.expect_ident()?;
-        
+
         // Check for optional <args> after name (e.g. `Allocator<void>`)
-        if matches!(self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+        if matches!(
+            self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Lt,
+                ..
+            }))
+        ) {
             // Template syntax after name - skip this part
             // The args were already captured in the first <>
         }
-        
+
         // Parse the body
         if !matches!(
             &self.peek,
@@ -2264,14 +2383,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump(); // {
-        
+
         let mut stmts = Vec::<CppStmt>::new();
         while let Some(t) = self.peek.clone() {
             if matches!(
@@ -2288,7 +2403,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             stmts.push(CppStmt::Decl(decl));
         }
         self.bump(); // }
-        
+
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -2298,7 +2413,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
         ) {
             self.bump();
         }
-        
+
         Ok(CppDecl::FullSpec {
             primary_name,
             specific_args,
@@ -2340,7 +2455,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     // Regular class/type name
                     Ok(MangleType::Class(s.to_string()))
                 }
-            }
+            },
         }
     }
 
@@ -2579,11 +2694,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut body = vec![];
@@ -2623,11 +2734,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "=",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("=", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // 简化: 把 = 之后到 ; 之前的 token 收为 body_text (M9 不解析表达式)
@@ -2699,21 +2806,21 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 })) => {
                     depth += 1;
                     self.bump();
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Lt, ..
                 })) => {
                     depth += 1;
                     self.bump();
                     text.push('<');
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::RParen | TokKind::RBracket | TokKind::RBrace,
                     ..
                 })) => {
                     depth -= 1;
                     self.bump();
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Gt, ..
                 })) => {
@@ -2738,7 +2845,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         break;
                     }
                     text.push('>');
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Ident,
                     text: id,
@@ -2756,7 +2863,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     ) {
                         text.push(' ');
                     }
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Number,
                     text: n,
@@ -2764,14 +2871,14 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 })) => {
                     self.bump();
                     text.push_str(&n);
-                }
+                },
                 Some(CppTok::ColonColon(_)) => {
                     self.bump();
                     text.push_str("::");
-                }
+                },
                 _ => {
                     self.bump();
-                }
+                },
             }
         }
         Some(text.trim().to_string())
@@ -2803,11 +2910,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut members = vec![];
@@ -2835,7 +2938,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if !text.trim().is_empty() {
                         members.push(CppDecl::Opaque(text));
                     }
-                }
+                },
             }
         }
         self.bump();
@@ -2897,11 +3000,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // M30.4: 匿名聚合体分配唯一名 (`__anon_aggr_1`, `__anon_aggr_2`, ...)
@@ -2934,7 +3033,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if !text.trim().is_empty() {
                         members.push(CppDecl::Opaque(text));
                     }
-                }
+                },
             }
         }
         self.bump();
@@ -3331,16 +3430,26 @@ fn lookahead_is_full_specialization(&self) -> bool {
             let mut k = 0;
             loop {
                 match self.peek_token_at(k) {
-                    Some(CppTok::C(Tok { kind: TokKind::Semi, .. })) | None => break,
-                    Some(CppTok::C(Tok { kind: TokKind::LParen, .. })) => {
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Semi,
+                        ..
+                    }))
+                    | None => break,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    })) => {
                         if matches!(
                             self.peek_token_at(k + 1),
-                            Some(CppTok::C(Tok { kind: TokKind::Star, .. }))
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Star,
+                                ..
+                            }))
                         ) {
                             return self.parse_member_fnptr();
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
                 k += 1;
             }
@@ -3369,7 +3478,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         return self.parse_member_fnptr();
                     }
                     return self.parse_ctor();
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Ident,
                     ..
@@ -3381,10 +3490,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             ..
                         })) => {
                             return self.parse_member_fn_inline();
-                        }
+                        },
                         _ => return self.parse_member_var(),
                     }
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Star,
                     ..
@@ -3409,14 +3518,14 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         }
                     }
                     return self.parse_member_var();
-                }
+                },
                 Some(CppTok::Kw(_, _)) => {
                     // 第二 token 是关键字: 可能是 `class operator+` (operator fn)
                     if self.is_operator_fn_start() {
                         return self.parse_operator_fn();
                     }
                     return Err(CppParseError::Unsupported("class member", self.span()));
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Amp, ..
                 })) => {
@@ -3461,7 +3570,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         });
                     }
                     return Err(CppParseError::Unsupported("T& member", self.span()));
-                }
+                },
                 _ => return Err(CppParseError::Unsupported("class member", self.span())),
             }
         }
@@ -3495,10 +3604,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             }))
         ) || matches!(
             &self.peek,
-            Some(CppTok::Kw(
-                CppKw::Const | CppKw::Volatile | CppKw::Static,
-                _
-            ))
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile | CppKw::Static, _))
         );
         if is_type_kw_or_qual {
             // M11 stdlib: 如果是 `Type operator ...` 模式, 走 parse_operator_fn
@@ -3513,10 +3619,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             // 跳过 const/volatile/static 限定
             while matches!(
                 self.peek_token_at(j),
-                Some(CppTok::Kw(
-                    CppKw::Const | CppKw::Volatile | CppKw::Static,
-                    _
-                ))
+                Some(CppTok::Kw(CppKw::Const | CppKw::Volatile | CppKw::Static, _))
             ) {
                 j += 1;
             }
@@ -3525,10 +3628,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             // `dccpp_time_point now()`)
             while let Some(tok) = self.peek_token_at(j) {
                 if let CppTok::Kw(k, _) = &tok {
-                    if matches!(
-                        k,
-                        CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile
-                    ) {
+                    if matches!(k, CppKw::Inline | CppKw::Static | CppKw::Const | CppKw::Volatile) {
                         j += 1;
                         continue;
                     }
@@ -3583,10 +3683,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             loop {
                 while matches!(
                     self.peek_token_at(j),
-                    Some(CppTok::Kw(
-                        CppKw::Const | CppKw::Volatile | CppKw::Static,
-                        _
-                    ))
+                    Some(CppTok::Kw(CppKw::Const | CppKw::Volatile | CppKw::Static, _))
                 ) {
                     j += 1;
                 }
@@ -3693,11 +3790,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         // 跳过 `extern "C" {` 部分
         self.bump();
@@ -3711,7 +3804,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 }) => {
                     self.bump();
                     depth += 1;
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::RBrace,
                     ..
@@ -3721,10 +3814,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if depth == 0 {
                         break;
                     }
-                }
+                },
                 _ => {
                     self.bump();
-                }
+                },
             }
         }
         // 截取原文: 整段 `extern "C" { ... }`
@@ -3744,7 +3837,12 @@ fn lookahead_is_full_specialization(&self) -> bool {
         self.bump();
         // M30.2: `typedef __typeof__(expr) Name;` (glibc nullptr_t) -
         // depth 跳过 __typeof__ 的括号表达式, 与 decltype 同等处理.
-        if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+        if let Some(CppTok::C(Tok {
+            kind: TokKind::Ident,
+            text,
+            ..
+        })) = &self.peek
+        {
             if text == "__typeof__" || text == "__typeof" || text == "typeof" {
                 self.bump();
                 if matches!(
@@ -3763,7 +3861,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             }) => {
                                 depth += 1;
                                 self.bump();
-                            }
+                            },
                             CppTok::C(Tok {
                                 kind: TokKind::RParen,
                                 ..
@@ -3773,10 +3871,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 if depth == 0 {
                                     break;
                                 }
-                            }
+                            },
                             _ => {
                                 self.bump();
-                            }
+                            },
                         }
                     }
                 }
@@ -3852,7 +3950,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 }) => {
                                     depth += 1;
                                     self.bump();
-                                }
+                                },
                                 CppTok::C(Tok {
                                     kind: TokKind::RParen,
                                     ..
@@ -3862,10 +3960,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                     if depth == 0 {
                                         break;
                                     }
-                                }
+                                },
                                 _ => {
                                     self.bump();
-                                }
+                                },
                             }
                         }
                     }
@@ -3889,7 +3987,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             }) => {
                                 depth += 1;
                                 self.bump();
-                            }
+                            },
                             CppTok::C(Tok {
                                 kind: TokKind::RBrace,
                                 ..
@@ -3899,15 +3997,15 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 if depth == 0 {
                                     break;
                                 }
-                            }
+                            },
                             _ => {
                                 self.bump();
-                            }
+                            },
                         }
                     }
                 }
                 t
-            }
+            },
             Err(_) => {
                 self.lex = saved_lex;
                 self.peek = saved_peek;
@@ -3959,7 +4057,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 })) => {
                                     depth += 1;
                                     self.bump();
-                                }
+                                },
                                 Some(CppTok::C(Tok {
                                     kind: TokKind::RBrace,
                                     ..
@@ -3969,17 +4067,22 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                     if depth == 0 {
                                         break;
                                     }
-                                }
+                                },
                                 None => break,
                                 _ => {
                                     self.bump();
-                                }
+                                },
                             }
                         }
                     }
                 }
                 // b: decltype ( ... ).
-                if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+                if let Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                })) = &self.peek
+                {
                     if text == "decltype"
                         && matches!(
                             self.peek_token_at(1),
@@ -4002,7 +4105,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                     ..
                                 })) => depth -= 1,
                                 None => break,
-                                _ => {}
+                                _ => {},
                             }
                         }
                     }
@@ -4016,7 +4119,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             ..
                         })) => {
                             self.bump();
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind:
                                 TokKind::KwChar
@@ -4040,7 +4143,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             ..
                         })) => {
                             self.bump();
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::LParen,
                             ..
@@ -4096,13 +4199,13 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                         ..
                                     })) => depth -= 1,
                                     None => break,
-                                    _ => {}
+                                    _ => {},
                                 }
                             }
                             if fp_name.is_some() {
                                 break;
                             }
-                        }
+                        },
                         _ => break,
                     }
                 }
@@ -4128,13 +4231,13 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                     ..
                                 })) => depth -= 1,
                                 None => break,
-                                _ => {}
+                                _ => {},
                             }
                         }
                     }
                 }
                 MangleType::Int
-            }
+            },
         };
         // 期望 ident (typedef 名). 模板实例类型 `Name<Args> alias`
         // 已由 parse_mangle_type 解析为 Template; 记录别名映射,
@@ -4163,7 +4266,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     }) => {
                         depth += 1;
                         self.bump();
-                    }
+                    },
                     CppTok::C(Tok {
                         kind: TokKind::RParen,
                         ..
@@ -4173,10 +4276,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         if depth == 0 {
                             break;
                         }
-                    }
+                    },
                     _ => {
                         self.bump();
-                    }
+                    },
                 }
             }
         }
@@ -4256,11 +4359,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump(); // {
                      // Parse the enumerator list: `name [= init-expr]`, comma separated,
@@ -4293,8 +4392,8 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     // 枚举列表结束
                     self.bump();
                     break;
-                }
-                _ => {}
+                },
+                _ => {},
             }
             // 所有括号种类都计入 depth, 保证 init 表达式内的逗号不会切分 enumerator.
             if open {
@@ -4312,7 +4411,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     }
                     cur_init = None;
                     self.bump();
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::Ident,
                     text,
@@ -4320,20 +4419,20 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 }) if cur_name.is_none() && depth == 1 => {
                     cur_name = Some(text.clone());
                     self.bump();
-                }
+                },
                 CppTok::C(Tok {
                     kind: TokKind::Assign,
                     ..
                 }) if cur_name.is_some() && depth == 1 => {
                     cur_init = Some(Vec::new());
                     self.bump();
-                }
+                },
                 _ => {
                     if let Some(init) = cur_init.as_mut() {
                         init.push(self.token_text(&t));
                     }
                     self.bump();
-                }
+                },
             }
         }
         if let Some(n) = cur_name.take() {
@@ -4363,10 +4462,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
         let mut j = 0;
         while matches!(
             self.peek_token_at(j),
-            Some(CppTok::Kw(
-                CppKw::Inline | CppKw::Static | CppKw::Virtual | CppKw::Explicit,
-                _
-            ))
+            Some(CppTok::Kw(CppKw::Inline | CppKw::Static | CppKw::Virtual | CppKw::Explicit, _))
         ) {
             j += 1;
         }
@@ -4521,7 +4617,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 } else {
                     false
                 }
-            }
+            },
             _ => false,
         };
         if need_ret {
@@ -4593,9 +4689,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 op,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 ret,
                 is_unary,
             });
@@ -4614,9 +4710,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 op,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 ret,
                 is_unary,
             });
@@ -4765,11 +4861,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut params = vec![];
@@ -4820,7 +4912,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         }) => {
                             depth += 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::RBracket,
                             ..
@@ -4830,10 +4922,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             if depth == 0 {
                                 break;
                             }
-                        }
+                        },
                         _ => {
                             self.bump();
-                        }
+                        },
                     }
                 }
             }
@@ -4955,7 +5047,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         }) => {
                             depth += 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::RBracket,
                             ..
@@ -4965,10 +5057,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             if depth == 0 {
                                 break;
                             }
-                        }
+                        },
                         _ => {
                             self.bump();
-                        }
+                        },
                     }
                 }
             }
@@ -4991,7 +5083,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         }) => {
                             depth += 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::RParen,
                             ..
@@ -5001,21 +5093,21 @@ fn lookahead_is_full_specialization(&self) -> bool {
                             }
                             depth -= 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::RBrace,
                             ..
                         }) => {
                             depth -= 1;
                             self.bump();
-                        }
+                        },
                         CppTok::C(Tok {
                             kind: TokKind::Comma,
                             ..
                         }) if depth == 0 => break,
                         _ => {
                             self.bump();
-                        }
+                        },
                     }
                 }
             }
@@ -5081,7 +5173,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     }) => {
                         depth += 1;
                         self.bump();
-                    }
+                    },
                     CppTok::C(Tok {
                         kind: TokKind::RBracket,
                         ..
@@ -5091,10 +5183,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         if depth == 0 {
                             break;
                         }
-                    }
+                    },
                     _ => {
                         self.bump();
-                    }
+                    },
                 }
             }
         }
@@ -5116,7 +5208,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     }) => {
                         depth += 1;
                         self.bump();
-                    }
+                    },
                     CppTok::C(Tok {
                         kind: TokKind::RParen,
                         ..
@@ -5126,14 +5218,14 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         }
                         depth -= 1;
                         self.bump();
-                    }
+                    },
                     CppTok::C(Tok {
                         kind: TokKind::Semi | TokKind::Comma,
                         ..
                     }) if depth == 0 => break,
                     _ => {
                         self.bump();
-                    }
+                    },
                 }
             }
         }
@@ -5209,7 +5301,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 | None => break,
                 _ => {
                     self.bump();
-                }
+                },
             }
             guard += 1;
         }
@@ -5254,7 +5346,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         ..
                     })) => depth -= 1,
                     None => break,
-                    _ => {}
+                    _ => {},
                 }
             }
         }
@@ -5301,7 +5393,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 }) => {
                                     depth += 1;
                                     self.bump();
-                                }
+                                },
                                 CppTok::C(Tok {
                                     kind: TokKind::RParen,
                                     ..
@@ -5311,10 +5403,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                     if depth == 0 {
                                         break;
                                     }
-                                }
+                                },
                                 _ => {
                                     self.bump();
-                                }
+                                },
                             }
                         }
                     }
@@ -5382,9 +5474,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ) {
                     self.bump();
                     CppBody {
-                    stmts: vec![],
-                    is_decl: true,
-                }
+                        stmts: vec![],
+                        is_decl: true,
+                    }
                 } else {
                     self.parse_body()?
                 };
@@ -5449,9 +5541,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
         ) {
             self.bump();
             CppBody {
-                    stmts: vec![],
-                    is_decl: true,
-                }
+                stmts: vec![],
+                is_decl: true,
+            }
         } else {
             self.parse_body()?
         };
@@ -5603,9 +5695,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 params,
                 inits,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_virtual,
                 is_explicit,
                 is_noexcept,
@@ -5637,11 +5729,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "~",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("~", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let class = self.expect_ident()?;
@@ -5659,9 +5747,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
             return Ok(CppDecl::Dtor {
                 class,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_virtual,
                 // C++11 [except.spec]/3: destructors are implicitly noexcept
                 is_noexcept: true,
@@ -5729,18 +5817,16 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 .chars()
                 .take_while(|c| c.is_ascii_hexdigit() || *c == 'x' || *c == 'X')
                 .collect();
-            let v: i64 = if let Some(hex) = raw
-                .strip_prefix("0x")
-                .or_else(|| raw.strip_prefix("0X"))
-            {
-                i64::from_str_radix(hex, 16).map_err(|_| {
-                    CppParseError::Unexpected("non-type template argument", raw, self.span())
-                })?
-            } else {
-                raw.parse::<i64>().map_err(|_| {
-                    CppParseError::Unexpected("non-type template argument", raw, self.span())
-                })?
-            };
+            let v: i64 =
+                if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+                    i64::from_str_radix(hex, 16).map_err(|_| {
+                        CppParseError::Unexpected("non-type template argument", raw, self.span())
+                    })?
+                } else {
+                    raw.parse::<i64>().map_err(|_| {
+                        CppParseError::Unexpected("non-type template argument", raw, self.span())
+                    })?
+                };
             self.bump();
             return Ok(MangleType::NonType(if neg { -v } else { v }));
         }
@@ -5778,16 +5864,16 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     ..
                 })) => {
                     self.bump();
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::KwVolatile,
                     ..
                 })) => {
                     self.bump();
-                }
+                },
                 Some(CppTok::Kw(CppKw::Volatile, _)) => {
                     self.bump();
-                }
+                },
                 _ => break,
             }
         }
@@ -5977,7 +6063,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     format!("{:?}", self.peek),
                     self.span(),
                 ))
-            }
+            },
         };
         self.bump();
         // M26: 处理限定名 `std::vector` / `::std::vector` 等
@@ -6100,11 +6186,11 @@ fn lookahead_is_full_specialization(&self) -> bool {
             "long" | "long int" | "int long" => MangleType::Long,
             "unsigned long" | "long unsigned" | "unsigned long int" | "long unsigned int" => {
                 MangleType::Ulong
-            }
+            },
             "long long" | "long long int" => MangleType::LongLong,
             "unsigned long long" | "long unsigned long" | "unsigned long long int" => {
                 MangleType::UlongLong
-            }
+            },
             "float" => MangleType::Float,
             "double" => MangleType::Double,
             "long double" | "double long" => MangleType::LongDouble,
@@ -6225,7 +6311,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             ) {
                 self.bump();
                 continue;
- }
+            }
             if matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -6320,9 +6406,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 name,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_virtual,
                 is_override: spec.is_override,
                 is_const,
@@ -6346,9 +6432,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 name,
                 params,
                 body: CppBody {
-                stmts: vec![],
-                is_decl: true,
-            },
+                    stmts: vec![],
+                    is_decl: true,
+                },
                 is_virtual,
                 is_override: spec.is_override,
                 is_const,
@@ -6535,24 +6621,23 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         | TokKind::KwExtern,
                     ..
                 }))
-            )
-                || match &self.peek {
-                    Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) => {
-                        text == "__inline" || text == "__inline__" || text == "__extension__"
-                    }
-                    _ => false,
-                };
+            ) || match &self.peek {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                })) => text == "__inline" || text == "__inline__" || text == "__extension__",
+                _ => false,
+            };
             if is_spec {
-                let is_c_static = matches!(
-                    &self.peek,
-                    Some(CppTok::Kw(CppKw::Static, _))
-                ) || matches!(
-                    &self.peek,
-                    Some(CppTok::C(Tok {
-                        kind: TokKind::KwStatic,
-                        ..
-                    }))
-                );
+                let is_c_static = matches!(&self.peek, Some(CppTok::Kw(CppKw::Static, _)))
+                    || matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::KwStatic,
+                            ..
+                        }))
+                    );
                 if is_c_static {
                     is_static = true;
                 }
@@ -6628,10 +6713,13 @@ fn lookahead_is_full_specialization(&self) -> bool {
         let params = self.parse_param_list()?;
         // M30.5: trailing return type `auto f() -> Ret`
         let mut trailing_ret_type: Option<MangleType> = None;
-        if matches!(self.peek, Some(CppTok::C(Tok {
-            kind: TokKind::Arrow,
-            ..
-        }))) {
+        if matches!(
+            self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Arrow,
+                ..
+            }))
+        ) {
             self.bump(); // consume `->`
             let ret_ty = self.parse_mangle_type()?;
             trailing_ret_type = Some(ret_ty);
@@ -6725,7 +6813,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     }) => {
                         depth += 1;
                         self.bump();
-                    }
+                    },
                     CppTok::C(Tok {
                         kind: TokKind::RBracket,
                         ..
@@ -6735,10 +6823,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         if depth == 0 {
                             break;
                         }
-                    }
+                    },
                     _ => {
                         self.bump();
-                    }
+                    },
                 }
             }
         }
@@ -6775,10 +6863,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             self.bump();
         } else {
             // `,` 多声明符等尾部不支持, 保持旧降级行为 (报 Unsupported)
-            return Err(CppParseError::Unsupported(
-                "global variable declarator",
-                self.span(),
-            ));
+            return Err(CppParseError::Unsupported("global variable declarator", self.span()));
         }
         Ok(CppDecl::GlobalVar {
             ty,
@@ -6798,10 +6883,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
         // 跳过说明符
         while matches!(
             self.peek_token_at(i),
-            Some(CppTok::Kw(
-                CppKw::Inline | CppKw::Static | CppKw::Virtual | CppKw::Explicit,
-                _
-            ))
+            Some(CppTok::Kw(CppKw::Inline | CppKw::Static | CppKw::Virtual | CppKw::Explicit, _))
         ) {
             i += 1;
         }
@@ -6889,11 +6971,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut stmts = vec![];
@@ -6926,7 +7004,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if !text.trim().is_empty() {
                         stmts.push(CppStmt::OpaqueStmt(text));
                     }
-                }
+                },
             }
         }
         self.bump();
@@ -6949,9 +7027,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
         } else {
             let stmt = self.parse_stmt()?;
             Ok(CppBody {
-            stmts: vec![stmt],
-            is_decl: false,
-        })
+                stmts: vec![stmt],
+                is_decl: false,
+            })
         }
     }
 
@@ -6960,8 +7038,14 @@ fn lookahead_is_full_specialization(&self) -> bool {
         if matches!(
             (&self.peek, self.peek_token_at(1)),
             (
-                Some(CppTok::C(Tok { kind: TokKind::Ident, .. })),
-                Some(CppTok::C(Tok { kind: TokKind::Colon, .. }))
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                })),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Colon,
+                    ..
+                }))
             )
         ) {
             let label = self.expect_ident()?;
@@ -7374,11 +7458,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let cond = self.parse_expr()?;
@@ -7389,11 +7469,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ")",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let then = self.parse_body_or_stmt()?;
@@ -7433,11 +7509,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let cond = self.parse_expr()?;
@@ -7448,11 +7520,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ")",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let body = self.parse_body_or_stmt()?;
@@ -7471,11 +7539,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let init = if matches!(
@@ -7529,11 +7593,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ")",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let body = self.parse_body()?;
@@ -7558,11 +7618,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let expr = self.parse_expr()?;
@@ -7574,11 +7630,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ")",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // expect `{`
@@ -7589,11 +7641,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "{",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // Parse body: collect case/default arms
@@ -7670,7 +7718,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 }
                 cur_label = self.span(); // `default` 关键字位置
                 self.bump(); // past `default`
-                // expect `:`
+                             // expect `:`
                 if !matches!(
                     &self.peek,
                     Some(CppTok::C(Tok {
@@ -7690,7 +7738,11 @@ fn lookahead_is_full_specialization(&self) -> bool {
             }
             // Check for `[[fallthrough]];` (C++17 standard attribute)
             if self.at_tok(TokKind::LBracket) {
-                if let Some(CppTok::C(Tok { kind: TokKind::LBracket, .. })) = self.peek_token_at(1) {
+                if let Some(CppTok::C(Tok {
+                    kind: TokKind::LBracket,
+                    ..
+                })) = self.peek_token_at(1)
+                {
                     if let Some(stmt) = self.parse_std_attributes_stmt()? {
                         cur_stmts.push(stmt);
                     }
@@ -7709,7 +7761,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             if is_attr_fallthrough {
                 let attr_span = self.span();
                 self.bump(); // __attribute__
-                // expect `((`
+                             // expect `((`
                 if self.at_tok(TokKind::LParen) {
                     self.bump();
                     if self.at_tok(TokKind::LParen) {
@@ -7778,7 +7830,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         return Some(s);
                     }
                     continue;
-                }
+                },
                 _ => return Some(stmt),
             }
         }
@@ -7796,24 +7848,24 @@ fn lookahead_is_full_specialization(&self) -> bool {
             | CppStmt::Fallthrough { .. }
             | CppStmt::StructuredBinding { .. } => true,
             CppStmt::If { then, els, .. } => {
-                let then_term = Self::last_effective_stmt(then)
-                    .map_or(false, |s| Self::stmt_terminates(s));
+                let then_term =
+                    Self::last_effective_stmt(then).map_or(false, |s| Self::stmt_terminates(s));
                 let else_term = els.as_ref().map_or(false, |e| {
                     Self::last_effective_stmt(e).map_or(false, |s| Self::stmt_terminates(s))
                 });
                 then_term && else_term
-            }
+            },
             CppStmt::IfConstexpr { then, els, .. } => {
-                let then_term = Self::last_effective_stmt(then)
-                    .map_or(false, |s| Self::stmt_terminates(s));
+                let then_term =
+                    Self::last_effective_stmt(then).map_or(false, |s| Self::stmt_terminates(s));
                 let else_term = els.as_ref().map_or(false, |e| {
                     Self::last_effective_stmt(e).map_or(false, |s| Self::stmt_terminates(s))
                 });
                 then_term && else_term
-            }
+            },
             CppStmt::Block(b) => {
                 Self::last_effective_stmt(b).map_or(false, |s| Self::stmt_terminates(s))
-            }
+            },
             CppStmt::Labeled { stmt, .. } => Self::stmt_terminates(stmt),
             CppStmt::Switch { .. } => true,
             CppStmt::While { .. }
@@ -7841,8 +7893,8 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if let Some(s) = Self::find_fallthrough_span(b) {
                         return Some(s);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         None
@@ -7868,43 +7920,43 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 for stmt in &body.stmts {
                     self.check_fallthrough_stmt(stmt);
                 }
-            }
+            },
             CppDecl::Class(cd) => {
                 for m in &cd.members {
                     self.check_fallthrough_decl(m);
                 }
-            }
+            },
             CppDecl::Namespace { body, .. } | CppDecl::InlineNamespace { body, .. } => {
                 // Regular and inline namespaces
                 for x in body {
                     self.check_fallthrough_decl(x);
                 }
-            }
+            },
             CppDecl::ExternTemplate(_) => {
                 // Extern templates: no fallthrough check needed (declaration only)
-            }
+            },
             CppDecl::Template { decl, .. } => {
                 self.check_fallthrough_decl(decl);
-            }
+            },
             CppDecl::PartialSpec { decl, .. } => {
                 self.check_fallthrough_decl(decl);
-            }
+            },
             CppDecl::FullSpec { body, .. } => {
                 // Full spec has body with statements to check
                 for stmt in &body.stmts {
                     self.check_fallthrough_stmt(stmt);
                 }
-            }
+            },
             CppDecl::ExportBlock(decls) => {
                 for d in decls {
                     self.check_fallthrough_decl(d);
                 }
-            }
+            },
             CppDecl::AnonAggr { members, .. } => {
                 for m in members {
                     self.check_fallthrough_decl(m);
                 }
-            }
+            },
             CppDecl::MemberVar { .. }
             | CppDecl::Using { .. }
             | CppDecl::UsingEnum { .. }
@@ -7919,7 +7971,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             | CppDecl::Empty
             | CppDecl::Enum { .. }
             | CppDecl::Opaque(_)
-            | CppDecl::StaticAssert { .. } => {}
+            | CppDecl::StaticAssert { .. } => {},
         }
     }
 
@@ -7947,9 +7999,9 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     let last = Self::last_effective_stmt(body);
                     match last {
                         // 最后一条有效语句是 fallthrough：合法标注
-                        Some(CppStmt::Fallthrough { .. }) => {}
+                        Some(CppStmt::Fallthrough { .. }) => {},
                         // 最后一条有效语句终止控制流：不会贯穿
-                        Some(s) if Self::stmt_terminates(s) => {}
+                        Some(s) if Self::stmt_terminates(s) => {},
                         // 其他情况：未标注的隐式贯穿
                         _ => {
                             // 如果 body 中有 fallthrough 但不在最后，额外发 misplaced 警告
@@ -7967,10 +8019,10 @@ fn lookahead_is_full_specialization(&self) -> bool {
                                 "implicit fallthrough between switch cases (use [[fallthrough]] to mark intentional fallthrough)",
                                 diag_span,
                             ).with_hint("add `[[fallthrough]];` at the end of the case body to silence this warning"));
-                        }
+                        },
                     }
                 }
-            }
+            },
             CppStmt::If { then, els, .. } => {
                 for stmt in &then.stmts {
                     self.check_fallthrough_stmt(stmt);
@@ -7980,7 +8032,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         self.check_fallthrough_stmt(stmt);
                     }
                 }
-            }
+            },
             CppStmt::IfConstexpr { then, els, .. } => {
                 for stmt in &then.stmts {
                     self.check_fallthrough_stmt(stmt);
@@ -7990,22 +8042,22 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         self.check_fallthrough_stmt(stmt);
                     }
                 }
-            }
+            },
             CppStmt::While { body, .. }
             | CppStmt::DoWhile { body, .. }
             | CppStmt::For { body, .. } => {
                 for stmt in &body.stmts {
                     self.check_fallthrough_stmt(stmt);
                 }
-            }
+            },
             CppStmt::Block(b) => {
                 for stmt in &b.stmts {
                     self.check_fallthrough_stmt(stmt);
                 }
-            }
+            },
             CppStmt::Labeled { stmt, .. } => {
                 self.check_fallthrough_stmt(stmt);
-            }
+            },
             CppStmt::Try { body, catches, .. } => {
                 for stmt in &body.stmts {
                     self.check_fallthrough_stmt(stmt);
@@ -8015,7 +8067,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         self.check_fallthrough_stmt(stmt);
                     }
                 }
-            }
+            },
             CppStmt::Return(_)
             | CppStmt::Break
             | CppStmt::Continue
@@ -8032,7 +8084,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
             | CppStmt::Fallthrough { .. }
             | CppStmt::OpaqueStmt(_)
             | CppStmt::StructuredBinding { .. }
-            | CppStmt::IfConstexpr { .. } => {}
+            | CppStmt::IfConstexpr { .. } => {},
         }
     }
 
@@ -9220,12 +9272,12 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         // 不是转换, 恢复 lexer 状态, 重新解析为括号表达式
                         self.lex = saved;
                         self.peek = lparen.clone();
-                    }
+                    },
                     Err(_) => {
                         // 解析类型失败, 恢复 lexer 状态
                         self.lex = saved;
                         self.peek = lparen.clone();
-                    }
+                    },
                 }
             }
             // 普通括号表达式
@@ -9473,11 +9525,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "[",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("[", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         let mut captures = vec![];
@@ -9550,11 +9598,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "]",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("]", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // 形参列表 (可选)
@@ -9640,16 +9684,12 @@ fn lookahead_is_full_specialization(&self) -> bool {
             Some(CppTok::Kw(CppKw::Typename, _)) => {
                 // 简化: typename 后面直接接 ident
                 self.expect_ident()
-            }
+            },
             Some(other) => {
                 let got = format!("{:?}", other);
                 Err(CppParseError::Unexpected("type-name", got, other.span()))
-            }
-            None => Err(CppParseError::Unexpected(
-                "type-name",
-                "EOF".into(),
-                self.span(),
-            )),
+            },
+            None => Err(CppParseError::Unexpected("type-name", "EOF".into(), self.span())),
         }
     }
 
@@ -9872,11 +9912,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "}",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("}", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         Ok(CppExpr::InitList(elems))
@@ -9894,18 +9930,18 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 })) if text == "const" => {
                     is_const = true;
                     true
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::KwConst,
                     ..
                 })) => {
                     is_const = true;
                     true
-                }
+                },
                 Some(CppTok::Kw(CppKw::Const, _)) => {
                     is_const = true;
                     true
-                }
+                },
                 _ => false,
             };
             if is {
@@ -10029,7 +10065,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 })) => {
                     depth += 1;
                     i += 1;
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Gt, ..
                 })) => {
@@ -10038,7 +10074,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if depth == 0 {
                         return Some(i);
                     }
-                }
+                },
                 Some(CppTok::C(Tok {
                     kind: TokKind::Shr, ..
                 })) => {
@@ -10052,7 +10088,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                     if depth == 0 {
                         return Some(i);
                     }
-                }
+                },
                 // 语句/表达式终结符在未闭合时出现: 视为比较表达式
                 Some(CppTok::C(Tok {
                     kind:
@@ -10067,7 +10103,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 })) if depth == 1 => return None,
                 _ => {
                     i += 1;
-                }
+                },
             }
         }
     }
@@ -10203,18 +10239,18 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         })) => {
                             depth += 1;
                             i += 1;
-                        }
+                        },
                         Some(CppTok::C(Tok {
                             kind: TokKind::RParen,
                             ..
                         })) => {
                             depth -= 1;
                             i += 1;
-                        }
+                        },
                         None => return false,
                         _ => {
                             i += 1;
-                        }
+                        },
                     }
                 }
             }
@@ -10316,10 +10352,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
 
     /// 第 i 个 token 是否是 const/volatile/restrict 限定符
     fn is_qualifier_at(&self, i: usize) -> bool {
-        matches!(
-            self.peek_token_at(i),
-            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _))
-        )
+        matches!(self.peek_token_at(i), Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
     }
 
     /// 第 i 个 token 是否是 long / short
@@ -10538,12 +10571,18 @@ fn lookahead_is_full_specialization(&self) -> bool {
         } else {
             self.parse_mangle_type()?
         };
-            
+
         // M30.4: 检测结构化绑定 - 下一个 token 是 `[` 而非 ident
-        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBracket, .. }))) {
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBracket,
+                ..
+            }))
+        ) {
             return self.parse_structured_binding(&ty, is_static, is_volatile);
         }
-            
+
         // 普通变量声明：继续解析 ident + 可能数组声明符
         let name = self.expect_ident()?;
         // 数组声明符：`T name[N];` — 收集所有 `[N]` 后缀 (多维数组),
@@ -10564,7 +10603,7 @@ fn lookahead_is_full_specialization(&self) -> bool {
                         "array size must be a positive integer literal",
                         self.span(),
                     ))
-                }
+                },
             };
             if !matches!(
                 &self.peek,
@@ -10608,9 +10647,19 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 self.bump();
             }
             return if is_static {
-                Ok(CppStmt::StaticLocal { ty, name, init: None, is_volatile })
+                Ok(CppStmt::StaticLocal {
+                    ty,
+                    name,
+                    init: None,
+                    is_volatile,
+                })
             } else {
-                Ok(CppStmt::LocalVar { ty, name, init: None, is_volatile })
+                Ok(CppStmt::LocalVar {
+                    ty,
+                    name,
+                    init: None,
+                    is_volatile,
+                })
             };
         }
         // 跳过可能的 `()` (如 `int x(0);` C++ 风格构造)
@@ -10671,14 +10720,24 @@ fn lookahead_is_full_specialization(&self) -> bool {
             let init = match &ty {
                 MangleType::Class(cls) if !args.is_empty() => {
                     Some(CppExpr::Call(Box::new(CppExpr::Ident(cls.clone())), args))
-                }
+                },
                 _ if args.len() == 1 => Some(args.into_iter().next().unwrap()),
                 _ => None,
             };
             return if is_static {
-                Ok(CppStmt::StaticLocal { ty, name, init, is_volatile })
+                Ok(CppStmt::StaticLocal {
+                    ty,
+                    name,
+                    init,
+                    is_volatile,
+                })
             } else {
-                Ok(CppStmt::LocalVar { ty, name, init, is_volatile })
+                Ok(CppStmt::LocalVar {
+                    ty,
+                    name,
+                    init,
+                    is_volatile,
+                })
             };
         }
         let init = if matches!(
@@ -10703,9 +10762,19 @@ fn lookahead_is_full_specialization(&self) -> bool {
             self.bump();
         }
         if is_static {
-            Ok(CppStmt::StaticLocal { ty, name, init, is_volatile })
+            Ok(CppStmt::StaticLocal {
+                ty,
+                name,
+                init,
+                is_volatile,
+            })
         } else {
-            Ok(CppStmt::LocalVar { ty, name, init, is_volatile })
+            Ok(CppStmt::LocalVar {
+                ty,
+                name,
+                init,
+                is_volatile,
+            })
         }
     }
 
@@ -10717,15 +10786,27 @@ fn lookahead_is_full_specialization(&self) -> bool {
         is_volatile: bool,
     ) -> Result<CppStmt, CppParseError> {
         self.bump(); // consume '['
-        
+
         // 解析绑定的成员名列表：`a`, `a, b`, `a, b, c`
         let mut names = Vec::new();
         loop {
             // 跳过空白并允许空绑定 `_`
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::RBracket,
+                    ..
+                }))
+            ) {
                 break;
             }
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }))
+            ) {
                 self.bump(); // skip leading comma
                 continue;
             }
@@ -10734,50 +10815,67 @@ fn lookahead_is_full_specialization(&self) -> bool {
                 kind: TokKind::Ident,
                 text: ref t,
                 ..
-            })) if t == "_") {
+            })) if t == "_")
+            {
                 self.bump();
                 "_".to_string()
             } else {
-                self.expect_ident()? 
+                self.expect_ident()?
             };
             names.push(name);
             // 检查是否还有更多成员
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::RBracket,
+                    ..
+                }))
+            ) {
                 break;
             }
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }))
+            ) {
                 self.bump();
                 continue;
             }
             return Err(CppParseError::Unexpected(
-                "]", "expected comma or ]".to_string(),
+                "]",
+                "expected comma or ]".to_string(),
                 self.span(),
             ));
         }
         self.bump(); // consume ']'
-        
+
         // 解析初始化表达式：`= init`
         let init_expr = if matches!(
             &self.peek,
-            Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
+            Some(CppTok::C(Tok {
+                kind: TokKind::Assign,
+                ..
+            }))
         ) {
             self.bump();
             Some(self.parse_expr()?)
         } else {
-            return Err(CppParseError::Unexpected(
-                "=", "expected init".to_string(),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("=", "expected init".to_string(), self.span()));
         };
-        
+
         // 期待分号
         if matches!(
             &self.peek,
-            Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
         ) {
             self.bump();
         }
-        
+
         Ok(CppStmt::StructuredBinding {
             names,
             ty: ty.clone(),
@@ -10819,7 +10917,7 @@ fn inject_class_name(d: CppDecl, class: &str, _saved: &Option<CppTok>) -> CppDec
                 is_volatile,
                 is_friend,
             }
-        }
+        },
         CppDecl::Ctor {
             params,
             inits,
@@ -11032,7 +11130,7 @@ fn char_lit_value(s: &str) -> i64 {
         Some('x') => {
             let hex: String = chars.take_while(|c| c.is_ascii_hexdigit()).collect();
             i64::from_str_radix(&hex, 16).unwrap_or(0)
-        }
+        },
         _ => 0,
     }
 }
@@ -11076,7 +11174,7 @@ mod tests {
             CppDecl::Class(c) => {
                 assert_eq!(c.name, "Foo");
                 assert_eq!(c.members.len(), 3);
-            }
+            },
             _ => panic!("expected class"),
         }
     }
@@ -11097,7 +11195,7 @@ mod tests {
             CppDecl::Namespace { name, body } => {
                 assert_eq!(name.as_deref(), Some("std"));
                 assert_eq!(body.len(), 1);
-            }
+            },
             _ => panic!("expected namespace, got {:?}", d[0]),
         }
     }
@@ -11113,7 +11211,7 @@ mod tests {
                 assert_eq!(c.bases.len(), 1);
                 assert_eq!(c.bases[0].name, "Base");
                 assert_eq!(c.bases[0].access, Access::Public);
-            }
+            },
             _ => panic!("expected class"),
         }
     }
@@ -11239,8 +11337,12 @@ mod tests {
                         ("BLUE".to_string(), None),
                     ]
                 );
-                if variants.is_empty() { println!("DEBUG: variants is EMPTY!"); } else { println!("DEBUG: variants: {:?}", variants); }
-            }
+                if variants.is_empty() {
+                    println!("DEBUG: variants is EMPTY!");
+                } else {
+                    println!("DEBUG: variants: {:?}", variants);
+                }
+            },
             other => panic!("expected Enum, got {:?}", other),
         }
     }
@@ -11264,7 +11366,7 @@ mod tests {
                 assert_eq!(variants[0], ("A".to_string(), Some("1".to_string())));
                 // 初始化表达式保留 token 文本 (含前值引用)
                 assert_eq!(variants[1], ("B".to_string(), Some("A + 2".to_string())));
-            }
+            },
             other => panic!("expected Enum, got {:?}", other),
         }
     }
@@ -11277,11 +11379,8 @@ mod tests {
         match &d[0] {
             CppDecl::Enum { name, variants, .. } => {
                 assert_eq!(name, "_anon");
-                assert_eq!(
-                    variants,
-                    &vec![("ANON_X".to_string(), Some("42".to_string()))]
-                );
-            }
+                assert_eq!(variants, &vec![("ANON_X".to_string(), Some("42".to_string()))]);
+            },
             other => panic!("expected Enum, got {:?}", other),
         }
     }
@@ -11295,12 +11394,9 @@ mod tests {
         match &d[0] {
             CppDecl::Enum { variants, .. } => {
                 assert_eq!(variants.len(), 2);
-                assert_eq!(
-                    variants[0],
-                    ("A".to_string(), Some("f ( 1 , 2 )".to_string()))
-                );
+                assert_eq!(variants[0], ("A".to_string(), Some("f ( 1 , 2 )".to_string())));
                 assert_eq!(variants[1], ("B".to_string(), Some("3".to_string())));
-            }
+            },
             other => panic!("expected Enum, got {:?}", other),
         }
     }
@@ -11323,9 +11419,12 @@ mod tests {
                 let mut stmts: Vec<&CppStmt> = body.stmts.iter().collect();
                 while let Some(s) = stmts.pop() {
                     match s {
-                        CppStmt::LocalVar { init: Some(CppExpr::IntLit(v)), .. } => vals.push(*v),
+                        CppStmt::LocalVar {
+                            init: Some(CppExpr::IntLit(v)),
+                            ..
+                        } => vals.push(*v),
                         CppStmt::Return(Some(CppExpr::IntLit(v))) => vals.push(*v),
-                        _ => {}
+                        _ => {},
                     }
                 }
                 assert!(vals.contains(&65), "hex 0x41: {:?}", vals);
@@ -11334,7 +11433,7 @@ mod tests {
                 assert!(vals.contains(&42), "suffix 42ULL: {:?}", vals);
                 assert!(vals.contains(&10), "\\n: {:?}", vals);
                 assert!(vals.contains(&65), "\\x41: {:?}", vals);
-            }
+            },
             other => panic!("expected FreeFn, got {:?}", other),
         }
     }
@@ -11352,7 +11451,7 @@ mod tests {
                         ty,
                         MangleType::Reference(inner) if matches!(&**inner, MangleType::Class(n) if n == "Widget")
                     ));
-                }
+                },
                 other => panic!("expected MemberVar, got {:?}", other),
             },
             other => panic!("expected Class, got {:?}", other),
@@ -11370,11 +11469,7 @@ mod tests {
         };";
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level();
-        assert!(
-            d.is_ok(),
-            "parse failed: {:?}",
-            d.as_ref().map(|v| v[0].clone())
-        );
+        assert!(d.is_ok(), "parse failed: {:?}", d.as_ref().map(|v| v[0].clone()));
     }
 
     // M18.1: T<U1, U2, ...> 模板实参语法解析
@@ -11436,7 +11531,7 @@ mod tests {
         match &d[0] {
             CppDecl::Typedef { name, .. } => {
                 assert_eq!(name, "int_alias");
-            }
+            },
             _ => panic!("expected Typedef, got {:?}", d[0]),
         }
     }
@@ -11451,14 +11546,28 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         // 应有至少 3 个声明: good_fn, Opaque, another_good_fn
-        assert!(decls.len() >= 3, "expected >= 3 decls, got {}: {:?}", decls.len(), decls.iter().map(|d| match d { CppDecl::Opaque(_) => "Opaque", CppDecl::FreeFn { name, .. } => name.as_str(), _ => "other" }).collect::<Vec<_>>());
+        assert!(
+            decls.len() >= 3,
+            "expected >= 3 decls, got {}: {:?}",
+            decls.len(),
+            decls
+                .iter()
+                .map(|d| match d {
+                    CppDecl::Opaque(_) => "Opaque",
+                    CppDecl::FreeFn { name, .. } => name.as_str(),
+                    _ => "other",
+                })
+                .collect::<Vec<_>>()
+        );
         // 第一个应为 FreeFn
         assert!(matches!(&decls[0], CppDecl::FreeFn { name, .. } if name == "good_fn"));
         // 中间应有 Opaque
         let has_opaque = decls.iter().any(|d| matches!(d, CppDecl::Opaque(_)));
         assert!(has_opaque, "expected at least one Opaque decl");
         // 最后一个应为 FreeFn
-        assert!(matches!(decls.last(), Some(CppDecl::FreeFn { name, .. }) if name == "another_good_fn"));
+        assert!(
+            matches!(decls.last(), Some(CppDecl::FreeFn { name, .. }) if name == "another_good_fn")
+        );
     }
 
     #[test]
@@ -11480,17 +11589,27 @@ mod tests {
             CppDecl::Class(c) => {
                 assert_eq!(c.name, "Foo");
                 // method 应有函数体
-                let has_method = c.members.iter().any(|m| {
-                    matches!(m, CppDecl::MemberFn { name, .. } if name == "method")
-                });
+                let has_method = c
+                    .members
+                    .iter()
+                    .any(|m| matches!(m, CppDecl::MemberFn { name, .. } if name == "method"));
                 assert!(has_method, "expected method member fn");
-            }
+            },
             _ => panic!("expected Class, got {:?}", decls[0]),
         }
         // parser 不应有错误 (这个源文件完全可解析)
-        let errors = p.diags.iter().filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error)).count();
-        assert_eq!(errors, 0, "expected no parse errors, got {}: {:?}", errors,
-            p.diags.iter().map(|d| &d.msg).collect::<Vec<_>>());
+        let errors = p
+            .diags
+            .iter()
+            .filter(|d| matches!(d.sev, crate::diagnostics::Severity::Error))
+            .count();
+        assert_eq!(
+            errors,
+            0,
+            "expected no parse errors, got {}: {:?}",
+            errors,
+            p.diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -11512,11 +11631,17 @@ mod tests {
                 let has_opaque = c.members.iter().any(|m| matches!(m, CppDecl::Opaque(_)));
                 assert!(has_opaque, "expected Opaque member in struct Bar");
                 // x 和 y 应正常解析
-                let has_x = c.members.iter().any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "x"));
-                let has_y = c.members.iter().any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "y"));
+                let has_x = c
+                    .members
+                    .iter()
+                    .any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "x"));
+                let has_y = c
+                    .members
+                    .iter()
+                    .any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "y"));
                 assert!(has_x, "expected member x");
                 assert!(has_y, "expected member y");
-            }
+            },
             _ => panic!("expected Class, got {:?}", decls[0]),
         }
     }
@@ -11541,13 +11666,13 @@ pub fn is_dependent_expression(expr: &CppExpr, params: &[TemplateParam]) -> bool
         CppExpr::PtrMember(obj, _member) => is_dependent_expression(obj, params),
         // 调用 - 检查callee
         CppExpr::Call(callee, args) => {
-            is_dependent_expression(callee, params) || 
-            args.iter().any(|arg| is_dependent_expression(arg, params))
-        }
+            is_dependent_expression(callee, params)
+                || args.iter().any(|arg| is_dependent_expression(arg, params))
+        },
         // 二元/一元运算 - 操作数检查
         CppExpr::BinOp(_op, lhs, rhs) => {
             is_dependent_expression(lhs, params) || is_dependent_expression(rhs, params)
-        }
+        },
         CppExpr::UnaryOp(_op, operand) => is_dependent_expression(operand, params),
         // 其他表达式类型默认非依赖
         _ => false,
@@ -11561,41 +11686,46 @@ pub fn analyze_dependent_names_for_decl(
 ) -> DependentAnalysisResult {
     let mut dependent = HashSet::new();
     let mut non_dependent = HashSet::new();
-    
+
     fn collect_identifiers<'a>(expr: &'a CppExpr, ids: &mut Vec<&'a str>) {
         match expr {
             CppExpr::Ident(name) => ids.push(name),
             CppExpr::Member(obj, member) => {
                 collect_identifiers(obj, ids);
                 ids.push(member);
-            }
+            },
             CppExpr::PtrMember(obj, member) => {
                 collect_identifiers(obj, ids);
                 ids.push(member);
-            }
+            },
             CppExpr::Call(f, args) => {
                 collect_identifiers(f, ids);
                 for arg in args {
                     collect_identifiers(arg, ids);
                 }
-            }
+            },
             CppExpr::BinOp(_op, lhs, rhs) => {
                 collect_identifiers(lhs, ids);
                 collect_identifiers(rhs, ids);
-            }
+            },
             CppExpr::UnaryOp(_op, operand) => {
                 collect_identifiers(operand, ids);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
-    
+
     // 遍历声明中的所有表达式
     match decl {
-        CppDecl::FreeFn { ret, params: fn_params, body, .. } => {
+        CppDecl::FreeFn {
+            ret,
+            params: fn_params,
+            body,
+            ..
+        } => {
             // 返回类型
-            collect_types(ret, &mut non_dependent);  // 暂时都视为非依赖
-            // 参数类型
+            collect_types(ret, &mut non_dependent); // 暂时都视为非依赖
+                                                    // 参数类型
             for (_name, ty) in fn_params {
                 collect_types(ty, &mut non_dependent);
             }
@@ -11603,8 +11733,14 @@ pub fn analyze_dependent_names_for_decl(
             for stmt in &body.stmts {
                 collect_from_stmt(stmt, params, &mut dependent, &mut non_dependent);
             }
-        }
-        CppDecl::MemberFn { ret, params: fn_params, body, class, .. } => {
+        },
+        CppDecl::MemberFn {
+            ret,
+            params: fn_params,
+            body,
+            class,
+            ..
+        } => {
             collect_types(ret, &mut non_dependent);
             for (_name, ty) in fn_params {
                 collect_types(ty, &mut non_dependent);
@@ -11624,7 +11760,7 @@ pub fn analyze_dependent_names_for_decl(
             for stmt in &body.stmts {
                 collect_from_stmt(stmt, &all_params, &mut dependent, &mut non_dependent);
             }
-        }
+        },
         CppDecl::Class(c) => {
             // 基类
             for base in &c.bases {
@@ -11635,17 +11771,17 @@ pub fn analyze_dependent_names_for_decl(
                 match member {
                     CppDecl::MemberVar { ty, .. } => {
                         collect_types(ty, &mut non_dependent);
-                    }
+                    },
                     CppDecl::Typedef { target, .. } => {
                         collect_types(target, &mut non_dependent);
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
-    
+
     DependentAnalysisResult {
         dependent_names: dependent,
         non_dependent_names: non_dependent,
@@ -11662,12 +11798,12 @@ fn collect_from_stmt(
     match stmt {
         CppStmt::Expr(expr) => {
             classify_expr(expr, params, dependent, non_dependent);
-        }
+        },
         CppStmt::Return(expr) => {
             if let Some(e) = expr {
                 classify_expr(e, params, dependent, non_dependent);
             }
-        }
+        },
         CppStmt::If { cond, then, els } => {
             classify_expr(cond, params, dependent, non_dependent);
             for s in &then.stmts {
@@ -11678,8 +11814,13 @@ fn collect_from_stmt(
                     collect_from_stmt(s, params, dependent, non_dependent);
                 }
             }
-        }
-        CppStmt::For { init, cond, step, body } => {
+        },
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
             if let Some(_i) = init {
                 // _i is Box<CppStmt>, recursively collect from this single statement
                 // This is typically a variable declaration or empty
@@ -11694,26 +11835,26 @@ fn collect_from_stmt(
             for stmt in &body.stmts {
                 collect_from_stmt(stmt, params, dependent, non_dependent);
             }
-        }
+        },
         CppStmt::While { cond, body } => {
             classify_expr(cond, params, dependent, non_dependent);
             for stmt in &body.stmts {
                 collect_from_stmt(stmt, params, dependent, non_dependent);
             }
-        }
+        },
         CppStmt::LocalVar { ty, init, .. } => {
             collect_types(ty, non_dependent);
             if let Some(i) = init {
                 classify_expr(i, params, dependent, non_dependent);
             }
-        }
+        },
         CppStmt::StaticLocal { ty, init, .. } => {
             collect_types(ty, non_dependent);
             if let Some(i) = init {
                 classify_expr(i, params, dependent, non_dependent);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -11731,7 +11872,7 @@ fn classify_expr(
             } else {
                 non_dependent.insert(name.clone());
             }
-        }
+        },
         CppExpr::Member(obj, member) => {
             let obj_str = match obj.as_ref() {
                 CppExpr::Ident(n) => n.clone(),
@@ -11746,7 +11887,7 @@ fn classify_expr(
                 };
                 non_dependent.insert(format!("{}.{}", obj_str, member));
             }
-        }
+        },
         CppExpr::PtrMember(obj, member) => {
             let obj_str = match obj.as_ref() {
                 CppExpr::Ident(n) => n.clone(),
@@ -11761,7 +11902,7 @@ fn classify_expr(
                 };
                 non_dependent.insert(format!("{}.{}", obj_str, member));
             }
-        }
+        },
         _ => {
             // 递归处理子表达式 - 收集所有标识符
             let mut ids = Vec::new();
@@ -11773,7 +11914,7 @@ fn classify_expr(
                     non_dependent.insert(id);
                 }
             }
-        }
+        },
     }
 }
 
@@ -11784,25 +11925,25 @@ fn collect_identifiers_for_classification(expr: &CppExpr, ids: &mut Vec<String>)
         CppExpr::Member(obj, member) => {
             collect_identifiers_for_classification(obj, ids);
             ids.push(member.clone());
-        }
+        },
         CppExpr::PtrMember(obj, member) => {
             collect_identifiers_for_classification(obj, ids);
             ids.push(member.clone());
-        }
+        },
         CppExpr::Call(f, args) => {
             collect_identifiers_for_classification(f, ids);
             for arg in args {
                 collect_identifiers_for_classification(arg, ids);
             }
-        }
+        },
         CppExpr::BinOp(_op, lhs, rhs) => {
             collect_identifiers_for_classification(lhs, ids);
             collect_identifiers_for_classification(rhs, ids);
-        }
+        },
         CppExpr::UnaryOp(_op, operand) => {
             collect_identifiers_for_classification(operand, ids);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -11811,23 +11952,23 @@ fn collect_types(ty: &MangleType, non_dependent: &mut HashSet<String>) {
     match ty {
         MangleType::Class(name) => {
             non_dependent.insert(name.clone());
-        }
+        },
         MangleType::Pointer(inner) | MangleType::Reference(inner) => {
             collect_types(inner, non_dependent);
-        }
+        },
         MangleType::Template { name, args } => {
             non_dependent.insert(name.clone());
             for arg in args {
                 collect_types(arg, non_dependent);
             }
-        }
+        },
         MangleType::TplMember { name, member, args } => {
             non_dependent.insert(format!("{}.{}", name, member));
             for arg in args {
                 collect_types(arg, non_dependent);
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 

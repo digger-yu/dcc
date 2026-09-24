@@ -15,42 +15,40 @@ use crate::codegen::shared::elf::{
 use crate::const_eval::{self, ConstValue};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::preproc::LineSpan;
-use crate::target::Target;
 use crate::semantics::{ObjectIdentity, StorageClass, StorageInfo, StorageType};
+use crate::target::Target;
 use std::collections::{HashMap, HashSet};
 
+mod abi;
 /// x86_64 代码生成器 - 所有子模块声明
 mod asm;
 mod backend;
 mod codegen;
-mod instructions;
-mod abi;
+mod elf;
 mod emit;
+mod instructions;
 mod mem;
 mod parallel;
 mod special;
-mod elf;
 mod stubs;
-
 
 // ============================================================================
 // Core Public Exports (from extracted modules)
 // All production exports flow through this section.
 // ============================================================================
 pub use self::codegen::{
-    Codegen, GlobalVar, PendingJump, JumpKind, AbiClass, ArgLoc,
-    CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout, PendingCodeRel,
-    VaListAddress, ParallelGlobalSnap, ParallelEmitCtx, FuncEmitChunk,
+    AbiClass, ArgLoc, Codegen, CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout,
+    FuncEmitChunk, GlobalVar, JumpKind, ParallelEmitCtx, ParallelGlobalSnap, PendingCodeRel,
+    PendingJump, VaListAddress,
 };
 
 // ============================================================================
 // ASM Register Constants and Utilities
 // ============================================================================
 pub use self::asm::{
-    ASM_REG_XMM, ASM_REG_YMM, ASM_REG_ZMM, ASM_REG_TMM, ASM_REG_K,
-    ASM_REG_CR, ASM_REG_DR, ASM_REG_MMX, ASM_REG_ST, AsmLocalLabels,
-    parse_asm_operand_str, strip_asm_comment, AsmOperand,
-    AsmDirectiveExpander,
+    parse_asm_operand_str, strip_asm_comment, AsmDirectiveExpander, AsmLocalLabels, AsmOperand,
+    ASM_REG_CR, ASM_REG_DR, ASM_REG_K, ASM_REG_MMX, ASM_REG_ST, ASM_REG_TMM, ASM_REG_XMM,
+    ASM_REG_YMM, ASM_REG_ZMM,
 };
 
 // No _impl modules - functionality extracted to dedicated modules (asm, codegen, etc.)

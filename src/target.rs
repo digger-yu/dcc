@@ -49,11 +49,11 @@ pub struct Target {
     ///
     /// 每个架构的 ABI 规定了基本类型的自然对齐要求。
     /// 这些值用于 struct/union 布局计算和 `__alignof__` 求值。
-    pub ptr_align: u8,       // 指针类型对齐
-    pub int_align: u8,       // int 对齐 (通常 = int_size)
-    pub long_align: u8,      // long 对齐
-    pub llong_align: u8,     // long long 对齐
-    pub double_align: u8,    // double 对齐
+    pub ptr_align: u8, // 指针类型对齐
+    pub int_align: u8,         // int 对齐 (通常 = int_size)
+    pub long_align: u8,        // long 对齐
+    pub llong_align: u8,       // long long 对齐
+    pub double_align: u8,      // double 对齐
     pub long_double_align: u8, // long double 对齐
     pub is_linux: bool,
     pub red_zone: bool,
@@ -359,16 +359,16 @@ impl Target {
                 if self.arch == crate::cli::Arch::X86_64 {
                     self.cpu_features = CpuFeatures::detect();
                 }
-            }
+            },
             "x86-64" | "x86-64-v1" => {
                 // 基线: 不做任何额外启用
-            }
+            },
             "x86-64-v2" => {
                 self.cpu_features.ssse3 = true;
                 self.cpu_features.sse4_1 = true;
                 self.cpu_features.sse4_2 = true;
                 self.cpu_features.popcnt = true;
-            }
+            },
             "x86-64-v3" => {
                 // v2 + AVX family
                 self.cpu_features.ssse3 = true;
@@ -381,7 +381,7 @@ impl Target {
                 self.cpu_features.bmi2 = true;
                 self.cpu_features.fma = true;
                 self.cpu_features.f16c = true;
-            }
+            },
             "x86-64-v4" => {
                 // v3 + AVX-512
                 self.cpu_features.ssse3 = true;
@@ -398,14 +398,14 @@ impl Target {
                 self.cpu_features.avx512bw = true;
                 self.cpu_features.avx512dq = true;
                 self.cpu_features.avx512vl = true;
-            }
+            },
             // Intel micro-architectures
             "sandybridge" => {
                 self.cpu_features.avx = true;
                 self.cpu_features.sse4_1 = true;
                 self.cpu_features.sse4_2 = true;
                 self.cpu_features.popcnt = true;
-            }
+            },
             "haswell" => {
                 self.cpu_features.avx = true;
                 self.cpu_features.avx2 = true;
@@ -416,7 +416,7 @@ impl Target {
                 self.cpu_features.sse4_1 = true;
                 self.cpu_features.sse4_2 = true;
                 self.cpu_features.popcnt = true;
-            }
+            },
             "skylake" | "skylake-avx512" => {
                 self.cpu_features.avx = true;
                 self.cpu_features.avx2 = true;
@@ -433,7 +433,7 @@ impl Target {
                     self.cpu_features.avx512dq = true;
                     self.cpu_features.avx512vl = true;
                 }
-            }
+            },
             "icelake-server" | "icelake-client" => {
                 self.cpu_features.avx = true;
                 self.cpu_features.avx2 = true;
@@ -449,7 +449,7 @@ impl Target {
                 self.cpu_features.avx512dq = true;
                 self.cpu_features.avx512vl = true;
                 self.cpu_features.avx512_vnni = true;
-            }
+            },
             "sapphirerapids" | "granite-rapids" => {
                 self.cpu_features.avx = true;
                 self.cpu_features.avx2 = true;
@@ -468,14 +468,14 @@ impl Target {
                 self.cpu_features.avx_vnni = true;
                 self.cpu_features.avx10_1 = true;
                 self.cpu_features.apx_f = true;
-            }
+            },
             // ARM micro-architectures (mcpu)
             "cortex-a53" | "cortex-a72" | "cortex-a76" => {
                 // ARMv8.0 A-profile baseline
-            }
+            },
             "neoverse-n1" | "neoverse-v1" => {
                 // ARMv8.2+ with crypto extensions
-            }
+            },
             // ARM Cortex-M embedded cores (bare-metal)
             "cortex-m0" | "cortex-m0plus" | "cortex-m1" => {
                 // ARMv6-M: Thumb-1 only, no Thumb-2, soft-float
@@ -484,7 +484,7 @@ impl Target {
                 self.has_fpu = false;
                 self.has_dsp = false;
                 self.has_trustzone = false;
-            }
+            },
             "cortex-m3" => {
                 // ARMv7-M: Thumb-2, soft-float, no DSP
                 self.arm_arch_version = Some("armv7-m".to_string());
@@ -492,7 +492,7 @@ impl Target {
                 self.has_fpu = false;
                 self.has_dsp = false;
                 self.has_trustzone = false;
-            }
+            },
             "cortex-m4" => {
                 // ARMv7E-M: Thumb-2, optional single-precision FP, DSP
                 self.arm_arch_version = Some("armv7e-m".to_string());
@@ -500,7 +500,7 @@ impl Target {
                 self.has_fpu = true; // optional, enabled by default
                 self.has_dsp = true;
                 self.has_trustzone = false;
-            }
+            },
             "cortex-m7" => {
                 // ARMv7E-M: Thumb-2, optional single/double FP, DSP
                 self.arm_arch_version = Some("armv7e-m".to_string());
@@ -508,7 +508,7 @@ impl Target {
                 self.has_fpu = true;
                 self.has_dsp = true;
                 self.has_trustzone = false;
-            }
+            },
             "cortex-m23" => {
                 // ARMv8-M Baseline: Thumb-1/2, TrustZone
                 self.arm_arch_version = Some("armv8-m.base".to_string());
@@ -516,7 +516,7 @@ impl Target {
                 self.has_fpu = false;
                 self.has_dsp = false;
                 self.has_trustzone = true;
-            }
+            },
             "cortex-m33" => {
                 // ARMv8-M Mainline: Thumb-2, FP, DSP, TrustZone
                 self.arm_arch_version = Some("armv8-m.main".to_string());
@@ -524,7 +524,7 @@ impl Target {
                 self.has_fpu = true;
                 self.has_dsp = true;
                 self.has_trustzone = true;
-            }
+            },
             "cortex-m55" => {
                 // ARMv8.1-M: Helium DSP, FP, TrustZone
                 self.arm_arch_version = Some("armv8.1-m.main".to_string());
@@ -532,7 +532,7 @@ impl Target {
                 self.has_fpu = true;
                 self.has_dsp = true;
                 self.has_trustzone = true;
-            }
+            },
             // RISC-V extension parsing (rv32/rv64 + extensions)
             name if name.starts_with("rv32") || name.starts_with("rv64") => {
                 // Parse RISC-V ISA string: rv32/rv64 + extension letters
@@ -552,10 +552,10 @@ impl Target {
                     self.riscv_has_f = true;
                     self.riscv_has_d = true;
                 }
-            }
+            },
             _ => {
                 // Unknown arch name: accept but no feature changes
-            }
+            },
         }
     }
 
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::SysV);
-        assert!(!t.arch.has_backend());  // RiscV32 not implemented
+        assert!(!t.arch.has_backend()); // RiscV32 not implemented
         assert!(t.is_ilp32());
         assert!(!t.is_lp64());
     }

@@ -54,9 +54,8 @@ fn stmt_has_static_local(s: &crate::ast::Stmt) -> bool {
     match s {
         Stmt::Block { b, .. } => block_has_static_local(b),
         Stmt::If { then_, else_, .. } => {
-            stmt_has_static_local(then_)
-                || else_.as_ref().is_some_and(|e| stmt_has_static_local(e))
-        }
+            stmt_has_static_local(then_) || else_.as_ref().is_some_and(|e| stmt_has_static_local(e))
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_static_local(body),
         Stmt::For { body, .. } => stmt_has_static_local(body),
         _ => false,
@@ -80,9 +79,9 @@ fn gvn_block(block: &mut Block, fenv_access: bool) {
                         }
                     }
                 }
-            }
+            },
             BlockItem::Stmt(s) => gvn_stmt(s, &mut avail, &mut copies, fenv_access),
-            _ => {}
+            _ => {},
         }
     }
     coalesce_block(block);
@@ -114,7 +113,7 @@ fn gvn_stmt(
             } else {
                 propagate_copies_expr(e, copies);
             }
-        }
+        },
         Stmt::If {
             cond, then_, else_, ..
         } => {
@@ -123,16 +122,16 @@ fn gvn_stmt(
             if let Some(e) = else_ {
                 gvn_stmt(e, avail, copies, fenv_access);
             }
-        }
+        },
         Stmt::Block { b, .. } => gvn_block(b, fenv_access),
         Stmt::While { cond, body, .. } => {
             propagate_copies_expr(cond, copies);
             gvn_stmt(body, avail, copies, fenv_access);
-        }
+        },
         Stmt::Do { body, cond, .. } => {
             gvn_stmt(body, avail, copies, fenv_access);
             propagate_copies_expr(cond, copies);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -150,8 +149,8 @@ fn gvn_stmt(
                 propagate_copies_expr(st, copies);
             }
             gvn_stmt(body, avail, copies, fenv_access);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -176,9 +175,7 @@ fn coalesce_block(block: &mut Block) {
                 // ——源变量在初始化之后被重新赋值, 合并会把
                 // "old = p; p = g0; old+p" 错误变成 "p = g0; p+p",
                 // 语义改变 (pr126405-3, pr123625 的 V16DI O2 abort)
-                if !assigned.contains(&v.name.name)
-                    && !assigned.contains(&name.name)
-                {
+                if !assigned.contains(&v.name.name) && !assigned.contains(&name.name) {
                     // Don't alias pointer to array/struct/union: array-to-pointer
                     // decay computes address at each use site, but aliasing would
                     // make codegen treat the array name as a pre-computed pointer,
@@ -215,9 +212,9 @@ fn collect_assignments(item: &BlockItem, assigned: &mut std::collections::HashSe
             if let Expr::Ident { name, .. } = l.as_ref() {
                 assigned.insert(name.name.clone());
             }
-        }
+        },
         BlockItem::Stmt(s) => collect_assignments_stmt(s, assigned),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -230,27 +227,27 @@ fn collect_assignments_stmt(s: &Stmt, assigned: &mut std::collections::HashSet<S
             if let Expr::Ident { name, .. } = l.as_ref() {
                 assigned.insert(name.name.clone());
             }
-        }
+        },
         Stmt::Block { b, .. } => {
             for sub in &b.items {
                 collect_assignments(sub, assigned);
             }
-        }
+        },
         Stmt::If { then_, else_, .. } => {
             collect_assignments_stmt(then_, assigned);
             if let Some(e) = else_ {
                 collect_assignments_stmt(e, assigned);
             }
-        }
+        },
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
             collect_assignments_stmt(body, assigned);
-        }
+        },
         Stmt::For { init, body, .. } => {
             if let Some(i) = init {
                 collect_assignments_stmt(i, assigned);
             }
             collect_assignments_stmt(body, assigned);
-        }
+        },
         Stmt::Label { stmt, .. } => collect_assignments_stmt(stmt, assigned),
         Stmt::Switch { cases, .. } => {
             for c in cases {
@@ -258,8 +255,8 @@ fn collect_assignments_stmt(s: &Stmt, assigned: &mut std::collections::HashSet<S
                     collect_assignments(sub, assigned);
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -269,9 +266,9 @@ fn rewrite_aliases(item: &mut BlockItem, alias: &HashMap<String, String>) {
             if let Some(init) = &mut v.init {
                 rewrite_expr_aliases(init, alias);
             }
-        }
+        },
         BlockItem::Stmt(s) => rewrite_stmt_aliases(s, alias),
-        _ => {}
+        _ => {},
     }
 }
 
@@ -287,20 +284,20 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
             if let Some(e) = else_ {
                 rewrite_stmt_aliases(e, alias);
             }
-        }
+        },
         Stmt::Block { b, .. } => {
             for sub in &mut b.items {
                 rewrite_aliases(sub, alias);
             }
-        }
+        },
         Stmt::While { cond, body, .. } => {
             rewrite_expr_aliases(cond, alias);
             rewrite_stmt_aliases(body, alias);
-        }
+        },
         Stmt::Do { body, cond, .. } => {
             rewrite_stmt_aliases(body, alias);
             rewrite_expr_aliases(cond, alias);
-        }
+        },
         Stmt::For {
             init,
             cond,
@@ -318,7 +315,7 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
                 rewrite_expr_aliases(st, alias);
             }
             rewrite_stmt_aliases(body, alias);
-        }
+        },
         Stmt::Label { stmt, .. } => rewrite_stmt_aliases(stmt, alias),
         Stmt::GotoIndirect { expr, .. } => rewrite_expr_aliases(expr, alias),
         Stmt::Switch { cases, .. } => {
@@ -327,8 +324,8 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
                     rewrite_aliases(sub, alias);
                 }
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -338,29 +335,29 @@ fn rewrite_expr_aliases(e: &mut Expr, alias: &HashMap<String, String>) {
             if let Some(target) = alias.get(&name.name) {
                 name.name = target.clone();
             }
-        }
+        },
         Expr::Binop { l, r, .. } => {
             rewrite_expr_aliases(l, alias);
             rewrite_expr_aliases(r, alias);
-        }
+        },
         Expr::Unary { e: inner, .. } => rewrite_expr_aliases(inner, alias),
         Expr::Assign { l, r, .. } => {
             rewrite_expr_aliases(l, alias);
             rewrite_expr_aliases(r, alias);
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             rewrite_expr_aliases(cond, alias);
             rewrite_expr_aliases(then_, alias);
             rewrite_expr_aliases(else_, alias);
-        }
+        },
         Expr::Cast { e: inner, .. } => rewrite_expr_aliases(inner, alias),
         Expr::Index { arr, idx, .. } => {
             rewrite_expr_aliases(arr, alias);
             rewrite_expr_aliases(idx, alias);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -370,29 +367,29 @@ fn propagate_copies_expr(e: &mut Expr, copies: &HashMap<String, String>) {
             if let Some(src) = copies.get(&name.name) {
                 name.name = src.clone();
             }
-        }
+        },
         Expr::Binop { l, r, .. } => {
             propagate_copies_expr(l, copies);
             propagate_copies_expr(r, copies);
-        }
+        },
         Expr::Unary { e: inner, .. } => propagate_copies_expr(inner, copies),
         Expr::Assign { l, r, .. } => {
             propagate_copies_expr(l, copies);
             propagate_copies_expr(r, copies);
-        }
+        },
         Expr::Cond {
             cond, then_, else_, ..
         } => {
             propagate_copies_expr(cond, copies);
             propagate_copies_expr(then_, copies);
             propagate_copies_expr(else_, copies);
-        }
+        },
         Expr::Cast { e: inner, .. } => propagate_copies_expr(inner, copies),
         Expr::Index { arr, idx, .. } => {
             propagate_copies_expr(arr, copies);
             propagate_copies_expr(idx, copies);
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -416,10 +413,10 @@ fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
                 gvn_key_string(l, fenv_access)?,
                 gvn_key_string(r, fenv_access)?
             ))
-        }
+        },
         Expr::Unary { op, e: inner, .. } => {
             Some(format!("u:{op:?}:{}", gvn_key_string(inner, fenv_access)?))
-        }
+        },
         _ => None,
     }
 }
@@ -523,7 +520,7 @@ mod tests {
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
                             tls_model: None,
-                        asm_label: None,
+                            asm_label: None,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -551,7 +548,7 @@ mod tests {
                             quals: crate::ast::QualifierFlags::NONE,
                             addr_space: crate::ast::AddrSpace::None,
                             tls_model: None,
-                        asm_label: None,
+                            asm_label: None,
                         })),
                     ],
                     span: sp.clone(),
@@ -574,7 +571,7 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
-                    is_inline: false,
+                is_inline: false,
                 is_old_style: false,
                 format_kind: None,
                 format_string_idx: None,
@@ -595,22 +592,22 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            is_naked: false,
-            is_noreturn: false,
-            is_pure: false,
-            is_const_attr: false,
-            returns_twice: false,
-            no_instrument: false,
-            is_malloc: false,
-            malloc_dealloc: None,
-            malloc_dealloc_argno: None,
-            alloc_size: None,
-            assume_aligned: None,
-            warn_unused_result: false,
-            is_sentinel: false,
-            format_arg_idx: None,
-            is_nodiscard: false,
-            asm_label: None,
+                is_naked: false,
+                is_noreturn: false,
+                is_pure: false,
+                is_const_attr: false,
+                returns_twice: false,
+                no_instrument: false,
+                is_malloc: false,
+                malloc_dealloc: None,
+                malloc_dealloc_argno: None,
+                alloc_size: None,
+                assume_aligned: None,
+                warn_unused_result: false,
+                is_sentinel: false,
+                format_arg_idx: None,
+                is_nodiscard: false,
+                asm_label: None,
             })],
             fenv_access: false,
             fp_contract: false,

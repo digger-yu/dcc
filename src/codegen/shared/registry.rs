@@ -1,23 +1,23 @@
 // src/codegen/registry.rs - Backend registration and discovery
 // 第一性原理：单一 truth 源，避免 has_backend 手写谎言
 
-use crate::codegen::shared::backend::{Backend, CompileInput, CommonImage};
+use crate::cli::Arch;
+use crate::codegen::shared::backend::{Backend, CommonImage, CompileInput};
 use crate::codegen::shared::features::FeatureSet;
 use crate::codegen::x86_64;
-use crate::cli::Arch;
 use crate::diagnostics::Diagnostic;
 use crate::target::Target;
 
+#[cfg(feature = "mips")]
+use crate::codegen::mips;
+#[cfg(feature = "mips")]
+use crate::codegen::mips::mips64;
+#[cfg(feature = "mips")]
+use crate::codegen::riscv64;
 /// 后端 family 通过 cargo feature gate; 默认构建仅含 x86_64.
 /// 见 Cargo.toml `arm` / `mips` / `all-backends`.
 #[cfg(feature = "arm")]
 use crate::codegen::{aarch64, arm};
-#[cfg(feature = "mips")]
-use crate::codegen::mips;
-#[cfg(feature = "mips")]
-use crate::codegen::riscv64;
-#[cfg(feature = "mips")]
-use crate::codegen::mips::mips64;
 
 /// Backend implementation wrapper for type erasure
 pub enum AnyBackend {
@@ -121,12 +121,12 @@ impl Backend for AnyBackend {
 }
 
 /// Backend Registry - Single source of truth for supported backends
-/// 
+///
 /// **Usage:**
 /// 1. `backend_for(arch, target, relocatable)` returns Option<Box<dyn Backend>>
 /// 2. If None, the backend is disabled (not just limited)
 /// 3. `has_backend()` must stay consistent with the match arms above
-/// 
+///
 /// **Uninstall procedure:**
 /// When removing a backend:
 /// - Remove from this match statement
@@ -136,29 +136,45 @@ impl Backend for AnyBackend {
 /// - Remove from parity test table
 #[inline]
 #[allow(unused_variables)] // relocatable is forwarded to arm/mips/riscv backends, which are gated by cargo features
-pub fn backend_for(arch: Arch, target: &Target, relocatable: bool) -> Option<Box<dyn Backend + 'static>> {
+pub fn backend_for(
+    arch: Arch,
+    target: &Target,
+    relocatable: bool,
+) -> Option<Box<dyn Backend + 'static>> {
     match arch {
         Arch::X86_64 => Some(Box::new(AnyBackend::X86_64(x86_64::Codegen::new(target.clone())))),
         #[cfg(feature = "arm")]
-        Arch::AArch64 => Some(Box::new(AnyBackend::AArch64(aarch64::Aarch64Codegen::new(target.clone(), relocatable)))),
+        Arch::AArch64 => Some(Box::new(AnyBackend::AArch64(aarch64::Aarch64Codegen::new(
+            target.clone(),
+            relocatable,
+        )))),
         #[cfg(feature = "arm")]
-        Arch::Arm => Some(Box::new(AnyBackend::Arm(arm::ArmCodegen::new(target.clone(), relocatable)))),
+        Arch::Arm => {
+            Some(Box::new(AnyBackend::Arm(arm::ArmCodegen::new(target.clone(), relocatable))))
+        },
         #[cfg(feature = "mips")]
-        Arch::Mips => Some(Box::new(AnyBackend::Mips(mips::MipsCodegen::new(target.clone(), relocatable)))),
+        Arch::Mips => {
+            Some(Box::new(AnyBackend::Mips(mips::MipsCodegen::new(target.clone(), relocatable))))
+        },
         #[cfg(feature = "mips")]
-        Arch::Mips64 => Some(Box::new(AnyBackend::Mips64(mips64::Mips64Codegen::new(target.clone(), relocatable)))),
+        Arch::Mips64 => Some(Box::new(AnyBackend::Mips64(mips64::Mips64Codegen::new(
+            target.clone(),
+            relocatable,
+        )))),
         #[cfg(feature = "mips")]
-        Arch::RiscV64 => Some(Box::new(AnyBackend::RiscV64(riscv64::Riscv64Codegen::new(target.clone(), relocatable)))),
+        Arch::RiscV64 => Some(Box::new(AnyBackend::RiscV64(riscv64::Riscv64Codegen::new(
+            target.clone(),
+            relocatable,
+        )))),
 
         // Disabled backends:
-        Arch::RiscV32 => None,  // See emit E0399 "Not Yet Implemented"
+        Arch::RiscV32 => None, // See emit E0399 "Not Yet Implemented"
 
         // 关闭的后端 family (feature 未开启): 返回 None 让调用方报 E0399.
         #[cfg(not(feature = "arm"))]
         Arch::AArch64 | Arch::Arm => None,
         #[cfg(not(feature = "mips"))]
         Arch::Mips | Arch::Mips64 | Arch::RiscV64 => None,
-
         // Future platforms can be added here
     }
 }

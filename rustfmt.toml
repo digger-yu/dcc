@@ -13,3 +13,11 @@ tab_spaces = 4
 
 # 单行 if/for/while 语句体宽度 (rustfmt 默认 60, 显式固化避免漂移)
 single_line_if_else_max_width = 60
+
+# ========== 排序相关 ==========
+reorder_modules = true          # 模块按字母排序
+reorder_imports = true          # 导入按字母排序
+
+# ========== 其他 ==========
+fn_call_width = 80              # 函数调用参数宽度
+match_block_trailing_comma = true # 匹配块尾逗号
