@@ -143,3 +143,12 @@ target/
 *.elf
 *.bin
 *.dis.txt
+*.rlib
+
+# Migration scratch: archives, logs, one-off analysis reports
+.archive/
+.archive_*/
+logs/
+*.log
+phase*_analysis_complete.txt
+compile_output.txt
