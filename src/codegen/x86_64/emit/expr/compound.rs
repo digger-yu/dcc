@@ -132,14 +132,30 @@ impl Codegen {
                     // 整数内型 (_Complex int/short/char):
                     // 实部/虚部按类型宽度存储, 避免 store_stack(8B)
                     // 在 isz < 8 时覆盖相邻虚部槽.
-                    self.mov_imm(0, *real as i128);
+                    self.mov_imm(0, real.as_f64() as i128);
                     self.emit_store(0, result_off, inner_sz as usize);
-                    self.mov_imm(0, *imag as i128);
+                    self.mov_imm(0, imag.as_f64() as i128);
                     self.emit_store(0, result_off + inner_sz, inner_sz as usize);
-                    self.mov_imm(0, *real as i128);
+                    self.mov_imm(0, real.as_f64() as i128);
                 }
                 // rax = 指向 complex 值 (spill_complex_operand / 整体赋值
                 // 从 rax rep movsb 物化; 浮点路径 rax 已被 imm 加载破坏)
+                self.emit_lea_r13(0, result_off);
+            },
+            Expr::ComplexIntLit { real, imag, ty, .. } => {
+                // 整型虚数字面量 (3j / 9007199254740993j): 分量是精确
+                // i128，按类型宽度直存，严禁经 f64 中转（|i| >= 2^53 丢精度）。
+                let inner = match ty {
+                    Type::Complex(i) => i.base.clone(),
+                    other => other.clone(),
+                };
+                let inner_sz = inner.size() as i64;
+                let result_off = -self.frame_size + 8;
+                self.mov_imm(0, *real);
+                self.emit_store(0, result_off, inner_sz as usize);
+                self.mov_imm(0, *imag);
+                self.emit_store(0, result_off + inner_sz, inner_sz as usize);
+                self.mov_imm(0, *real);
                 self.emit_lea_r13(0, result_off);
             },
             _ => {},

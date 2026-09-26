@@ -94,7 +94,48 @@ impl Codegen {
         if matches!(src_ty, Type::Array(_, _)) && self.gen_lvalue_addr(e, dst) {
             return;
         }
-        self.gen_expr(e, dst);
+        // ── a6: `long double` 交界转换集中分流（单一真源）─────────────────────
+        // 值通道判据只有 `float_in_st0` 一个；st(0) ↔ xmm0 / GP 寄存器的搬运
+        // 全部经 special/x87_floating_point.rs 的 Layer0 原语。下面既有的
+        // `(LongDouble, 整型)` 分支按 xmm0 取值，所以那一类先收窄再落回原分支。
+        let src_is_ld = matches!(src_ty, Type::LongDouble);
+        let dst_is_ld = matches!(ty, Type::LongDouble);
+        let src_is_num = (Self::is_integer_type(&src_ty)
+            && !matches!(src_ty, Type::Int128 | Type::UInt128))
+            || matches!(src_ty, Type::Float | Type::Double);
+        let dst_is_num = (Self::is_integer_type(ty) && !matches!(ty, Type::Int128 | Type::UInt128))
+            || matches!(ty, Type::Float | Type::Double);
+        let mut src_materialized = false;
+        if dst_is_ld && !src_is_ld && src_is_num {
+            // → long double：整数 / float / double 精确拓宽到 st(0)（80-bit 是
+            // 它们的真超集，不存在舍入）。结果交付在 st(0)，`dst` 寄存器不承载。
+            self.gen_expr(e, dst);
+            self.emit_operand_to_st0(&src_ty, dst);
+            return;
+        }
+        if src_is_ld && !dst_is_ld && dst_is_num {
+            self.gen_expr(e, dst); // st(0) = 80-bit 值
+            src_materialized = true;
+            match ty {
+                // 80→64 / 80→32 都是单步舍入，不经中间格式
+                Type::Double => {
+                    self.emit_x87_to_xmm0();
+                    return;
+                },
+                Type::Float => {
+                    self.emit_x87_to_xmm0_f32();
+                    return;
+                },
+                // ld → 整型：先落 f64 到 xmm0，再走下面按 xmm0 取值的既有分支。
+                // （80→64→int 存在罕见双舍入边界差，见迁移文档“仍未解决”清单）
+                _ => {
+                    self.emit_x87_to_xmm0();
+                },
+            }
+        }
+        if !src_materialized {
+            self.gen_expr(e, dst);
+        }
         // 类型转换
         match (&src_ty, ty) {
             (src, Type::Int128 | Type::UInt128) if !matches!(src, Type::Int128 | Type::UInt128) => {

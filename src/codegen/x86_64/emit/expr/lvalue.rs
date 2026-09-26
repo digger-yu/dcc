@@ -480,14 +480,10 @@ impl Codegen {
                     // 后续 mixed-type 比较（如 float > int）会错误地把该
                     // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
                     if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble) {
-                        match size {
-                            4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                            // double/long double: movsd 加载低 8 字节.
-                            // long double 内部为 double (16 字节槽高 8 字节
-                            // 为零), movsd 读低 8 字节即值 (xmm0-double 约定).
-                            8 | 16 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
-                            _ => {},
-                        }
+                        // 单一真源：long double 必须 `fld tbyte [dst]`（旧写法
+                        // movsd 只读 16 字节槽的低 8 字节，依赖“高 8 字节为 0
+                        // 且就是 f64 位型”的旧不变量）。
+                        self.emit_load_scalar_float_at(&f.ty, dst);
                     } else {
                         let is_signed = !matches!(
                             &f.ty,
@@ -529,12 +525,8 @@ impl Codegen {
                 // 后续 mixed-type 比较（如 float > int）会错误地把该
                 // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
                 if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                    match size {
-                        4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                        // double/long double: movsd 读低 8 字节 (xmm0-double)
-                        8 | 16 => self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movsd xmm0, [dst]
-                        _ => {},
-                    }
+                    // 同上：单一真源，long double 走 `fld tbyte`。
+                    self.emit_load_scalar_float_at(ty, dst);
                 } else {
                     let is_signed = !matches!(
                         ty,
@@ -611,7 +603,7 @@ impl Codegen {
             if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
                 || matches!(ty, Type::Imaginary(_))
             {
-                self.emit_global_float_load_to_xmm(0, &name.name, ty);
+                self.emit_global_float_load(&name.name, ty);
             } else if matches!(ty, Type::Complex(_)) {
                 // _Complex 全局变量: 加载实部和虚部到帧临时区
                 // rax 指向结果区, 供后续 spill_complex_operand 使用
@@ -631,36 +623,44 @@ impl Codegen {
                     Type::Complex(ref inner)
                         if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble)
                 );
+                let inner = match ty {
+                    Type::Complex(ref c) => c.base.clone(),
+                    _ => Type::Double,
+                };
                 if is_float_inner {
-                    let pfx = if matches!(
-                        ty,
-                        Type::Complex(ref inner) if matches!(inner.base, Type::Float)
-                    ) {
-                        0xF3u8
+                    // long double 内层: 每个分量按 80-bit tbyte 加载到 st(0),
+                    // 直接 fstp 落 result_off 的 16 字节槽;
+                    // float/double 内层: global → xmm0 → movss/movsd 落槽。
+                    if matches!(inner, Type::LongDouble) {
+                        self.emit_global_float_load_x87_offset(&name.name, 0, &inner);
+                        self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                        self.emit_global_float_load_x87_offset(
+                            &name.name,
+                            inner_sz as i32,
+                            &inner,
+                        );
+                        self.emit_x87_fstp_at(
+                            13,
+                            (result_off + inner_sz as i64) as i32,
+                            &inner,
+                        );
                     } else {
-                        0xF2u8
-                    };
-                    // 加载实部: global → xmm0 → [r13+result_off]
-                    self.emit_global_float_load_to_xmm(
-                        0,
-                        &name.name,
-                        &match ty {
-                            Type::Complex(ref inner) => inner.base.clone(),
-                            _ => Type::Double,
-                        },
-                    );
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
-                    // 加载虚部: global+inner_sz → xmm0 → [r13+result_off+inner_sz]
-                    self.emit_global_float_load_to_xmm_offset(
-                        0,
-                        &name.name,
-                        inner_sz as i32,
-                        &match ty {
-                            Type::Complex(ref inner) => inner.base.clone(),
-                            _ => Type::Double,
-                        },
-                    );
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz as i64);
+                        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                        // 加载实部: global → xmm0 → [r13+result_off]
+                        self.emit_global_float_load_to_xmm(0, &name.name, &inner);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        // 加载虚部: global+inner_sz → xmm0 → [r13+result_off+inner_sz]
+                        self.emit_global_float_load_to_xmm_offset(
+                            0,
+                            &name.name,
+                            inner_sz as i32,
+                            &inner,
+                        );
+                        self.emit_xmm0_r13_disp(
+                            &[pfx, 0x49, 0x0F, 0x11],
+                            result_off + inner_sz as i64,
+                        );
+                    }
                 } else {
                     // 整数 complex 全局: 加载 16 字节到临时区
                     self.emit_global_addr(0, &name.name);

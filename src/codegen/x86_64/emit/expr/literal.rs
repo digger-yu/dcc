@@ -23,9 +23,10 @@ impl Codegen {
                 let masked = Self::mask_imm_to_type(*v, ty);
                 self.mov_imm(dst, masked);
             },
-            Expr::Float { v, ty, .. } => {
+            Expr::Float { c, ty, .. } => {
                 // 浮点字面量: 存入 .rodata, 用 movsd/movss 加载到 xmm0
-                self.gen_float_imm_load(*v, ty);
+                // （long double 走 x87 fld tbyte，保留真 80-bit 精度）
+                self.gen_float_imm_load(*c, ty);
             },
             Expr::String { data, .. } => {
                 // 将字符串加入 .rodata 池, 生成 RIP-relative LEA

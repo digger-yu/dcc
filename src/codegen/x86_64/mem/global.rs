@@ -152,49 +152,143 @@ pub fn encode_complex_parts_i(re: i128, im: i128, inner: &Type) -> Vec<u8> {
     b
 }
 
-/// Encode complex number parts as little-endian bytes for floating-point components.
-pub fn encode_complex_parts_f(re: f64, im: f64, inner: &Type) -> Vec<u8> {
-    let mut b = Vec::new();
-    for v in [re, im] {
-        match inner {
-            Type::Float => b.extend_from_slice(&(v as f32).to_bits().to_le_bytes()),
-            Type::LongDouble => {
-                b.extend_from_slice(&v.to_bits().to_le_bytes());
-                b.extend_from_slice(&[0u8; 8]);
+/// 单个浮点分量按目标类型编码为字节：
+/// - Float  ：4 字节 IEEE-754 binary32
+/// - Double ：8 字节 IEEE-754 binary64
+/// - LongDouble：16 字节对象 = 真 10 字节 80-bit + 6 字节 padding
+fn encode_float_component(c: FloatConst, inner: &Type) -> Vec<u8> {
+    match inner {
+        Type::Float => {
+            // F32 精确；F64/LongDouble 在此显式降级到 f32。
+            (c.as_f64() as f32).to_bits().to_le_bytes().to_vec()
+        },
+        Type::LongDouble => match c {
+            FloatConst::LongDouble(b) => {
+                let mut bits = b.to_vec();
+                bits.resize(16, 0);
+                bits
             },
-            _ => b.extend_from_slice(&v.to_bits().to_le_bytes()),
-        }
+            other => {
+                let mut bits =
+                    crate::float80::from_f64(other.as_f64()).to_vec();
+                bits.resize(16, 0);
+                bits
+            },
+        },
+        _ => match c {
+            FloatConst::F64(f) => f.to_bits().to_le_bytes().to_vec(),
+            other => other.as_f64().to_bits().to_le_bytes().to_vec(),
+        },
     }
+}
+
+/// Encode complex number parts as little-endian bytes for floating-point components.
+pub fn encode_complex_parts_f(re: FloatConst, im: FloatConst, inner: &Type) -> Vec<u8> {
+    let mut b = encode_float_component(re, inner);
+    b.extend_from_slice(&encode_float_component(im, inner));
     b
 }
 
+/// 两个同目标宽度浮点常量的加/减组合。
+/// F32/F64 在 f64 域求值后按目标宽度舍回；LongDouble 走真 80-bit
+/// 整数域加/减，全程不经 f64 中转。
+fn combine_float_consts(
+    l: FloatConst,
+    r: FloatConst,
+    subtract: bool,
+    inner: &Type,
+) -> FloatConst {
+    match inner {
+        Type::LongDouble => {
+            let (la, lb) = match (l, r) {
+                (FloatConst::LongDouble(a), FloatConst::LongDouble(b)) => (a, b),
+                (a, b) => (
+                    crate::float80::from_f64(a.as_f64()),
+                    crate::float80::from_f64(b.as_f64()),
+                ),
+            };
+            let out = if subtract {
+                crate::float80::sub(&la, &lb)
+            } else {
+                crate::float80::add(&la, &lb)
+            };
+            FloatConst::LongDouble(out)
+        },
+        Type::Float => {
+            let v = if subtract {
+                l.as_f64() - r.as_f64()
+            } else {
+                l.as_f64() + r.as_f64()
+            };
+            FloatConst::F32(v as f32)
+        },
+        _ => {
+            let v = if subtract {
+                l.as_f64() - r.as_f64()
+            } else {
+                l.as_f64() + r.as_f64()
+            };
+            FloatConst::F64(v)
+        },
+    }
+}
+
 /// Extract real and imaginary parts from complex initialization expression.
-pub fn complex_init_parts(e: &Expr) -> Option<(f64, f64)> {
+///
+/// 返回携带源码语义精度的 `(real, imag)`，不提前降级。
+/// `inner` 是复数元素类型（Float/Double/LongDouble）：标量表达式（`Expr::Float`
+/// 占实部、`Expr::Imag` 占虚部）的**缺失分量必须按 inner 构造同精度零**，
+/// 否则 `_Complex long double c = 0.1L + 0.2Li` 这类初始化器的实/虚部会
+/// 被写成同一个值或被 F64 零静默降级。
+pub fn complex_init_parts(e: &Expr, inner: &Type) -> Option<(FloatConst, FloatConst)> {
     use crate::codegen::x86_64::const_eval;
 
+    let zero = || FloatConst::zero(inner);
     match e {
         Expr::ComplexLit { real, imag, .. } => Some((*real, *imag)),
-        Expr::Imag { e: inner, .. } => {
-            Some((0.0, const_eval::eval_full(inner, false).ok()?.as_float()?))
+        Expr::ComplexIntLit { .. } => {
+            // 整型字面量不属于浮点 complex 路径（下方 i128 路径处理）。
+            None
         },
-        Expr::Float { v, .. } => Some((*v, 0.0)),
-        Expr::Int { v, .. } => Some((*v as f64, 0.0)),
+        Expr::Imag { e: sub, .. } => {
+            // 纯虚数：实部为 inner 精度的零，虚部取常量值。
+            let f = match const_eval::eval_full(sub, false).ok()? {
+                const_eval::ConstValue::Float(f) => f,
+                const_eval::ConstValue::Int(v) => FloatConst::from_int(inner, v),
+                _ => return None,
+            };
+            Some((zero(), f))
+        },
+        Expr::Float { c, .. } => Some((*c, zero())),
+        Expr::Int { v, .. } => Some((FloatConst::from_int(inner, *v), zero())),
         Expr::Unary { op, e, .. } => {
             if matches!(op, UnOp::Neg) {
-                let (re, im) = complex_init_parts(e)?;
-                Some((-re, -im))
+                let (re, im) = complex_init_parts(e, inner)?;
+                Some((re.negate(), im.negate()))
             } else {
                 None
             }
         },
-        Expr::Binop { op, l, r, .. } => match op {
-            BinOp::Add | BinOp::Sub => {
-                let neg = if matches!(op, BinOp::Sub) { -1.0 } else { 1.0 };
-                let (lre, lim) = complex_init_parts(l)?;
-                let (rre, rim) = complex_init_parts(r)?;
-                Some((lre + neg * rre, lim + neg * rim))
-            },
-            _ => None,
+        Expr::Binop { op, l, r, ty, .. } => {
+            // binop 的结果类型可能与外层 inner 相同；以表达式自身 ty 为准。
+            let bin_inner = match ty {
+                Type::Complex(i) | Type::Imaginary(i) => &i.base,
+                other => other,
+            };
+            match op {
+                BinOp::Add | BinOp::Sub => {
+                    let sub = matches!(op, BinOp::Sub);
+                    // complex 分量组合：(a+bi) ± (c+di)。
+                    // 实部 = combine(re_l, re_r)，虚部 = combine(im_l, im_r)。
+                    let (lre, lim) = complex_init_parts(l, bin_inner)?;
+                    let (rre, rim) = complex_init_parts(r, bin_inner)?;
+                    Some((
+                        combine_float_consts(lre, rre, sub, bin_inner),
+                        combine_float_consts(lim, rim, sub, bin_inner),
+                    ))
+                },
+                _ => None,
+            }
         },
         _ => None,
     }
@@ -213,10 +307,11 @@ pub fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
             if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
                 return None;
             }
-            Some((*real as i128, *imag as i128))
+            Some((real.as_f64() as i128, imag.as_f64() as i128))
         },
+        Expr::ComplexIntLit { real, imag, .. } => Some((*real, *imag)),
         Expr::Int { v, .. } => Some((*v, 0)),
-        Expr::Float { v, .. } => Some((*v as i128, 0)),
+        Expr::Float { c, .. } => Some((c.as_f64() as i128, 0)),
         Expr::Imag { e: inner, .. } => Some((0, const_eval::eval(inner).ok()?)),
         Expr::Unary { op, e, .. } => {
             if matches!(op, UnOp::Neg) {
@@ -252,39 +347,50 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
     if is_float {
         match const_eval::eval_full(init, false).ok()? {
             const_eval::ConstValue::Float(f) => {
-                if sz == 4 {
-                    Some((f as f32).to_bits().to_le_bytes().to_vec())
-                } else if sz == 16 {
-                    // long double: xmm0-double convention
-                    let mut b = f.to_bits().to_le_bytes().to_vec();
-                    b.extend_from_slice(&[0u8; 8]);
-                    Some(b)
-                } else if sz == 32 {
-                    // _Complex long double real part
-                    let mut b = f.to_bits().to_le_bytes().to_vec();
-                    b.extend_from_slice(&[0u8; 8]);
-                    b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
-                    b.extend_from_slice(&[0u8; 8]);
+                // 字节编码交给单一真源 `Codegen::float_data_bytes`。
+                // 旧写法在这里内联发“f64 位型 + 高 8 零”（注释还写着
+                // xmm0-double convention），而读侧在对象表示迁移后已统一
+                // 用 `fld tbyte`，于是 `long double g = 1.0L` 读回来是 `-nan`。
+                // 此函数与 `Codegen::global_init_bytes`（emit/expr/utils.rs）
+                // 是**两份都活着的副本**（前者走 codegen.rs / static_locals.rs，
+                // 后者走 elf/init_list.rs），只改一份会得到“测试全绿但现象不变”。
+                if sz == 32 {
+                    // _Complex long double：实部 + 零虚部，每分量 16 字节。
+                    let ld = Type::LongDouble;
+                    let mut b =
+                        crate::codegen::x86_64::Codegen::float_data_bytes(f, 16);
+                    b.extend_from_slice(
+                        &crate::codegen::x86_64::Codegen::float_data_bytes(
+                            FloatConst::zero(&ld),
+                            16,
+                        ),
+                    );
                     Some(b)
                 } else {
-                    Some(f.to_bits().to_le_bytes().to_vec())
+                    Some(crate::codegen::x86_64::Codegen::float_data_bytes(f, sz))
                 }
             },
             const_eval::ConstValue::Int(v) => {
-                if sz == 4 {
-                    Some((v as f32).to_bits().to_le_bytes().to_vec())
-                } else if sz == 16 {
-                    let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
-                    b.extend_from_slice(&[0u8; 8]);
-                    Some(b)
-                } else if sz == 32 {
-                    let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
-                    b.extend_from_slice(&[0u8; 8]);
-                    b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
-                    b.extend_from_slice(&[0u8; 8]);
+                if sz == 32 {
+                    // _Complex long double 实部源为整型：精确 RNE 转换 +
+                    // LongDouble 精度零虚部。
+                    let ld = Type::LongDouble;
+                    let mut b = crate::codegen::x86_64::Codegen::float_data_bytes(
+                        FloatConst::from_int(&ld, v),
+                        16,
+                    );
+                    b.extend_from_slice(
+                        &crate::codegen::x86_64::Codegen::float_data_bytes(
+                            FloatConst::zero(&ld),
+                            16,
+                        ),
+                    );
                     Some(b)
                 } else {
-                    Some((v as f64).to_bits().to_le_bytes().to_vec())
+                    Some(crate::codegen::x86_64::Codegen::float_data_bytes(
+                        crate::ast::FloatConst::F64(crate::float80::i128_to_f64(v)),
+                        sz,
+                    ))
                 }
             },
             _ => None,
@@ -300,7 +406,7 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
 pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
     match inner {
         Type::Float | Type::Double | Type::LongDouble => {
-            let (re, im) = complex_init_parts(init)?;
+            let (re, im) = complex_init_parts(init, inner)?;
             Some(encode_complex_parts_f(re, im, inner))
         },
         _ => {
@@ -308,8 +414,13 @@ pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
             if let Some((re, im)) = complex_init_parts_i(init) {
                 return Some(encode_complex_parts_i(re, im, inner));
             }
-            let (re, im) = complex_init_parts(init)?;
-            Some(encode_complex_parts_i(re as i128, im as i128, inner))
+            // 浮点常量回退到整数初始化：在 f64 边界显式降级（可审计）。
+            let (re, im) = complex_init_parts(init, inner)?;
+            Some(encode_complex_parts_i(
+                re.as_f64() as i128,
+                im.as_f64() as i128,
+                inner,
+            ))
         },
     }
 }

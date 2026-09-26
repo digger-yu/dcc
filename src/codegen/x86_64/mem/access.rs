@@ -234,6 +234,52 @@ impl Codegen {
                 .push((disp32_pos, name.to_string(), false));
         }
     }
+    /// 登记全局符号 RIP-relative 引用的重定位。
+    /// `disp_pos` = 指令内 disp32 首字节绝对位置（fld/fstp/mov 各形态通用）。
+    pub(crate) fn push_global_float_rel(&mut self, disp_pos: u64, name: &str) {
+        let resolved = self.resolve_global_key(name).to_string();
+        // TLS 全局变量: ET_EXEC 走 pending_tls_rels 由 resolve() 修补,
+        // ET_REL 走 pending_data_rels + R_X86_64_PC32 (与整数路径一致)
+        let is_tls = self
+            .globals_raw
+            .get(&resolved)
+            .map(|g| g.is_tls)
+            .unwrap_or(false);
+        if is_tls && !self.relocatable {
+            self.pending_tls_rels.push((disp_pos, resolved));
+        } else {
+            self.pending_data_rels.push((disp_pos, resolved));
+        }
+    }
+
+    /// 全局标量浮点 rvalue load 的**单一真源**：
+    /// - st0 通道（`long double`，或 `-mno-sse`）发 RIP-relative `fld`
+    ///   （float=`D9 /5`、double=`DD /5`、long double=`DB /5 m80`，6 字节）；
+    /// - xmm 通道保留 movss/movsd（8 字节）。
+    /// 旧写法对 `long double` 发 movsd，只读走真 80-bit 槽的低 8 字节，
+    /// 全局量读回恒为 `-nan`（局部路径早已修为 fldt，这是唯一漏网标量站点）。
+    pub(crate) fn emit_global_float_load(&mut self, name: &str, ty: &Type) {
+        // _Imaginary: 按内型加载
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            &inner.base
+        } else {
+            ty
+        };
+        if self.float_in_st0(effective_ty) {
+            let (opcode, modrm) = match effective_ty {
+                Type::Float => (0xD9u8, 0x05u8),
+                Type::LongDouble => (0xDBu8, 0x2Du8),
+                _ => (0xDDu8, 0x05u8),
+            };
+            // fld m32/m64/m80 [rip+disp32]：disp32 位于字节 2（指令长 6）。
+            let disp_pos = self.pos() + 2;
+            self.emit(&[opcode, modrm, 0, 0, 0, 0]);
+            self.push_global_float_rel(disp_pos, name);
+            return;
+        }
+        self.emit_global_float_load_to_xmm(0, name, ty);
+    }
+
     pub(crate) fn emit_global_float_load_to_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
         // _Imaginary: 按内型加载
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
@@ -248,30 +294,19 @@ impl Codegen {
         }
         let modrm = 0x05 | ((xmm & 7) << 3);
         let mut ins = Vec::new();
-        if rex != 0 {
-            ins.push(rex);
-        }
+        // mandatory prefix 必须在 REX 之前
         if is_float {
-            ins.extend_from_slice(&[0xF3, 0x0F, 0x10, modrm, 0, 0, 0, 0]);
+            ins.push(0xF3);
         } else {
-            ins.extend_from_slice(&[0xF2, 0x0F, 0x10, modrm, 0, 0, 0, 0]);
+            ins.push(0xF2);
         }
+        if rex != 0 {
+            ins.push(0x40 | rex);
+        }
+        ins.extend_from_slice(&[0x0F, 0x10, modrm, 0, 0, 0, 0]);
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
-        // Resolve static local mangled name for relocation
-        let resolved = self.resolve_global_key(name).to_string();
-        // TLS 全局变量: ET_EXEC 走 pending_tls_rels 由 resolve() 修补,
-        // ET_REL 走 pending_data_rels + R_X86_64_PC32 (与整数路径一致)
-        let is_tls = self
-            .globals_raw
-            .get(&resolved)
-            .map(|g| g.is_tls)
-            .unwrap_or(false);
-        if is_tls && !self.relocatable {
-            self.pending_tls_rels.push((disp_pos, resolved.clone()));
-        } else {
-            self.pending_data_rels.push((disp_pos, resolved));
-        }
+        self.push_global_float_rel(disp_pos, name);
     }
     pub(crate) fn emit_global_float_load_to_xmm_offset(
         &mut self,
@@ -301,13 +336,69 @@ impl Codegen {
         }
         // 从 [rax] 加载到 xmm
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-        let xmm_rex = if xmm >= 8 { 0x04u8 } else { 0u8 };
-        if xmm_rex != 0 {
-            self.emit(&[xmm_rex]);
+        // mandatory prefix 必须在 REX 之前
+        self.emit(&[pfx]);
+        if xmm >= 8 {
+            self.emit(&[0x44]);
         }
-        self.emit(&[pfx, 0x0F, 0x10, 0x00]); // movss/movsd xmm0, [rax]
+        self.emit(&[0x0F, 0x10, 0x00]); // movss/movsd xmm0, [rax]
     }
-    pub(crate) fn emit_global_float_store(&mut self, name: &str, ty: &Type) {
+
+    /// 全局量 `name + offset` 的 x87 `fld`（用于 `_Complex long double`
+    /// 全局量的实/虚部分量加载）。前置：ra 已无需由本函数准备；
+    /// 本函数自取全局地址加偏移后发 `fld [addr]`，结果交付 st(0)。
+    /// float=`D9 /0`、double=`DD /0`、long double=`DB /5 m80`。
+    pub(crate) fn emit_global_float_load_x87_offset(
+        &mut self,
+        name: &str,
+        offset: i32,
+        ty: &Type,
+    ) {
+        self.emit_global_addr(0, name);
+        if offset != 0 {
+            if (-128..=127).contains(&offset) {
+                self.emit(&[0x48, 0x83, 0xC0, offset as u8]); // add rax, imm8
+            } else {
+                self.emit(&[0x48, 0x05]); // add rax, imm32
+                self.emit(&offset.to_le_bytes());
+            }
+        }
+        let (opcode, reg_field) = match ty {
+            Type::Float => (0xD9u8, 0u8),
+            Type::LongDouble => (0xDBu8, 5u8),
+            _ => (0xDDu8, 0u8),
+        };
+        self.emit(&[opcode, (reg_field << 3) | 0x00]); // fld [rax]
+    }
+    /// 全局标量浮点 store 的**单一真源**。
+    /// 前置：`src_ty` 的 rvalue 已按通道约定求值（整数在 rax、float/double 在
+    /// xmm0、`long double` 在 st(0)）。
+    /// - st0 通道（`long double` / `-mno-sse`）：先把源操作数拓宽到 st(0)，
+    ///   再发 RIP-relative `fstp`（float=`D9 /3`、double=`DD /3`、
+    ///   long double=`DB /7 m80`），落真 80-bit 槽并弹出，与局部
+    ///   `emit_store_scalar_float_at` 语义一致；
+    /// - xmm 通道保留 movss/movsd。
+    /// 旧写法对 `long double` 发 movsd + 手工清零高 8 字节，把陈旧 xmm0 的
+    /// f64 位型写进真 80-bit 对象（且 st(0) 漏在 x87 栈上），赋值后读回 -nan。
+    pub(crate) fn emit_global_float_store(&mut self, name: &str, dst_ty: &Type, src_ty: &Type) {
+        let effective_ty = if let Type::Imaginary(ref inner) = dst_ty {
+            &inner.base
+        } else {
+            dst_ty
+        };
+        if self.float_in_st0(effective_ty) {
+            // 源操作数 → st(0)（整数/f32/f64 经精确拓宽，long double 已在 st0）。
+            self.emit_operand_to_st0(src_ty, 0);
+            let (opcode, modrm) = match effective_ty {
+                Type::Float => (0xD9u8, 0x1Du8),
+                Type::LongDouble => (0xDBu8, 0x3Du8),
+                _ => (0xDDu8, 0x1Du8),
+            };
+            let disp_pos = self.pos() + 2;
+            self.emit(&[opcode, modrm, 0, 0, 0, 0]);
+            self.push_global_float_rel(disp_pos, name);
+            return;
+        }
         let resolved = self.resolve_global_key(name).to_string();
         let (_, is_tls, _off) = self
             .globals_raw
@@ -315,7 +406,7 @@ impl Codegen {
             .map(|g| (g.size, g.is_tls, g.offset))
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
-        let is_float = matches!(ty, Type::Float);
+        let is_float = matches!(effective_ty, Type::Float);
         let pfx = if is_float { 0xF3 } else { 0xF2 };
         let pos = self.pos() + 4;
         self.emit(&[pfx, 0x0F, 0x11, 0x05, 0, 0, 0, 0]);
@@ -323,11 +414,6 @@ impl Codegen {
             self.pending_tls_rels.push((pos, resolved.clone()));
         } else {
             self.pending_data_rels.push((pos, resolved.clone()));
-        }
-        if matches!(ty, Type::LongDouble) {
-            // 高 8 字节写零: rax = &g; mov qword [rax+8], 0
-            self.emit_global_addr(0, name);
-            self.emit(&[0x48, 0xC7, 0x40, 0x08, 0, 0, 0, 0]);
         }
     }
     pub(crate) fn emit_global_float_store_from_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
@@ -339,18 +425,100 @@ impl Codegen {
         }
         let modrm = 0x05 | ((xmm & 7) << 3);
         let mut ins = Vec::new();
-        if rex != 0 {
-            ins.push(rex);
-        }
+        // mandatory prefix 必须在 REX 之前
         if is_float {
-            ins.extend_from_slice(&[0xF3, 0x0F, 0x11, modrm, 0, 0, 0, 0]);
+            ins.push(0xF3);
         } else {
-            ins.extend_from_slice(&[0xF2, 0x0F, 0x11, modrm, 0, 0, 0, 0]);
+            ins.push(0xF2);
         }
+        if rex != 0 {
+            ins.push(0x40 | rex);
+        }
+        ins.extend_from_slice(&[0x0F, 0x11, modrm, 0, 0, 0, 0]);
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
         self.pending_data_rels.push((disp_pos, resolved));
     }
+
+    /// 全局标量浮点 lvalue → 指定 xmm（inline asm xmm 约束输入）。
+    /// long double：RIP fldt → 栈 scratch fstpt → 按 xmm 宽度
+    /// fld/fstp 单步舍入 → movss/movsd；f32/f64 直接 RIP movss/movsd。
+    /// 旧写法对 long double 发 RIP movsd/movq，读低 8 字节当 double。
+    pub(crate) fn emit_global_float_to_xmm_typed(
+        &mut self, xmm: u8, name: &str, ty: &Type,
+    ) {
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            &inner.base
+        } else {
+            ty
+        };
+        if self.float_in_st0(effective_ty) {
+            self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp,16
+            // fld tbyte [rip+x]
+            let (opcode, modrm) = match effective_ty {
+                Type::Float => (0xD9u8, 0x05u8),
+                Type::LongDouble => (0xDBu8, 0x2Du8),
+                _ => (0xDDu8, 0x05u8),
+            };
+            let dp1 = self.pos() + 2;
+            self.emit(&[opcode, modrm, 0, 0, 0, 0]);
+            self.push_global_float_rel(dp1, name);
+            self.emit_x87_fstp_at(4, 0, effective_ty); // fstp tbyte [rsp]
+            let is_float = matches!(effective_ty, Type::Float);
+            let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
+            // REX 必须在 mandatory prefix 之后
+            self.emit(&[pfx]);
+            if xmm >= 8 {
+                self.emit(&[0x44]);
+            }
+            self.emit(&[0x0F, 0x10, 0x04 | ((xmm & 7) << 3), 0x24]);
+            self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp,16
+            return;
+        }
+        self.emit_global_float_load_to_xmm(xmm, name, ty);
+    }
+
+    /// xmm（f32/f64）→ 全局 long double lvalue（inline asm xmm 约束
+    /// 写回）：栈 scratch mov → fld 拓宽 → RIP fstpt。
+    /// 旧写法发 RIP movsd，把 f64 位型写进 80-bit 对象（读回 -nan）。
+    pub(crate) fn emit_xmm_to_global_float_typed(
+        &mut self, xmm: u8, name: &str, src_ty: &Type, dst_ty: &Type,
+    ) {
+        let effective_dst = if let Type::Imaginary(ref inner) = dst_ty {
+            &inner.base
+        } else {
+            dst_ty
+        };
+        let effective_src = if let Type::Imaginary(ref inner) = src_ty {
+            &inner.base
+        } else {
+            src_ty
+        };
+        debug_assert!(self.float_in_st0(effective_dst));
+        self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp,16
+        let pfx: u8 = if matches!(effective_src, Type::Float) {
+            0xF3
+        } else {
+            0xF2
+        };
+        // REX 必须在 mandatory prefix 之后
+        self.emit(&[pfx]);
+        if xmm >= 8 {
+            self.emit(&[0x44]);
+        }
+        self.emit(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24]); // mov [rsp],xmm
+        self.emit_x87_fld_at(4, 0, effective_src); // fld [rsp]
+        let (opcode, modrm) = match effective_dst {
+            Type::Float => (0xD9u8, 0x1Du8),
+            Type::LongDouble => (0xDBu8, 0x3Du8),
+            _ => (0xDDu8, 0x1Du8),
+        };
+        let dp = self.pos() + 2;
+        self.emit(&[opcode, modrm, 0, 0, 0, 0]); // fstp [rip+x]
+        self.push_global_float_rel(dp, name);
+        self.emit(&[0x48, 0x83, 0xC4, 0x10]); // add rsp,16
+    }
+
     pub(crate) fn emit_ident_base_addr(&mut self, name: &str, arr_ty: &Type, dst: u8) {
         // 嵌套函数 upvar 数组/VLA: 对象在定义父帧中。VLA/VM struct 的
         // 父帧 [off] 是元数据槽, 槽内容才是数据基址 (二次加载);
@@ -489,7 +657,33 @@ impl Codegen {
         let modrm = 0x04; // mod=00, rm=100 (SIB), reg 字段在下方按目标寄存器填充
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
-        if is_float {
+        if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble)
+            && self.float_in_st0(elem_ty)
+        {
+            // long double（及 -mno-sse 下的全部浮点）：`fld tbyte [r11 + idx*scale]`。
+            // 旧写法对 LongDouble 发 movsd，只拿到低 8 字节。
+            // 16 字节元素无法用 SIB scale 表达（最大 8），先把索引乘成字节偏移。
+            let (opcode, rf) = match elem_ty {
+                Type::Float => (0xD9u8, 0u8),
+                Type::LongDouble => (0xDBu8, 5u8),
+                _ => (0xDDu8, 0u8),
+            };
+            let (scale2, sib2) = if elem_size == 16 {
+                // imul idx, idx, 16
+                let rex_i = 0x48u8 | if idx_reg >= 8 { 0x01 } else { 0 };
+                self.emit(&[rex_i, 0x69, 0xC0 | ((idx_reg & 7) << 3) | (idx_reg & 7)]);
+                self.emit(&16i32.to_le_bytes());
+                (0u8, (0u8 << 6) | ((idx_reg & 7) << 3) | 3)
+            } else {
+                (scale, sib)
+            };
+            let _ = scale2;
+            let mut rex = 0x41u8; // REX.B: SIB base=r11
+            if idx_reg >= 8 {
+                rex |= 0x02; // REX.X
+            }
+            self.emit(&[rex, opcode, 0x04 | ((rf & 7) << 3), sib2]);
+        } else if is_float {
             let xmm = 0u8; // 浮点表达式结果约定在 xmm0
             let mut rex = 0x41u8; // REX.B: SIB base=r11 (REX 前缀必须 0x40-0x4F)
             if xmm >= 8 {
@@ -565,8 +759,22 @@ impl Codegen {
             (0x80u8, true)
         };
         match ty {
-            Type::Float => self.emit(&[0xF3, 0x0F, 0x10, modrm]),
-            Type::Double | Type::LongDouble => self.emit(&[0xF2, 0x0F, 0x10, modrm]),
+            Type::Float | Type::Double | Type::LongDouble => {
+                // long double 走 `fld tbyte`（见 emit_load_scalar_float_at），
+                // 旧写法把 LongDouble 归入 movsd 分支依赖“高 8 字节为 0”的旧不变量。
+                // `modrm` 已按 disp 选好 mod 且 reg 域为 0，x87 只需把 reg 域换 /0 /5。
+                if self.float_in_st0(ty) {
+                    let (opcode, rf) = match ty {
+                        Type::Float => (0xD9u8, 0u8),
+                        Type::LongDouble => (0xDBu8, 5u8),
+                        _ => (0xDDu8, 0u8),
+                    };
+                    self.emit(&[opcode, (rf << 3) | modrm]);
+                } else {
+                    let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
+                    self.emit(&[pfx, 0x0F, 0x10, modrm]);
+                }
+            },
             _ => {
                 if size < 8 && Self::is_signed_int(ty) {
                     match size {
@@ -662,7 +870,7 @@ impl Codegen {
                 }
                 let elem_ty = original_expr.ty();
                 self.emit_load_mem_typed(elem_size, &elem_ty);
-                if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
+                if dst != 0 && !self.is_scalar_float_channel_ty(&elem_ty) {
                     self.mov(dst, 0);
                 }
             },
@@ -679,13 +887,11 @@ impl Codegen {
                     }
                 }
                 let elem_ty = original_expr.ty();
-                if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
-                    // 值在 xmm0, 存储到 [rcx]
-                    if matches!(elem_ty, Type::Float) {
-                        self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                    } else {
-                        self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                    }
+                if self.is_scalar_float_channel_ty(&elem_ty) {
+                    // 单一真源：值可能在 xmm0（f32/f64）或 st(0)（long double），
+                    // 旧写法无条件 `movsd [rcx], xmm0` 会把陈旧 xmm0 写进
+                    // long double 对象，并把真正的 80-bit 值漏在 x87 栈上。
+                    self.emit_store_scalar_float_at(&elem_ty, &elem_ty, 1);
                 } else {
                     match elem_size {
                         1 => self.emit(&[0x88, 0x01]),

@@ -327,110 +327,73 @@ impl Codegen {
             },
         }
     }
+    // complex 静态初始化器只有一份真源：mem/global.rs。历史上这里有第二份
+    // 逐字副本（走 elf/init_list.rs），只改一份会出现“测试全绿但 .data
+    // 现象不变”。以下关联函数全部委托 global，保证两条路径语义一致。
     pub(crate) fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
-        match inner {
-            Type::Float | Type::Double | Type::LongDouble => {
-                let (re, im) = Self::complex_init_parts(init)?;
-                Some(Self::encode_complex_parts_f(re, im, inner))
-            },
-            _ => {
-                // 整数分量: 优先 i128 精确求值; 失败退回 f64 拆解
-                // (浮点源按 C 语义截断转换)
-                if let Some((re, im)) = Self::complex_init_parts_i(init) {
-                    return Some(Self::encode_complex_parts_i(re, im, inner));
-                }
-                let (re, im) = Self::complex_init_parts(init)?;
-                Some(Self::encode_complex_parts_i(re as i128, im as i128, inner))
-            },
-        }
+        crate::codegen::x86_64::mem::global::complex_init_bytes(init, inner)
     }
-    fn complex_init_parts(e: &Expr) -> Option<(f64, f64)> {
-        match e {
-            Expr::ComplexLit { real, imag, .. } => Some((*real, *imag)),
-            Expr::Imag { e: inner, .. } => {
-                Some((0.0, const_eval::eval_full(inner, false).ok()?.as_float()?))
-            },
-            Expr::Float { v, .. } => Some((*v, 0.0)),
-            Expr::Int { v, .. } => Some((*v as f64, 0.0)),
-            Expr::Unary { op, e, .. } => {
-                if matches!(op, UnOp::Neg) {
-                    let (re, im) = Self::complex_init_parts(e)?;
-                    Some((-re, -im))
-                } else {
-                    None
-                }
-            },
-            Expr::Binop { op, l, r, .. } => match op {
-                BinOp::Add | BinOp::Sub => {
-                    let neg = if matches!(op, BinOp::Sub) { -1.0 } else { 1.0 };
-                    let (lre, lim) = Self::complex_init_parts(l)?;
-                    let (rre, rim) = Self::complex_init_parts(r)?;
-                    Some((lre + neg * rre, lim + neg * rim))
-                },
-                _ => None,
-            },
-            _ => None,
-        }
+    fn complex_init_parts(e: &Expr, inner: &Type) -> Option<(FloatConst, FloatConst)> {
+        crate::codegen::x86_64::mem::global::complex_init_parts(e, inner)
     }
     fn complex_init_parts_i(e: &Expr) -> Option<(i128, i128)> {
-        match e {
-            Expr::ComplexLit { real, imag, ty, .. } => {
-                let inner = match ty {
-                    Type::Complex(i) | Type::Imaginary(i) => &i.base,
-                    other => other,
-                };
-                if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
-                    return None;
+        crate::codegen::x86_64::mem::global::complex_init_parts_i(e)
+    }
+    /// 浮点初始化器 → 数据字节的**单一真源**。
+    ///
+    /// 接收完整的 FloatConst：LongDouble 直出真 80-bit 编码（10 字节），
+    /// 目标 16 字节对象再补 6 字节 padding；F32/F64 按目标宽度截断。
+    /// 以前这些站点各自内联写"低 8 字节 = f64 位型 + 高 8 零"，
+    /// 而读侧在对象表示迁移后已统一改成 `fld tbyte` —— 于是写出的字节被
+    /// 当 80-bit 解释：`long double g = 1.0L` 的 f64 位型落在 80-bit 的
+    /// 尾数域，指数域变成高两个零字节 → 指数 0 且整数位 0 → 读回 `-nan`。
+    pub(crate) fn float_data_bytes(c: FloatConst, size: usize) -> Vec<u8> {
+        match c {
+            FloatConst::LongDouble(b) => {
+                // 真 80-bit 编码直出；16 字节对象补 6 字节 padding。
+                let mut out = b.to_vec();
+                if out.len() < size {
+                    out.resize(size, 0);
                 }
-                Some((*real as i128, *imag as i128))
-            },
-            Expr::Int { v, .. } => Some((*v, 0)),
-            Expr::Float { v, .. } => Some((*v as i128, 0)),
-            Expr::Imag { e: inner, .. } => Some((0, const_eval::eval(inner).ok()?)),
-            Expr::Unary { op, e, .. } => {
-                if matches!(op, UnOp::Neg) {
-                    let (re, im) = Self::complex_init_parts_i(e)?;
-                    Some((-re, -im))
-                } else {
-                    None
+                if out.len() > size {
+                    out.truncate(size);
                 }
+                out
             },
-            Expr::Binop { op, l, r, .. } => match op {
-                BinOp::Add | BinOp::Sub => {
-                    let neg: i128 = if matches!(op, BinOp::Sub) { -1 } else { 1 };
-                    let (lre, lim) = Self::complex_init_parts_i(l)?;
-                    let (rre, rim) = Self::complex_init_parts_i(r)?;
-                    Some((lre + neg * rre, lim + neg * rim))
-                },
-                _ => None,
+            FloatConst::F32(f) => {
+                let n = size.clamp(1, 4);
+                f.to_le_bytes()[..n].to_vec()
             },
-            _ => None,
+            FloatConst::F64(f) => {
+                if size <= 4 {
+                    let n = size.max(1);
+                    return (f as f32).to_bits().to_le_bytes()[..n].to_vec();
+                }
+                let bytes = f.to_bits().to_le_bytes();
+                let mut b = bytes[..size.min(8)].to_vec();
+                if b.len() < size {
+                    b.resize(size, 0);
+                }
+                b
+            },
         }
     }
-    fn encode_complex_parts_f(re: f64, im: f64, inner: &Type) -> Vec<u8> {
-        let mut b = Vec::new();
-        for v in [re, im] {
-            match inner {
-                Type::Float => b.extend_from_slice(&(v as f32).to_bits().to_le_bytes()),
-                Type::LongDouble => {
-                    b.extend_from_slice(&v.to_bits().to_le_bytes());
-                    b.extend_from_slice(&[0u8; 8]);
-                },
-                _ => b.extend_from_slice(&v.to_bits().to_le_bytes()),
-            }
-        }
-        b
+    fn encode_complex_parts_f(
+        re: FloatConst,
+        im: FloatConst,
+        inner: &Type,
+    ) -> Vec<u8> {
+        crate::codegen::x86_64::mem::global::encode_complex_parts_f(re, im, inner)
     }
     fn encode_complex_parts_i(re: i128, im: i128, inner: &Type) -> Vec<u8> {
-        let isz = inner.size().max(1);
-        let mut b = re.to_le_bytes()[..isz.min(16)].to_vec();
-        b.extend_from_slice(&im.to_le_bytes()[..isz.min(16)]);
-        b
+        crate::codegen::x86_64::mem::global::encode_complex_parts_i(re, im, inner)
     }
     pub(crate) fn eval_asm_operand(expr: &Expr) -> Option<String> {
         match const_eval::eval_full(expr, false) {
             Ok(ConstValue::Int(v)) => return Some(v.to_string()),
-            Ok(ConstValue::Float(f)) => return Some((f as i128).to_string()),
+            Ok(ConstValue::Float(f)) => {
+                return Some((f.as_f64() as i128).to_string())
+            },
             Ok(ConstValue::Addr { name, offset }) => {
                 return Some(Self::format_asm_symbol_immediate(&name, offset));
             },
@@ -464,6 +427,25 @@ impl Codegen {
             }
             return d;
         }
+        // 整型复数字面量: 两分量按 i128 精确 LE 编码，全程不经浮点。
+        if let Expr::ComplexIntLit { real, imag, ty, .. } = e {
+            let inner = match ty {
+                Type::Complex(i) | Type::Imaginary(i) => &i.base,
+                other => other,
+            };
+            let comp_sz = inner.size().max(1).min(16);
+            let mut data: Vec<u8> = Vec::new();
+            for v in [*real, *imag] {
+                data.extend_from_slice(&v.to_le_bytes()[..comp_sz]);
+            }
+            if width > 0 && data.len() > width {
+                data.truncate(width);
+            }
+            while data.len() < width {
+                data.push(0);
+            }
+            return data;
+        }
         // 复数字面量: 必须特殊处理, 因为 eval_full 只返回虚部
         if let Expr::ComplexLit { real, imag, ty, .. } = e {
             // 分量编码由字面量自身类型的 inner 决定: Float→f32 位模式,
@@ -479,15 +461,27 @@ impl Codegen {
             let mut data: Vec<u8> = Vec::new();
             for v in [*real, *imag] {
                 match inner {
-                    Type::Float => data.extend_from_slice(&(v as f32).to_bits().to_le_bytes()),
-                    Type::LongDouble => {
-                        // dcc LD: 16B 槽 = 低 8B double 位模式 + 高 8B 零
-                        data.extend_from_slice(&v.to_bits().to_le_bytes());
-                        data.extend_from_slice(&[0u8; 8]);
+                    Type::Float => {
+                        data.extend_from_slice(
+                            &(v.as_f64() as f32).to_bits().to_le_bytes(),
+                        )
                     },
-                    Type::Double => data.extend_from_slice(&v.to_bits().to_le_bytes()),
+                    Type::LongDouble => {
+                        // 真 80-bit 编码（16B 槽 = 10 字节 + 6 字节 padding）
+                        let mut bits = match v {
+                            FloatConst::LongDouble(b) => b.to_vec(),
+                            other => {
+                                crate::float80::from_f64(other.as_f64()).to_vec()
+                            },
+                        };
+                        bits.resize(16, 0);
+                        data.extend_from_slice(&bits);
+                    },
+                    Type::Double => {
+                        data.extend_from_slice(&v.as_f64().to_bits().to_le_bytes())
+                    },
                     _ => {
-                        let b = (v as i128).to_le_bytes();
+                        let b = (v.as_f64() as i128).to_le_bytes();
                         data.extend_from_slice(&b[..comp_sz.min(16)]);
                     },
                 }
@@ -585,25 +579,24 @@ impl Codegen {
             match cv {
                 const_eval::ConstValue::Float(f) => {
                     // 按目标宽度截断: 窄元素 (char/short) 数组不能用表达式
-                    // 类型宽度 (int=4) 写数据, 否则元素会错位/越界
-                    let size = width.max(1);
-                    if size <= 4 {
-                        (f as f32).to_bits().to_le_bytes()[..size.min(4)].to_vec()
-                    } else {
-                        let bytes = f.to_bits().to_le_bytes();
-                        bytes[..size.min(bytes.len())].to_vec()
-                    }
+                    // 类型宽度 (int=4) 写数据, 否则元素会错位/越界。
+                    // LongDouble 经单一真源直出**真 80-bit 编码**。
+                    Self::float_data_bytes(f, width.max(1))
                 },
                 const_eval::ConstValue::Int(v) => {
                     let size = width.max(1);
                     if is_float {
-                        // 浮点目标: 整型常量隐式转换为浮点位模式
-                        if size <= 4 {
-                            (v as f32).to_bits().to_le_bytes()[..size.min(4)].to_vec()
+                        // 浮点目标：整型常量在目标精度上精确 RNE 转换
+                        // （旧写法经 `v as f64` 中转，|v| >= 2^53 会丢精度）。
+                        let target_ty = if size >= 10 {
+                            Type::LongDouble
+                        } else if size <= 4 {
+                            Type::Float
                         } else {
-                            let bytes = (v as f64).to_bits().to_le_bytes();
-                            bytes[..size.min(bytes.len())].to_vec()
-                        }
+                            Type::Double
+                        };
+                        let c = FloatConst::from_int(&target_ty, v);
+                        Self::float_data_bytes(c, size)
                     } else {
                         let bytes = v.to_le_bytes();
                         bytes[..size.min(bytes.len())].to_vec()
@@ -854,6 +847,7 @@ impl Codegen {
             Expr::Int { span, .. }
             | Expr::Float { span, .. }
             | Expr::ComplexLit { span, .. }
+            | Expr::ComplexIntLit { span, .. }
             | Expr::Real { span, .. }
             | Expr::Imag { span, .. }
             | Expr::String { span, .. }
@@ -1032,66 +1026,12 @@ impl Codegen {
         is_float: bool,
         ty: &Type,
     ) -> Option<Vec<u8>> {
-        // 复数常量初始化: 必须由目标类型驱动, 分量编码按 inner 类型
-        // 决定 — 仅靠 sz 无法区分 _Complex float (2 x f32 位模式) 与
-        // _Complex int (2 x 4 字节整数值), 旧实现把 _Complex int /
-        // _Complex long 写成 float 位模式导致初始化错误。
-        // 支持的字面量形态: ComplexLit / Imag(expr) / Neg / Add / Sub 组合。
-        if let Type::Complex(inner) = ty {
-            if let Some(bytes) = Self::complex_init_bytes(init, &inner.base) {
-                return Some(bytes);
-            }
-        }
-        if is_float {
-            match const_eval::eval_full(init, false).ok()? {
-                const_eval::ConstValue::Float(f) => {
-                    if sz == 4 {
-                        Some((f as f32).to_bits().to_le_bytes().to_vec())
-                    } else if sz == 16 {
-                        // long double: dcc 内部为 double (xmm0-double 约定),
-                        // 16 字节槽 = 低 8 字节 double 位模式 + 高 8 字节零.
-                        // 运行时读取 (movsd) 依赖此布局。
-                        let mut b = f.to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&[0u8; 8]);
-                        Some(b)
-                    } else if sz == 32 {
-                        // _Complex long double 实数初始化: 实部 + 零虚部
-                        // (与标量同一 xmm0-double 约定, 每分量 16 字节)
-                        let mut b = f.to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&[0u8; 8]);
-                        b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
-                        b.extend_from_slice(&[0u8; 8]);
-                        Some(b)
-                    } else {
-                        Some(f.to_bits().to_le_bytes().to_vec())
-                    }
-                },
-                const_eval::ConstValue::Int(v) => {
-                    if sz == 4 {
-                        Some((v as f32).to_bits().to_le_bytes().to_vec())
-                    } else if sz == 16 {
-                        // long double: xmm0-double 约定 (同上)
-                        let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&[0u8; 8]);
-                        Some(b)
-                    } else if sz == 32 {
-                        // _Complex long double 实数初始化: 实部 + 零虚部
-                        let mut b = (v as f64).to_bits().to_le_bytes().to_vec();
-                        b.extend_from_slice(&[0u8; 8]);
-                        b.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
-                        b.extend_from_slice(&[0u8; 8]);
-                        Some(b)
-                    } else {
-                        Some((v as f64).to_bits().to_le_bytes().to_vec())
-                    }
-                },
-                _ => None,
-            }
-        } else {
-            const_eval::eval(init)
-                .ok()
-                .map(|value| value.to_le_bytes()[..sz].to_vec())
-        }
+        // 单一真源：全局/静态初始化字节一律由 mem/global.rs 负责，
+        // 这里仅保留关联函数入口供 elf/init_list.rs 调用，避免再出现
+        // 一份经 f64 中转的副本（见 global.rs 中的根因注释）。
+        crate::codegen::x86_64::mem::global::global_init_bytes(
+            init, sz, is_float, ty,
+        )
     }
     pub(crate) fn gp_reg_name_bits(idx: u8, bits: u8) -> Option<&'static str> {
         Some(match (idx, bits) {

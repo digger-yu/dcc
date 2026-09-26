@@ -42,168 +42,9 @@ impl Codegen {
                 self.mov_imm(dst, masked);
             },
             Expr::Ident { name, ty, .. } => {
-                if matches!(ty, Type::Array(_, _)) {
-                    // 数组标识符在值上下文中衰减为首元素地址 (C 数组到指针
-                    // 转换): int *p = arr; / return arr; / x ? arr1 : arr2。
-                    // 此前直接 gen_expr 会误读 a[0] 的值 (mov 而非 lea)。
-                    return self.gen_expr_decay(e, dst);
-                }
-                if matches!(ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
-                    // 函数名作为值: 退化为函数地址
-                    // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义的嵌套函数)
-                    if let Some((unique, hops, offs)) = self.resolve_nested_func_ref(&name.name) {
-                        // trampoline 地址 (hops>0 时经静态链访问定义父帧)
-                        self.load_trampoline_addr(dst, &unique, hops, &offs);
-                    } else {
-                        let effective_name = self
-                            .nested_func_renames
-                            .get(&self.current_func_name)
-                            .and_then(|m| m.get(&name.name))
-                            .cloned()
-                            .unwrap_or_else(|| name.name.clone());
-                        self.emit_func_addr(dst, &effective_name);
-                    }
-                } else if matches!(ty, Type::Vector(_, _)) {
-                    // 向量变量: 标量逐元素加载到帧临时区 slot 0
-                    self.gen_vector_load(e);
-                } else if self.is_global_not_local(&name.name)
-                    && matches!(ty, Type::Int128 | Type::UInt128)
-                {
-                    self.gen_int128_load(&name.name);
-                    if dst != 0 {
-                        self.mov(dst, 0);
-                    }
-                } else if self.is_global_not_local(&name.name) {
-                    // 浮点全局变量加载到 xmm0 (浮点值约定, 同局部变量);
-                    // 整数路径 emit_global_load 会把 double 装进 GP 寄存器,
-                    // 与 gen_float_binop 期望的 xmm0 不符 (TLS/普通全局都受影响)
-                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
-                        || matches!(ty, Type::Imaginary(_))
-                    {
-                        self.emit_global_float_load_to_xmm(0, &name.name, ty);
-                    } else if matches!(ty, Type::Complex(_)) {
-                        // _Complex 全局变量: 加载实部和虚部到帧临时区
-                        // rax 指向结果区, 供后续 spill_complex_operand 使用
-                        let inner_sz = match ty {
-                            Type::Complex(ref inner) => inner.size(),
-                            _ => 8,
-                        };
-                        let total_sz = inner_sz * 2;
-                        // 统一物化到 result_off (dcc complex rvalue 约定:
-                        // result_off 内存对 + xmm0 实部 + rax=地址),
-                        // 消费端 (gen_complex_part 非 lvalue 分支等) 按
-                        // result_off 读取; 旧目标 vector_temp_base 与
-                        // 消费端约定错位。
-                        let result_off = -self.frame_size + 8;
-                        let is_float_inner = matches!(
-                            ty,
-                            Type::Complex(ref inner)
-                                if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble)
-                        );
-                        if is_float_inner {
-                            let pfx = if matches!(
-                                ty,
-                                Type::Complex(ref inner) if matches!(inner.base, Type::Float)
-                            ) {
-                                0xF3u8
-                            } else {
-                                0xF2u8
-                            };
-                            // 加载实部: global → xmm0 → [r13+result_off]
-                            self.emit_global_float_load_to_xmm(
-                                0,
-                                &name.name,
-                                &match ty {
-                                    Type::Complex(ref inner) => inner.base.clone(),
-                                    _ => Type::Double,
-                                },
-                            );
-                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
-                            // 加载虚部: global+inner_sz → xmm0 → [r13+result_off+inner_sz]
-                            self.emit_global_float_load_to_xmm_offset(
-                                0,
-                                &name.name,
-                                inner_sz as i32,
-                                &match ty {
-                                    Type::Complex(ref inner) => inner.base.clone(),
-                                    _ => Type::Double,
-                                },
-                            );
-                            self.emit_xmm0_r13_disp(
-                                &[pfx, 0x49, 0x0F, 0x11],
-                                result_off + inner_sz as i64,
-                            );
-                        } else {
-                            // 整数 complex 全局: 加载 16 字节到临时区
-                            self.emit_global_addr(0, &name.name);
-                            // rax = global addr, 拷贝到临时区
-                            self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
-                            self.emit_lea_r13(7, result_off); // rdi = r13 + result_off
-                            self.mov_imm(1, total_sz as i128);
-                            self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                        }
-                        self.emit_lea_r13(0, result_off);
-                    } else {
-                        self.emit_global_load(dst, &name.name);
-                    }
-                } else if matches!(ty, Type::Complex(_))
-                    && !(self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name))
-                {
-                    // _Complex 局部变量: 物化整体到 result_off (统一 rvalue
-                    // 约定: result_off 内存对 + xmm0 实部 + rax=地址)。
-                    // 旧实现落 mov_from_stack 按标量 8B 读, 实部/虚部全错。
-                    let inner_sz = match ty {
-                        Type::Complex(ref inner) => inner.size(),
-                        _ => 8,
-                    };
-                    let total_sz = inner_sz * 2;
-                    let result_off = -self.frame_size + 8;
-                    let src_off = self.var_offset(&name.name);
-                    self.emit_lea_r13(6, src_off); // rsi = &var
-                    self.emit_lea_r13(7, result_off); // rdi = result_off
-                    self.mov_imm(1, total_sz as i128);
-                    self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                    let pfx = if matches!(ty, Type::Complex(ref inner) if matches!(inner.base, Type::Float))
-                    {
-                        0xF3u8
-                    } else {
-                        0xF2u8
-                    };
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
-                    self.emit_lea_r13(0, result_off);
-                } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
-                    || matches!(ty, Type::Imaginary(_))
-                {
-                    self.gen_float_load(&name.name, ty);
-                } else if self.current_func_is_nested
-                    && self.upvar_offsets.contains_key(&name.name)
-                    && matches!(ty, Type::Int128 | Type::UInt128)
-                {
-                    let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                    self.load_upvar(0, parent_off, 8, &name.name);
-                    self.load_upvar(2, parent_off + 8, 8, &name.name);
-                    if dst != 0 {
-                        self.mov(dst, 0);
-                    }
-                } else if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name)
-                {
-                    let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
-                    self.load_upvar(dst, parent_off, ty.size(), &name.name);
-                } else {
-                    // P1-4: __int128 变量加载 (两个 64 位槽)
-                    if matches!(ty, Type::Int128 | Type::UInt128) {
-                        let off = self.var_offset(&name.name);
-                        self.load_stack(dst, off); // low 64 bits
-                        self.load_stack(2, off + 8); // high 64 bits → rdx
-                        if dst != 0 { /* rax already set */ }
-                    } else {
-                        self.mov_from_stack(dst, &name.name);
-                    }
-                }
-                // 整数提升: char/short → int
-                if ty.is_int() {
-                    self.gen_int_promote(dst, ty);
-                }
+                // 单一入口：本 arm 曾是 `gen_expr_ident_rvalue` 的逐字副本
+                // (两份同源代码, 只有这一份在跑)。现只委派。
+                self.gen_expr_ident_rvalue(e, name, ty, dst);
             },
             Expr::Binop {
                 op,
@@ -668,15 +509,34 @@ impl Codegen {
                 // pr23135: res.v = i 后 i2[0] 变 i2[1] 的值)
                 let assign_l_ty = lv.ty();
                 if matches!(assign_l_ty, Type::Vector(_, _)) && !matches!(lv, Expr::Ident { .. }) {
-                    self.gen_expr(r, 0); // RHS → 向量临时槽 0
+                    // 交付约定轴: va_arg 聚合的 rvalue 不物化到「向量临时槽 0」, 而是
+                    // rax = 缓冲区地址 (`gen_expr_va_arg` 写 `alloc_sret_slot` 的槽,
+                    // 与向量临时槽基址不是一个地方)。无条件按向量临时槽读源会把
+                    // 装载器填好的值用错误源整体覆盖, 故先按约定把真源压栈,
+                    // 取完 LHS 地址 (会覆写 rax) 再弹出作 rsi。
+                    let rax_is_agg_addr = match **r {
+                        Expr::VaArg { ref ty, .. } => Self::va_arg_result_in_memory(ty),
+                        _ => false,
+                    };
+                    self.gen_expr(r, 0); // RHS → 向量临时槽 0 (或 rax = 聚合缓冲区地址)
+                    if rax_is_agg_addr {
+                        self.push(0);
+                    }
                     if self.gen_lvalue_addr(lv, 0) {
-                        let toff = self.vector_temp_base(0, assign_l_ty.size());
                         self.emit(&[0x48, 0x89, 0xC7]); // mov rdi, rax
-                        self.emit_lea_r13(6, toff); // rsi = 临时槽
+                        if rax_is_agg_addr {
+                            self.pop(6); // rsi = 聚合缓冲区地址
+                        } else {
+                            let toff = self.vector_temp_base(0, assign_l_ty.size());
+                            self.emit_lea_r13(6, toff); // rsi = 临时槽
+                        }
                         self.mov_imm(1, assign_l_ty.size() as i128);
                         self.emit(&[0xFC]); // cld
                         self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
                         return;
+                    }
+                    if rax_is_agg_addr {
+                        self.pop(6); // LHS 地址不可得, 落回下方通用路径: 保持栈平衡
                     }
                 }
                 // _Complex lvalue 赋值 (非 Ident): 统一走物化+分量拷贝。
@@ -744,8 +604,8 @@ impl Codegen {
                         // Without cvtsd2ss, movss would store the raw
                         // lower 32 bits of the double, not the float
                         // representation.
-                        if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
-                            && matches!(&r_ty, Type::Float | Type::Double | Type::LongDouble)
+                        if matches!(l_ty, Type::Float | Type::Double)
+                            && matches!(&r_ty, Type::Float | Type::Double)
                         {
                             self.emit_float_precision_convert(&r_ty, l_ty);
                         }
@@ -753,7 +613,7 @@ impl Codegen {
                         // integer but LHS is float (e.g. `ping = 0;`).
                         // The integer result sits in eax; convert it to
                         // xmm0 before gen_float_store.
-                        if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
+                        if matches!(l_ty, Type::Float | Type::Double)
                             && Self::is_integer_type(&r_ty)
                         {
                             self.emit_scalar_to_xmm0_if_needed(r, l_ty);
@@ -830,8 +690,8 @@ impl Codegen {
                             } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
                                 || matches!(l_ty, Type::Imaginary(_))
                             {
-                                // 浮点全局: 值在 xmm0, 用 movsd/movss 存储
-                                self.emit_global_float_store(&name.name, l_ty);
+                                // 浮点全局: 值在通道 (xmm0 / st0), 按目标宽度存储
+                                self.emit_global_float_store(&name.name, l_ty, &r_ty);
                             } else {
                                 self.emit_global_store(dst, &name.name);
                             }
@@ -925,9 +785,8 @@ impl Codegen {
                                 0,
                             ) {
                                 self.push(0); // save addr
-                                self.gen_expr(r, 0); // rax = val (complex)
-                                self.pop(1); // rcx = addr
                                 if let Type::Complex(ref cinner) = elem_ty {
+                                    // store_complex_at_rcx 自行 pop 地址并对 r 单次求值
                                     self.store_complex_at_rcx(r, &cinner.base);
                                 }
                                 return;
@@ -945,12 +804,7 @@ impl Codegen {
                                 self.push(0); // save addr
                                 self.gen_expr(r, 0); // rax = val
                                 self.pop(1); // rcx = addr
-                                self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
-                                if matches!(elem_ty, Type::Float) {
-                                    self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                                } else {
-                                    self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                                }
+                                self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1); // 单一真源：收浮影子副本
                                 return;
                             }
                         } else {
@@ -992,35 +846,29 @@ impl Codegen {
                         self.emit_index_scale(es, arr, elem_ty);
                         self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
                         self.push(0); // save addr
-                        self.gen_expr(r, 0); // rax = val
-                        self.pop(1); // rcx = addr
-                        if is_agg_elem {
-                            self.gen_agg_elem_store(r, elem_ty, es, dst);
-                            return;
-                        }
-                        // _Complex 浮点元素: 逐分量写 (实部 [rcx], 虚部
-                        // [rcx+isz])。若落入下方整数 store, gen_expr 遗留
-                        // 在 rax 的值 (如 conj 的 flip 掩码) 会覆盖实部。
-                        if matches!(elem_ty, Type::Complex(ref c)
+                        let is_cx_float = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
-                                Type::Float | Type::Double | Type::LongDouble))
-                        {
+                                Type::Float | Type::Double | Type::LongDouble));
+                        if is_cx_float {
                             if let Type::Complex(ref cinner) = elem_ty {
                                 self.store_complex_at_rcx(r, &cinner.base);
                             }
-                        } else if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
-                            self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
-                            if matches!(elem_ty, Type::Float) {
-                                self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                            } else {
-                                self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                            }
                         } else {
-                            match es {
-                                1 => self.emit(&[0x88, 0x01]),
-                                2 => self.emit(&[0x66, 0x89, 0x01]),
-                                4 => self.emit(&[0x89, 0x01]),
-                                _ => self.emit(&[0x48, 0x89, 0x01]),
+                            self.gen_expr(r, 0); // rax = val
+                            self.pop(1); // rcx = addr
+                            if is_agg_elem {
+                                self.gen_agg_elem_store(r, elem_ty, es, dst);
+                                return;
+                            }
+                            if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                                self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
+                            } else {
+                                match es {
+                                    1 => self.emit(&[0x88, 0x01]),
+                                    2 => self.emit(&[0x66, 0x89, 0x01]),
+                                    4 => self.emit(&[0x89, 0x01]),
+                                    _ => self.emit(&[0x48, 0x89, 0x01]),
+                                }
                             }
                         }
                     } else {
@@ -1039,34 +887,29 @@ impl Codegen {
                         self.emit_index_scale(es, arr, elem_ty);
                         self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
                         self.push(0);
-                        self.gen_expr(r, 0);
-                        self.pop(1);
-                        if is_agg_elem {
-                            self.gen_agg_elem_store(r, elem_ty, es, dst);
-                            return;
-                        }
-                        // _Complex 浮点元素: 逐分量写 (同上, 防止整数
-                        // store 把 rax 残值写进实部)
-                        if matches!(elem_ty, Type::Complex(ref c)
+                        let is_cx_float2 = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
-                                Type::Float | Type::Double | Type::LongDouble))
-                        {
+                                Type::Float | Type::Double | Type::LongDouble));
+                        if is_cx_float2 {
                             if let Type::Complex(ref cinner) = elem_ty {
                                 self.store_complex_at_rcx(r, &cinner.base);
                             }
-                        } else if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
-                            self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
-                            if matches!(elem_ty, Type::Float) {
-                                self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                            } else {
-                                self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                            }
                         } else {
-                            match es {
-                                1 => self.emit(&[0x88, 0x01]),
-                                2 => self.emit(&[0x66, 0x89, 0x01]),
-                                4 => self.emit(&[0x89, 0x01]),
-                                _ => self.emit(&[0x48, 0x89, 0x01]),
+                            self.gen_expr(r, 0);
+                            self.pop(1);
+                            if is_agg_elem {
+                                self.gen_agg_elem_store(r, elem_ty, es, dst);
+                                return;
+                            }
+                            if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                                self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
+                            } else {
+                                match es {
+                                    1 => self.emit(&[0x88, 0x01]),
+                                    2 => self.emit(&[0x66, 0x89, 0x01]),
+                                    4 => self.emit(&[0x89, 0x01]),
+                                    _ => self.emit(&[0x48, 0x89, 0x01]),
+                                }
                             }
                         }
                     }
@@ -1147,42 +990,38 @@ impl Codegen {
                     } else {
                         self.gen_expr(ptr_e, 0); // rax = address
                         self.push(0); // save addr
-                        self.gen_expr(r, 0); // rax = val
-                        self.pop(1); // rcx = addr
-                                     // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
-                        if let Some(seg) = seg_prefix {
-                            self.emit(&[seg]);
-                        }
-                        // 浮点指向: 值在 xmm0, 用 movsd/movss 存储
-                        // _Complex 指向: 逐分量写 (实部 [rcx], 虚部 [rcx+isz]),
-                        // 防止整数 store 把 rax 残值写进实部
-                        if matches!(assign_l_ty, Type::Complex(ref c)
-                        if matches!(&c.base,
-                            Type::Float | Type::Double | Type::LongDouble))
-                        {
+                        let is_cx_ptr = matches!(assign_l_ty, Type::Complex(ref c)
+                            if matches!(&c.base,
+                                Type::Float | Type::Double | Type::LongDouble));
+                        if is_cx_ptr {
+                            if let Some(seg) = seg_prefix {
+                                self.emit(&[seg]);
+                            }
                             if let Type::Complex(ref cinner) = assign_l_ty {
                                 self.store_complex_at_rcx(r, &cinner.base);
                             }
-                        } else if matches!(
-                            &assign_l_ty,
-                            Type::Float | Type::Double | Type::LongDouble
-                        ) {
-                            self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
-                            if matches!(assign_l_ty, Type::Float) {
-                                self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                            } else {
-                                self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                            }
                         } else {
-                            // 按 *ptr 类型宽度选择 store 指令 (截断语义:
-                            // 只写低 n 字节). 旧实现恒用 8 字节 movq,
-                            // 会越界覆盖相邻内存 (如 decNumber
-                            // *up=(Unit)out 破坏后续单元 → 系数全 0).
-                            match assign_l_ty.size() {
-                                1 => self.emit(&[0x88, 0x01]),       // mov [rcx], al
-                                2 => self.emit(&[0x66, 0x89, 0x01]), // mov [rcx], ax
-                                4 => self.emit(&[0x89, 0x01]),       // mov [rcx], eax
-                                _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
+                            self.gen_expr(r, 0); // rax = val
+                            self.pop(1); // rcx = addr                            // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
+                            if let Some(seg) = seg_prefix {
+                                self.emit(&[seg]);
+                            }
+                            if matches!(
+                                &assign_l_ty,
+                                Type::Float | Type::Double | Type::LongDouble
+                            ) {
+                                self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
+                            } else {
+                                // 按 *ptr 类型宽度选择 store 指令 (截断语义:
+                                // 只写低 n 字节). 旧实现恒用 8 字节 movq,
+                                // 会越界覆盖相邻内存 (如 decNumber
+                                // *up=(Unit)out 破坏后续单元 → 系数全 0).
+                                match assign_l_ty.size() {
+                                    1 => self.emit(&[0x88, 0x01]),       // mov [rcx], al
+                                    2 => self.emit(&[0x66, 0x89, 0x01]), // mov [rcx], ax
+                                    4 => self.emit(&[0x89, 0x01]),       // mov [rcx], eax
+                                    _ => self.emit(&[0x48, 0x89, 0x01]), // mov [rcx], rax
+                                }
                             }
                         }
                         // pop(1) 把 rcx 覆盖成目标地址, store 后结果值仍在 rax.
@@ -1457,23 +1296,22 @@ impl Codegen {
                             self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
                         } else {
                             self.push(0); // 保存目标地址
-                            self.gen_expr(r, 0); // rax = 值 (浮点: xmm0)
-                            self.pop(1); // rcx = 目标地址
                             let size = field_info.as_ref().map_or(4, |f| f.ty.size());
                             // 浮点字段: 值在 xmm0, 用 movss/movsd 存储
                             let fty = field_info.as_ref().map(|f| f.ty.clone());
-                            if let Some(fty) = &fty {
-                                if let Type::Complex(ref cinner) = fty {
-                                    // _Complex 浮点字段: 逐分量写 (实部 [rcx],
-                                    // 虚部 [rcx+isz])。旧实现落入整数 8B store,
-                                    // rax 的整数位模式直接覆盖两分量
-                                    // (20020227-1: s.f = 1 后实部为 1.4e-45)。
-                                    if matches!(
-                                        &cinner.base,
-                                        Type::Float | Type::Double | Type::LongDouble
-                                    ) {
-                                        self.store_complex_at_rcx(r, &cinner.base);
-                                    } else {
+                            let is_cx_field = matches!(&fty,
+                                Some(Type::Complex(ref c))
+                                    if matches!(&c.base,
+                                        Type::Float | Type::Double | Type::LongDouble));
+                            if is_cx_field {
+                                if let Some(Type::Complex(ref cinner)) = fty {
+                                    self.store_complex_at_rcx(r, &cinner.base);
+                                }
+                            } else {
+                                self.gen_expr(r, 0); // rax = 值 (浮点: xmm0)
+                                self.pop(1); // rcx = 目标地址
+                                if let Some(fty) = &fty {
+                                    if let Type::Complex(ref cinner) = fty {
                                         // 整数 complex 字段: rvalue 已由外层
                                         // gen_expr 物化在 result_off (rax=地址
                                         // 约定), 整体拷贝 isz*2 字节到 [rcx]
@@ -1483,16 +1321,25 @@ impl Codegen {
                                         self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx
                                         self.mov_imm(1, (isz * 2) as i128);
                                         self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                                    }
-                                } else if matches!(
-                                    fty,
-                                    Type::Float | Type::Double | Type::LongDouble
-                                ) {
-                                    self.emit_scalar_to_xmm0_if_needed(r, fty);
-                                    if matches!(fty, Type::Float) {
-                                        self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
+                                    } else if matches!(
+                                        fty,
+                                        Type::Float | Type::Double | Type::LongDouble
+                                    ) {
+                                        self.emit_store_scalar_float_at(&r.ty(), fty, 1); // 单一真源：收浮影子副本
                                     } else {
-                                        self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
+                                        match size {
+                                            1 => self.emit(&[0x88, 0x01]),
+                                            2 => self.emit(&[0x66, 0x89, 0x01]),
+                                            4 => self.emit(&[0x89, 0x01]),
+                                            8 => self.emit(&[0x48, 0x89, 0x01]),
+                                            16 => {
+                                                // __int128: rax:rdx → [rcx]:[rcx+8]
+                                                self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                                                self.emit(&[0x48, 0x89, 0x51, 0x08]);
+                                                // mov [rcx+8], rdx
+                                            },
+                                            _ => {},
+                                        }
                                     }
                                 } else {
                                     match size {
@@ -1501,25 +1348,11 @@ impl Codegen {
                                         4 => self.emit(&[0x89, 0x01]),
                                         8 => self.emit(&[0x48, 0x89, 0x01]),
                                         16 => {
-                                            // __int128: rax:rdx → [rcx]:[rcx+8]
                                             self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                            self.emit(&[0x48, 0x89, 0x51, 0x08]);
-                                            // mov [rcx+8], rdx
+                                            self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
                                         },
                                         _ => {},
                                     }
-                                }
-                            } else {
-                                match size {
-                                    1 => self.emit(&[0x88, 0x01]),
-                                    2 => self.emit(&[0x66, 0x89, 0x01]),
-                                    4 => self.emit(&[0x89, 0x01]),
-                                    8 => self.emit(&[0x48, 0x89, 0x01]),
-                                    16 => {
-                                        self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                        self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
-                                    },
-                                    _ => {},
                                 }
                             }
                         }
@@ -1549,7 +1382,13 @@ impl Codegen {
                         self.push(0); // 保存目标地址
                         self.gen_expr(r, 0); // 值 (浮点: xmm0)
                         self.pop(1); // rcx = 目标地址
-                        if is_float_inner {
+                        if matches!(inner, Type::LongDouble) {
+                            // LongDouble 分量: gen_expr 后值在 st0 (80-bit
+                            // tbyte), 必须 fstpt 直写 [rcx+part_off]。绝不
+                            // 能走下方 SSE movsd — 只写 8 字节且取 xmm0
+                            // (垃圾), 破坏 real/imag 的 10 字节 tbyte 槽。
+                            self.emit_x87_fstp_at(1, part_off as i32, &inner);
+                        } else if is_float_inner {
                             self.emit_scalar_to_xmm0_if_needed(r, &inner);
                             let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                             self.emit(&[pfx, 0x0F, 0x11]); // movss/movsd [rcx+disp], xmm0
@@ -1649,12 +1488,7 @@ impl Codegen {
                         self.gen_expr(r, 0); // rax = val (浮点: xmm0)
                         self.pop(1); // rcx = 目标地址
                         if is_float_ty {
-                            self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
-                            if matches!(assign_l_ty, Type::Float) {
-                                self.emit(&[0xF3, 0x0F, 0x11, 0x01]); // movss [rcx], xmm0
-                            } else {
-                                self.emit(&[0xF2, 0x0F, 0x11, 0x01]); // movsd [rcx], xmm0
-                            }
+                            self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1); // 单一真源：收浮影子副本
                         } else {
                             match assign_sz {
                                 1 => self.emit(&[0x88, 0x01]),       // mov [rcx], al
@@ -1672,9 +1506,9 @@ impl Codegen {
             Expr::Unary { op, e, .. } => {
                 // 浮点字面量取负: 编译期折叠, 直接生成相反值的 Float 表达式
                 if matches!(op, UnOp::Neg) {
-                    if let Expr::Float { v, ty, span, .. } = e.as_ref() {
+                    if let Expr::Float { c, ty, span, .. } = e.as_ref() {
                         let negated = Expr::Float {
-                            v: -*v,
+                            c: c.negate(),
                             ty: ty.clone(),
                             span: span.clone(),
                         };
@@ -1714,38 +1548,38 @@ impl Codegen {
                     && (matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble)
                         || matches!(e.ty(), Type::Imaginary(_)))
                 {
-                    self.gen_expr(e, 0); // xmm0 = e
+                    self.gen_expr(e, 0); // 值按类型落在 st(0) 或 xmm0
                     let e_ty = e.ty();
                     let neg_ty = if let Type::Imaginary(ref inner) = e_ty {
                         &inner.base
                     } else {
                         &e_ty
                     };
-                    match neg_ty {
-                        Type::Float => {
-                            // 翻转 32 位符号位: movabs rax, 0x8000_0000
-                            //   66 48 0f 6e c8 movq xmm1, rax
-                            //   0f 57 c1       xorps xmm0, xmm1
-                            self.emit(&[0x48, 0xB8]);
-                            self.emit(&0x80000000u64.to_le_bytes());
-                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
-                            self.emit(&[0x0F, 0x57, 0xC1]);
-                        },
-                        Type::Double => {
-                            // 翻转 64 位符号位
-                            self.emit(&[0x48, 0xB8]);
-                            self.emit(&0x8000000000000000u64.to_le_bytes());
-                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
-                            self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
-                        },
-                        Type::LongDouble => {
-                            // long double (80-bit): dcc 用 8 字节近似, 同样翻转 bit 63
-                            self.emit(&[0x48, 0xB8]);
-                            self.emit(&0x8000000000000000u64.to_le_bytes());
-                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
-                            self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
-                        },
-                        _ => unreachable!(),
+                    // 单一判据：st(0) 通道用 `fchs`（翻转 80-bit 的符号位，
+                    // 不经 xmm0、不丢尾数）；否则才用 xorpd 翻符号位掩码。
+                    // `Imaginary` 参内型的符号位存在内存对里，不适用 st(0)。
+                    if self.float_in_st0(neg_ty) && !matches!(e_ty, Type::Imaginary(_)) {
+                        self.emit_x87_chs();
+                    } else {
+                        match neg_ty {
+                            Type::Float => {
+                                // 翻转 32 位符号位: movabs rax, 0x8000_0000
+                                //   66 48 0f 6e c8 movq xmm1, rax
+                                //   0f 57 c1       xorps xmm0, xmm1
+                                self.emit(&[0x48, 0xB8]);
+                                self.emit(&0x80000000u64.to_le_bytes());
+                                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                                self.emit(&[0x0F, 0x57, 0xC1]);
+                            },
+                            _ => {
+                                // 翻转 64 位符号位（double，以及 -mno-sse 下
+                                // 担心遗漏的兼容分支已由上方 st(0) 接走）
+                                self.emit(&[0x48, 0xB8]);
+                                self.emit(&0x8000000000000000u64.to_le_bytes());
+                                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                                self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
+                            },
+                        }
                     }
                     if dst != 0 {
                         self.mov(dst, 0);
@@ -1761,6 +1595,24 @@ impl Codegen {
                     };
                     let inner_sz = inner.size() as i64;
                     let result_off = -self.frame_size + 8;
+                    // complex LD: 两分量各 fchs (值通道是 x87), 物化到帧槽,
+                    // rax=result_off (LD rvalue 约定)。绝不能落到下方 SSE
+                    // movsd/flip_sign 路径 — 那只读/写 8 字节, 会破坏 10 字节
+                    // tbyte (real/imag 双双变 nan)。
+                    if matches!(inner, Type::LongDouble) {
+                        let src = self.gen_complex_ld_materialize(e);
+                        self.emit_x87_fld_at(13, src as i32, &inner);
+                        self.emit_x87_chs();
+                        self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                        self.emit_x87_fld_at(13, src as i32 + 16, &inner);
+                        self.emit_x87_chs();
+                        self.emit_x87_fstp_at(13, (result_off + inner_sz) as i32, &inner);
+                        self.emit_lea_r13(0, result_off);
+                        if dst != 0 {
+                            self.mov(dst, 0);
+                        }
+                        return;
+                    }
                     let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     // 1. 实部 → xmm0, 虚部 → [r13+result_off+inner_sz]
                     if self.gen_lvalue_addr(e, 0) {
@@ -1816,6 +1668,21 @@ impl Codegen {
                     };
                     let inner_sz = inner.size() as i64;
                     let result_off = -self.frame_size + 8;
+                    // complex LD 共轭: 源只求值一次物化成 tbyte 对, real 直写,
+                    // imag fchs 后写 (值通道是 x87, 不能走下方 SSE 副本)。
+                    if matches!(inner, Type::LongDouble) {
+                        let src = self.gen_complex_ld_materialize(e);
+                        self.emit_x87_fld_at(13, src as i32, &inner);
+                        self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                        self.emit_x87_fld_at(13, src as i32 + 16, &inner);
+                        self.emit_x87_chs();
+                        self.emit_x87_fstp_at(13, (result_off + inner_sz) as i32, &inner);
+                        self.emit_lea_r13(0, result_off);
+                        if dst != 0 {
+                            self.mov(dst, 0);
+                        }
+                        return;
+                    }
                     if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
                         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         if self.gen_lvalue_addr(e, 0) {
@@ -2006,166 +1873,8 @@ impl Codegen {
             Expr::Call {
                 callee, args, ty, ..
             } => {
-                // C 标准语义: (*fp)(...) 中 * 为函数指示符转换 (no-op),
-                // 剥掉 Deref 壳后按内部表达式求值, 不真实解引用函数指针
-                // (否则会双重加载, 把函数体的机器码字节当地址调用).
-                let mut call_target: &Expr = callee.as_ref();
-                while let Expr::Deref { e: inner, .. } = call_target {
-                    call_target = inner.as_ref();
-                }
-                let sret_off = if Self::needs_memory_return(ty) {
-                    Some(self.alloc_sret_slot(ty.size()))
-                } else {
-                    None
-                };
-                // 检查是否为直接调用 (callee 是 Ident 且不是局部函数指针变量)
-                let direct_name = if let Expr::Ident { name, .. } = call_target {
-                    if self.var_map.contains_key(&name.name)
-                        || (self.current_func_is_nested
-                            && self.upvar_offsets.contains_key(&name.name))
-                        || self.is_global_var(&name.name)
-                    {
-                        None // 函数指针变量: 走间接调用
-                    } else {
-                        Some(name.name.clone())
-                    }
-                } else {
-                    None
-                };
-                // gen_builtin 已完整物化 complex 返回的 builtin (conj 系列):
-                // result_off 含实/虚部, xmm0=实部 — 下方统一物化须跳过,
-                // 否则 movq 打包 store 会覆盖虚部 (20020411-1)
-                let mut complex_builtin_done = false;
-                if let Some(fname) = direct_name {
-                    let name_name = fname;
-                    // __atomic_* / __sync_* 内置函数特殊处理 (生成 lock 前缀指令)
-                    if (name_name.starts_with("__atomic_") || name_name.starts_with("__sync_"))
-                        && self.gen_atomic_builtin(&name_name, args, dst)
-                    {
-                        // 已成功生成原子指令
-                    } else if self.gen_builtin(&name_name, args, dst) {
-                        // 已成功处理 __builtin_* 函数
-                        if matches!(
-                            name_name.as_str(),
-                            "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl"
-                        ) {
-                            complex_builtin_done = true;
-                        }
-                    } else if Self::is_fortify_builtin(&name_name) {
-                        // Linux FORTIFY: __builtin___memcpy_chk 等 FORTIFY 宏族展开后
-                        // 带有 __builtin_ 前缀, 但实际应链接到 libc 的 __*_chk 符号.
-                        // 剥离前缀后按普通函数调用处理.
-                        let real_name = &name_name["__builtin_".len()..];
-                        self.emit_sysv_call(Some(real_name), None, args, sret_off);
-                        if let Some(off) = sret_off {
-                            self.emit_lea_r13(0, off);
-                            if dst != 0 {
-                                self.mov(dst, 0);
-                            }
-                        } else if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                    } else if name_name.starts_with("__builtin_") {
-                        self.gen_unknown_builtin_fallback(&name_name, ty, dst, sret_off);
-                    } else if self.error_attr_fns.contains(&name_name) {
-                        // __attribute__((error("..."))) 函数: 编译期断言失败时
-                        // 理论上不应到达此处 (常量折叠应消除调用).
-                        // 作为安全网, 发射 ud2 (unreachable) 避免生成对外部
-                        // 未定义函数的调用, 防止链接失败.
-                        self.emit(&[0x0f, 0x0b]); // ud2
-                    } else {
-                        self.emit_sysv_call(Some(&name_name), None, args, sret_off);
-                        if let Some(off) = sret_off {
-                            // rax = &缓冲 (gen_sret_return 等依赖 rax 指向结果)
-                            self.emit_lea_r13(0, off);
-                            if dst != 0 {
-                                self.mov(dst, 0);
-                            }
-                        } else if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                    }
-                } else {
-                    self.emit_sysv_call(None, Some(call_target), args, sret_off);
-                    if let Some(off) = sret_off {
-                        self.emit_lea_r13(0, off);
-                        if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                    } else if dst != 0 {
-                        self.mov(dst, 0);
-                    }
-                }
-                // A2: long double 内存返回 — 从 sret 缓冲加载值到 xmm0
-                // (dcc 内部以 double 精度表示, 低 8 字节为值)
-                if matches!(ty, Type::LongDouble) {
-                    if let Some(off) = sret_off {
-                        self.emit_lea_r13(0, off); // rax = &缓冲
-                        self.emit(&[0xF2, 0x0F, 0x10, 0x00]); // movsd xmm0, [rax]
-                    }
-                }
-                // vector 返回值: 存入向量临时槽 0
-                // <=16B: SSE 类, 被调方在 xmm0 返回, 需存入临时槽
-                if matches!(ty, Type::Vector(_, _)) && sret_off.is_none() {
-                    let toff = self.vector_temp_base(0, ty.size());
-                    if ty.size() <= 8 {
-                        // xmm0 → 临时槽 0
-                        self.store_xmm64_stack(0, toff);
-                    } else {
-                        // 16B Vector: xmm0 (全 16B) → 临时槽 0
-                        self.store_xmm128_stack(0, toff);
-                    }
-                }
-                // _Complex 返回值统一物化: 返回端按 SysV ABI 传值
-                // (SSE 类: xmm0=实部/xmm1=虚部; 整数类: rax[:rdx];
-                //  Memory 类: sret 缓冲), 调用后统一物化到帧临时区
-                // result_off, 转换为 dcc complex rvalue 通用约定
-                // (内存对 + xmm0=实部 + rax=result_off)。消费端
-                // (赋值/spill/传参) 统一按内存对读取, 避免整数 _Complex
-                // 返回被按 xmm 读取得垃圾 (complex-6: ctest_int)。
-                if let Type::Complex(inner) = ty {
-                    let result_off = -self.frame_size + 8;
-                    if complex_builtin_done {
-                        // conj 系列已在 gen_builtin 内自物化 (实部
-                        // result_off, 虚部 result_off+isz, xmm0=实部),
-                        // 只补 rax=result_off 约定 (下方统一 lea)
-                    } else if let Some(off) = sret_off {
-                        // Memory 类 (long double): rax 已指向 sret 缓冲,
-                        // 拷贝到 result_off 统一内存布局
-                        self.mov(6, 0); // rsi = rax (缓冲地址)
-                        self.emit_lea_r13(7, result_off); // rdi = r13+result_off
-                        self.mov_imm(1, ty.size() as i128);
-                        self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                        let _ = off;
-                    } else if matches!(inner.base, Type::Float) {
-                        // SysV ABI: _Complex float 是单个 8 字节 SSE 类,
-                        // 返回端打包在 xmm0 低/高 32 位 (movq 读出即
-                        // [real@0..4][imag@4..8])。旧实现按 xmm0/xmm1 两
-                        // 寄存器约定拆分 (那是 _Complex double 的分类),
-                        // float complex 虚部丢失 (complex-6 test_float)。
-                        self.emit_xmm0_r13_disp(&[0x66, 0x49, 0x0F, 0xD6], result_off);
-                        // 实部重载 xmm0 (dcc complex rvalue 约定, movss 4B)
-                        self.emit_xmm0_r13_disp(&[0xF3, 0x49, 0x0F, 0x10], result_off);
-                    } else if matches!(inner.base, Type::Double) {
-                        let pfx = 0xF2u8;
-                        let isz = inner.base.size() as i64;
-                        // xmm0=实部 → [result_off]
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
-                        // xmm1=虚部 → xmm0 → [result_off+isz]
-                        self.emit(&[pfx, 0x0F, 0x10, 0xC1]); // movsd xmm0, xmm1
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + isz);
-                        // 实部重载 xmm0 (dcc complex rvalue 约定)
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
-                    } else {
-                        // 整数 _Complex: rax(实部/打包) → [result_off],
-                        // rdx(虚部) → [result_off+8] (>8B)
-                        self.store_stack(0, result_off);
-                        if ty.size() > 8 {
-                            self.store_stack(2, result_off + 8);
-                        }
-                    }
-                    self.emit_lea_r13(0, result_off);
-                }
+                // 单一入口：本 arm 曾是 `gen_expr_call` 的逐字副本。
+                self.gen_expr_call(callee, args, ty, dst);
             },
             Expr::SizeofTy { ty, .. } => {
                 // VM struct/union (含 VLA 字段的局部类型): sizeof 读
@@ -2444,489 +2153,10 @@ impl Codegen {
                 }
             },
             Expr::Cast { ty, e, .. } => {
-                // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
-                if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e.as_ref()) {
-                    self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
-                    // rax 指向临时槽, 供后续 aggregate_assign 或向量操作使用
-                    let vec_size = elem_ty.base.size() * n;
-                    let temp_off = self.vector_temp_base(0, vec_size);
-                    self.emit_lea_r13(0, temp_off);
-                    return;
-                }
-                let src_ty = e.ty();
-                // 标量整数→向量 (同尺寸): 直接用 movq 将 GP 寄存器值移入 XMM
-                // 然后存到临时槽, 供后续 aggregate assign 使用
-                if let Type::Vector(_, _) = ty {
-                    if src_ty.size() == ty.size() && src_ty.size() <= 8 && src_ty.is_int() {
-                        self.gen_expr(e, dst);
-                        if dst != 0 {
-                            self.mov(0, dst);
-                        }
-                        // movq xmm0, rax: 66 REX.W 0F 6E C0
-                        self.emit_movq_gp_to_xmm(0, 0);
-                        // 存 xmm0 到临时槽, 供后续 aggregate assign 从内存读
-                        let vec_size = ty.size();
-                        let temp_off = self.vector_temp_base(0, vec_size);
-                        // movq [r13+temp_off], xmm0: 66 REX.B 0F D6 /r (store)
-                        // 位移可能超出 8 位, 用 mod=10 (32-bit disp)
-                        // ModRM: mod=10, reg=xmm0(000), r/m=100(SIB)
-                        // SIB: scale=00, index=100(none), base=101(r13) + REX.B
-                        let rex = 0x41; // REX.B for r13
-                        self.emit(&[0x66, rex, 0x0F, 0xD6, 0x84, 0x25]);
-                        self.emit(&(temp_off as i32).to_le_bytes());
-                        // rax = 临时槽地址 (供后续使用)
-                        self.emit_lea_r13(0, temp_off);
-                        return;
-                    }
-                }
-                // 向量→标量整数 (同尺寸): 从向量内存加载到 GP 寄存器
-                // 关键: vector 可能 < 8B, 不能固定 movq 读 8 字节 (读到垃圾).
-                // 改为按 vector 实际 size 直接 load 到 GP, 再 zero-extend 到 64 位.
-                if let Type::Vector(_, _) = src_ty {
-                    if src_ty.size() == ty.size() && ty.size() <= 8 && ty.is_int() {
-                        // 取 vector 地址到 rax (rvalue 先物化到临时槽)
-                        if !self.gen_lvalue_addr(e, 0) {
-                            self.gen_expr(e, 0);
-                            let toff = self.vector_temp_base(0, src_ty.size());
-                            self.emit_lea_r13(0, toff);
-                        }
-                        // rax = vector 内存地址, 按实际 size 加载到 rax
-                        let sz = src_ty.size();
-                        match sz {
-                            1 => {
-                                // movzx eax, byte [rax]
-                                self.emit(&[0x0F, 0xB6, 0x00]);
-                            },
-                            2 => {
-                                // movzx eax, word [rax]
-                                self.emit(&[0x0F, 0xB7, 0x00]);
-                            },
-                            4 => {
-                                // mov eax, dword [rax] (自动 zero-extend 到 64 位)
-                                self.emit(&[0x8B, 0x00]);
-                            },
-                            8 => {
-                                // mov rax, qword [rax] (64 位无 truncation)
-                                self.emit(&[0x48, 0x8B, 0x00]);
-                            },
-                            _ => {
-                                // 更大? 不可能, 条件已限定 <= 8
-                                self.emit(&[0x48, 0x8B, 0x00]);
-                            },
-                        }
-                        if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                        return;
-                    }
-                }
-                if self.gen_same_size_bitcast(e, ty, dst) {
-                    return;
-                }
-                // 数组在 cast 中 decay 为首元素地址, 如 (const __m128i *) buf.
-                // 直接 gen_expr 会误读数组内容 (mov 而非 lea).
-                if matches!(src_ty, Type::Array(_, _)) && self.gen_lvalue_addr(e, dst) {
-                    return;
-                }
-                self.gen_expr(e, dst);
-                // 类型转换
-                match (&src_ty, ty) {
-                    (src, Type::Int128 | Type::UInt128)
-                        if !matches!(src, Type::Int128 | Type::UInt128) =>
-                    {
-                        if dst != 0 {
-                            self.mov(0, dst);
-                        }
-                        if matches!(
-                            src,
-                            Type::Bool
-                                | Type::UChar
-                                | Type::UShort
-                                | Type::UInt
-                                | Type::ULong
-                                | Type::ULongLong
-                        ) {
-                            self.emit(&[0x48, 0x31, 0xD2]);
-                        } else {
-                            self.emit(&[0x48, 0x99]);
-                        }
-                        if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                    },
-                    // unsigned → signed same-size integer cast:
-                    // The value in dst is zero-extended (from loading
-                    // unsigned), but the signed consumer (e.g. idiv)
-                    // needs sign-extension.  Emit movsxd / movswx /
-                    // movsbw to re-interpret.
-                    (Type::UInt, Type::Int) => {
-                        // movsxd dst, dst (sign-extend 32→64)
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                    },
-                    // signed → unsigned same-size: 截断到类型宽度并零扩展
-                    // 如 (unsigned int)(signed_expr) 需要确保高位为 0
-                    (Type::Int, Type::UInt)
-                    | (Type::Long, Type::ULong)
-                    | (Type::LongLong, Type::ULongLong) => {
-                        // mov dst32, dst32 (零扩展 32→64) 或 mov dst64, dst64
-                        let sz = ty.size();
-                        if sz <= 4 {
-                            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                        }
-                        // 64-bit: 无需处理 (已经是 64 位)
-                    },
-                    (Type::UShort, Type::Short) => {
-                        // movswl dst, dst (sign-extend 16→32, zero-extend to 64)
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                    },
-                    (Type::UChar, Type::SChar | Type::Char) => {
-                        // movsbl dst, dst (sign-extend 8→32, zero to 64)
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                    },
-                    // int → float/double
-                    // 源整数值由 gen_expr(e, dst) 求值到 dst 寄存器,
-                    // 转换指令必须读取 dst (而非固定 rax), 否则嵌套在
-                    // Binop 右操作数 (dst=rcx 等) 时会读到错误寄存器.
-                    (
-                        src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short),
-                        Type::Float,
-                    ) => {
-                        // cvtsi2ss xmm0, dst (F3 0F 2A /r)
-                        let wide = matches!(src, Type::Long | Type::LongLong);
-                        let rex = 0x40
-                            | (if wide { 0x08 } else { 0 })
-                            | (if dst >= 8 { 0x01 } else { 0 });
-                        self.emit(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
-                    },
-                    (
-                        src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short),
-                        Type::Double | Type::LongDouble,
-                    ) => {
-                        // cvtsi2sd xmm0, dst (F2 0F 2A /r)
-                        let wide = matches!(src, Type::Long | Type::LongLong);
-                        let rex = 0x40
-                            | (if wide { 0x08 } else { 0 })
-                            | (if dst >= 8 { 0x01 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
-                    },
-                    // float/double → int
-                    // 浮点值按约定在 xmm0, 转换结果必须写入 dst 寄存器,
-                    // 否则嵌套在 Binop 右操作数 (dst=rcx) 时结果被覆盖.
-                    (
-                        Type::Float,
-                        Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
-                    ) => {
-                        // cvttss2si dst, xmm0 (F3 0F 2C /r)
-                        let wide = matches!(ty, Type::Long | Type::LongLong);
-                        let rex = 0x40
-                            | (if wide { 0x08 } else { 0 })
-                            | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        self.emit_float_to_int_saturate(dst, &Type::Float, wide);
-                    },
-                    (
-                        Type::Double,
-                        Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
-                    ) => {
-                        // cvttsd2si dst, xmm0 (F2 0F 2C /r)
-                        let wide = matches!(ty, Type::Long | Type::LongLong);
-                        let rex = 0x40
-                            | (if wide { 0x08 } else { 0 })
-                            | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        self.emit_float_to_int_saturate(dst, &Type::Double, wide);
-                    },
-                    (
-                        Type::LongDouble,
-                        Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
-                    ) => {
-                        // long double 内部为 double, 值已在 xmm0
-                        // cvttsd2si dst, xmm0
-                        let wide = matches!(ty, Type::Long | Type::LongLong);
-                        let rex = 0x40
-                            | (if wide { 0x08 } else { 0 })
-                            | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        self.emit_float_to_int_saturate(dst, &Type::LongDouble, wide);
-                    },
-                    (Type::Complex(inner), Type::Int | Type::Long | Type::Char | Type::Short) => {
-                        let is_f32 = matches!(&inner.base, Type::Float);
-                        match e.as_ref() {
-                            Expr::Binop { .. } => {
-                                // gen_complex_binop 已将实部留在 xmm0
-                            },
-                            Expr::Ident { name, .. } => {
-                                let off = self.var_offset(&name.name);
-                                let pfx = if is_f32 { 0xF3u8 } else { 0xF2u8 };
-                                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off);
-                            },
-                            _ => {
-                                let result_off = -self.frame_size + 8;
-                                let pfx = if is_f32 { 0xF3u8 } else { 0xF2u8 };
-                                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
-                            },
-                        }
-                        if is_f32 {
-                            self.emit(&[0xF3, 0x0F, 0x2C, 0xC0]);
-                        } else {
-                            self.emit(&[0xF2, 0x0F, 0x2C, 0xC0]);
-                        }
-                        if dst != 0 {
-                            self.mov(dst, 0);
-                        }
-                    },
-                    // float ↔ double
-                    (Type::Float, Type::Double | Type::LongDouble) => {
-                        // cvtss2sd xmm0, xmm0 (F3 0F 5A C0)
-                        self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
-                    },
-                    (Type::Double | Type::LongDouble, Type::Float) => {
-                        // cvtsd2ss xmm0, xmm0 (F2 0F 5A C0)
-                        self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
-                    },
-                    // unsigned int (<=32bit) → float/double:
-                    // 零扩展到 64 位后值一定落在 signed int64 正半轴,
-                    // 可直接用 cvtsi2ss/cvtsi2sd (与 signed 路径相同指令).
-                    (src @ (Type::Bool | Type::UChar | Type::UShort | Type::UInt), Type::Float) => {
-                        // 零扩展: 截断到源宽度, 高 32 位自动清零
-                        self.emit_zero_extend(dst, src);
-                        // cvtsi2ss xmm0, dst (F3 REX.W 0F 2A /r)
-                        // 需要 REX.W: UInt 零扩展后值可能 > INT32_MAX,
-                        // 必须以 64 位有符号解释.
-                        let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
-                        self.emit(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
-                    },
-                    (
-                        src @ (Type::Bool | Type::UChar | Type::UShort | Type::UInt),
-                        Type::Double | Type::LongDouble,
-                    ) => {
-                        self.emit_zero_extend(dst, src);
-                        // cvtsi2sd xmm0, dst (F2 REX.W 0F 2A /r)
-                        let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
-                    },
-                    // unsigned long/longlong → float/double:
-                    // 64 位无符号值可能超过 signed int64 范围.
-                    // 策略: 检查符号位, 正数直接 cvtsi2ss/sd;
-                    // 负数 (bit63=1) 先 shr 1, 转换后乘 2.0.
-                    (Type::ULong | Type::ULongLong, Type::Float) => {
-                        self.emit_ulong_to_float(dst, false);
-                    },
-                    (Type::ULong | Type::ULongLong, Type::Double | Type::LongDouble) => {
-                        self.emit_ulong_to_float(dst, true);
-                    },
-                    // float/double → unsigned int (<=32bit):
-                    // 先用 cvttss2si/cvttsd2si 转到 signed int64,
-                    // 负值 (float<0) 钳位到 0, 然后截断到目标宽度.
-                    (Type::Float, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                        // cvttss2si dst, xmm0 (REX.W 64 位结果)
-                        let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        // 负值钳位到 0: 先 zero_reg=0 (xor 会破坏 flags),
-                        // 再 test dst, dst 设置 SF, 最后 cmovs 选择.
-                        let zero_reg = if dst == 0 { 2 } else { 0 };
-                        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[
-                            rex_cmov,
-                            0x0F,
-                            0x48,
-                            0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                        ]);
-                        // 截断到目标宽度
-                        self.emit_truncate_to_unsigned(dst, ty);
-                    },
-                    (Type::Double, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                        // cvttsd2si dst, xmm0 (REX.W 64 位结果)
-                        let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        let zero_reg = if dst == 0 { 2 } else { 0 };
-                        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[
-                            rex_cmov,
-                            0x0F,
-                            0x48,
-                            0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                        ]);
-                        self.emit_truncate_to_unsigned(dst, ty);
-                    },
-                    (Type::LongDouble, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                        // long double 内部为 double, 值已在 xmm0
-                        let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                        let zero_reg = if dst == 0 { 2 } else { 0 };
-                        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[
-                            rex_cmov,
-                            0x0F,
-                            0x48,
-                            0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                        ]);
-                        self.emit_truncate_to_unsigned(dst, ty);
-                    },
-                    // float/double → ulong/ulonglong:
-                    // cvttss2si/cvttsd2si 结果若为非负即正确;
-                    // 若为负 (说明原值 > INT64_MAX), 加 2^64 校正.
-                    (Type::Float, Type::ULong | Type::ULongLong) => {
-                        self.emit_float_to_ulong(dst, false);
-                    },
-                    (Type::Double, Type::ULong | Type::ULongLong) => {
-                        self.emit_float_to_ulong(dst, true);
-                    },
-                    (Type::LongDouble, Type::ULong | Type::ULongLong) => {
-                        // long double 内部为 double, 值已在 xmm0
-                        self.emit_float_to_ulong(dst, true);
-                    },
-                    // 整数窄化转换: 源类型宽度 > 目标类型宽度时需要截断
-                    (src, dst_ty) if src.size() > dst_ty.size() => {
-                        // 目标为无符号小类型: 截断到目标宽度 (零扩展语义)
-                        // 目标为有符号小类型: 截断后符号扩展
-                        match dst_ty {
-                            Type::Bool | Type::UChar => {
-                                // and dst, 0xFF
-                                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                                self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
-                                self.emit(&0xFFu32.to_le_bytes());
-                            },
-                            Type::Char | Type::SChar | Type::Short => {
-                                // 截断到 8/16 位后符号扩展
-                                let bits = dst_ty.size() * 8;
-                                if bits == 8 {
-                                    // movsx dst, dst_byte (REX.W 0F BE C0)
-                                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0x40 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xBE,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                } else {
-                                    // movsx dst, dst_word (REX.W 0F BF C0)
-                                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0x40 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xBF,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                }
-                            },
-                            Type::UShort => {
-                                // and dst, 0xFFFF
-                                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                                self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
-                                self.emit(&0xFFFFu32.to_le_bytes());
-                            },
-                            Type::UInt => {
-                                // mov eax, eax (32位零扩展到64位)
-                                let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
-                                self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                            },
-                            Type::Int => {
-                                // movsxd dst, dst (sign-extend 32→64)
-                                // 截断到 32 位后符号扩展, 供后续有符号运算
-                                // (如 idiv, cmp) 使用正确的 64 位值.
-                                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                                self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                            },
-                            _ => {},
-                        }
-                    },
-                    // 整数缩小转换: 截断到目标类型宽度并符号/零扩展.
-                    // 例如 (char)0xff: Int 值 255 需截断为 8 位再符号扩展为 -1.
-                    // 前面已处理的特定转换 (Int128/浮点/复数等) 不会到达此处.
-                    (src, dst_ty) if Self::is_int_narrow(src, dst_ty) => {
-                        self.gen_int_narrow_cast(dst, dst_ty);
-                    },
-                    // 整数宽度提升但符号性改变 (sign-change widening).
-                    // 小类型 (< int) 在寄存器中以符号/零扩展形式存在于 64 位中.
-                    // 当 Cast 到不同符号性的类型时, 需重新做扩展.
-                    (src, dst_ty)
-                        if Self::is_integer_type(src)
-                            && Self::is_integer_type(dst_ty)
-                            && src.size() < 4 =>
-                    {
-                        let src_signed = Self::is_signed_int(src) || matches!(src, Type::Char);
-                        let dst_signed =
-                            Self::is_signed_int(dst_ty) || matches!(dst_ty, Type::Char);
-                        if src_signed && !dst_signed {
-                            // 有符号源 → 无符号目标: 寄存器中是符号扩展值,
-                            // 需截断到目标宽度 (零扩展语义).
-                            let dst_bits = dst_ty.size() * 8;
-                            match dst_bits {
-                                8 => {
-                                    // movzbl %al, %eax (截断到 8 位, 零扩展到 32 位)
-                                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xB6,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                },
-                                16 => {
-                                    // movzwl %ax, %eax (截断到 16 位, 零扩展到 32 位)
-                                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xB7,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                },
-                                32 => {
-                                    // mov dst32, dst32 (截断到 32 位, 零扩展到 64 位)
-                                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
-                                    self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                                },
-                                _ => {},
-                            }
-                        } else if !src_signed && dst_signed && dst_ty.size() <= src.size() {
-                            // 无符号源 → 有符号目标, 目标不比源宽:
-                            // 寄存器中是零扩展值, 需截断到目标宽度并符号扩展.
-                            let dst_bits = dst_ty.size() * 8;
-                            match dst_bits {
-                                8 => {
-                                    // movsbq %al, %rax (截断到 8 位, 符号扩展)
-                                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xBE,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                },
-                                16 => {
-                                    // movswq %ax, %rax (截断到 16 位, 符号扩展)
-                                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                                    self.emit(&[
-                                        rex,
-                                        0x0F,
-                                        0xBF,
-                                        0xC0 | ((dst & 7) << 3) | (dst & 7),
-                                    ]);
-                                },
-                                _ => {},
-                            }
-                        }
-                        // 注: 无符号源 → 有符号目标, 目标更宽时, 零扩展值
-                        // 已正确表示非负有符号值, 无需转换.
-                    },
-                    // 其他情况: 不转换 (同类型/指针/聚合等无需转换)
-                    _ => {},
-                }
+                // 单一入口：本 arm 曾是 `gen_expr_cast` 的逐字副本。此处模式
+                // 内层 `e` 遮蔽了 gen_expr 的形参 `e`, 而 gen_expr_cast 要的
+                // 正是那个被转换的子表达式, 语义一致。
+                self.gen_expr_cast(ty, e, dst);
             },
             Expr::Cond {
                 cond, then_, else_, ..
@@ -2956,40 +2186,14 @@ impl Codegen {
                 self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
                 self.string_refs.push((at, data));
             },
-            Expr::Float { v, ty, .. } => {
+            Expr::Float { c, ty, .. } => {
                 // 浮点字面量: 存入 .rodata, 用 movsd/movss 加载到 xmm0
-                self.gen_float_imm_load(*v, ty);
+                self.gen_float_imm_load(*c, ty);
             },
-            Expr::ComplexLit { real, imag, ty, .. } => {
-                // C99 虚数字面量 (4.0i / 3j): 实部 → xmm0, 整个复数对写入
-                // 帧临时区 result_off (与 gen_complex_binop 结果布局一致),
-                // 供后续整体赋值 / __real__ / __imag__ 读取。
-                let inner = match ty {
-                    Type::Complex(i) => i.base.clone(),
-                    _ => Type::Double,
-                };
-                let inner_sz = inner.size() as i64;
-                let result_off = -self.frame_size + 8;
-                if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
-                    self.gen_float_imm_load(*real, &inner); // xmm0 = 实部
-                    self.gen_float_store_at(result_off, &inner);
-                    self.gen_float_imm_load(*imag, &inner); // xmm0 = 虚部
-                    self.gen_float_store_at(result_off + inner_sz, &inner);
-                    // 实部重新载入 xmm0 (结果约定)
-                    self.gen_float_imm_load(*real, &inner);
-                } else {
-                    // 整数内型 (_Complex int/short/char):
-                    // 实部/虚部按类型宽度存储, 避免 store_stack(8B)
-                    // 在 isz < 8 时覆盖相邻虚部槽.
-                    self.mov_imm(0, *real as i128);
-                    self.emit_store(0, result_off, inner_sz as usize);
-                    self.mov_imm(0, *imag as i128);
-                    self.emit_store(0, result_off + inner_sz, inner_sz as usize);
-                    self.mov_imm(0, *real as i128);
-                }
-                // rax = 指向 complex 值 (spill_complex_operand / 整体赋值
-                // 从 rax rep movsb 物化; 浮点路径 rax 已被 imm 加载破坏)
-                self.emit_lea_r13(0, result_off);
+            Expr::ComplexLit { .. } | Expr::ComplexIntLit { .. } => {
+                // 复数字面量统一走 compound.rs 单一实现（含整型精确 i128
+                // 分量），避免两处维护同一发射逻辑。
+                self.gen_expr_complex_lit(e, dst);
             },
             Expr::Real { e, ty, .. } => {
                 // __real__ expr: 取 _Complex 表达式实部; 标量返回自身
@@ -3006,230 +2210,16 @@ impl Codegen {
                 span,
                 ..
             } => {
-                // Step 1: 语义层计算地址描述符
-                use crate::semantics::{
-                    compute_lvalue_address, determine_action, AddressBase, AddressContext,
-                    ByteOffset, MaterializeAction,
-                };
-
-                let ctx = AddressContext {
-                    is_nested: self.current_func_is_nested,
-                };
-
-                // 检查是否为嵌套运行时索引: 语义层的 add_byte_offsets 会丢失
-                // 第二个运行时偏移, 这种情况退回旧路径。
-                // 常量内部索引可以正确合并 (Constant + Runtime = Runtime with addend)。
-                let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
-                    && crate::const_eval::eval(idx).is_err()
-                    && match arr.as_ref() {
-                        Expr::Index { idx: inner_idx, .. } => {
-                            crate::const_eval::eval(inner_idx).is_err()
-                        },
-                        _ => false,
-                    };
-
-                if !is_nested_runtime_index {
-                    let desc = compute_lvalue_address(self, e, &ctx);
-
-                    // Step 2: 确定物化动作
-                    let action = determine_action(elem_ty, true);
-
-                    // Step 3: SIB 快速路径优化 (仅全局数组 + 标量加载 + 运行时索引)
-                    // 这是在语义层解析之后的优化: 使用已解析的 symbol_key
-                    if matches!(action, MaterializeAction::LoadScalar)
-                        && matches!(&desc.base, AddressBase::GlobalSymbolAddr { .. })
-                        && matches!(&desc.offset, ByteOffset::Runtime { addend: 0, .. })
-                    {
-                        if let AddressBase::GlobalSymbolAddr { symbol_key } = &desc.base {
-                            if let ByteOffset::Runtime { stride, addend: 0 } = &desc.offset {
-                                let es = *stride as u8;
-                                // 只有 1/2/4/8 字节元素能用 SIB scale
-                                if *stride == 1 || *stride == 2 || *stride == 4 || *stride == 8 {
-                                    self.gen_expr(idx, 1);
-                                    self.emit_load_global_indexed(dst, 1, symbol_key, es, elem_ty);
-                                    return;
-                                }
-                            }
-                        }
-                    }
-
-                    // Step 4: 通用路径 - 通过语义层物化
-                    // 数组元素衰减: 元素是数组时返回地址 (ArrayDecay)
-                    if matches!(action, MaterializeAction::ArrayDecay) {
-                        if self.materialize_address(
-                            &desc,
-                            MaterializeAction::TakeAddress,
-                            Some(idx),
-                            e,
-                            Some(arr),
-                            dst,
-                        ) {
-                            return;
-                        }
-                    } else if matches!(action, MaterializeAction::AggregateLoad) {
-                        // 聚合元素: 返回地址供调用方使用
-                        if self.materialize_address(
-                            &desc,
-                            MaterializeAction::TakeAddress,
-                            Some(idx),
-                            e,
-                            Some(arr),
-                            dst,
-                        ) {
-                            return;
-                        }
-                    } else if matches!(action, MaterializeAction::LoadScalar) {
-                        // 标量加载: 先做 bounds check, 再加载
-                        // 注意: bounds check 需要在索引求值后、地址计算前插入
-                        // 为简化实现, 我们先尝试语义层路径, 失败则退回旧路径
-                        if self.bounds_check {
-                            // bounds check 模式: 退回旧路径 (保证边界检查正确)
-                            // TODO: 将 bounds check 集成到 materialize_address 中
-                        } else {
-                            if self.materialize_address(&desc, action, Some(idx), e, Some(arr), dst)
-                            {
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Fallback: 旧路径 (语义层无法处理时使用)
-                // 数组类型的元素作为值使用时退化为指向首元素的指针
-                // (C11 6.3.2.1p3): 如 words[1] (char words[][6]) 作函数参数
-                // 时应传 &words[1] 地址, 而非对元素做标量加载。
-                if matches!(elem_ty, Type::Array(_, _)) {
-                    self.gen_lvalue_addr(e, dst);
-                    return;
-                }
-                let es = elem_ty.size() as i32;
-                if let Expr::Ident {
-                    name: arr_name,
-                    ty: arr_ty,
-                    ..
-                } = arr.as_ref()
-                {
-                    // 仅全局数组走 SIB 索引快速路径; 全局指针 (char *s = "hello")
-                    // 的下标访问必须先加载指针值再解引用, 不能对符号本身绝对寻址。
-                    // 修复: 使用 resolve_global_key 解析 static local -> mangled 名,
-                    // 避免源名称与文件级全局同名时的错误路由 (BUG-A)。
-                    // 注意: SIB 快速路径仅用于文件级全局数组 (RIP-relative 寻址)。
-                    // Static local 虽然注册在 globals 中, 但不能用 RIP-relative,
-                    // 必须走慢路径 (emit_ident_base_addr) 从栈帧访问。
-                    let is_static_local = self
-                        .static_local_map
-                        .is_static_local(&self.current_func_name, &arr_name.name);
-                    let resolved_key = self.resolve_global_key(&arr_name.name).to_string();
-                    let is_global_array = !is_static_local
-                        && self
-                            .globals_raw
-                            .get(&resolved_key)
-                            .is_some_and(|g| matches!(g.ty, Type::Array(_, _)));
-                    if is_global_array {
-                        // 全局数组: 单条 [disp32+idx*scale] 加载, 避免 LEA+ADD 两步。
-                        // 注: 不在前面 imul rcx, rcx, es - emit_load_global_indexed 已用 SIB scale 体现 es。
-                        self.gen_expr(idx, 1);
-                        self.emit_load_global_indexed(dst, 1, &resolved_key, es as u8, elem_ty);
-                    } else {
-                        // 统一基址计算 (修复 BUG-B: 使用 resolve_global_key 解析 static local)
-                        self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
-                        self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
-                        self.gen_expr(idx, 1); // rcx = index
-                        self.pop(0); // 恢复基址到 rax
-                        if self.bounds_check {
-                            // 保存元素索引 (imul 会覆盖 rcx): libubsan handler 第二参数
-                            self.emit(&[0x48, 0x89, 0xce]); // mov rsi, rcx
-                        }
-                        self.emit_index_scale(es, arr, elem_ty);
-                        // -fbounds-check: 数组下标运行时边界检查
-                        if self.bounds_check {
-                            if let Type::Array(_, crate::ast::ArraySize::Const(n)) = arr_ty {
-                                // 比较 rcx (idx*es) < n*es; 不在范围内调 __ubsan_handle_out_of_bounds
-                                let ok_label = self.fresh_label();
-                                let n_imm = (*n as i64) * (es as i64);
-                                if n_imm > 0 && n_imm < i32::MAX as i64 {
-                                    self.emit(&[0x48, 0x81, 0xf9]); // cmp rcx, imm32
-                                    self.emit(&(n_imm as i32).to_le_bytes());
-                                    self.jmp_rel32(&ok_label, JumpKind::Jb);
-                                    // out of bounds: 调用 __ubsan_handle_out_of_bounds
-                                    // 签名: (OutOfBoundsData *Data, unsigned long Index)。
-                                    // Data 不能传 0/NULL: libubsan 会解引用
-                                    // Data->Loc 与描述符打印诊断
-                                    // (此前传垃圾指针, 越界即段错误而非报错)。
-                                    self.emit_ubsan_oob_data(
-                                        &idx.ty(),
-                                        elem_ty,
-                                        &format!("{} [{}]", Self::ubsan_type_name(elem_ty), *n),
-                                        span,
-                                    );
-                                    self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32
-                                                                    // call 位移起始于当前 code.len() - 4 (0xe8 之后).
-                                                                    // 与 trapv 处同号。- 4 错为 - 0 会让 R_X86_64_PLT32
-                                                                    // 盖到下一条指令首字节, 运行时 SIGILL.
-                                    let call_at = self.code.len() as u64 - 4;
-                                    self.pending_func_rels.push((
-                                        call_at,
-                                        "__ubsan_handle_out_of_bounds".to_string(),
-                                    ));
-                                    self.label(&ok_label);
-                                }
-                                // n_imm 溢出/0/未知大小: 跳过检查 (留待运行时)
-                            }
-                        }
-                        self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
-                        self.emit_load_mem_typed(es as usize, elem_ty); // 按元素类型加载
-                        if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
-                            self.mov(dst, 0);
-                        }
-                    }
-                } else {
-                    // 通用路径: 基址来自任意 lvalue/指针表达式 (如 s.i[k])
-                    let arr_ty = arr.ty();
-                    let arr_is_arr = matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _));
-                    if arr_is_arr {
-                        if !self.gen_lvalue_addr(arr, 0) {
-                            self.gen_expr(arr, 0);
-                        }
-                    } else {
-                        self.gen_expr(arr, 0);
-                    }
-                    self.push(0);
-                    self.gen_expr(idx, 1);
-                    self.pop(0);
-                    self.emit_index_scale(es, arr, elem_ty);
-                    self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
-                    self.emit_load_mem_typed(es as usize, elem_ty);
-                    if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
-                        self.mov(dst, 0);
-                    }
-                }
+                // 单一入口：见 Member arm 同款说明 (影子副本收敛)。
+                self.gen_expr_index_rvalue(e, arr, idx, elem_ty, span, dst);
             },
             Expr::PostInc { e, .. } => self.gen_inc_dec(e, dst, false, true),
             Expr::PostDec { e, .. } => self.gen_inc_dec(e, dst, false, false),
             Expr::PreInc { e, .. } => self.gen_inc_dec(e, dst, true, true),
             Expr::PreDec { e, .. } => self.gen_inc_dec(e, dst, true, false),
             Expr::Deref { e, ty, .. } => {
-                // *e: 求值内部表达式得到地址, 然后按结果类型大小加载
-                let load_ty = ty.clone();
-                let load_size = load_ty.size().max(1);
-                // C11 6.3.2.1p3: *e 的类型是数组时 (e 指向数组的指针),
-                // 值上下文衰减为首元素地址 = e 的值本身, 不得按数组
-                // 大小加载内容 (va-arg-21: vprintf(s, **ap_ptr) 会把
-                // va_list 前 8 字节当指针传入 → 段错误)。
-                if matches!(load_ty, Type::Array(_, _)) {
-                    self.gen_expr(e, dst);
-                    return;
-                }
-                self.gen_expr(e, 0);
-                // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)
-                if let Some(seg) = Self::ptr_seg_prefix(&e.ty()) {
-                    self.emit_load_mem_typed_seg(load_size, &load_ty, seg);
-                } else {
-                    self.emit_load_mem_typed(load_size, &load_ty);
-                }
-                if dst != 0 && !matches!(load_ty, Type::Float | Type::Double) {
-                    self.mov(dst, 0);
-                }
+                // 单一入口：见 Member arm 同款说明 (影子副本收敛)。
+                self.gen_expr_deref_rvalue(e, ty, dst);
             },
             Expr::AddrOf { e, .. } => {
                 // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
@@ -3427,346 +2417,10 @@ impl Codegen {
                 ty,
                 ..
             } => {
-                // struct/union 成员访问: 基址 + 偏移
-                // 1. 计算基址 (struct指针或struct变量地址)
-                if *is_arrow {
-                    self.gen_expr(expr, dst);
-                } else {
-                    if let Expr::Ident { name, .. } = expr.as_ref() {
-                        if self.is_global_not_local(&name.name) {
-                            self.emit_global_addr(dst, &name.name);
-                        } else {
-                            let off = self.var_offset(&name.name);
-                            // VLA/VM struct 变量: [off] 存数据基址, 须加载
-                            // 而非 lea 槽地址 (否则寻址到元数据槽,
-                            // pr82210: s.a[i].c 写坏基址槽)
-                            if self.vla_offsets.contains_key(&name.name) {
-                                self.load_stack(dst, off);
-                            } else {
-                                let rex = 0x49u8;
-                                self.emit(&[rex, 0x8D]);
-                                if off.abs() < 128 {
-                                    self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
-                                } else {
-                                    self.emit(&[0x85 | ((dst & 7) << 3)]);
-                                    self.emit(&(off as i32).to_le_bytes());
-                                }
-                            }
-                        }
-                    } else {
-                        // 通用路径: 嵌套成员/下标等复合 lvalue (如 s.a.b)
-                        if !self.gen_lvalue_addr(expr, dst) {
-                            self.gen_expr(expr, dst);
-                            // If expr is a non-lvalue aggregate (e.g. function
-                            // call returning struct), dst holds the struct VALUE
-                            // not a pointer. We must spill it to a temp slot
-                            // and use that slot's address as the base.
-                            // Exception: CompoundLit already returns an ADDRESS
-                            // (the stack slot where it was built), so we can
-                            // use dst directly without spilling.
-                            let expr_ty = expr.ty();
-                            let is_compound = matches!(expr.as_ref(), Expr::CompoundLit { .. });
-                            if matches!(expr_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
-                                && !is_compound
-                            {
-                                let struct_size = expr_ty.size();
-                                // 物化到帧临时区 result_off (r13 相对)。
-                                // 不能用动态 sub rsp 槽: 该槽在表达式求值
-                                // 期间从不回收, 泄漏使后续 rsp 相对寻址
-                                // (emit_sysv_call 的参数暂存槽/对齐垫) 全部
-                                // 错位 — f().a 作 printf 实参时段错误/乱码。
-                                // SysV ABI: >16B (MEMORY 类) 返回时 rax 已是
-                                // 被调方写入的 sret 缓冲地址, 无需物化。
-                                if struct_size > 16 {
-                                    // dst (rax) 已指向返回值, 保持不变
-                                } else {
-                                    // <=8B 全值在 rax; >8B 且 <=16B 在 rax:rdx
-                                    let result_off = -self.frame_size + 8;
-                                    self.emit_store(0, result_off, 8);
-                                    if struct_size > 8 {
-                                        self.emit_store(2, result_off + 8, 8);
-                                    }
-                                    // dst = 指向物化后的 struct 值
-                                    self.emit_lea_r13(dst, result_off);
-                                }
-                            }
-                        }
-                    }
-                }
-                // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
-                //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
-                let expr_ty = expr.ty();
-                let target_ty =
-                    self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
-                let field_info = match &target_ty {
-                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
-                        find_field(fields, &field.name).map(|(f, extra)| {
-                            let mut fc = f.clone();
-                            fc.offset += extra;
-                            fc
-                        })
-                    },
-                    _ => None,
-                };
-                // VM struct 运行时成员偏移 (目标字段在首 VLA 字段之后,
-                // pr82210): 偏移已加到 dst, 跳过静态偏移加法
-                let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _, _))
-                    && self.gen_vm_member_offset(&target_ty, &field.name, dst);
-                if !vm_off_done {
-                    if let Some(ref f) = field_info {
-                        let field_off = f.offset as i32;
-                        if field_off != 0 {
-                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                            self.emit(&field_off.to_le_bytes());
-                        }
-                    }
-                }
-                // 3. 加载成员值 (位域 vs 普通)
-                // 数组字段 (如 decNumber 的 Unit lsu[1]): 值上下文中衰减为
-                // 首元素地址 — dst 已持有该地址, 不得再按元素大小加载值,
-                // 否则 `p = s->arr` 会把 arr[0] 的值当作地址.
-                let field_is_array = match &field_info {
-                    Some(f) => matches!(f.ty, Type::Array(_, _)),
-                    None => matches!(ty, Type::Array(_, _)),
-                };
-                if !field_is_array {
-                    if let Some(ref f) = field_info {
-                        if let Some(bw) = f.bit_width {
-                            // 位域读取: 加载容器 → 右移 → 掩码
-                            let container_size = f.ty.size();
-                            // 加载容器值
-                            match container_size {
-                                1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
-                                2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
-                                4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                                8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                                _ => {},
-                            }
-                            // 右移 bit_offset 位
-                            if f.bit_offset > 0 {
-                                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                                self.emit(&[rex, 0xC1, 0xE8 | (dst & 7), f.bit_offset as u8]);
-                            }
-                            // 掩码: and dst, (1 << bw) - 1
-                            if bw < 64 {
-                                let mask: u64 = if bw == 64 { u64::MAX } else { (1u64 << bw) - 1 };
-                                // imm32 在 REX.W 下会符号扩展到 64 位,
-                                // 所以 >0x7FFFFFFF 的掩码不能用 imm32 编码
-                                // (例如 bw=32 时 mask=0xFFFFFFFF 会被
-                                // 符号扩展为 0xFFFFFFFFFFFFFFFF, 变成 no-op).
-                                if mask <= 0x7FFFFFFF {
-                                    // 32 位有符号 imm32 可安全编码
-                                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                                    self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
-                                    self.emit(&(mask as u32).to_le_bytes());
-                                } else {
-                                    // >32 位掩码: movabs tmp, mask; and dst, tmp
-                                    // 使用 rcx 作为临时寄存器 (如 dst==rcx 则用 rdx)
-                                    let tmp = if dst != 1 { 1 } else { 2 }; // rcx or rdx
-                                                                            // movabs tmp, mask
-                                    let rex_tmp = 0x48 | if tmp >= 8 { 0x44 } else { 0 };
-                                    self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
-                                    self.emit(&mask.to_le_bytes());
-                                    // and dst, tmp
-                                    let rex = 0x48
-                                        | if dst >= 8 { 0x44 } else { 0 }
-                                        | if tmp >= 8 { 0x04 } else { 0 };
-                                    self.emit(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
-                                }
-                            }
-                            // 有符号位域: 符号扩展
-                            // 枚举位域符号性: GCC 对全部枚举值非负的 enum
-                            // 取 unsigned int 作兼容类型, 此时位域按无符号
-                            // 解释 (不得符号扩展); 含负值则为 int.
-                            let is_unsigned = match &f.ty {
-                                Type::UInt
-                                | Type::ULong
-                                | Type::ULongLong
-                                | Type::UShort
-                                | Type::UChar
-                                | Type::Bool => true,
-                                Type::Enum(_, values, underlying) => match underlying {
-                                    Some(u) => !Self::is_signed_int(&u.base),
-                                    None => values.iter().all(|(_, v)| *v >= 0),
-                                },
-                                _ => false,
-                            };
-                            if !is_unsigned && bw < 64 {
-                                let sign_bit: u64 = 1u64 << (bw - 1);
-                                let inv_mask: u64 = !((1u64 << bw) - 1);
-                                if sign_bit <= 0xFFFFFFFF {
-                                    // 32 位符号位: 可用 imm32 编码
-                                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                                    // test dst, (1 << (bw-1))
-                                    self.emit(&[rex, 0xF7, 0xC0 | (dst & 7)]);
-                                    self.emit(&((sign_bit as u32).to_le_bytes()));
-                                    // jz +7 (跳过符号扩展)
-                                    self.emit(&[0x74, 0x07]);
-                                    // or dst, inv_mask  (填充高位)
-                                    let rex2 = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                                    self.emit(&[rex2, 0x81, 0xC8 | (dst & 7)]);
-                                    self.emit(&(inv_mask as u32).to_le_bytes());
-                                } else {
-                                    // >32 位: 用临时寄存器 (rcx/rdx)
-                                    let tmp = if dst != 1 { 1 } else { 2 };
-                                    // movabs tmp, sign_bit
-                                    let rex_tmp = 0x48 | if tmp >= 8 { 0x44 } else { 0 };
-                                    self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
-                                    self.emit(&sign_bit.to_le_bytes());
-                                    // test dst, tmp
-                                    let rex_t = 0x48
-                                        | if dst >= 8 { 0x44 } else { 0 }
-                                        | if tmp >= 8 { 0x04 } else { 0 };
-                                    self.emit(&[rex_t, 0x85, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
-                                    // jz +N (跳过 movabs + or)
-                                    // movabs tmp, inv_mask (2+8=10 bytes) + or (3 bytes) = 13 bytes
-                                    self.emit(&[0x74, 13]);
-                                    // movabs tmp, inv_mask
-                                    self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
-                                    self.emit(&inv_mask.to_le_bytes());
-                                    // or dst, tmp
-                                    let rex_o = 0x48
-                                        | if dst >= 8 { 0x44 } else { 0 }
-                                        | if tmp >= 8 { 0x04 } else { 0 };
-                                    self.emit(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
-                                }
-                            }
-                        } else if let Type::Complex(inner) = &f.ty {
-                            // 复数字段: 按 complex rvalue 统一约定物化到
-                            // result_off (rax=地址)。不能按标量加载到 dst —
-                            // spill/比较端把 rax 当源地址 rep movsb, 标量加载
-                            // 会让它以位模式值为指针 (foo().x 段错误)。
-                            let isz = inner.base.size();
-                            let result_off = -self.frame_size + 8;
-                            self.mov(6, dst); // rsi = 字段地址
-                            self.emit_lea_r13(7, result_off); // rdi = 物化槽
-                            self.mov_imm(1, (isz * 2) as i128);
-                            self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                            if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble) {
-                                // 浮点 inner 结果约定: xmm0 = 实部
-                                let pfx = if matches!(inner.base, Type::Float) {
-                                    0xF3u8
-                                } else {
-                                    0xF2u8
-                                };
-                                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
-                            }
-                            self.emit_lea_r13(0, result_off);
-                        } else {
-                            // 普通字段: 直接加载
-                            let size = f.ty.size();
-                            // float/double/long double 字段: 只加载到 xmm0
-                            // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
-                            // 后续 mixed-type 比较（如 float > int）会错误地把该
-                            // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
-                            if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble) {
-                                match size {
-                                    4 => {
-                                        self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)])
-                                    }, // movss xmm0, [dst]
-                                    // double/long double: movsd 加载低 8 字节.
-                                    // long double 内部为 double (16 字节槽高 8 字节
-                                    // 为零), movsd 读低 8 字节即值 (xmm0-double 约定).
-                                    8 | 16 => {
-                                        self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)])
-                                    }, // movsd xmm0, [dst]
-                                    _ => {},
-                                }
-                            } else {
-                                let is_signed = !matches!(
-                                    &f.ty,
-                                    Type::Bool
-                                        | Type::UChar
-                                        | Type::UShort
-                                        | Type::UInt
-                                        | Type::ULong
-                                        | Type::ULongLong
-                                        | Type::UInt128
-                                );
-                                match size {
-                                    1 => {
-                                        let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
-                                        self.emit(&[
-                                            0x48,
-                                            0x0F,
-                                            opcode,
-                                            ((dst & 7) << 3) | (dst & 7),
-                                        ]);
-                                    },
-                                    2 => {
-                                        let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
-                                        self.emit(&[
-                                            0x48,
-                                            0x0F,
-                                            opcode,
-                                            ((dst & 7) << 3) | (dst & 7),
-                                        ]);
-                                    },
-                                    4 => {
-                                        if is_signed {
-                                            // movsxd r64, r/m32 — sign-extend dword to qword
-                                            self.emit(&[0x48, 0x63, ((dst & 7) << 3) | (dst & 7)]);
-                                        } else {
-                                            // mov r32, r/m32 — zero-extend (implicit)
-                                            self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]);
-                                        }
-                                    },
-                                    8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                                    _ => {},
-                                }
-                            }
-                        }
-                    } else {
-                        let size = ty.size();
-                        // float/double/long double 字段: 只加载到 xmm0
-                        // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
-                        // 后续 mixed-type 比较（如 float > int）会错误地把该
-                        // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
-                        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                            match size {
-                                4 => self.emit(&[0xF3, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)]), // movss xmm0, [dst]
-                                // double/long double: movsd 读低 8 字节 (xmm0-double)
-                                8 | 16 => {
-                                    self.emit(&[0xF2, 0x0F, 0x10, ((dst & 7) << 3) | (dst & 7)])
-                                }, // movsd xmm0, [dst]
-                                _ => {},
-                            }
-                        } else {
-                            let is_signed = !matches!(
-                                ty,
-                                Type::Bool
-                                    | Type::UChar
-                                    | Type::UShort
-                                    | Type::UInt
-                                    | Type::ULong
-                                    | Type::ULongLong
-                                    | Type::UInt128
-                            );
-                            match size {
-                                1 => {
-                                    let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
-                                    self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                                },
-                                2 => {
-                                    let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
-                                    self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                                },
-                                4 => {
-                                    if is_signed {
-                                        // movsxd r64, r/m32 — sign-extend dword to qword
-                                        self.emit(&[0x48, 0x63, ((dst & 7) << 3) | (dst & 7)]);
-                                    } else {
-                                        // mov r32, r/m32 — zero-extend (implicit)
-                                        self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]);
-                                    }
-                                },
-                                8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                                _ => {},
-                            }
-                        }
-                    }
-                }
+                // 单一入口：本 arm 曾是 `gen_expr_member_rvalue` 的逐字副本
+                // (两份同源代码, 只有这一份在跑), 任何只改 lvalue.rs 的修复
+                // 都会静默失效。现只委派。
+                self.gen_expr_member_rvalue(expr, field, is_arrow, ty, dst);
             },
             Expr::CompoundLit { ty, inits, .. } => {
                 if let Type::Vector(elem_ty, n) = ty {
@@ -3785,39 +2439,12 @@ impl Codegen {
                 // dst = r13 + base_offset (compound lit address)
                 self.emit_lea_r13(dst, base_offset);
             },
-            Expr::VaArg { ap, ty: arg_ty, .. } => {
-                // 聚合 va_arg: 物化到临时槽, rax = 槽地址 (与 sret Call
-                // 约定一致), 供调用方 gen_aggregate_assign 以 rax 为源拷贝
-                // VLA 类型编译时 size 为 8 (ArraySize::Var 退化为指针),
-                // 但实际运行时大小动态, 必须走 gen_va_arg_struct 路径
-                // 用运行时大小进行正确复制 (20020412-1)
-                if matches!(arg_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
-                    && (arg_ty.size() > 8 || Self::type_has_vla(arg_ty))
-                {
-                    let slot = self.alloc_sret_slot(arg_ty.size());
-                    let va_addr = self.resolve_va_list_addr(ap);
-                    if let VaListAddress::Named(ref name) = va_addr {
-                        self.emit_lea_r13(7, slot); // rdi = 临时槽
-                        self.gen_va_arg_struct(name, arg_ty);
-                    } else {
-                        // Reg/Lvalue: rcx 已有 va_list 指针, 用指针版 struct 读取
-                        self.emit_lea_r13(7, slot); // rdi = 临时槽
-                        self.gen_va_arg_ptr_struct(arg_ty);
-                    }
-                    self.emit_lea_r13(0, slot); // rax = 槽地址
-                    return;
-                }
-                // 统一分发: 构造 VaListAddress 后按变体分派
-                let va_addr = self.resolve_va_list_addr(ap);
-                match va_addr {
-                    VaListAddress::Named(name) => {
-                        self.gen_va_arg(&name, arg_ty, dst);
-                    },
-                    VaListAddress::InReg | VaListAddress::Lvalue(_) => {
-                        // rcx 已有 va_list 指针地址
-                        self.gen_va_arg_ptr(arg_ty, dst);
-                    },
-                }
+            Expr::VaArg { .. } => {
+                // 单一入口：本 arm 曾是 `gen_expr_va_arg` 的逐字副本（两份同源
+                // 代码，只有这一份在跑），任何只改 va_arg.rs 的修复都会静默
+                // 失效。现只委派，交付约定与地址解析判据全部收在
+                // emit/expr/va_arg.rs。
+                self.gen_expr_va_arg(e, dst);
             },
             Expr::InitList { inits, .. } => {
                 if let Type::Vector(elem_ty, n) = e.ty() {
