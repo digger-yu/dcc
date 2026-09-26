@@ -469,6 +469,12 @@ impl Codegen {
     }
 
     pub fn emit_load_mem_typed(&mut self, size: usize, ty: &Type) {
+        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+            // 单一真源：long double 必须 `fld tbyte [rax]`，
+            // 不能再 `movsd` 读低 8 字节（真 80-bit 落槽后低 8 字节只是尾数）。
+            self.emit_load_scalar_float_at(ty, 0);
+            return;
+        }
         match ty {
             Type::Float => self.emit(&[0xF3, 0x0F, 0x10, 0x00]), // movss xmm0, [rax]
             Type::Double => self.emit(&[0xF2, 0x0F, 0x10, 0x00]), // movsd xmm0, [rax]
@@ -784,13 +790,8 @@ impl Codegen {
         if self.reg_bindings.contains_key(name) {
             return 0;
         }
-        let is_vla = Self::type_has_vla(ty);
-        let alloc_sz = if is_vla {
-            ty.size().saturating_add(16)
-        } else {
-            ty.size()
-        };
-        let slots = ((alloc_sz.saturating_add(7) / 8).max(1)) as i64;
+        // 分配口径与 pre_register_vars 共用单一真源 var_alloc_slots
+        let slots = Self::var_alloc_slots(ty);
         let used = self.var_map_total_slots.saturating_mul(8);
         let hdr = 48i64 + self.temp_slots as i64 * 8;
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
@@ -800,21 +801,29 @@ impl Codegen {
     }
 
     pub fn alloc_sret_slot(&mut self, size: usize) -> i64 {
-        self.sret_depth += 1;
+        // 统一按 16 字节对齐向下步进: 任何尺寸序列都互不重叠
+        // (旧 bump 以"调用次数 * 当前 padded"定址, 8B→32B→8B 会撞槽)。
         let padded = (size as i64 + 15) & !15;
-        // Allocate sret slots inside the frame, starting after vec_reserve(512)
-        // + bf_rmw_reserve(32) + padding(56). This lands in the trampoline
-        // reserve area, well below parameter/local save slots near r13.
-        // Previously used -8 - expr_depth*8 - sret_depth*padded, which placed
-        // sret slots directly on top of parameter save slots (e.g. rdi at -72
-        // and sret slot 2 at -104..-56 overlap in pr51877).
-        let base = self.vec_temp_off + 600;
-        base - (self.sret_depth as i64 - 1) * padded
+        let cur = self.sret_watermark;
+        self.sret_watermark = cur + padded;
+        self.sret_region_base - cur - padded
     }
 
     /// Allocate a local variable slot (generic name).
     pub fn alloc_local(&mut self, sz: usize) -> i64 {
         self.alloc_sret_slot(sz)
+    }
+
+    /// 保存当前 sret 槽水位 (用于嵌套求值作用域)。配合
+    /// `restore_sret_watermark` 在其求值结束后回收槽位。所有 sret/物化槽
+    /// 都在外层 block-item 内死亡, 但表达式嵌套时子表达式槽若不回收,
+    /// 同一 item 内长链会推高不必要水位; save/restore 让兄弟表达式复用槽。
+    pub fn save_sret_watermark(&self) -> i64 {
+        self.sret_watermark
+    }
+
+    pub fn restore_sret_watermark(&mut self, mark: i64) {
+        self.sret_watermark = mark;
     }
 
     // ========================================================================
@@ -917,27 +926,35 @@ impl Codegen {
     }
 
     pub fn emit_scalar_to_xmm0_if_needed(&mut self, expr: &Expr, elem_ty: &Type) {
+        let src = expr.ty();
+        self.emit_scalar_to_xmm0_if_needed_ty(&src, elem_ty);
+    }
+
+    /// `emit_scalar_to_xmm0_if_needed` 的类型版（单一真源）：只依赖源类型，
+    /// 供 `emit_store_scalar_float_at` 一类已经知道 `src_ty` 而不是 `&Expr` 的出口复用。
+    pub fn emit_scalar_to_xmm0_if_needed_ty(&mut self, src_ty: &Type, elem_ty: &Type) {
+        let expr_is_float = matches!(
+            src_ty,
+            Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
+        );
         if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
             return;
         }
-        if matches!(
-            expr.ty(),
-            Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
-        ) {
+        if expr_is_float {
             // 浮点表达式结果已在 xmm0
             // 但如果表达式类型与目标类型不匹配，需要转换
             // 例如: double 表达式赋值给 float 变量，需要 cvtsd2ss
-            if matches!(elem_ty, Type::Float) && matches!(expr.ty(), Type::Double) {
+            if matches!(elem_ty, Type::Float) && matches!(src_ty, Type::Double) {
                 // double -> float: cvtsd2ss xmm0, xmm0
                 self.emit(&[0xF2, 0x0F, 0x5A, 0xC0]);
-            } else if matches!(elem_ty, Type::Double) && matches!(expr.ty(), Type::Float) {
+            } else if matches!(elem_ty, Type::Double) && matches!(src_ty, Type::Float) {
                 // float -> double: cvtss2sd xmm0, xmm0
                 self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]);
             }
             return;
         }
         // 整数→浮点转换: 根据整数类型宽度选择 32 位或 64 位转换
-        let expr_ty = expr.ty();
+        let expr_ty = src_ty.clone();
         let is_64bit =
             matches!(expr_ty, Type::Long | Type::ULong | Type::LongLong | Type::ULongLong);
         // 无符号 <=32 位类型: 值在寄存器中已零扩展到 64 位,

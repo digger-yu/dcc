@@ -295,31 +295,42 @@ impl Codegen {
         let float_ty = Self::widest_float_type(&l.ty(), &r.ty());
         let is_float = matches!(float_ty, Type::Float);
         let is_long_double = matches!(float_ty, Type::LongDouble);
-        // -mno-sse 目标走 x87; SSE 模式下 long double 按 double 运算 (xmm0)
-        if !self.target.sse {
+        // x87 通路唯一入口：`long double` 恒走 st(0)，`-mno-sse` 目标下
+        // float/double 也走（判据集中在 `float_in_st0`，不在这里叠加条件）。
+        if self.float_in_st0(&float_ty) {
             // 比较运算走特殊路径
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne)
             {
                 self.gen_float_cmp_x87(op, &float_ty, l, r);
                 return;
             }
-            // 取模: 软件实现, 需要 SSE 指令, 在 no-sse 模式下通过调用 fmod/fmodf 实现
+            // 取模: 软件实现, 需要 SSE 指令, 在 x87 通路下通过调用 fmod/fmodf 实现
             if matches!(op, BinOp::Mod) {
                 // 回退到通用调用路径, 通过外部函数实现
                 // 将左操作数存入临时槽, 计算右操作数, 调用 __dcc_x87_fmod
                 self.gen_expr(l, 0); // st(0) = l
-                                     // 保存 st(0) 到栈临时区
-                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
-                self.emit(&[0xDD, 0x1C, 0x24]); // fstp qword [rsp]
+                self.emit_operand_to_st0(&l.ty(), 0);
+                // 保存 st(0) 到栈临时区 (固定 16 字节: ld 要装 tbyte 且保持对齐)
+                self.emit(&[0x48, 0x83, 0xEC, 16]); // sub rsp, 16
+                if is_long_double {
+                    self.emit(&[0xDB, 0x3C, 0x24]); // fstp tbyte [rsp]
+                } else {
+                    self.emit(&[0xDD, 0x1C, 0x24]); // fstp qword [rsp]
+                }
                 self.expr_depth += 1;
                 self.gen_expr(r, 0); // st(0) = r
+                self.emit_operand_to_st0(&r.ty(), 0);
                 self.expr_depth -= 1;
                 // 现在 st(0) = r, [rsp] = l
                 // 交换: 需要 st(0) = l, st(1) = r 才能做 fdiv
                 // 先加载 l 到 st(0)
-                self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp]
-                                                // 现在 st(0) = l, st(1) = r
-                                                // 做 l/r
+                if is_long_double {
+                    self.emit(&[0xDB, 0x2C, 0x24]); // fld tbyte [rsp]
+                } else {
+                    self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp]
+                }
+                // 现在 st(0) = l, st(1) = r
+                // 做 l/r
                 self.emit(&[0xDE, 0xF9]); // fdivrp: st(1) = st(0)/st(1) = l/r, pop
                                           // 现在 st(0) = l/r
                                           // trunc to int64
@@ -328,32 +339,34 @@ impl Codegen {
                 self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp] -- 但已被 fistp 覆盖
                                                 // 简化处理: 直接用 x87 做减法模拟 fmod
                                                 // 实际上内核很少用浮点取模, 这里先简单处理
-                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                                                // （C 的 `%` 本身不允许浮点操作数）
+                self.emit(&[0x48, 0x83, 0xC4, 16]); // add rsp, 16
                 self.emit_x87_fldz(); // 结果置 0 (简化处理)
                 return;
             }
             // 一般二元运算: 加载左到 st(0), 保存, 加载右到 st(0), 加载左到 st(0)
             // 最终: st(0) = 左, st(1) = 右
             self.gen_expr(l, 0); // st(0) = l
-                                 // 保存 l 到临时栈 (long double 用 16 字节 tbyte, 否则 8 字节 qword)
+                                 // 整数 / 宽浮点操作数经 Layer0 唯一入口搬到 st(0)
+            self.emit_operand_to_st0(&l.ty(), 0);
+            // 保存 l 到刚分配的 16 字节槽 (long double 用 tbyte, 否则 qword)
+            self.emit(&[0x48, 0x83, 0xEC, 16]); // sub rsp, 16
             if is_long_double {
-                self.emit(&[0x48, 0x83, 0xEC, 16]); // sub rsp, 16
                 self.emit(&[0xDB, 0x3C, 0x24]); // fstp tbyte [rsp]
             } else {
-                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0xDD, 0x1C, 0x24]); // fstp qword [rsp]
             }
             self.expr_depth += 1;
             self.gen_expr(r, 0); // st(0) = r
+            self.emit_operand_to_st0(&r.ty(), 0);
             self.expr_depth -= 1;
             // 重新加载 l
             if is_long_double {
                 self.emit(&[0xDB, 0x2C, 0x24]); // fld tbyte [rsp]
-                self.emit(&[0x48, 0x83, 0xC4, 16]); // add rsp, 16
             } else {
                 self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp]
-                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
             }
+            self.emit(&[0x48, 0x83, 0xC4, 16]); // add rsp, 16
             // 执行运算: st(0) = 左, st(1) = 右
             // x87 的 fxxxp 是 st(1) op st(0), 然后 pop
             // 当前: st(0) = l, st(1) = r
@@ -508,26 +521,20 @@ impl Codegen {
         // movzx rax, al
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
     }
-    pub(crate) fn gen_float_imm_load(&mut self, v: f64, ty: &Type) {
-        // -mno-sse 目标走 x87; SSE 模式下 long double 内部为 double (xmm0)
-        if !self.target.sse {
-            self.emit_x87_float_imm(v, ty);
+    pub(crate) fn gen_float_imm_load(&mut self, c: FloatConst, ty: &Type) {
+        // x87 通路（long double 恒真 / -mno-sse）：真 80-bit 常量落 .rodata,
+        // 用 `fld tbyte [rip+disp32]` 直接交付在 st(0)。
+        if self.float_in_st0(ty) {
+            self.emit_x87_float_imm(c, ty);
             return;
         }
         let is_float = matches!(ty, Type::Float);
-        let is_ld = matches!(ty, Type::LongDouble);
         let bytes = if is_float {
             // float: 4 字节
-            let f = v as f32;
-            f.to_le_bytes().to_vec()
-        } else if is_ld {
-            // long double: 16 字节 (低 8 字节 double, 高 8 字节零)
-            let mut b = v.to_le_bytes().to_vec();
-            b.extend_from_slice(&[0u8; 8]);
-            b
+            (c.as_f64() as f32).to_le_bytes().to_vec()
         } else {
             // double: 8 字节
-            v.to_le_bytes().to_vec()
+            c.as_f64().to_le_bytes().to_vec()
         };
         let key = format!(
             "f_{}",
@@ -551,10 +558,16 @@ impl Codegen {
         self.float_refs.push((at, off));
     }
     pub(crate) fn gen_float_load(&mut self, name: &str, ty: &Type) {
-        // -mno-sse 目标走 x87; SSE 模式下 long double 内部为 double (xmm0)
-        if !self.target.sse {
+        // _Imaginary: 按内型取通道，与 gen_float_store 保持一致
+        let effective_ty = if let Type::Imaginary(ref inner) = ty {
+            &inner.base
+        } else {
+            ty
+        };
+        // x87 通路：`fld tbyte [r13+off]` 直接交付 st(0)，不再拆低 8 字节进 xmm0。
+        if self.float_in_st0(effective_ty) {
             let off = self.var_offset(name);
-            self.emit_x87_fld_mem(off, ty);
+            self.emit_x87_fld_mem(off, effective_ty);
             return;
         }
         self.load_float_to_xmm(name, ty, 0);
@@ -567,42 +580,14 @@ impl Codegen {
         } else {
             ty
         };
-        // -mno-sse 模式: 使用 x87 fstp 存储 st(0) 到内存.
-        // SSE 模式下 long double 内部为 double, 走下方 movq 路径.
-        if !self.target.sse {
+        // x87 通路: `fstp tbyte [r13+off]` 把 st(0) 的真 80-bit 对象表示原样落槽，
+        // 不再写“低 8 字节 f64 位型 + 高 8 字节清零”。
+        if self.float_in_st0(effective_ty) {
             self.emit_x87_fstp_mem_typed(off, effective_ty);
             return;
         }
         let is_float = matches!(effective_ty, Type::Float);
-        let is_ld = matches!(effective_ty, Type::LongDouble);
-        if is_ld {
-            // long double 16 字节: 分两次 movq 存储 (xmm0 低 8 字节 + 高 8 字节零)
-            // movq [r13+off], xmm0: 66 49 0F D6 45|4D off
-            self.emit(&[0x66, 0x49, 0x0F, 0xD6]);
-            if off.abs() < 128 {
-                self.emit(&[0x45, off as i8 as u8]);
-            } else {
-                self.emit(&[0x85]);
-                self.emit(&(off as i32).to_le_bytes());
-            }
-            // 高 8 字节存零: mov qword [r13+off+8], 0 (前向清零,
-            // 与 register_var 窗口 [off, off+16) 一致; 旧向后清零
-            // [off-8] 越出窗口踩下方相邻变量)
-            let off2 = off + 8;
-            // REX.W C7 /0: mov qword [r13+off2], 0
-            // ModRM 在此处分支选择: disp8 版 (0x45) 与 disp32 版 (0x85)
-            // 互斥, 不可先无条件 emit 0x45 再补 0x85 (否则双重 ModRM
-            // 导致指令流错位, 后续字节被当指令执行 → SIGSEGV)
-            self.emit(&[0x49, 0xC7]);
-            if off2.abs() < 128 {
-                self.emit(&[0x45]);
-                self.emit(&[off2 as i8 as u8]);
-            } else {
-                self.emit(&[0x85]);
-                self.emit(&(off2 as i32).to_le_bytes());
-            }
-            self.emit(&0u32.to_le_bytes());
-        } else if is_float {
+        if is_float {
             // float: movss [r13+off], xmm0 → F3 49 0F 11 45 off
             self.emit(&[0xF3, 0x49, 0x0F, 0x11]);
             if off.abs() < 128 {
@@ -626,8 +611,10 @@ impl Codegen {
         let is_float = matches!(ty, Type::Float);
         let is_ld = matches!(ty, Type::LongDouble);
         if is_ld {
-            self.emit_xmm_r13_disp(0x66, 0xD6, 0, off);
-            self.store_stack_imm32(off + 8, 0);
+            // LD 通道: 值在 st(0)，用 fstp tbyte 写全 10 字节（含 6 字节
+            // 槽填充由布局保证），不再 movq 低 8 字节 + 清高 8 字节——
+            // 那会丢失 80-bit 高位（指数/显式整数位），读回是 NaN/垃圾。
+            self.emit_x87_fstp_at(13, off as i32, ty);
         } else if is_float {
             self.store_xmm32_stack(0, off);
         } else {
@@ -672,14 +659,7 @@ impl Codegen {
             ty.clone()
         };
         let is_float = matches!(effective_ty, Type::Float);
-        let is_ld = matches!(effective_ty, Type::LongDouble);
-        if is_ld {
-            self.emit(&[0xF3]);
-            if xmm >= 8 {
-                self.emit(&[0x44]);
-            }
-            self.emit(&[0x41, 0x0F, 0x7E]);
-        } else if is_float {
+        if is_float {
             self.emit(&[0xF3]);
             if xmm >= 8 {
                 self.emit(&[0x44]);

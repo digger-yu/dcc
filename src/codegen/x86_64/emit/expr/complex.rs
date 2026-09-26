@@ -133,7 +133,9 @@ impl Codegen {
             self.emit_lea_r13(7, result_off);
             self.mov_imm(1, total as i128);
             self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-            if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble) {
+            // f/d rvalue 约定 xmm0=实部; LD rvalue 约定是帧内存+rax,
+            // 消费端用 fld tbyte 读, 不碰 xmm0。
+            if matches!(inner.base, Type::Float | Type::Double) {
                 let pfx = if matches!(inner.base, Type::Float) {
                     0xF3u8
                 } else {
@@ -187,6 +189,12 @@ impl Codegen {
         let total_sz = inner_sz * 2;
         let save_sz = total_sz * 2;
         let result_off = -self.frame_size + 8;
+        if matches!(inner_ty, Type::LongDouble) {
+            // `_Complex long double` 走独立 x87 链路（f/d 仍走下方 SSE 路径）。
+            // 详见 gen_complex_ld_binop。
+            self.gen_complex_ld_binop(op, l, r, dst, result_off);
+            return;
+        }
         self.emit(&[0x48, 0x83, 0xEC, save_sz as u8]);
         self.spill_complex_operand(l, 0, inner_sz, is_float, is_float_inner, &inner_ty);
         self.spill_complex_operand(r, total_sz, inner_sz, is_float, is_float_inner, &inner_ty);
@@ -369,6 +377,223 @@ impl Codegen {
             self.emit_lea_r13(0, result_off);
         }
     }
+
+    /// 把一个算术操作数（complex / imaginary / 标量，inner 可窄于 LD）
+    /// 溢出到 LD 运算区的两个 **16 字节间距** 栈槽：
+    ///   real → [rsp + base], imag → [rsp + base + 16]
+    /// 每个槽是真 80-bit tbyte（fstpt），与 gcc 为 __mulxc3/__divxc3
+    /// 准备入参的布局完全一致；窄操作数先精确拓宽到 st(0) 再 fstpt，
+    /// 不做任何 f64 中转。调用后 x87 栈保持平衡。
+    ///
+    /// 关键：源表达式**只求值一次**。先经 gen_complex_ld_materialize 把整体
+    /// 物化成帧内一对 tbyte（返回 real 偏移，imag=real+16），再 fld/fstp 搬到
+    /// rsp 运算槽。旧实现 real/imag 各独立 gen_expr 一次，对 complex
+    /// rvalue 会把带副作用的 gen_expr 跑两遍（副作用翻倍且第二次覆盖
+    /// 同一 result_off 槽）。
+    fn spill_complex_ld_operand(&mut self, e: &Expr, base: u8) {
+        let src = self.gen_complex_ld_materialize(e);
+        // 实部
+        self.emit_x87_fld_at(13, src as i32, &Type::LongDouble);
+        self.emit_x87_fstp_at(4, base as i32, &Type::LongDouble);
+        // 虚部
+        self.emit_x87_fld_at(13, src as i32 + 16, &Type::LongDouble);
+        self.emit_x87_fstp_at(4, base as i32 + 16, &Type::LongDouble);
+    }
+
+    /// 把一个 complex / imaginary / 标量表达式**只求值一次**，物化成帧内一对
+    /// 16 字节 80-bit tbyte 槽（real@ret、imag@ret+16，共 32 字节，对齐 16），
+    /// 返回 real 槽的 r13 相对偏移。
+    ///
+    /// 这是所有“需要分别消费 real 与 imag”站点（spill / init / neg / conj /
+    /// store / 实参 / 返回）的**唯一物化入口**，消除旧路径对 complex
+    /// rvalue 双 gen_expr 的致命模式。
+    /// - 标量：real=值本身（窄源精确拓宽到 80-bit），imag=+0.0；
+    /// - imaginary：real=+0.0，imag=值本身；
+    /// - complex lvalue：从内存对逐分量 fld（按源内型宽度读）后 fstp tbyte；
+    /// - complex rvalue（lit/binop/Call/Cast）：gen_expr 一次，整体已按源内型
+    ///   物化在 result_off（rax=地址），逐分量 fld 后 fstp tbyte。
+    /// 窄于 LD 的源由 fld 硬件无损拓宽（f32/f64 是 80-bit 子集），无 f64 中转。
+    /// 物化结束后 x87 栈平衡，rax 不被保留（消费端按返回偏移用 r13 寻址）。
+    pub(crate) fn gen_complex_ld_materialize(&mut self, e: &Expr) -> i64 {
+        let dst = self.alloc_local(32);
+        let (is_cx, src_inner) = match e.ty() {
+            Type::Complex(c) | Type::Imaginary(c) => (true, c.base.clone()),
+            t => (false, t),
+        };
+        // 标量源：real=值, imag=0
+        if !is_cx {
+            self.gen_expr(e, 0);
+            self.emit_operand_to_st0(&e.ty(), 0);
+            self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
+            self.emit_x87_fldz();
+            self.emit_x87_fstp_at(13, dst as i32 + 16, &Type::LongDouble);
+            return dst;
+        }
+        let imaginary = matches!(e.ty(), Type::Imaginary(_));
+        // imaginary 源：real=0, imag=值
+        if imaginary {
+            self.emit_x87_fldz();
+            self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
+            self.gen_expr(e, 0);
+            self.emit_operand_to_st0(&src_inner, 0);
+            self.emit_x87_fstp_at(13, dst as i32 + 16, &Type::LongDouble);
+            return dst;
+        }
+        // complex 源：lvalue 直读内存对；rvalue gen_expr 一次后读 result_off。
+        // src_isz 是源分量宽度（f=4/d=8/LD=16），用于 rvalue 区的 imag 偏移。
+        let src_isz = src_inner.size() as i64;
+        let is_lvalue = self.gen_lvalue_addr(e, 0);
+        if !is_lvalue {
+            self.gen_expr(e, 0);
+        }
+        // 基址：lvalue 在 rax；rvalue 在 r13+result_off。逐分量 fld（按源内型）
+        // 后 fstp tbyte 到 dst。两次加载之间不能依赖 rax：fld 不破坏 rax。
+        let (base_reg, real_base) = if is_lvalue {
+            (0u8, 0i64)
+        } else {
+            (13u8, -self.frame_size + 8)
+        };
+        self.emit_x87_fld_at(base_reg, real_base as i32, &src_inner);
+        self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
+        self.emit_x87_fld_at(base_reg, (real_base + src_isz) as i32, &src_inner);
+        self.emit_x87_fstp_at(13, dst as i32 + 16, &Type::LongDouble);
+        dst
+    }
+
+    /// 求值 complex/imaginary/标量表达式的一个分量并把结果留在 st(0)。
+    /// - complex/imaginary lvalue：fld tbyte/dword/qword 直读内存分量；
+    /// - complex/imaginary rvalue（binop/字面量/Call）：gen_expr 已把整体
+    ///   物化成 r13 帧里的 [result_off, result_off+src_isz]，按源内型 fld；
+    /// - 标量：实部=值本身，虚部=+0.0。
+    /// 窄于 LD 的源由 fld 硬件无损拓宽（f32/f64 是 80-bit 子集）。
+    /// `_Complex long double` 算术/比较的独立 x87 实现。
+    ///
+    /// 栈布局（相对 rsp，每分量一个 16 字节 tbyte 槽，对齐 16）：
+    ///   [0]=l.real [16]=l.imag [32]=r.real [48]=r.imag
+    /// - Add/Sub：内联 x87（fldt/faddp|fsubp），实/虚各一次，结果在
+    ///   st0=real、st1=imag；
+    /// - Mul/Div：直接 `call __mulxc3`/`__divxc3`（与 gcc 一致），
+    ///   8 次 pushq 传 64 字节，返回 st0=real、st1=imag；
+    /// - EqEq/Ne：fucomip 逐分量比较。
+    /// 结果整体 fstpt 物化为帧 result_off 的两个 16 字节槽（共 32 字节），
+    /// 并按 dcc complex rvalue 约定把 rax 置为 result_off。
+    fn gen_complex_ld_binop(
+        &mut self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        dst: u8,
+        result_off: i64,
+    ) {
+        match op {
+            BinOp::EqEq | BinOp::Ne => {
+                self.gen_complex_ld_compare(op, l, r, dst);
+                return;
+            },
+            BinOp::Add | BinOp::Sub => {
+                // 预留 64 字节（4×16），保持调用对齐（本分支无 call）
+                self.emit(&[0x48, 0x83, 0xEC, 0x40]);
+                self.spill_complex_ld_operand(l, 0);
+                self.spill_complex_ld_operand(r, 32);
+                // 先 fld 左、后 fld 右: st0=right, st1=left。
+                // 实部: DE C1=faddp(st1=st1+st0) / DE E9=fsubp
+                // (st1=st1-st0=left-right, 弹栈)。
+                // 切勿用 DE E1=fsubrp — 那算 st1=st0-st1=right-left,
+                // 实/虚两部会整体取反 (a-b 被算成 b-a)。
+                self.emit_x87_fld_at(4, 0, &Type::LongDouble);
+                self.emit_x87_fld_at(4, 32, &Type::LongDouble);
+                let real_op = if matches!(op, BinOp::Add) {
+                    [0xDE, 0xC1]
+                } else {
+                    [0xDE, 0xE9]
+                };
+                self.emit(&real_op); // 弹出后 st0=real
+                // 虚部同理, 结果压在 real 之上: st0=imag, st1=real
+                self.emit_x87_fld_at(4, 16, &Type::LongDouble);
+                self.emit_x87_fld_at(4, 48, &Type::LongDouble);
+                let imag_op = real_op;
+                self.emit(&imag_op);
+                // 归一化到返回规范 st0=real, st1=imag（与 gcc add 的末尾
+                // fxch %st(1) 一致）
+                self.emit(&[0xD9, 0xC9]); // fxch st(1)
+            },
+            BinOp::Mul | BinOp::Div => {
+                let helper = if matches!(op, BinOp::Mul) {
+                    "__mulxc3"
+                } else {
+                    "__divxc3"
+                };
+                // gcc: subq $64,%rsp 后 fldt/fstpt 落 4 槽，再 8 次 pushq
+                // 传参（64 字节，与预留区同尺寸，push 后内容上移，
+                // 调用约定读的是 push 出来的栈），call，addq $64,%rsp。
+                self.emit(&[0x48, 0x83, 0xEC, 0x40]);
+                self.spill_complex_ld_operand(l, 0);
+                self.spill_complex_ld_operand(r, 32);
+                // 8 次 pushq 传参。最后 push 的 qword 落在最低地址（=首个
+                // 入参 a.real 的低字），故 push 顺序须为
+                //   b.imag(hi,lo) → b.real(hi,lo) → a.imag(hi,lo) → a.real(hi,lo)
+                // 每个 tbyte 高 qword 先 push、低 qword 后 push（与 gcc
+                // -O0 的 push -8,-16,...,-64(%rbp) 序列一致）。
+                // 关键：每 push 一次 rsp 下移 8，剩余源槽相对*当前* rsp 的
+                // 位移增加 8。第 k 次（0-based）push 读取 disp + k*8，
+                // 展开后每次都读当前 rsp+56（即数据随 push 向下移动）。
+                // 各 tbyte 高/低 qword 相对 sub 后 rsp 的初始偏移：
+                let pairs: [(u8, u8); 4] = [
+                    (56, 48), // b.imag: hi@56 lo@48
+                    (40, 32), // b.real: hi@40 lo@32
+                    (24, 16), // a.imag: hi@24 lo@16
+                    (8, 0),   // a.real: hi@8  lo@0
+                ];
+                let mut k = 0u8;
+                for (hi, lo) in pairs {
+                    self.emit(&[0xFF, 0x74, 0x24, hi + k * 8]); // push hi
+                    k += 1;
+                    self.emit(&[0xFF, 0x74, 0x24, lo + k * 8]); // push lo
+                    k += 1;
+                }
+                self.emit_call_extern(helper);
+                self.emit(&[0x48, 0x83, 0xC4, 0x40]); // add rsp, 64
+                // 返回 st0=real, st1=imag（fadd 分支同序，统一收尾）
+            },
+            _ => return,
+        }
+        // 统一收尾：两个分支结束时都是 st0=real、st1=imag（add/sub 已用
+        // fxch 归一化；__mulxc3/__divxc3 按规范即此序）。先 fstpt real
+        // （弹栈后 imag 升到 st0），再 fstpt imag。
+        self.emit_x87_fstp_at(13, result_off as i32, &Type::LongDouble);
+        self.emit_x87_fstp_at(13, result_off as i32 + 16, &Type::LongDouble);
+        self.emit(&[0x48, 0x83, 0xC4, 0x40]); // 释放 64 字节运算区
+        self.emit_lea_r13(0, result_off); // rax = 结果区地址
+    }
+
+    /// complex LD 的 == / !=：实部与虚部分别 fucomip，皆等才算相等。
+    /// 左右表达式各单次物化成帧内一对 tbyte（带副作用 rvalue 只求值一次），
+    /// 每个分量比较后 x87 栈平衡（fucomip 弹右值，再 fstp 弹左值）。
+    fn gen_complex_ld_compare(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
+        let false_label = self.fresh_label();
+        let end_label = self.fresh_label();
+        let ls = self.gen_complex_ld_materialize(l);
+        let rs = self.gen_complex_ld_materialize(r);
+        for is_real in [true, false] {
+            let off = if is_real { 0 } else { 16 };
+            // 左值入栈后右值入栈: st1=left, st0=right
+            self.emit_x87_fld_at(13, (ls + off) as i32, &Type::LongDouble);
+            self.emit_x87_fld_at(13, (rs + off) as i32, &Type::LongDouble);
+            // fucomip st0, st1 (DF E9): 比较 st1 vs st0, 弹 st0
+            self.emit(&[0xDF, 0xE9]);
+            self.jmp_rel32(&false_label, JumpKind::Jne);
+            self.emit_x87_fstp_st0(); // 弹掉左值
+        }
+        self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 1 } else { 0 });
+        self.jmp_rel32(&end_label, JumpKind::Jmp);
+        self.label(&false_label);
+        // 任一不等时该分量的左值还在栈上（fucomip 已弹右值），弹掉它
+        // 以把 x87 栈恢复到比较前状态。
+        self.emit_x87_fstp_st0();
+        self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
+        self.label(&end_label);
+    }
+
     pub(crate) fn gen_complex_imag_into_xmm0(&mut self, r: &Expr, inner: &Type) {
         let r_inner = match r.ty() {
             Type::Complex(ref c) | Type::Imaginary(ref c) => Some(c.base.clone()),
@@ -407,11 +632,35 @@ impl Codegen {
                 self.gen_float_store_at(imag_base, inner);
             } else {
                 // 整数内型: _Complex int z = 3i;
-                self.mov_imm(0, *real as i128);
+                self.mov_imm(0, real.as_f64() as i128);
                 self.store_stack(0, off);
-                self.mov_imm(0, *imag as i128);
+                self.mov_imm(0, imag.as_f64() as i128);
                 self.store_stack(0, off + inner_sz);
             }
+            return;
+        }
+        // 整型复数字面量: 分量是精确 i128，按 inner 宽度直存两槽。
+        if let Expr::ComplexIntLit { real, imag, .. } = init {
+            self.mov_imm(0, *real);
+            self.emit_store(0, off, inner_sz as usize);
+            self.mov_imm(0, *imag);
+            self.emit_store(0, off + inner_sz, inner_sz as usize);
+            return;
+        }
+        // `_Complex long double` 初始化: 全程 x87。经 materialize 单次
+        // 物化把分量取到帧内 tbyte 对（自动覆盖字面量/binop/Call
+        // rvalue/lvalue/标量/虚数源，并按源内型读槽、硬件无损拓宽窄源），
+        // fstp tbyte 落到目标 real@off、imag@off+16（每分量 16 字节槽）。
+        // 不走下方 SSE movsd 路径——它只搬 8 字节，LD 高位与第二分量皆错
+        // （局部 complex LD 变量出垃圾的直接链路）。
+        if matches!(inner, Type::LongDouble) {
+            // 源只求值一次，物化成帧内 real/imag tbyte 对，再搬到目标 real@off、
+            // imag@off+16（每分量 16 字节槽）。窄源由物化器硬件无损拓宽。
+            let src = self.gen_complex_ld_materialize(init);
+            self.emit_x87_fld_at(13, src as i32, &Type::LongDouble);
+            self.emit_x87_fstp_at(13, off as i32, &Type::LongDouble);
+            self.emit_x87_fld_at(13, src as i32 + 16, &Type::LongDouble);
+            self.emit_x87_fstp_at(13, (off + inner_sz) as i32, &Type::LongDouble);
             return;
         }
         self.gen_expr(init, 0);
@@ -771,8 +1020,17 @@ impl Codegen {
         }
         let isz = inner.size() as i64;
         let result_off = -self.frame_size + 8;
+        if let Type::LongDouble = &inner {
+            // LD: 源在 [rax+0]/[rax+16]（每分量 16 字节 tbyte 槽），逐分量
+            // fld tbyte 起、fstp tbyte 物化到 result_off/result_off+16。
+            // rax（lvalue 地址）在整个序列保持不变。
+            self.emit_x87_fld_at(0, 0, &inner);
+            self.emit_x87_fstp_at(13, result_off as i32, &inner);
+            self.emit_x87_fld_at(0, isz as i32, &inner);
+            self.emit_x87_fstp_at(13, (result_off + isz) as i32, &inner);
+        } else {
         match &inner {
-            t @ (Type::Float | Type::Double | Type::LongDouble) => {
+            t @ (Type::Float | Type::Double) => {
                 let pfx = if matches!(t, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 // 实部: xmm0 = [rax] → result_off
                 self.emit(&[pfx, 0x0F, 0x10, 0x00]);
@@ -796,6 +1054,7 @@ impl Codegen {
                 self.emit_load_mem_typed_disp(isz as usize, &inner, isz);
                 self.emit_store(0, result_off + isz, isz as usize);
             },
+        }
         }
         // rax = result_off (dcc complex rvalue 约定, 供 spill/整体拷贝)
         self.emit_lea_r13(0, result_off);
@@ -844,7 +1103,12 @@ impl Codegen {
         let lva_ok = self.gen_lvalue_addr(e, 0);
         if lva_ok {
             // lvalue 形态 (变量/字段/下标/解引用): 直接对内存分量寻址
-            if is_float {
+            if matches!(inner, Type::LongDouble) {
+                // long double 分量必须经 x87 `fld tbyte`（part_off 是 0
+                // 或 16 的 16 字节槽偏移）；发 movsd 只读 8 字节当
+                // f64 位型，st0/xmm 读侧取回即 -nan。
+                self.emit_x87_fld_at(0, part_off as i32, &inner);
+            } else if is_float {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 self.emit(&[pfx, 0x0F, 0x10]); // movss/movsd xmm0, [rax+disp]
                 if part_off == 0 {
@@ -878,9 +1142,20 @@ impl Codegen {
             // Call sret 返回 (Memory 类) 后 xmm0 未定义。
             self.gen_expr(e, 0);
             let result_off = -self.frame_size + 8;
-            let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-            let read_off = if is_real { result_off } else { result_off + inner_sz };
-            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], read_off);
+            if matches!(inner, Type::LongDouble) {
+                // LD: 实部/虚部各在 16 字节 tbyte 槽 (result_off / +16),
+                // fld tbyte 把该分量留在 st(0)（x87 标量通道）。
+                let read_off = if is_real {
+                    result_off
+                } else {
+                    result_off + inner_sz
+                };
+                self.emit_x87_fld_at(13, read_off as i32, &inner);
+            } else {
+                let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                let read_off = if is_real { result_off } else { result_off + inner_sz };
+                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], read_off);
+            }
         } else {
             // 整数内型非 lvalue (如 3i + 5i): 实部/虚部在帧临时区
             self.gen_expr(e, 0);
@@ -891,6 +1166,14 @@ impl Codegen {
         if dst != 0 {
             self.mov(dst, 0);
         }
+    }
+    /// `_Complex long double` 经 x87 返回：SysV 要求 st0=real、st1=imag。
+    /// 先单次物化成帧内一对 tbyte（带副作用 rvalue 只求值一次），再按
+    /// imag 先入栈、real 后入栈的顺序 fld tbyte，使 st0=real、st1=imag。
+    pub(crate) fn gen_complex_x87_return(&mut self, e: &Expr) {
+        let src = self.gen_complex_ld_materialize(e);
+        self.emit_x87_fld_at(13, src as i32 + 16, &Type::LongDouble); // imag → st0
+        self.emit_x87_fld_at(13, src as i32, &Type::LongDouble); // real → st0
     }
     pub(crate) fn gen_complex_sse_return(&mut self, e: &Expr, inner: &Type) {
         let inner_sz = inner.size() as i64;
@@ -939,8 +1222,10 @@ impl Codegen {
         if let Type::Complex(ref inner) = *l_ty {
             let result_off = -self.frame_size + 8;
             if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
-                self.gen_expr(r, 0);
-                self.pop(1); // rcx = 目标地址
+                // 目标地址由调用方 push 入栈，store_complex_at_rcx 内部会
+                // 自行 pop 到 rcx 并对 r 只求值一次（LD 单次物化；f/d 经
+                // emit_scalar_to_xmm0_if_needed 单次求值）。此处不得再预
+                // gen_expr，否则带副作用 rvalue 被求值两次。
                 self.store_complex_at_rcx(r, &inner.base);
                 // 统一 rvalue 约定收尾: [rcx] → result_off,
                 // xmm0=实部, rax=地址 (赋值表达式值消费端依赖)
@@ -948,12 +1233,15 @@ impl Codegen {
                 self.emit_lea_r13(7, result_off);
                 self.mov_imm(1, (inner.size() * 2) as i128);
                 self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                let pfx = if matches!(inner.base, Type::Float) {
-                    0xF3u8
-                } else {
-                    0xF2u8
-                };
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
+                if matches!(inner.base, Type::Float | Type::Double) {
+                    let pfx = if matches!(inner.base, Type::Float) {
+                        0xF3u8
+                    } else {
+                        0xF2u8
+                    };
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                }
                 self.emit_lea_r13(0, result_off);
                 return;
             }
@@ -1187,9 +1475,15 @@ impl Codegen {
                 self.gen_float_imm_load(*imag, inner);
                 self.gen_float_store_at(off, inner);
             } else {
-                self.mov_imm(0, *imag as i128);
+                self.mov_imm(0, imag.as_f64() as i128);
                 self.store_stack(0, off);
             }
+            return;
+        }
+        // 整型虚数字面量: imag 是精确 i128，按 inner 宽度直存。
+        if let Expr::ComplexIntLit { imag, .. } = init {
+            self.mov_imm(0, *imag);
+            self.emit_store(0, off, inner.size());
             return;
         }
         // 非字面量: 求值后存储
@@ -1464,6 +1758,22 @@ impl Codegen {
         let _ = total_sz;
     }
     pub(crate) fn store_complex_at_rcx(&mut self, r: &Expr, inner: &Type) {
+        let isz = inner.size() as i64;
+        // 统一约定：调用方把目标地址 push 入栈，这里 pop 到 rcx。这样所有
+        // 调用点都是 `push(addr); store_complex_at_rcx(...)`，无需在求值 r
+        // 与拷贝之间插入 pop（求值可能占用 rcx）。
+        self.pop(1); // rcx = dst addr
+        if matches!(inner, Type::LongDouble) {
+            // LD: 不能走 SSE，也不能对 complex rvalue 双求值。先单次物化
+            // 成帧内一对 tbyte（rcx 不被 fld/fstp 破坏），再逐分量
+            // fld tbyte → fstp tbyte [rcx(+16)]。
+            let src = self.gen_complex_ld_materialize(r);
+            self.emit_x87_fld_at(13, src as i32, inner);
+            self.emit_x87_fstp_at(1, 0, inner);
+            self.emit_x87_fld_at(13, src as i32 + 16, inner);
+            self.emit_x87_fstp_at(1, isz as i32, inner);
+            return;
+        }
         self.emit_scalar_to_xmm0_if_needed(r, inner);
         // 源为不同内型 complex/imaginary 时实部需精度转换
         // (标量源的转换已由 emit_scalar_to_xmm0_if_needed 处理)
@@ -1471,15 +1781,6 @@ impl Codegen {
             self.emit_float_convert(&c.base, inner);
         }
         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-        let isz = inner.size() as i64;
-        if matches!(inner, Type::LongDouble) {
-            // 高 8 字节清零: 实部槽 [rcx+8], 虚部槽 [rcx+8+isz]
-            self.emit(&[0x48, 0xC7, 0x41, 0x08]); // mov qword [rcx+8], imm32
-            self.emit(&[0x00, 0x00, 0x00, 0x00]);
-            self.emit(&[0x48, 0xC7, 0x41]);
-            self.emit(&[(0x08 + isz) as u8]);
-            self.emit(&[0x00, 0x00, 0x00, 0x00]);
-        }
         self.emit(&[pfx, 0x0F, 0x11, 0x01]); // movss/movsd [rcx], xmm0 (实部)
         self.gen_complex_imag_into_xmm0(r, inner);
         self.emit(&[pfx, 0x0F, 0x11, 0x41]); // movss/movsd [rcx+disp8], xmm0

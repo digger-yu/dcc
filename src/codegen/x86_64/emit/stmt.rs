@@ -26,7 +26,20 @@ impl Codegen {
                     // 函数声明返回 long double 时, 即使表达式类型是 int/double
                     // (隐式转换), 也必须走 sret 写回 (调用方从 sret 槽读值).
                     let func_ret_is_ld = matches!(self.current_func_ret_ty, Type::LongDouble);
-                    if (Self::needs_memory_return(&ret_ty) || func_ret_is_ld)
+                    if func_ret_is_ld && self.current_sret_offset.is_none() {
+                        // D10-3（已简化）：SysV 规定标量 `long double` 返回值在 **st(0)**。
+                        // 本后端 `long double` 的 rvalue 值通道已经就是 st(0)，所以
+                        // 返回表达式本身就是 `fldt`/x87 运算的终点，**不需要任何中转**。
+                        // 只有当被返回的表达式类型不是 st(0) 通道（整型 / f32 / f64）
+                        // 时才需要一次精确拓宽：整数走 `fild`（80-bit 有 64 位显式
+                        // 尾数，任意 int64/u64 无损），f32/f64 走内存中转 `fld`（同样是
+                        // 子集拓宽，不引入舍入）。旧实现无条件 spill xmm0→`fld qword`，
+                        // 那是在适配“ld 内部只有 f64 精度”的旧不变量，会把真 80-bit
+                        // 返回值重新舍回 53 位尾数。
+                        let e_ty = e.ty();
+                        self.gen_expr(e, 0);
+                        self.emit_operand_to_st0(&e_ty, 0);
+                    } else if (Self::needs_memory_return(&ret_ty) || func_ret_is_ld)
                         && self.current_sret_offset.is_some()
                     {
                         self.gen_sret_return(e, &ret_ty);
@@ -50,6 +63,10 @@ impl Codegen {
                             if let Type::Complex(inner) = &ret_ty {
                                 if matches!(&inner.base, Type::Float | Type::Double) {
                                     self.gen_complex_sse_return(e, &inner.base);
+                                } else if matches!(&inner.base, Type::LongDouble) {
+                                    // SysV: _Complex long double 经 x87 返回,
+                                    // st0=real、st1=imag（不走 sret/SSE）。
+                                    self.gen_complex_x87_return(e);
                                 } else {
                                     self.gen_expr(e, 0);
                                     let result_off = -self.frame_size + 8;
@@ -140,7 +157,26 @@ impl Codegen {
                                                 // rdx = 后 8 字节
                                             }
                                         } else {
+                                            // D4: 聚合 rvalue 以「rax = 缓冲区地址」交付
+                                            // (`va_arg` 聚合走 `gen_expr_va_arg` 的
+                                            // `alloc_sret_slot` 路径)。本分支的交付目标
+                                            // 是 SysV **寄存器**返回（[Integer,..] →
+                                            // rax[:rdx]，下方再把 Sse 类 movq 进 xmm0/xmm1），
+                                            // 必须按内容装载；不装载则调用方把地址字节当
+                                            // 数据用（实测 `return va_arg(ap, struct Pair64)`
+                                            // 的 `p.a` = 临时槽地址、`p.b` = 残留 rdx）。
+                                            let rax_is_agg_addr = match e {
+                                                Expr::VaArg { ref ty, .. } => {
+                                                    Self::va_arg_result_in_memory(ty)
+                                                },
+                                                _ => false,
+                                            };
                                             self.gen_expr(e, 0);
+                                            if rax_is_agg_addr {
+                                                // 先取高 8 再取低 8: 后一条会覆写 rax
+                                                self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
+                                                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                                            }
                                         }
                                     }
                                     // SysV: SSE/SSEUP 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
@@ -839,13 +875,22 @@ impl Codegen {
 
     pub fn gen_block_items(&mut self, items: &[BlockItem]) {
         for it in items {
-            match it {
-                BlockItem::Stmt(s) => self.gen_stmt(s),
-                BlockItem::Decl(Decl::Var(v)) => {
-                    // extern 声明不分配栈槽, 仅作为全局符号引用标记
-                    if v.is_extern && v.init.is_none() {
-                        continue;
-                    }
+            // 每个 block-item 从当前水位开始, 结束时回收其新增槽位
+            // (与 max_sret_bytes 静态扫描的 item 边界一一对应)。
+            let mark = self.save_sret_watermark();
+            self.gen_block_item(it);
+            self.restore_sret_watermark(mark);
+        }
+    }
+
+    fn gen_block_item(&mut self, it: &BlockItem) {
+        match it {
+            BlockItem::Stmt(s) => self.gen_stmt(s),
+            BlockItem::Decl(Decl::Var(v)) => {
+                // extern 声明不分配栈槽, 仅作为全局符号引用标记
+                if v.is_extern && v.init.is_none() {
+                    return;
+                }
                     // static 局部变量已在全局数据段分配,
                     // 跳过栈分配 (与函数顶层遍历 L6970 一致)
                     if v.is_static
@@ -856,7 +901,7 @@ impl Codegen {
                             .static_local_map
                             .needs_runtime_init(&self.current_func_name, &v.name.name)
                     {
-                        continue;
+                        return;
                     }
                     if let Some(ref reg_name) = v.register_name {
                         if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
@@ -884,7 +929,7 @@ impl Codegen {
                             self.gen_expr(init, 0);
                             self.emit_global_store(0, &v.name.name);
                         }
-                        continue;
+                        return;
                     }
                     self.register_var(&v.name.name, &v.ty);
                     if Self::type_has_vla(&v.ty) {
@@ -924,7 +969,21 @@ impl Codegen {
                                 {
                                     self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                                 }
+                                // D7: `__int128` 是 16 字节对象，且 dcc 的值模型把它
+                                // 按 rdx:rax 双寄存器交付。`mov_to_stack` 对任何
+                                // sz >= 8 都只写一个 8 字节 store，于是高半从未落槽：
+                                // 循环体内 `__int128 v = va_arg(...)` 后的 `v >> 64`
+                                // 读到的是栈残值（实测三次迭代全部返回同一个个值）。
+                                // 只在“目标与源都是 128 位整型值”时补高半 store，
+                                // 避开 float→__int128 转换只备 rax 的情形。
+                                let store_hi = matches!(&v.ty, Type::Int128 | Type::UInt128)
+                                    && matches!(&init_ty, Type::Int128 | Type::UInt128)
+                                    && !self.reg_bindings.contains_key(&v.name.name);
                                 self.mov_to_stack(0, &v.name.name);
+                                if store_hi {
+                                    let off = self.var_offset(&v.name.name);
+                                    self.store_stack(2, off + 8); // rdx = 高 8 字节
+                                }
                             }
                         }
                     }
@@ -941,6 +1000,5 @@ impl Codegen {
                 },
                 _ => {},
             }
-        }
     }
 }

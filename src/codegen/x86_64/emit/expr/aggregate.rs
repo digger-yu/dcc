@@ -144,23 +144,25 @@ impl Codegen {
                     // 寄存器返回: 按 abi_classes 存储
                     // (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
                     self.emit_sysv_call(Some(&name.name), None, args, None);
-                    // 128-bit SSE 向量: abi_classes 生成 [Sse, SseUp] 两个
-                    // eightbyte, 但完整向量存在一个 xmm 寄存器, 不能拆分
-                    // 用 store_xmm64(xmm0)+store_xmm64(xmm1), 必须用
-                    // store_xmm128_stack 一次性存 128bit (pr92618).
-                    let is_sse_vector_128 =
-                        matches!(call_ty, Type::Vector(_, _)) && call_ty.size() == 16 && {
-                            let c = Self::abi_classes(call_ty);
-                            c.len() == 2
-                                && c.iter()
-                                    .all(|x| matches!(x, AbiClass::Sse | AbiClass::SseUp))
-                        };
+                    // 128-bit 单寄存器 SSE 聚合: abi_classes 生成 [Sse, SseUp] 两个
+                    // eightbyte, 但 SysV 把完整 16 字节放在**同一个** xmm0 里返回
+                    // （`SseUp` 是同一寄存器的高半延续，不是第二个寄存器）。
+                    // 不得拆成 store_xmm64(xmm0)+store_xmm64(xmm1) —— 那会从
+                    // 从未赋值的 xmm1 取高半（pr92618）。必须用 store_xmm128_stack
+                    // 一次性存 128bit。
+                    //
+                    // 判据直接用被调方 stmt.rs 返回端用的同一个
+                    // `is_sseup_128_aggregate`，而不是自己重写形状队集：旧写法限定
+                    // `Type::Vector`，于是 `struct { v4f v; }` 这种**含向量的聚合**
+                    // 漏判而落入逐 chunk 存储（实测 4 元素返回 `1 2 2 0`）。
+                    // 两侧共用单一真源后，这类错配不可能再发生。
+                    let is_sse_128_single_reg = Self::is_sseup_128_aggregate(call_ty);
                     if is_global_dst {
                         // Global destination: dst_off=0 is invalid for
                         // store_stack (would corrupt return address).
                         // Store to sret temp, then rep movsb to global.
                         let temp_off = self.alloc_sret_slot(call_ty.size());
-                        if is_sse_vector_128 {
+                        if is_sse_128_single_reg {
                             self.store_xmm128_stack(0, temp_off);
                         } else {
                             let ret_classes = Self::abi_classes(call_ty);
@@ -183,7 +185,7 @@ impl Codegen {
                                                             // rep movsb handled below
                         call_sret_handled = true;
                     } else {
-                        if is_sse_vector_128 {
+                        if is_sse_128_single_reg {
                             self.store_xmm128_stack(0, dst_off);
                             return;
                         }
@@ -215,10 +217,16 @@ impl Codegen {
         // SysV va_arg 聚合读取: 按 abi 分类从寄存器保存区/溢出区读出,
         // 直接写入目标变量缓冲 (rdi)。通用 rax/rdx 物化路径只覆盖 16 字节,
         // >16B 聚合会截断/污染, 必须绕开。
+        //
+        // 判据只准问 `va_arg_result_in_memory`（交付约定的单一真源），不得在此
+        // 重写书写形态枚举：旧式 `Struct|Union && size > 8` 把 16 字节裸向量
+        // (`__m128d`) 漏给下方通用 Vector 分支, 而该分支的源固定取
+        // `vector_temp_base(0, sz)` —— `gen_expr_va_arg` 却把装载结果写进
+        // `alloc_sret_slot` 的槽 (`vec_temp_off + 600`), 两者不是同一处, 于是
+        // 装载器填好的值被一个错误源整体覆盖 (sseup_shares_one_slot rc=3)。
+        // 走本分支既消除该错配, 也省掉「临时槽 → 目标」的多余一次拷贝。
         if let Expr::VaArg { ap, ty: arg_ty, .. } = r {
-            if matches!(arg_ty, Type::Struct { .. } | Type::Union { .. })
-                && (arg_ty.size() > 8 || Self::type_has_vla(arg_ty))
-            {
+            if Self::va_arg_result_in_memory(arg_ty) {
                 let va_addr = self.resolve_va_list_addr(ap);
                 // 设置 rdi = 目标地址 (resolve 之后, 避免被 scratch 覆盖)
                 if is_global_dst {
@@ -310,83 +318,119 @@ impl Codegen {
                     if dst_float || src_float {
                         if is_global_dst {
                             // 全局目标: 分量路径的 gen_float_store_at 是
-                            // r13 栈槽相对, 对全局变量会写到栈顶附近。
-                            // 先求值再取全局地址, 按全局连续布局写入。
-                            self.gen_expr(r, 0);
-                            self.emit_global_addr(1, dst_name); // rcx = dst
-                            if dst_float {
+                            // r13 栈槽相对, 对全局变量会写到栈顶附近, 必须
+                            // 先取全局地址再按连续布局写入。
+                            if matches!(&inner.base, Type::LongDouble) {
+                                // LD 不走 SSE: store_complex_at_rcx 内部单次
+                                // 物化（这里不预 gen_expr，否则带副作用
+                                // rvalue 被求值两次）。
+                                self.emit_global_addr(1, dst_name); // rcx = dst
+                                self.push(1);
                                 self.store_complex_at_rcx(r, &inner.base);
                             } else {
-                                // 整数目标 + 浮点源 (C99 6.3.1.7 分量截断):
-                                // cvttsd2si 后写 [rcx]/[rcx+isz]
-                                let isz = inner.base.size() as i64;
-                                let result_off = -self.frame_size + 8;
-                                if src_complex {
-                                    let si = src_inner.clone().unwrap();
-                                    let rpfx =
-                                        if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                                    self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off);
-                                }
-                                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si rax, xmm0
-                                if isz == 4 {
-                                    self.emit(&[0x89, 0x01]); // mov [rcx], eax
+                                // f/d 与 int 截断臂: 先 gen_expr 再寻址。
+                                self.gen_expr(r, 0);
+                                self.emit_global_addr(1, dst_name); // rcx = dst
+                                if dst_float {
+                                    self.store_complex_at_rcx(r, &inner.base);
                                 } else {
-                                    self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                }
-                                if src_complex {
-                                    let si = src_inner.clone().unwrap();
-                                    self.gen_complex_imag_into_xmm0(r, &si);
-                                } else {
-                                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
-                                }
-                                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
-                                if isz == 4 {
-                                    self.emit(&[0x89, 0x41, isz as u8]); // mov [rcx+isz], eax
-                                } else {
-                                    self.emit(&[0x48, 0x89, 0x41]);
-                                    self.emit(&(isz as i32).to_le_bytes());
+                                    // 整数目标 + 浮点源 (C99 6.3.1.7 分量
+                                    // 截断): cvttsd2si 后写 [rcx]/[rcx+isz]
+                                    let isz = inner.base.size() as i64;
+                                    let result_off = -self.frame_size + 8;
+                                    if src_complex {
+                                        let si = src_inner.clone().unwrap();
+                                        let rpfx = if matches!(si, Type::Float) {
+                                            0xF3u8
+                                        } else {
+                                            0xF2u8
+                                        };
+                                        self.emit_xmm0_r13_disp(
+                                            &[rpfx, 0x49, 0x0F, 0x10],
+                                            result_off,
+                                        );
+                                    }
+                                    // cvttsd2si rax, xmm0
+                                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
+                                    if isz == 4 {
+                                        self.emit(&[0x89, 0x01]); // mov [rcx], eax
+                                    } else {
+                                        self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                                    }
+                                    if src_complex {
+                                        let si = src_inner.clone().unwrap();
+                                        self.gen_complex_imag_into_xmm0(r, &si);
+                                    } else {
+                                        self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0
+                                    }
+                                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
+                                    if isz == 4 {
+                                        self.emit(&[0x89, 0x41, isz as u8]);
+                                    } else {
+                                        self.emit(&[0x48, 0x89, 0x41]);
+                                        self.emit(&(isz as i32).to_le_bytes());
+                                    }
                                 }
                             }
+                        } else if matches!(&inner.base, Type::LongDouble) {
+                            // 局部 LD: 不走 SSE，也不能对 complex rvalue 双
+                            // 求值。单次物化成帧内一对 tbyte，再 fld/fstp
+                            // 搬到 real@dst_off、imag@dst_off+16（窄源由
+                            // fld 硬件无损拓宽）。
+                            let src = self.gen_complex_ld_materialize(r);
+                            self.emit_x87_fld_at(13, src as i32, &inner.base);
+                            self.emit_x87_fstp_at(13, dst_off as i32, &inner.base);
+                            self.emit_x87_fld_at(13, src as i32 + 16, &inner.base);
+                            self.emit_x87_fstp_at(
+                                13,
+                                (dst_off + inner.size() as i64) as i32,
+                                &inner.base,
+                            );
                         } else {
+                            // 局部 f/d 与局部 int 目标
                             self.gen_expr(r, 0);
                             if dst_float {
                                 // Convert integer RHS to float if needed
                                 // (e.g., c = 0 where c is _Complex double)
                                 self.emit_scalar_to_xmm0_if_needed(r, &inner.base);
                                 // 实部宽度适配: 产出端 (binop 等) 按运算 inner
-                                // 重载 xmm0 实部 (Complex Double 结果 = double
-                                // 位模式), dst inner 更窄 (Float) 时直接 movss
-                                // 取低 32 位得 0 (1.0d 低 32 位), 必须先 cvtsd2ss
-                                // (complex-6 test_float: x = 1.0 + 2.0i 实部丢失)
+                                // 重载 xmm0 实部, dst inner 更窄 (Float) 时
+                                // 直接 movss 取低 32 位会丢实部, 必须先
+                                // cvtsd2ss (complex-6 test_float)。
                                 if let Type::Complex(ref c) = r.ty() {
                                     self.emit_float_convert(&c.base, &inner.base);
                                 }
                                 self.gen_float_store_at(dst_off, &inner.base);
                                 self.gen_complex_imag_into_xmm0(r, &inner.base);
-                                let inner_sz = inner.size() as i64;
-                                let imag_base = dst_off + inner_sz;
+                                let imag_base = dst_off + inner.size() as i64;
                                 self.gen_float_store_at(imag_base, &inner.base);
                             } else {
-                                // 整数目标 + 浮点源: 分量 cvttsd2si 截断转换。
-                                // 旧路径按 r 自身 inner 读位模式直写整数槽 →
-                                // x = 1.0 + 2.0i (_Complex int x) 实部为
-                                // 1.0d 低 32 位 0, conj 得 (0, 巨数)
-                                // (complex-6 test_int)。
+                                // 整数目标 + 浮点源: 分量 cvttsd2si 截断。
+                                // 旧路径按 r 自身 inner 读位模式直写整数槽
+                                // → 实部取了 1.0d 低 32 位 0 (complex-6
+                                // test_int)。
                                 let isz = inner.base.size() as i64;
                                 let result_off = -self.frame_size + 8;
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
-                                    let rpfx =
-                                        if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                                    self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off);
+                                    let rpfx = if matches!(si, Type::Float) {
+                                        0xF3u8
+                                    } else {
+                                        0xF2u8
+                                    };
+                                    self.emit_xmm0_r13_disp(
+                                        &[rpfx, 0x49, 0x0F, 0x10],
+                                        result_off,
+                                    );
                                 }
-                                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si rax, xmm0
+                                // cvttsd2si rax, xmm0
+                                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
                                 self.emit_store(0, dst_off, isz as usize);
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
                                     self.gen_complex_imag_into_xmm0(r, &si);
                                 } else {
-                                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0
                                 }
                                 self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
                                 self.emit_store(0, dst_off + isz, isz as usize);

@@ -13,9 +13,9 @@ impl Codegen {
     pub fn gen_expr_unary_ops(&mut self, op: &UnOp, e: &Box<Expr>, dst: u8) {
         // 浮点字面量取负: 编译期折叠, 直接生成相反值的 Float 表达式
         if matches!(op, UnOp::Neg) {
-            if let Expr::Float { v, ty, span, .. } = e.as_ref() {
+            if let Expr::Float { c, ty, span, .. } = e.as_ref() {
                 let negated = Expr::Float {
-                    v: -*v,
+                    c: c.negate(),
                     ty: ty.clone(),
                     span: span.clone(),
                 };
@@ -55,13 +55,25 @@ impl Codegen {
             && (matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble)
                 || matches!(e.ty(), Type::Imaginary(_)))
         {
-            self.gen_expr(e, 0); // xmm0 = e
             let e_ty = e.ty();
             let neg_ty = if let Type::Imaginary(ref inner) = e_ty {
                 &inner.base
             } else {
                 &e_ty
             };
+            // LD/imaginary LD 走 x87: gen_expr 后值在 st0, fchs 直接翻
+            // 80-bit 符号位 (旧路径 XOR xmm0 bit63 只动 8 字节, LD 根本
+            // 不在 xmm0, 结果无效)。
+            if matches!(neg_ty, Type::LongDouble) {
+                self.gen_expr(e, 0);
+                self.emit_x87_chs();
+                if dst != 0 {
+                    // 标量 LD rvalue: rax 取 gen_expr 已交付的地址
+                    self.mov(dst, 0);
+                }
+                return;
+            }
+            self.gen_expr(e, 0); // xmm0 = e
             match neg_ty {
                 Type::Float => {
                     // 翻转 32 位符号位: movabs rax, 0x8000_0000
@@ -74,13 +86,6 @@ impl Codegen {
                 },
                 Type::Double => {
                     // 翻转 64 位符号位
-                    self.emit(&[0x48, 0xB8]);
-                    self.emit(&0x8000000000000000u64.to_le_bytes());
-                    self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
-                    self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
-                },
-                Type::LongDouble => {
-                    // long double (80-bit): dcc 用 8 字节近似, 同样翻转 bit 63
                     self.emit(&[0x48, 0xB8]);
                     self.emit(&0x8000000000000000u64.to_le_bytes());
                     self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
@@ -102,6 +107,23 @@ impl Codegen {
             };
             let inner_sz = inner.size() as i64;
             let result_off = -self.frame_size + 8;
+            // complex LD: 两分量各 fchs (值通道是 x87), 物化到帧槽,
+            // rax=result_off (LD rvalue 约定; 旧路径 movsd 只读 8 字节)。
+            if matches!(inner, Type::LongDouble) {
+                // 源只求值一次物化成 tbyte 对，real/imag 各 fchs 后写 result_off。
+                let src = self.gen_complex_ld_materialize(e);
+                self.emit_x87_fld_at(13, src as i32, &inner);
+                self.emit_x87_chs();
+                self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                self.emit_x87_fld_at(13, src as i32 + 16, &inner);
+                self.emit_x87_chs();
+                self.emit_x87_fstp_at(13, (result_off + inner_sz) as i32, &inner);
+                self.emit_lea_r13(0, result_off);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                return;
+            }
             let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
             // 1. 实部 → xmm0, 虚部 → [r13+result_off+inner_sz]
             if self.gen_lvalue_addr(e, 0) {
@@ -157,7 +179,22 @@ impl Codegen {
             };
             let inner_sz = inner.size() as i64;
             let result_off = -self.frame_size + 8;
-            if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
+            // complex LD 共轭: 源只求值一次物化成 tbyte 对, real 直写,
+            // imag fchs 后写。
+            if matches!(inner, Type::LongDouble) {
+                let src = self.gen_complex_ld_materialize(e);
+                self.emit_x87_fld_at(13, src as i32, &inner);
+                self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                self.emit_x87_fld_at(13, src as i32 + 16, &inner);
+                self.emit_x87_chs();
+                self.emit_x87_fstp_at(13, (result_off + inner_sz) as i32, &inner);
+                self.emit_lea_r13(0, result_off);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                return;
+            }
+            if matches!(inner, Type::Float | Type::Double) {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 if self.gen_lvalue_addr(e, 0) {
                     self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
