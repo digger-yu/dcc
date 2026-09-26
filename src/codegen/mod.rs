@@ -226,6 +226,7 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
         Expr::Int { .. }
         | Expr::Float { .. }
         | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
         | Expr::String { .. }
         | Expr::Char { .. }
         | Expr::Ident { .. }

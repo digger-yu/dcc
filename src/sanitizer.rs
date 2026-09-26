@@ -1039,7 +1039,8 @@ fn instrument_expr(
         | Expr::Int { .. }
         | Expr::Char { .. }
         | Expr::Float { .. }
-        | Expr::ComplexLit { .. } => ExprKind::Trivial,
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. } => ExprKind::Trivial,
         Expr::Real { e, .. } | Expr::Imag { e, .. } => {
             // 实/虚部提取: 插桩内层表达式, 自身无内存访问
             instrument_expr(e, flags, ctx, guard_var, guard_base);
@@ -1236,6 +1237,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Int { span, .. }
         | Expr::Float { span, .. }
         | Expr::ComplexLit { span, .. }
+        | Expr::ComplexIntLit { span, .. }
         | Expr::Real { span, .. }
         | Expr::Imag { span, .. }
         | Expr::String { span, .. }

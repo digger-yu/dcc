@@ -353,6 +353,86 @@ pub struct Case {
     pub span: Span,
 }
 
+/// 浮点字面量的编译期值。
+///
+/// 变体携带其**源码语义类型**的精确值：`1.0f` → [`FloatConst::F32`]，
+/// `1.0` → [`FloatConst::F64`]，`1.0L` → [`FloatConst::LongDouble`]
+/// （真 80-bit 位型，直接由十进制文本正确舍入得到，**不经 f64 中转**，
+/// 从而消除 `0.1L` 被拓宽成 f64 值的末位精度差异）。
+///
+/// 消费方必须按变体显式匹配处理；不支持 x87 80-bit 的后端通过
+/// [`FloatConst::as_f64`] 显式降级，降级点因此全部可见、可审计。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FloatConst {
+    F32(f32),
+    F64(f64),
+    LongDouble(crate::float80::Bits),
+}
+
+impl FloatConst {
+    /// 以 f64 读取值。F32 先提升；LongDouble 经真 80-bit → f64
+    /// 正确舍入（仅供非 x86 后端与常量折叠等显式降级场景使用）。
+    pub fn as_f64(self) -> f64 {
+        match self {
+            FloatConst::F32(f) => f as f64,
+            FloatConst::F64(f) => f,
+            FloatConst::LongDouble(ref b) => crate::float80::to_f64(b),
+        }
+    }
+
+    /// 是否为 long double（80-bit）字面量。
+    pub fn is_long_double(self) -> bool {
+        matches!(self, FloatConst::LongDouble(_))
+    }
+
+    /// 是否为各精度的（正或负）零。
+    pub fn is_zero(self) -> bool {
+        match self {
+            FloatConst::F32(f) => f == 0.0,
+            FloatConst::F64(f) => f == 0.0,
+            FloatConst::LongDouble(ref b) => crate::float80::is_zero(b),
+        }
+    }
+
+    /// 符号翻转（保留各变体自身精度；用于一元 `-` 作用于字面量）。
+    pub fn negate(self) -> FloatConst {
+        match self {
+            FloatConst::F32(f) => FloatConst::F32(-f),
+            FloatConst::F64(f) => FloatConst::F64(-f),
+            FloatConst::LongDouble(b) => {
+                FloatConst::LongDouble(crate::float80::negate(b))
+            }
+        }
+    }
+
+    /// 指定浮点类型的正零常量。所有“分量缺失 / 纯虚数实部”等场景统一
+    /// 经此构造，杜绝随手写 `F64(0.0)` 把 LongDouble 分量静默降级。
+    pub fn zero(ty: &Type) -> FloatConst {
+        match ty {
+            Type::Float => FloatConst::F32(0.0),
+            Type::LongDouble => {
+                FloatConst::LongDouble(crate::float80::from_f64(0.0))
+            },
+            _ => FloatConst::F64(0.0),
+        }
+    }
+
+    /// 整型常量 → 指定目标浮点类型，全程精确 RNE。
+    ///
+    /// 旧路径是 `F64(i as f64)` / `from_f64(i as f64)`：对 `|i| >= 2^53`
+    /// 的整数会先丢精度再“拓宽”。统一走 float80 的整数转换入口；
+    /// LongDouble 对 `|i| < 2^64` 完全精确。
+    pub fn from_int(ty: &Type, i: i128) -> FloatConst {
+        match ty {
+            Type::Float => FloatConst::F32(crate::float80::i128_to_f32(i)),
+            Type::LongDouble => {
+                FloatConst::LongDouble(crate::float80::from_i128(i))
+            },
+            _ => FloatConst::F64(crate::float80::i128_to_f64(i)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum Expr {
@@ -362,14 +442,25 @@ pub enum Expr {
         ty: Type,
     },
     Float {
-        v: f64,
+        c: FloatConst,
         span: Span,
         ty: Type,
     },
     /// _Complex 字面量: 4.0i / 3j / 1.0iF (实部 + 虚部; ty = _Complex T)
     ComplexLit {
-        real: f64,
-        imag: f64,
+        real: FloatConst,
+        imag: FloatConst,
+        span: Span,
+        ty: Type,
+    },
+    /// 整型 _Complex 字面量: 3j / 1i (实部 + 虚部，精确 i128，不经浮点)
+    ///
+    /// 与 [`Expr::ComplexLit`] 分开：浮点域的 `FloatConst` 无法在
+    /// `|i| >= 2^53` 时精确承载整数，旧路径 `F64(v as f64)` 会先丢
+    /// 精度再由 codegen 转回整数。
+    ComplexIntLit {
+        real: i128,
+        imag: i128,
         span: Span,
         ty: Type,
     },
@@ -1567,6 +1658,7 @@ impl Expr {
             Expr::Int { ty, .. }
             | Expr::Float { ty, .. }
             | Expr::ComplexLit { ty, .. }
+            | Expr::ComplexIntLit { ty, .. }
             | Expr::Real { ty, .. }
             | Expr::Imag { ty, .. }
             | Expr::String { ty, .. }

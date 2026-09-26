@@ -707,17 +707,23 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
             // FENV_ACCESS ON: 不折叠浮点常量运算 (舍入模式可能被 fesetround
             // 在运行时改变, 编译期折叠将按默认舍入求值, 语义错误).
             if !fenv_access {
-                if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) =
+                if let (Expr::Float { c: lc, .. }, Expr::Float { c: rc, .. }) =
                     (l.as_ref(), r.as_ref())
                 {
-                    if let Some(v) = eval_float_binop(op, *lv, *rv) {
+                    // LongDouble 不做编译期折叠：宿主无 80-bit 运算，
+                    // 留给后端 x87 运行时按目标舍入模式求值。
+                    if lc.is_long_double() || rc.is_long_double() {
+                        // fall through, keep original expression
+                    } else if let Some(v) =
+                        eval_float_binop(op, lc.as_f64(), rc.as_f64())
+                    {
                         // 结果精度必须匹配目标类型: Float 结果截为 f32
-                        let v = if matches!(ty, crate::ast::Type::Float) {
-                            (v as f32) as f64
+                        let c = if matches!(ty, crate::ast::Type::Float) {
+                            crate::ast::FloatConst::F32(v as f32)
                         } else {
-                            v
+                            crate::ast::FloatConst::F64(v)
                         };
-                        return Expr::Float { v, span, ty };
+                        return Expr::Float { c, span, ty };
                     }
                 }
             }
@@ -1229,6 +1235,7 @@ fn expr_node_count(e: &Expr) -> usize {
         | Expr::AlignofExpr { .. }
         | Expr::Offsetof { .. }
         | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
         | Expr::LabelAddr { .. } => 1,
         Expr::Unary { e, .. }
         | Expr::Cast { e, .. }
@@ -2453,12 +2460,12 @@ mod tests {
         let float_expr = || Expr::Binop {
             op: BinOp::Add,
             l: Box::new(Expr::Float {
-                v: 1.5,
+                c: crate::ast::FloatConst::F64(1.5),
                 span: Span::point("t.c", 1, 1),
                 ty: Type::Double,
             }),
             r: Box::new(Expr::Float {
-                v: 2.25,
+                c: crate::ast::FloatConst::F64(2.25),
                 span: Span::point("t.c", 1, 1),
                 ty: Type::Double,
             }),
@@ -2468,7 +2475,7 @@ mod tests {
         // 默认 (FENV_ACCESS OFF): 浮点常量运算被折叠
         let folded = fold_expr(float_expr(), false);
         assert!(
-            matches!(folded, Expr::Float { v, .. } if (v - 3.75).abs() < 1e-12),
+            matches!(folded, Expr::Float { c: crate::ast::FloatConst::F64(v), .. } if (v - 3.75).abs() < 1e-12),
             "float binop should fold without FENV_ACCESS, got {folded:?}"
         );
         // FENV_ACCESS ON: 保留运行时二元运算 (舍入模式可能在运行时改变)

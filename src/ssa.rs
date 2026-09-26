@@ -36,7 +36,7 @@ impl SsaVar {
 pub enum Operand {
     Var(SsaVar),
     Int(i128),
-    Float(f64, Type),
+    Float(crate::ast::FloatConst, Type),
     /// 字符串字面量 (在 rodata 中以 FNV-1a label 表示)
     Str(Vec<u8>),
     /// 全局符号地址 (用符号名占位)
@@ -638,21 +638,21 @@ impl Builder {
                 }
                 Operand::Int(*v)
             },
-            Expr::Float { v, ty, .. } => {
+            Expr::Float { c, ty, .. } => {
                 if let Some(t) = target {
                     self.emit(Inst {
                         dest: Some(t.clone()),
                         kind: InstKind::Bin {
                             op: BinOp::Add,
-                            l: Operand::Float(*v, ty.clone()),
-                            r: Operand::Float(0.0, ty.clone()),
+                            l: Operand::Float(*c, ty.clone()),
+                            r: Operand::Float(crate::ast::FloatConst::zero(ty), ty.clone()),
                         },
                         span: t.span.clone(),
                     });
                     self.define(t.clone());
                     return Operand::Var(t);
                 }
-                Operand::Float(*v, ty.clone())
+                Operand::Float(*c, ty.clone())
             },
             Expr::String { data, .. } => Operand::Str(data.clone()),
             Expr::Char { v, .. } => Operand::Int(*v),
@@ -2454,7 +2454,7 @@ fn expr_ty(e: &Expr) -> Type {
         Expr::InitList { ty, .. } => ty.clone(),
         Expr::StmtExpr { ty, .. } => ty.clone(),
         Expr::Comma { ty, .. } => ty.clone(),
-        Expr::ComplexLit { ty, .. } => ty.clone(),
+        Expr::ComplexLit { ty, .. } | Expr::ComplexIntLit { ty, .. } => ty.clone(),
         Expr::Real { ty, .. } => ty.clone(),
         Expr::Imag { ty, .. } => ty.clone(),
         Expr::VaArg { ty, .. } => ty.clone(),
@@ -3866,8 +3866,8 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function)
             span: Span::point("ssa", 0, 0),
             ty: Type::Int,
         },
-        Operand::Float(v, ty) => Expr::Float {
-            v: *v,
+        Operand::Float(c, ty) => Expr::Float {
+            c: *c,
             span: Span::point("ssa", 0, 0),
             ty: ty.clone(),
         },

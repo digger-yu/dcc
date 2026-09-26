@@ -136,7 +136,7 @@ fn bucket_id(e: &Expr) -> u32 {
     match e {
         Expr::Int { .. } => 0,
         Expr::Float { .. } => 1,
-        Expr::ComplexLit { .. } => 2,
+        Expr::ComplexLit { .. } | Expr::ComplexIntLit { .. } => 2,
         Expr::Real { .. } => 3,
         Expr::Imag { .. } => 4,
         Expr::String { .. } => 5,

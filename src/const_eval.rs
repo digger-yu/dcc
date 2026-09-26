@@ -3,7 +3,7 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, Stmt, Type, UnOp};
+use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FloatConst, Stmt, Type, UnOp};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +27,9 @@ pub type ConstEvalResult = Result<i128, ConstEvalError>;
 pub enum ConstValue {
     /// 整型常量 (含枚举/字符)
     Int(i128),
-    /// 浮点常量 (f32 / f64 / long double 都存为 f64 表示)
-    Float(f64),
+    /// 浮点常量。携带源码语义精度（f32 / f64 / long double），
+    /// long double 保留真 80-bit 位型，避免常量折叠把 `0.1L` 拓宽成 f64。
+    Float(crate::ast::FloatConst),
     /// 字符串字面量: 字节内容 + 唯一标签 (供 codegen 写入 rodata)
     Str { data: Vec<u8>, label: String },
     /// 静态对象的地址: 符号名 + 字节偏移
@@ -42,14 +43,15 @@ impl ConstValue {
     pub fn as_int(&self) -> Option<i128> {
         match self {
             ConstValue::Int(v) => Some(*v),
-            ConstValue::Float(f) => Some(*f as i128),
+            ConstValue::Float(f) => Some(f.as_f64() as i128),
             _ => None,
         }
     }
-    /// 转为浮点 (仅在确实是浮点时)
+    /// 转为 f64 (仅在确实是浮点或可转浮点的整数时)。
+    /// long double 经真 80-bit → f64 正确舍入，调用方即显式降级点。
     pub fn as_float(&self) -> Option<f64> {
         match self {
-            ConstValue::Float(f) => Some(*f),
+            ConstValue::Float(f) => Some(f.as_f64()),
             ConstValue::Int(v) => Some(*v as f64),
             _ => None,
         }
@@ -61,7 +63,7 @@ pub fn eval(expr: &Expr) -> ConstEvalResult {
     // fenv_access false for backwards compatibility with old call sites
     match eval_full(expr, false) {
         Ok(ConstValue::Int(v)) => Ok(v),
-        Ok(ConstValue::Float(f)) => Ok(f as i128),
+        Ok(ConstValue::Float(f)) => Ok(f.as_f64() as i128),
         Ok(_) => Err(ConstEvalError::NotConstant),
         Err(e) => Err(e),
     }
@@ -71,7 +73,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
     match expr {
         Expr::Int { v, .. } => Ok(ConstValue::Int(*v)),
         Expr::Char { v, .. } => Ok(ConstValue::Int(*v)),
-        Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
+        Expr::Float { c, .. } => Ok(ConstValue::Float(*c)),
         // 数组名在常量表达式中退化为首元素地址 (C11 6.3.2.1p3):
         // (arr)->field / arr + 1 等地址常量链的基址
         Expr::Ident {
@@ -235,7 +237,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         if fenv_access {
                             return Err(ConstEvalError::NotConstant);
                         }
-                        Ok(ConstValue::Float(-f))
+                        Ok(ConstValue::Float(f.negate()))
                     },
                     _ => Err(ConstEvalError::NotConstant),
                 },
@@ -381,16 +383,17 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                         return Ok(ConstValue::Int(signed));
                     }
                 }
-                // Integer → float/double/long double cast:
-                // Convert the integer value to f64.
+                // Integer → float/double/long double cast：在目标精度上
+                // 精确 RNE（LongDouble 对 |i| < 2^64 完全精确）。
                 if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                    return Ok(ConstValue::Float(i as f64));
+                    return Ok(ConstValue::Float(FloatConst::from_int(ty, i)));
                 }
                 return Ok(ConstValue::Int(i));
             }
             // Float → integer cast: convert with saturation (match x86 behavior
             // for out-of-range values: clamp to INT_MAX/INT_MIN).
-            if let ConstValue::Float(f) = v {
+            if let ConstValue::Float(fc) = v {
+                let f = fc.as_f64();
                 if let Some(bits) = int_type_bits(ty) {
                     let is_signed = !is_unsigned_int_ty(ty);
                     let clamped = if is_signed {
@@ -446,14 +449,21 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             // 不, 更好的方式: 返回 ConstValue::Int 编码虚部 (用于 __imag__),
             // 而 __real__ 直接提取 real 字段.
             // 最简方案: 返回虚部作为 Float (内核中复数常量主要用于 __imag__)
-            if *imag != 0.0 {
+            if !imag.is_zero() {
                 Ok(ConstValue::Float(*imag))
             } else {
                 Ok(ConstValue::Float(*real))
             }
         },
+        Expr::ComplexIntLit { real, imag, .. } => {
+            // 整型复数字面量：返回虚部整数（实部由 __real__ 直接取字段）。
+            if *imag != 0 { Ok(ConstValue::Int(*imag)) } else { Ok(ConstValue::Int(*real)) }
+        },
         Expr::Real { e, .. } => {
             // __real__ expr: 提取实部
+            if let Expr::ComplexIntLit { real, .. } = e.as_ref() {
+                return Ok(ConstValue::Int(*real));
+            }
             match eval_full(e, false)? {
                 ConstValue::Float(f) => {
                     // 如果内部是 ComplexLit, 实部已在 eval_full 中编码
@@ -471,6 +481,9 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         },
         Expr::Imag { e, .. } => {
             // __imag__ expr: 提取虚部
+            if let Expr::ComplexIntLit { imag, .. } = e.as_ref() {
+                return Ok(ConstValue::Int(*imag));
+            }
             match eval_full(e, false)? {
                 ConstValue::Float(f) => {
                     if let Expr::ComplexLit { real: _, imag, .. } = e.as_ref() {
@@ -774,7 +787,7 @@ fn eval_with_env(
                         if fenv_access {
                             return Err(ConstEvalError::NotConstant);
                         }
-                        Ok(ConstValue::Float(-f))
+                        Ok(ConstValue::Float(f.negate()))
                     },
                     _ => Err(ConstEvalError::NotConstant),
                 },
@@ -1019,6 +1032,28 @@ fn pointee_byte_scale(ty: &Type) -> Option<i128> {
     }
 }
 
+/// 在 f64 域折叠两个浮点常量。任一操作数为 long double 时拒绝折叠：
+/// 宿主无 80-bit 运算，f64 折叠会静默改变 `0.1L` 等的值，必须留给
+/// 后端在运行时用 x87 求值。float 在 C 常规转换中本就提升为 double，
+/// 故折叠结果统一为 F64。
+fn fold_float<F>(
+    a: FloatConst,
+    b: FloatConst,
+    fenv_access: bool,
+    f: F,
+) -> Result<ConstValue, ConstEvalError>
+where
+    F: FnOnce(f64, f64) -> f64,
+{
+    if fenv_access || a.is_long_double() || b.is_long_double() {
+        return Err(ConstEvalError::NotConstant);
+    }
+    Ok(ConstValue::Float(FloatConst::F64(f(
+        a.as_f64(),
+        b.as_f64(),
+    ))))
+}
+
 fn add_values(
     l: ConstValue,
     r: ConstValue,
@@ -1026,23 +1061,12 @@ fn add_values(
 ) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_add(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a + b))
-        },
+        (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x + y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a as f64 + b))
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x + y)
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a + b as f64))
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x + y)
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1054,23 +1078,12 @@ fn sub_values(
 ) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_sub(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a - b))
-        },
+        (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x - y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a as f64 - b))
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x - y)
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a - b as f64))
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x - y)
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1082,23 +1095,12 @@ fn mul_values(
 ) -> Result<ConstValue, ConstEvalError> {
     match (l, r) {
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_mul(b))),
-        (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a * b))
-        },
+        (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x * y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a as f64 * b))
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x * y)
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a * b as f64))
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x * y)
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1114,23 +1116,12 @@ fn div_values(
             .checked_div(b)
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
-        (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a / b))
-        },
+        (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x / y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a as f64 / b))
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x / y)
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            if fenv_access {
-                return Err(ConstEvalError::NotConstant);
-            }
-            Ok(ConstValue::Float(a / b as f64))
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x / y)
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1147,15 +1138,16 @@ fn mod_values(
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access {
+            if fenv_access || a.is_long_double() || b.is_long_double() {
                 return Err(ConstEvalError::NotConstant);
             }
             // C fmod semantics: a - trunc(a/b) * b
             // Rust f64 % f64 matches C fmod()
-            if b == 0.0 {
+            let (af, bf) = (a.as_f64(), b.as_f64());
+            if bf == 0.0 {
                 return Err(ConstEvalError::DivisionByZero);
             }
-            Ok(ConstValue::Float(a % b))
+            Ok(ConstValue::Float(FloatConst::F64(af % bf)))
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1261,7 +1253,7 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
                     write!(f, "'\\x{:x}'", *v)
                 }
             },
-            Expr::Float { v, .. } => write!(f, "{}", v),
+            Expr::Float { c, .. } => write!(f, "{}", c.as_f64()),
             Expr::String { data, .. } => {
                 write!(f, "\"")?;
                 for b in data {
@@ -1551,8 +1543,13 @@ mod tests {
     }
 
     fn float(v: f64, ty: Type) -> Expr {
+        let c = match ty {
+            Type::LongDouble => FloatConst::LongDouble(crate::float80::from_f64(v)),
+            Type::Float => FloatConst::F32(v as f32),
+            _ => FloatConst::F64(v),
+        };
         Expr::Float {
-            v,
+            c,
             span: Span::point("t.c", 1, 1),
             ty,
         }
@@ -1562,10 +1559,10 @@ mod tests {
     fn float_arithmetic_eval() {
         // 浮点 + 浮点
         let a = bin_f(BinOp::Add, 1.5, 2.25, Type::Double, Type::Double);
-        assert_eq!(eval_full(&a, false), Ok(ConstValue::Float(3.75)));
+        assert_eq!(eval_full(&a, false), Ok(ConstValue::Float(FloatConst::F64(3.75))));
         // 浮点 * 浮点
         let m = bin_f(BinOp::Mul, 2.0, 3.0, Type::Double, Type::Double);
-        assert_eq!(eval_full(&m, false), Ok(ConstValue::Float(6.0)));
+        assert_eq!(eval_full(&m, false), Ok(ConstValue::Float(FloatConst::F64(6.0))));
         // 浮点 / 0 返回有限 NaN/inf, 不报错 (符合 IEEE 754)
         let d = bin_f(BinOp::Div, 1.0, 0.0, Type::Double, Type::Double);
         assert!(matches!(eval_full(&d, false), Ok(ConstValue::Float(_))));
@@ -1589,7 +1586,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&e, false), Ok(ConstValue::Float(3.5)));
+        assert_eq!(eval_full(&e, false), Ok(ConstValue::Float(FloatConst::F64(3.5))));
     }
 
     fn bin_f(op: BinOp, l: f64, r: f64, lt: Type, rt: Type) -> Expr {
@@ -1703,8 +1700,8 @@ mod tests {
     fn complex_lit_real_extract() {
         // __real__ (3.0 + 4.0i) == 3.0
         let c = Expr::ComplexLit {
-            real: 3.0,
-            imag: 4.0,
+            real: FloatConst::F64(3.0),
+            imag: FloatConst::F64(4.0),
             span: Span::point("t.c", 1, 1),
             ty: Type::Complex(Box::new(Type::Double.into())),
         };
@@ -1713,15 +1710,15 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(3.0)));
+        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(FloatConst::F64(3.0))));
     }
 
     #[test]
     fn complex_lit_imag_extract() {
         // __imag__ (3.0 + 4.0i) == 4.0
         let c = Expr::ComplexLit {
-            real: 3.0,
-            imag: 4.0,
+            real: FloatConst::F64(3.0),
+            imag: FloatConst::F64(4.0),
             span: Span::point("t.c", 1, 1),
             ty: Type::Complex(Box::new(Type::Double.into())),
         };
@@ -1730,7 +1727,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&im, false), Ok(ConstValue::Float(4.0)));
+        assert_eq!(eval_full(&im, false), Ok(ConstValue::Float(FloatConst::F64(4.0))));
     }
 
     #[test]
@@ -1742,7 +1739,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Double,
         };
-        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(5.0)));
+        assert_eq!(eval_full(&r, false), Ok(ConstValue::Float(FloatConst::F64(5.0))));
     }
 
     #[test]

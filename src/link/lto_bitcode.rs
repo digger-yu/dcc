@@ -146,7 +146,21 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
         },
         Some(ExprLiteral::Float(f)) => {
             out.push(1u8);
-            out.extend_from_slice(&f.to_le_bytes());
+            // FloatConst 按变体序列化，保留 LongDouble 真 80-bit 精度。
+            match f {
+                crate::ast::FloatConst::F32(v) => {
+                    out.push(0u8);
+                    out.extend_from_slice(&v.to_le_bytes());
+                },
+                crate::ast::FloatConst::F64(v) => {
+                    out.push(1u8);
+                    out.extend_from_slice(&v.to_le_bytes());
+                },
+                crate::ast::FloatConst::LongDouble(b) => {
+                    out.push(2u8);
+                    out.extend_from_slice(&b);
+                },
+            }
         },
         None => {
             out.push(0xffu8);
@@ -461,8 +475,28 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
             Some(ExprLiteral::Int(v))
         },
         1 => {
-            let v = f64::from_le_bytes(data[*cur..*cur + 8].try_into().unwrap());
-            *cur += 8;
+            // FloatConst: 读变体标记与对应宽度的负载。
+            let tag = data[*cur];
+            *cur += 1;
+            let v = match tag {
+                0 => {
+                    let b = data[*cur..*cur + 4].try_into().unwrap();
+                    *cur += 4;
+                    crate::ast::FloatConst::F32(f32::from_le_bytes(b))
+                },
+                1 => {
+                    let b = data[*cur..*cur + 8].try_into().unwrap();
+                    *cur += 8;
+                    crate::ast::FloatConst::F64(f64::from_le_bytes(b))
+                },
+                2 => {
+                    let b: [u8; 10] =
+                        data[*cur..*cur + 10].try_into().unwrap();
+                    *cur += 10;
+                    crate::ast::FloatConst::LongDouble(b)
+                },
+                _ => return Err("invalid FloatConst variant tag".to_string()),
+            };
             Some(ExprLiteral::Float(v))
         },
         _ => None,
@@ -1353,6 +1387,12 @@ fn fold_binary_op(
             Some(ExprLiteral::Int(result))
         },
         (ExprLiteral::Float(l), ExprLiteral::Float(r)) => {
+            // LongDouble 不做跨 TU 编译期折叠：宿主无 80-bit 运算，
+            // 留待后端运行时求值。
+            if l.is_long_double() || r.is_long_double() {
+                return None;
+            }
+            let (l, r) = (l.as_f64(), r.as_f64());
             // Handle arithmetic operations
             let arith_result = match op {
                 BinOp::Add => Some(l + r),
@@ -1363,7 +1403,9 @@ fn fold_binary_op(
                 _ => None,
             };
             if let Some(v) = arith_result {
-                return Some(ExprLiteral::Float(v));
+                return Some(ExprLiteral::Float(
+                    crate::ast::FloatConst::F64(v),
+                ));
             }
             // Handle comparison operations
             let cmp_result = match op {
@@ -1386,7 +1428,9 @@ fn fold_unary_op(op: crate::ast::UnOp, val: ExprLiteral) -> Option<ExprLiteral> 
     use crate::ast::UnOp;
     match (op, val) {
         (UnOp::Neg, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(v.checked_neg()?)),
-        (UnOp::Neg, ExprLiteral::Float(v)) => Some(ExprLiteral::Float(-v)),
+        (UnOp::Neg, ExprLiteral::Float(v)) => {
+            Some(ExprLiteral::Float(v.negate()))
+        },
         (UnOp::Not, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(if v == 0 { 1 } else { 0 })),
         (UnOp::BitNot, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(!v)),
         (UnOp::Plus, lit) => Some(lit),

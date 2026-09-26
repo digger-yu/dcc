@@ -41,7 +41,7 @@ pub enum ValueType {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExprLiteral {
     Int(i128),
-    Float(f64),
+    Float(crate::ast::FloatConst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1253,7 +1253,7 @@ impl ExprLiteral {
     pub fn as_int(&self) -> i128 {
         match self {
             Self::Int(v) => *v,
-            Self::Float(f) => *f as i128,
+            Self::Float(f) => f.as_f64() as i128,
         }
     }
 
@@ -1261,7 +1261,7 @@ impl ExprLiteral {
     pub fn as_float(&self) -> f64 {
         match self {
             Self::Int(v) => *v as f64,
-            Self::Float(v) => *v,
+            Self::Float(v) => v.as_f64(),
         }
     }
 
@@ -1526,13 +1526,18 @@ impl Lowering {
                 literal = Some(ExprLiteral::Int(*v));
                 (ExprKind::Constant, Vec::new())
             },
-            Expr::Float { v, .. } => {
-                literal = Some(ExprLiteral::Float(*v));
+            Expr::Float { c, .. } => {
+                literal = Some(ExprLiteral::Float(*c));
                 (ExprKind::Constant, Vec::new())
             },
             Expr::ComplexLit { imag, .. } => {
                 // 虚数字面量: 常量 (虚部值; 实部 0)
                 literal = Some(ExprLiteral::Float(*imag));
+                (ExprKind::Constant, Vec::new())
+            },
+            Expr::ComplexIntLit { imag, .. } => {
+                // 整型虚数字面量: 常量 (虚部整数; 实部 0)
+                literal = Some(ExprLiteral::Int(*imag));
                 (ExprKind::Constant, Vec::new())
             },
             Expr::Real { e, .. } | Expr::Imag { e, .. } => {
@@ -1890,6 +1895,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Int { span, .. }
         | Expr::Float { span, .. }
         | Expr::ComplexLit { span, .. }
+        | Expr::ComplexIntLit { span, .. }
         | Expr::Real { span, .. }
         | Expr::Imag { span, .. }
         | Expr::String { span, .. }

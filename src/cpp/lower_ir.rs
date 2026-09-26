@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, QualType, QualifierFlags, Type, UnOp};
+use crate::ast::{BinOp, FloatConst, QualType, QualifierFlags, Type, UnOp};
 use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, ThisAdjust, VTableComponent};
 use crate::cpp::hir::*;
 use crate::cpp::sema::{Access, ClassId, CxxSymbol, CxxSymbolKind, CxxType, SymbolId};
@@ -754,8 +754,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::IntLiteral(v) => Ok(Operand::Int(*v)),
 
             HirExprKind::FloatLiteral(s) => {
+                // C++ HIR 浮点字面量按 double 建模（显式 f 后缀在 HIR
+                // 侧已处理类型；此处不存在 80-bit long double 通道）。
                 let val: f64 = s.parse().unwrap_or(0.0);
-                Ok(Operand::Float(val, Type::Double))
+                Ok(Operand::Float(FloatConst::F64(val), Type::Double))
             },
 
             HirExprKind::BoolLiteral(b) => Ok(Operand::Int(if *b { 1 } else { 0 })),
@@ -4511,11 +4513,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     match &member_ty {
                         CxxType::Integer { .. } => Operand::Int(0),
                         CxxType::Float { bits } => {
-                            let v = match bits {
-                                32 => 0.0f32 as f64,
-                                _ => 0.0f64,
+                            let c = match bits {
+                                32 => FloatConst::F32(0.0),
+                                _ => FloatConst::F64(0.0),
                             };
-                            Operand::Float(v, Type::Double)
+                            Operand::Float(c, Type::Double)
                         },
                         CxxType::Bool => Operand::Int(0),
                         CxxType::Pointer(_) => Operand::Int(0),

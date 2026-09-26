@@ -7623,8 +7623,10 @@ impl<'a> Parser<'a> {
                             Err(_) => {
                                 // 非整型常量: 尝试浮点截断 (GCC 兼容)
                                 match crate::const_eval::eval_full(&e, self.opts.fenv_access) {
-                                    Ok(crate::const_eval::ConstValue::Float(f)) if f >= 0.0 => {
-                                        Some(f as u32)
+                                    Ok(crate::const_eval::ConstValue::Float(f))
+                                        if f.as_f64() >= 0.0 =>
+                                    {
+                                        Some(f.as_f64() as u32)
                                     },
                                     _ => None,
                                 }
@@ -11620,9 +11622,10 @@ impl<'a> Parser<'a> {
                     .any(|c| c == 'i' || c == 'I' || c == 'j' || c == 'J');
                 self.advance();
                 if is_imag {
-                    Some(Expr::ComplexLit {
-                        real: 0.0,
-                        imag: v as f64,
+                    // 整数虚数字面量全程走 i128，避免经 f64 中转丢精度。
+                    Some(Expr::ComplexIntLit {
+                        real: 0,
+                        imag: v,
                         span: sp,
                         ty: Type::Complex(Box::new(ty.into())),
                     })
@@ -11660,26 +11663,36 @@ impl<'a> Parser<'a> {
                     stripped = &stripped[..stripped.len() - 1];
                 }
                 let v_s = stripped;
-                let v: f64 = if v_s.starts_with("0x") || v_s.starts_with("0X") {
-                    parse_hex_float(v_s)
-                } else if matches!(ty, Type::Float) {
-                    // Float 后缀 (f/F): 先解析为 f32 再提升到 f64,
-                    // 匹配 C 语义 (float 常量的值是最接近的 f32 值)。
-                    v_s.parse::<f32>().unwrap_or(0.0) as f64
-                } else {
-                    v_s.parse().unwrap_or(0.0)
+                // 按源码语义类型构造编译期值。LongDouble 必须由原始文本
+                // 直接正确舍入到真 80-bit，严禁经 f64 中转（否则
+                // `0.1L` 会丢成 f64 拓宽值）；解析失败才显式回落 f64。
+                let c: FloatConst = match ty {
+                    Type::LongDouble => match crate::float80::from_decimal(v_s) {
+                        Some(bits) => FloatConst::LongDouble(bits),
+                        None => FloatConst::F64(v_s.parse().unwrap_or(0.0)),
+                    },
+                    Type::Float => {
+                        FloatConst::F32(v_s.parse::<f32>().unwrap_or(0.0))
+                    }
+                    _ => {
+                        if v_s.starts_with("0x") || v_s.starts_with("0X") {
+                            FloatConst::F64(parse_hex_float(v_s))
+                        } else {
+                            FloatConst::F64(v_s.parse().unwrap_or(0.0))
+                        }
+                    }
                 };
                 self.advance();
                 if is_imag {
                     // 虚数字面量: 4.0i → _Complex double (实部 0, 虚部 v)
                     Some(Expr::ComplexLit {
-                        real: 0.0,
-                        imag: v,
+                        real: FloatConst::zero(&ty),
+                        imag: c,
                         span: sp,
                         ty: Type::Complex(Box::new(ty.into())),
                     })
                 } else {
-                    Some(Expr::Float { v, span: sp, ty })
+                    Some(Expr::Float { c, span: sp, ty })
                 }
             },
             TokKind::StringLit => {
@@ -12936,7 +12949,7 @@ fn parse_chr(raw: &str) -> i128 {
     result
 }
 
-/// Parse a C99 hexadecimal floating-point constant.
+/// Parse a C9 hexadecimal floating-point constant.
 /// Format: [0x] hex_digits [.hex_digits] [p/P [+/-] decimal_exp]
 /// Value = mantissa * 2^exponent
 /// The input string may include the 0x prefix and type/imag suffixes.

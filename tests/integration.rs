@@ -7274,6 +7274,102 @@ fn struct_abi_extended() {
     let _ = fs::remove_file(&exe);
 }
 
+/// 回归测试 (原 c_xfail/flag_clobber_frame.c): 局部 `int ok` 的赋值
+/// `ok = 0;` 确实执行, 但帧内同名不同尺寸的聚合局部 (先 16B 的
+/// `struct with_vec s;` 后 32B 的 `struct vec_int s;`) 共用同一槽且
+/// 槽按首次声明定容, 导致 `s.i = 7` 溢出覆盖相邻的 ok —— 退出码型
+/// 夹具静默假绿。已修复 (pre_register_vars 按全函数同名声明的最大
+/// 尺寸分配槽)。注意: 夹具里的 `!= 99.0` 是**故意的触发器** (强制
+/// 走 FAIL 分支执行 ok = 0), 不是笔误, 不要改回 10.0。
+#[test]
+#[cfg(unix)]
+fn flag_clobber_frame() {
+    let src = include_str!("fixtures/c/flag_clobber_frame.c");
+    let (out, exe) = run_compile_and_run("flag-clobber-frame", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().expect("run exe");
+    let stdout = String::from_utf8_lossy(&run.stdout).to_string();
+    // 判据自证: FAIL 行存在 → `ok = 0;` 真的执行了 (不是被死代码消除);
+    // 退出码必须是 1 → 末尾 `if (!ok)` 看到了被写的 0。
+    assert!(stdout.contains("FAIL:"), "fixture did not execute ok = 0:\n{stdout}");
+    let rc = run.status.code().unwrap_or(-1);
+    assert_eq!(rc, 1, "ok = 0 被后续同名大结构体的槽溢出丢失 (假绿):\n{stdout}");
+    assert!(stdout.contains("SOME TESTS FAILED"), "missing verdict line:\n{stdout}");
+    let _ = fs::remove_file(&exe);
+}
+
+/// 80-bit `long double` 算术与比较回归。夹具里 bit0/1/2 三项判据**只有真
+/// x87 80-bit 运算才成立**（f64 下 `1/3` 与拓宽后的 f64 基准相等、`1+2^-63`
+/// 舍回 1、累加结果不同），且已单独验证过它们的鉴别力（把结果先过
+/// 一遍 `double` 再比，对应位会变 0）。stdout 逐字符比较则防住
+/// “退出码对了但数字不同”那种部分实现。
+#[test]
+#[cfg(unix)]
+fn ld80_arith_cmp() {
+    let src = include_str!("fixtures/c/ld80_arith_cmp.c");
+    let (out, exe) = run_compile_and_run("ld80-arith-cmp", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "80-bit 算术/比较判据未全中 (期望 r=15)");
+    let _ = fs::remove_file(&exe);
+}
+
+/// inline asm `t`（x87）通道绑定 long double：全局/局部输入与全局/局部
+/// 写回都必须走真 80-bit tbyte，输出与 gcc 逐字符一致、退出码 0。
+/// 覆盖 REX 前缀顺序与全局读侧 movsd 两类根因修复。
+#[test]
+#[cfg(unix)]
+fn ld80_asm_t_channel() {
+    let src = include_str!("fixtures/c/ld80_asm_t_channel.c");
+    let (out, exe) = run_compile_and_run("ld80-asm-t-channel", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "t 通道判据未全中");
+    let _ = fs::remove_file(&exe);
+}
+
+/// inline asm `x`（SSE）通道绑定 float/double：全局/局部输入与写回全部
+/// 形态必须正确，输出与 gcc 逐字符一致、退出码 0。
+#[test]
+#[cfg(unix)]
+fn ld80_asm_x_channel() {
+    let src = include_str!("fixtures/c/ld80_asm_x_channel.c");
+    let (out, exe) = run_compile_and_run("ld80-asm-x-channel", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "x 通道判据未全中");
+    let _ = fs::remove_file(&exe);
+}
+
+/// long double 经 `x` 约束非法：dcc 必须以 E0311 诊断拒绝（对齐 gcc
+/// "inconsistent operand constraints"），四处形态各一条且退出非 0。
+#[test]
+fn ld80_asm_x_rejects_long_double() {
+    let dir = std::env::temp_dir();
+    let tag = format!("dcc-ld80-asm-x-reject-{}", std::process::id());
+    let src_path = dir.join(format!("{tag}.c"));
+    let obj_path = dir.join(format!("{tag}.o"));
+    fs::write(&src_path, include_str!("fixtures/c/ld80_asm_x_rejects_long_double.c"))
+        .expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "must reject long double + x constraint:\n{stderr}");
+    let count = stderr.matches("E0311").count();
+    assert!(count >= 4, "expected >= 4 E0311 errors, got {count}:\n{stderr}");
+    assert!(
+        stderr.contains("inconsistent operand constraints"),
+        "expected gcc-style message:\n{stderr}"
+    );
+    assert!(!stderr.to_lowercase().contains("panic"), "error path panicked:\n{stderr}");
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
 /// 浮点存储路径: double/float 数组下标、解引用、struct 字段赋值
 /// (值在 xmm0, 必须用 movss/movsd 而非 GP mov 存储)
 #[test]
@@ -9439,6 +9535,147 @@ fn va_arg_aggregate_direct() {
     let code = run_exe(&exe);
     let _ = fs::remove_file(exe);
     assert_eq!(code, 0, "aggregate va_arg fixture failed");
+}
+
+/// D2: `va_arg(ap, __m128d)` 的两个 eightbyte ([Sse, SseUp]) 必须共享同一个
+/// 16 字节 XMM 槽, 且装载结果必须被消费侧按「rax = 聚合地址」约定原样接收.
+/// 消费侧曾从 `vector_temp_base(0)` 取源 (与装载器写的 `alloc_sret_slot` 槽
+/// 差一个 +600 常量偏移), 把已填好的值用错误源覆盖, 两个向量全读错.
+#[test]
+fn va_arg_sseup_shares_one_slot() {
+    let src = include_str!("fixtures/c/va_arg/sseup_shares_one_slot.c");
+    let (output, exe) = run_compile_and_run("va-sseup-slot", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "[Sse, SseUp] 共享单槽 fixture failed");
+}
+
+/// D3: `fp_offset` 的上限与推进步长必须按**实际占用的 XMM 寄存器个数**算.
+/// 按 SSE 家族 eightbyte 个数算会把 `[Sse, SseUp]` 当作 2 个寄存器, 上限从 160
+/// 缩到 144, 于是第 8 个向量参数被误判溢出而去 overflow_arg_area 取.
+#[test]
+fn va_arg_xmm_reg_count_not_eightbyte_count() {
+    let src = include_str!("fixtures/c/va_arg/xmm_reg_count_not_eightbyte_count.c");
+    let (output, exe) = run_compile_and_run("va-xmm-reg-count", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "XMM 寄存器计数判据 fixture failed (返回值为首个读错的序号)");
+}
+
+/// D3 第二半: `[Sse, Sse]`（`struct {double;double;}`, GCC 实测用 xmm0+xmm1）与
+/// `[Sse, SseUp]`（同一槽的低/高半）槽布局不同, 不能按奇偶统一近似.
+#[test]
+fn va_arg_sse_vs_sseup_slot_layout() {
+    let src = include_str!("fixtures/c/va_arg/sse_vs_sseup_slot_layout.c");
+    let (output, exe) = run_compile_and_run("va-sse-slot-layout", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(
+        code, 0,
+        "[Sse,Sse] vs [Sse,SseUp] 槽布局 fixture failed (返回值为首个读错的序号)"
+    );
+}
+
+/// D1 + D4: 通过已退化为指针的 `va_list` 形参读聚合变参, 并按值返回.
+/// D1 = 指针变体把 reg_save_area 装进 r9 却让共用的装载体用 rcx 当基址
+/// (缺 REX.B), 读到 va_list 结构体自身的栈垃圾; D4 = `return va_arg(ap, struct S)`
+/// 走寄存器返回时 rax 只是缓冲区地址, 不装载内容则调用方把地址当数据.
+#[test]
+fn va_arg_agg_via_va_list_param() {
+    let src = include_str!("fixtures/c/va_arg/agg_via_va_list_param.c");
+    let (output, exe) = run_compile_and_run("va-agg-via-param", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "指针型 va_list 参数读聚合 fixture failed");
+}
+
+/// D5: `va_arg(ap, __int128)` 在 `gp_offset == 40`（只剩 8 字节）时不得被拆分，
+/// `gp_offset` 也不得推进——GCC 真值是整体上溢出区。旧实现多一条 GCC 里不存在
+/// 的 hybrid 路径且无条件 `+= 16`.
+#[test]
+fn va_arg_int128_gp_boundary_no_split() {
+    let src = include_str!("fixtures/c/va_arg/int128_gp_boundary_no_split.c");
+    let (output, exe) = run_compile_and_run("va-i128-boundary", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "__int128 GP 边界不拆分 fixture failed");
+}
+
+/// D6: `gen_va_arg_ptr` 曾完全没有 `__int128` 分支，16 字节标量落回单 8 字节
+/// 通用路径（只取到也只推进低半）.
+#[test]
+fn va_arg_int128_via_va_list_param() {
+    let src = include_str!("fixtures/c/va_arg/int128_via_va_list_param.c");
+    let (output, exe) = run_compile_and_run("va-i128-via-param", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "指针型 va_list 上 __int128 fixture failed");
+}
+
+/// D3 落点 + D5 边界：全局 `va_list` 跨函数取 `__int128`。
+/// `va_start` 写真全局内存而 `va_arg` 读函数私有懒分配栈槽时，四个参数全错.
+#[test]
+fn va_arg_int128_global_valist() {
+    let src = include_str!("fixtures/c/va_arg/int128_global_valist.c");
+    let (output, exe) = run_compile_and_run("va-i128-global", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "全局 va_list + __int128 fixture failed");
+}
+
+/// D7: 循环体内的 `__int128` 局部量必须整体 16 字节落槽.
+/// `mov_to_stack` 对 sz >= 8 只发一个 8 字节 store, 高半(rdx)从未写入变量槽,
+/// 于是 `v >> 64` 读到栈残值——实测三次迭代全部返回最后一次的高半.
+#[test]
+fn va_arg_int128_loop_local_full_width() {
+    let src = include_str!("fixtures/c/va_arg/int128_loop_local_full_width.c");
+    let (output, exe) = run_compile_and_run("va-i128-fullwidth", src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(
+        code, 0,
+        "__int128 循局部量全宽落槽 fixture failed (每 2 位 = 一组首个读错的下标+1)"
+    );
 }
 
 /// va_copy 高级形式: 结构体成员 + 指针解引用

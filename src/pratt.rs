@@ -31,7 +31,7 @@
 //   * 不解析 sizeof / cast / compound literal. 这些属于声明或
 //     类型上下文, 留给调用方扩展.
 
-use crate::ast::{self, BinOp, Expr, Ident, Type, UnOp};
+use crate::ast::{self, BinOp, Expr, FloatConst, Ident, Type, UnOp};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Tok, TokKind};
 
@@ -169,9 +169,9 @@ impl PrattParser {
     /// 浮点字面量 nud.
     fn nud_float(&mut self, tok: Tok) -> ast::Expr {
         let raw = strip_imag_suffix(&tok.text);
-        let v = raw.parse::<f64>().unwrap_or(0.0);
+        let c = FloatConst::F64(raw.parse::<f64>().unwrap_or(0.0));
         Expr::Float {
-            v,
+            c,
             span: tok.span.clone(),
             ty: Type::Double,
         }
