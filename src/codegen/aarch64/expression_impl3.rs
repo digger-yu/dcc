@@ -9,7 +9,10 @@ impl Aarch64Codegen {
         match expr {
             Expr::Int { v, .. } => self.mov_w0_imm(trunc_i32(*v)),
             Expr::Char { v, .. } => self.mov_w0_imm(trunc_i32(*v)),
-            Expr::Float { v, .. } => self.load_float_s0(*v as f32),
+            Expr::Float { c, .. } => {
+                // AArch64 无 80-bit 硬件支持：LongDouble 在边界显式降级 f32。
+                self.load_float_s0(c.as_f64() as f32)
+            },
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.load_w0(off);

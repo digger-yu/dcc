@@ -271,7 +271,7 @@ impl Aarch64Codegen {
                 self.rodata[start..start + size.min(8)].copy_from_slice(&bytes[..size.min(8)]);
             },
             Some(ExprLiteral::Float(v)) => {
-                let bits = (v as f32).to_bits();
+                let bits = (v.as_f64() as f32).to_bits();
                 self.rodata[start..start + 4.min(size)]
                     .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
             },

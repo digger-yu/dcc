@@ -130,7 +130,7 @@ impl Riscv64Codegen {
                     return true;
                 }
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_fa0(v as f32);
+                    self.load_float_fa0(v.as_f64() as f32);
                     return true;
                 }
                 self.li_a0(0);

@@ -8,7 +8,10 @@ impl Riscv64Codegen {
     pub(crate) fn gen_expr_from_ast(&mut self, expr: &Expr) {
         match expr {
             Expr::Int { v, .. } => self.li_a0(trunc_i32(*v) as i32),
-            Expr::Float { v, .. } => self.load_float_fa0(*v as f32),
+            Expr::Float { c, .. } => {
+                // RISC-V 无 80-bit 硬件支持：LongDouble 在边界显式降级 f32。
+                self.load_float_fa0(c.as_f64() as f32)
+            },
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.load_a0(off);

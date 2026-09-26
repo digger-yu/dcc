@@ -140,7 +140,7 @@ impl Aarch64Codegen {
                     return true;
                 }
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_s0(v as f32);
+                    self.load_float_s0(v.as_f64() as f32);
                     return true;
                 }
                 self.mov_w0_imm(0);

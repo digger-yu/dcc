@@ -12,7 +12,7 @@ impl Riscv64Codegen {
         match &expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_fa0(v as f32);
+                    self.load_float_fa0(v.as_f64() as f32);
                     return true;
                 }
             },
@@ -316,7 +316,7 @@ impl Riscv64Codegen {
             // Complex constant: real = literal, imag = 0
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_fa0(v as f32);
+                    self.load_float_fa0(v.as_f64() as f32);
                     self.mv_fa1_fa0(); // save real to fa1
                     self.load_float_fa0(0.0); // imag = 0
                                               // Swap: fa0 should be real, fa1 should be imag
@@ -330,7 +330,7 @@ impl Riscv64Codegen {
                     self.mv_fa1_fa0(); // fa1 = 0
                                        // Hmm, this is getting complex. Let me simplify:
                                        // Just load real to fa0, zero to fa1
-                    self.load_float_fa0(v as f32);
+                    self.load_float_fa0(v.as_f64() as f32);
                     // Zero fa1: FSGNJ.S fa1, fa0, fa0 then zero it
                     // Actually just load 0.0 to fa1
                     self.mv_fa1_fa0(); // save real to fa1

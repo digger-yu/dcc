@@ -14,14 +14,15 @@ impl ArmCodegen {
             Expr::Char { v, .. } => {
                 self.emit_load_imm(0, *v as i32);
             },
-            Expr::Float { v, ty, .. } => {
-                // 浮点字面量: 加载到 VFP 寄存器 s0/d0
+            Expr::Float { c, ty, .. } => {
+                // 浮点字面量: 加载到 VFP 寄存器 s0/d0。
+                // ARM 无 80-bit 硬件支持：LongDouble 在边界显式降级为 f64。
                 let is_double =
                     matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_double {
-                    self.load_float_d0(*v);
+                    self.load_float_d0(c.as_f64());
                 } else {
-                    self.load_float_s0(*v as f32);
+                    self.load_float_s0(c.as_f64() as f32);
                 }
             },
             Expr::String { data, .. } => {
@@ -414,18 +415,18 @@ impl ArmCodegen {
                 let imag_off = self.alloc_local("<cx_i>", size);
                 // 存储实部
                 if is_double {
-                    self.load_float_d0(*real);
+                    self.load_float_d0(real.as_f64());
                     self.emit_vstr_d(0, real_off);
                 } else {
-                    self.emit_load_imm(0, real.to_bits() as i32);
+                    self.emit_load_imm(0, (real.as_f64() as f32).to_bits() as i32);
                     self.emit_store_r0(real_off);
                 }
                 // 存储虚部
                 if is_double {
-                    self.load_float_d0(*imag);
+                    self.load_float_d0(imag.as_f64());
                     self.emit_vstr_d(0, imag_off);
                 } else {
-                    self.emit_load_imm(0, imag.to_bits() as i32);
+                    self.emit_load_imm(0, (imag.as_f64() as f32).to_bits() as i32);
                     self.emit_store_r0(imag_off);
                 }
                 // 返回复数地址

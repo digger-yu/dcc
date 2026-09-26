@@ -1006,13 +1006,14 @@ impl MipsCodegen {
             Expr::Char { v, .. } => {
                 self.emit_load_imm(2, *v as i32);
             },
-            Expr::Float { v, ty, .. } => {
+            Expr::Float { c, ty, .. } => {
+                // MIPS 无 80-bit 硬件支持：LongDouble 在边界显式降级为 f64。
                 let is_double =
                     matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_double {
-                    self.load_float_d0(*v);
+                    self.load_float_d0(c.as_f64());
                 } else {
-                    self.load_float_f0(*v as f32);
+                    self.load_float_f0(c.as_f64() as f32);
                 }
             },
             Expr::String { data, .. } => {
@@ -1241,7 +1242,7 @@ impl MipsCodegen {
             },
             Expr::ComplexLit { real, .. } => {
                 // 简化: 返回实部
-                self.emit_load_imm(2, *real as i32);
+                self.emit_load_imm(2, real.as_f64() as i32);
             },
             Expr::Real { e, .. } => {
                 self.gen_expr_from_ast(e);

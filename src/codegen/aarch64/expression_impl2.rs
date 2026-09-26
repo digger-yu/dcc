@@ -12,7 +12,7 @@ impl Aarch64Codegen {
         match &expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_s0(v as f32);
+                    self.load_float_s0(v.as_f64() as f32);
                     return true;
                 }
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
@@ -290,7 +290,7 @@ impl Aarch64Codegen {
             // Complex constant: real = literal, imag = 0
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
-                    self.load_float_s0(v as f32);
+                    self.load_float_s0(v.as_f64() as f32);
                     self.zero_v1();
                     return true;
                 }

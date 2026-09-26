@@ -354,8 +354,8 @@ impl Aarch64Codegen {
                 return;
             }
         }
-        if let Expr::Float { v, .. } = expr {
-            self.load_float_s0(*v as f32);
+        if let Expr::Float { c, .. } = expr {
+            self.load_float_s0(c.as_f64() as f32);
         }
         let _ = hfa;
     }
