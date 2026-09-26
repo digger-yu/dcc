@@ -18,9 +18,10 @@ impl Codegen {
                 // VLA 类型编译时 size 为 8 (ArraySize::Var 退化为指针),
                 // 但实际运行时大小动态, 必须走 gen_va_arg_struct 路径
                 // 用运行时大小进行正确复制 (20020412-1)
-                if matches!(arg_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
-                    && (arg_ty.size() > 8 || Self::type_has_vla(arg_ty))
-                {
+                // 交付约定判据只准问 `va_arg_result_in_memory`（单一真源），不得
+                // 在此重写书写形态枚举：旧式 `Struct|Union && size > 8` 漏掉裸
+                // 16 字节向量（它的值需两个 8 字节块）与 Array。
+                if Self::va_arg_result_in_memory(arg_ty) {
                     let slot = self.alloc_sret_slot(arg_ty.size());
                     let va_addr = self.resolve_va_list_addr(ap);
                     if let VaListAddress::Named(ref name) = va_addr {

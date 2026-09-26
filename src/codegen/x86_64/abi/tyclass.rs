@@ -17,6 +17,40 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v2df() -> Type {
+        Type::Vector(Box::new(QualType::new(Type::Double)), 2)
+    }
+
+    /// 16 字节裸向量的两个 eightbyte 必须是 `[Sse, SseUp]`（与 GCC
+    /// `classify_field` 一致）：第二个 eightbyte 是同一寄存器的延续，不是独立
+    /// 槽。若退化为 `[Sse, Sse]`，按“消耗几个 XMM 寄存器”推算的
+    /// `fp_offset` 上限与推进步长都会翻倍，寄存器保存区将提前误判为溢出。
+    #[test]
+    fn v2df_classifies_as_sse_sseup() {
+        assert_eq!(Codegen::abi_classes(&v2df()), vec![AbiClass::Sse, AbiClass::SseUp]);
+        assert!(Codegen::is_sseup_128_aggregate(&v2df()));
+    }
+
+    /// 向量含 4 个 eightbyte（32B）时只有首槽是 Sse，其余均为延续。
+    #[test]
+    fn v4df_classifies_as_sse_followed_by_sseup() {
+        let v4df = Type::Vector(Box::new(QualType::new(Type::Double)), 4);
+        assert_eq!(
+            Codegen::abi_classes(&v4df),
+            vec![
+                AbiClass::Sse,
+                AbiClass::SseUp,
+                AbiClass::SseUp,
+                AbiClass::SseUp
+            ]
+        );
+    }
+}
 impl Codegen {
     pub(crate) fn abi_classes(ty: &Type) -> Vec<AbiClass> {
         let size = ty.size();
@@ -25,10 +59,36 @@ impl Codegen {
         }
         // SysV AMD64 ABI: 超过 64 字节的聚合类型无法放入寄存器集
         // (6 GP + 8 XMM 共 64 字节), 直接强制 Memory 类.
-        // long double (x86 80-bit) 也强制 Memory.
-        // Complex: any complex type is returned via memory regardless of size.
-        if size > 64 || matches!(ty, Type::LongDouble) || matches!(ty, Type::Complex(_)) {
+        // long double (x86 80-bit) 标量也强制 Memory.
+        //
+        // 除 `_Complex long double` 之外的所有 _Complex (float/double/
+        // 整数) 在 dcc 现有后端里统一按内存 (sret/栈槽) 交付, 维持此
+        // 既有约定, 避免它们落入下方 SSE/整数分类路径而回归。
+        let is_complex_ld = matches!(
+            ty,
+            Type::Complex(c) if matches!(&c.base, Type::LongDouble)
+        );
+        let force_memory = size > 64
+            || matches!(ty, Type::LongDouble)
+            || (matches!(ty, Type::Complex(_)) && !is_complex_ld)
+            || Self::type_has_vla(ty);
+        if force_memory {
             return vec![AbiClass::Memory];
+        }
+        // `_Complex long double` (32B): SysV ABI 3.2.3p2 分类为
+        // [X87, X87Up, ComplexX87, X87Up] — 实部 tbyte 占前两个
+        // eightbyte (X87 + 延续), 虚部 tbyte 占后两个 (ComplexX87
+        // 起始 + 延续)。参数侧仍整体走内存栈槽 (classes 含 X87 →
+        // force_mem); 返回侧凭此分类走 st0=real / st1=imag, 而非 sret。
+        // 旧实现把所有 Complex 一刀切成 Memory, complex LD 返回被迫
+        // 走 sret, 与 gcc 不互操作。
+        if is_complex_ld {
+            return vec![
+                AbiClass::X87,
+                AbiClass::X87Up,
+                AbiClass::ComplexX87,
+                AbiClass::X87Up,
+            ];
         }
         let num_eightbytes = size.div_ceil(8);
         let mut classes = vec![AbiClass::NoClass; num_eightbytes];
@@ -358,16 +418,62 @@ impl Codegen {
             _ => expr_ty,
         }
     }
-    pub(crate) fn needs_memory_return(ty: &Type) -> bool {
-        let classes = Self::abi_classes(ty);
-        // 分类强制 Memory/X87 → 必须 sret
-        if classes.iter().any(|c| {
+    /// ABI 分类里是否含**强制内存承载**的类（Memory / X87 家族）。
+    ///
+    /// 这是 SysV 参数传递与返回值交付的根判据，caller 装参、callee 取参和
+    /// 返回方式三处原先各自手写一遍同样的 `matches!`，改一处就会漂移。
+    pub(crate) fn classes_contain_memory_class(classes: &[AbiClass]) -> bool {
+        classes.iter().any(|c| {
             matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
-        }) {
-            return true;
+        })
+    }
+
+    /// 按 ABI 分类判定一个对象是否**必须整体驻留内存**：含 Memory 类，或
+    /// eightbyte 数超过寄存器对能容纳的 2 个。
+    ///
+    /// 关键判据：`SSE`/`SSEUp` 只是普通向量类（`__m128d` = `[Sse, SseUp]`），
+    /// 它们走 xmm 寄存器或 overflow 槽，本身**不**强制内存承载；而共享同一个
+    /// 16 字节槽的标量（`struct {__m128d;double}` 的第二 eightbyte = `SseUp`）
+    /// 绝不能按整数类从 GP 区取。按分类判定才与对象的**书写形态**无关。
+    pub(crate) fn classes_force_mem(classes: &[AbiClass]) -> bool {
+        Self::classes_contain_memory_class(classes) || classes.len() > 2
+    }
+
+    /// 该类型是否**整体**由 SSE 类构成（可全部从 16 字节 FP 槽按宽度读出）。
+    ///
+    /// 这是 va_arg 路由的唯一判据：`float`/`double` 与裸 `__m128` 系向量同属
+    /// SSE 家族，必须走同一条路径；按类型书写形态枚举会漏掉裸向量，使其误入
+    /// GP 区。空分类（size==0）返回 false，交由调用方走通用路径。
+    pub(crate) fn classes_all_sse_family(classes: &[AbiClass]) -> bool {
+        !classes.is_empty()
+            && classes
+                .iter()
+                .all(|c| matches!(c, AbiClass::Sse | AbiClass::SseUp))
+    }
+
+    pub(crate) fn needs_memory_return(ty: &Type) -> bool {
+        // 分类强制 Memory/X87，或超过 2 个 eightbyte 放不进 rax+rdx → sret
+        //
+        // 标量 `long double` 是例外：SysV AMD64 规定 X87 **标量**返回值
+        // 放在 **st(0)**（gcc 真值：`fldt <sym>` 后紧跟 `ret`），只有*含*
+        // X87 成员的聚合才返回内存。
+        //
+        // 注意不得误伤**参数传递**侧：X87 类参数确实走内存（16 字节栈槽）。
+        // 同一个 `classes_force_mem` 判据在两侧的结论相反，故只在此处特判，
+        // 不改 `classes_force_mem` 本身（它还被 caller 与 va_arg 复用）。
+        if matches!(ty, Type::LongDouble) {
+            return false;
         }
-        // 超过 2 个 eightbyte 无法放入 rax+rdx → sret
-        classes.len() > 2
+        // `_Complex long double` 同样是例外：SysV ABI 3.2.3p2 规定
+        // 其分类 [X87, X87Up, ComplexX87, X87Up] 的返回值经 x87 交付 —
+        // st0=实部, st1=虚部 (gcc 真值: 两条 `fldt` 后 `ret`)，不走 sret。
+        // 仅返回侧如此；参数侧仍凭 X87 类 force_mem 走内存栈槽。
+        if let Type::Complex(c) = ty {
+            if matches!(&c.base, Type::LongDouble) {
+                return false;
+            }
+        }
+        Self::classes_force_mem(&Self::abi_classes(ty))
     }
     pub(crate) fn ptr_seg_prefix(ty: &Type) -> Option<u8> {
         if let Type::Ptr(qt) = ty {
