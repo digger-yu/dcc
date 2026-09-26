@@ -12,6 +12,7 @@ fn expr_span(expr: &Expr) -> crate::diagnostics::Span {
         Expr::Int { span, .. }
         | Expr::Float { span, .. }
         | Expr::ComplexLit { span, .. }
+        | Expr::ComplexIntLit { span, .. }
         | Expr::Real { span, .. }
         | Expr::Imag { span, .. }
         | Expr::String { span, .. }
@@ -242,7 +243,7 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
             let has_labels_in_then = CF::stmt_contains_label(then_);
             let is_nonzero = match cv {
                 crate::const_eval::ConstValue::Int(i) => i != 0,
-                crate::const_eval::ConstValue::Float(f) => f != 0.0,
+                crate::const_eval::ConstValue::Float(f) => !f.is_zero(),
                 crate::const_eval::ConstValue::Addr { .. }
                 | crate::const_eval::ConstValue::Str { .. }
                 | crate::const_eval::ConstValue::Bytes { .. } => true,

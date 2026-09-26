@@ -417,8 +417,8 @@ impl Codegen {
                     scale,
                 } => {
                     self.emit(&[
-                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0xF3,
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0x0F,
                         0xC7,
                     ]);
@@ -432,8 +432,8 @@ impl Codegen {
                     scale,
                 } => {
                     self.emit(&[
-                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0xF3,
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0x0F,
                         0xC7,
                     ]);
@@ -441,7 +441,7 @@ impl Codegen {
                 },
                 AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
                     // RIP-relative: F3 0F C7 /6 with modrm = 0x35
-                    self.emit(&[0x48, 0xF3, 0x0F, 0xC7, 0x35, 0, 0, 0, 0]);
+                    self.emit(&[0xF3, 0x48, 0x0F, 0xC7, 0x35, 0, 0, 0, 0]);
                     let pos = self.pos() - 4;
                     self.pending_data_rels.push((pos, sym.clone()));
                 },
@@ -460,8 +460,8 @@ impl Codegen {
                     scale,
                 } => {
                     self.emit(&[
-                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0xF3,
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0x0F,
                         0xC7,
                     ]);
@@ -475,8 +475,8 @@ impl Codegen {
                     scale,
                 } => {
                     self.emit(&[
-                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0xF3,
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
                         0x0F,
                         0xC7,
                     ]);
@@ -484,7 +484,7 @@ impl Codegen {
                 },
                 AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
                     // RIP-relative: F3 0F C7 /7 with modrm = 0x3D
-                    self.emit(&[0x48, 0xF3, 0x0F, 0xC7, 0x3D, 0, 0, 0, 0]);
+                    self.emit(&[0xF3, 0x48, 0x0F, 0xC7, 0x3D, 0, 0, 0, 0]);
                     let pos = self.pos() - 4;
                     self.pending_data_rels.push((pos, sym.clone()));
                 },
@@ -2963,8 +2963,8 @@ impl Codegen {
                 if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
                     if *s <= 15 && *d <= 15 {
                         self.emit(&[
-                            Self::rex(false, *d, 0, *s),
                             0x66,
+                            Self::rex(false, *d, 0, *s),
                             0x0F,
                             0x38,
                             0xF6,
@@ -2982,8 +2982,8 @@ impl Codegen {
                 if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
                     if *s <= 15 && *d <= 15 {
                         self.emit(&[
-                            Self::rex(false, *d, 0, *s),
                             0xF3,
+                            Self::rex(false, *d, 0, *s),
                             0x0F,
                             0x38,
                             0xF6,

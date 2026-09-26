@@ -94,6 +94,18 @@ impl Codegen {
         }
         None
     }
+    /// Returns true if `ty` can legally be bound to an SSE (xmm) register
+    /// constraint. SysV long double and complex long double are x87-only
+    /// types; gcc rejects them with "inconsistent operand constraints".
+    pub(crate) fn asm_type_allows_xmm(ty: &Type) -> bool {
+        match ty {
+            Type::LongDouble => false,
+            Type::Complex(inner) | Type::Imaginary(inner) => {
+                !matches!(inner.base, Type::LongDouble)
+            },
+            _ => true,
+        }
+    }
     pub(crate) fn asm_imm_needs_parens(s: &str) -> bool {
         let s = s.strip_prefix('$').unwrap_or(s);
         if s.is_empty() {

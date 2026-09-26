@@ -450,6 +450,7 @@ fn expr_span(e: &Expr) -> &Span {
         Int { span, .. }
         | Float { span, .. }
         | ComplexLit { span, .. }
+        | ComplexIntLit { span, .. }
         | Real { span, .. }
         | Imag { span, .. }
         | String { span, .. }

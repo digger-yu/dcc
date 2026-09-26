@@ -123,7 +123,14 @@ pub struct Codegen {
     pub variadic_overflow_offset: i64,
     pub variadic_reg_save_offset: i64,
     pub current_sret_offset: Option<i64>,
-    pub sret_depth: i32,
+    /// 当前 sret/物化槽区已用字节水位 (自 `sret_region_base` 向下累计,
+    /// 16 字节对齐)。替换旧的"按调用次数计数、步长取当前尺寸"的 bump:
+    /// 旧实现混合 8/16/32B 分配时槽位互相重叠, 且随调用次数单调增长
+    /// 越过 frame_size 覆盖动态 call outgoing 区。
+    pub sret_watermark: i64,
+    /// sret/物化槽区顶界 (r13 相对偏移, 紧邻变量区底)。槽自该地址
+    /// 向下分配, 帧规划保证下界不越过 vec/bf/帧底固定区顶界。
+    pub sret_region_base: i64,
     // 嵌套函数静态链
     pub nested_funcs: HashMap<String, Vec<(String, i64)>>, // 嵌套函数名 → upvars (name, parent_offset)
     // 嵌套函数重命名：(父函数名，原名) → 唯一名 (避免同名嵌套函数符号冲突)
@@ -482,7 +489,8 @@ impl Codegen {
             variadic_overflow_offset: 16,
             variadic_reg_save_offset: 0,
             current_sret_offset: None,
-            sret_depth: 0,
+            sret_watermark: 0,
+            sret_region_base: 0,
             nested_funcs: HashMap::new(),
             nested_func_renames: HashMap::new(),
             nested_func_parent: HashMap::new(),

@@ -58,21 +58,37 @@ impl Codegen {
             {
                 effective_ty = Type::Double;
             }
+            // `_Complex long double` 形参: SysV 下整体走内存, 两个 16 字节
+            // 栈槽 (real@0、imag@16), 内容是真 80-bit tbyte。它不能落入通用
+            // 聚合 8 字节 chunk 路径 (那会用 GP movq 逐字搬运, 破坏 10 字节
+            // tbyte 布局), 这里提前规划为两个 16 字节栈槽。
+            let is_complex_ld = matches!(&effective_ty, Type::Complex(inner)
+                if matches!(&inner.base, Type::LongDouble));
+            if is_complex_ld {
+                let align = 16usize;
+                max_force_align = max_force_align.max(align);
+                let aligned = (stack + align - 1) & !(align - 1);
+                stack = aligned;
+                locs.push(vec![
+                    ArgLoc::Stack(aligned),
+                    ArgLoc::Stack(aligned + 16),
+                ]);
+                stack += 32;
+                continue;
+            }
             let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-            // SseUp 是前一个 Sse 所在 xmm 的高 64 位延续, 不单独占用寄存器。
+            // SseUp 是前一个 Sse 所在 xmm 高 64 位延续, 不单独占用寄存器。
             let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
-            // Struct/union 类型走 gen_va_arg_struct, 不支持混合 reg_save_area +
-            // overflow_arg_area 路径, 所以仍然强制溢出时整类型上栈。
-            // 标量类型 (__int128, long long 等) 走 gen_va_arg, 支持三路径,
-            // 允许单个 chunk 溢出时落到 overflow_arg_area。
-            let is_agg = matches!(effective_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
-            let force_mem = classes.iter().any(|c| {
-                matches!(
-                    c,
-                    AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87
-                )
-            }) || (is_agg && (gp + need_gp > gp_regs.len() || fp + need_fp > 8));
+            // SysV: 一个对象的所有 eightbyte 必须能同时放进**剩余**的参数寄存器；
+            // 装不下就整体走内存，并把它本来要用的寄存器留给下一个参数，
+            // 不得拆成"低半进寄存器 + 高半进栈"。判据只能依赖分类，不能
+            // 依赖书写形态：这里旧代码用 `is_agg`（Struct|Union）作为"多
+            // eightbyte 对象"的代理，于是标量 `__int128` 在只剩 1 个 GP 寄存器时
+            // 会被 r9 与栈拆开承载（实测：gcc callee + dcc caller 读出低半错误）。
+            let fits_gp = gp + need_gp <= gp_regs.len();
+            let fits_fp = fp + need_fp <= 8;
+            let force_mem = Self::classes_contain_memory_class(&classes) || !(fits_gp && fits_fp);
             if force_mem {
                 // caller 与 callee 必须用相同的 force_mem 栈参数对齐规则:
                 // 命名参数 (gen_params) 用 agg_align = ty.align().max(8),
@@ -158,14 +174,22 @@ impl Codegen {
             .flatten()
             .filter(|l| !matches!(l, ArgLoc::Stack(_)))
             .count();
+        // Stack arguments must be staged too: evaluating a later argument may
+        // emit nested calls and temporarily move RSP, so direct writes to the
+        // final outgoing area are not stable until all arguments are lowered.
+        let stack_pieces = locs
+            .iter()
+            .flatten()
+            .filter(|l| matches!(l, ArgLoc::Stack(_)))
+            .count();
         let hidden_slots = usize::from(sret_off.is_some());
         let callee_scratch_slots = usize::from(direct.is_none());
-        let stage_base = (stack + 7) & !7;
+        let stage_base = stack + 16;
         // Indirect calls need one extra scratch slot for the callee.
         // This slot must be included in frame_bytes; otherwise it can
         // alias caller temporaries already pushed above the call frame
         // (e.g. `lhs = (*fp)(...)` overwrites the saved lhs address).
-        let stage_slots = register_pieces + hidden_slots + callee_scratch_slots;
+        let stage_slots = register_pieces + hidden_slots + callee_scratch_slots + stack_pieces * 2;
         // force_mem 区起点 (sub 后 rsp) 必须对齐到 force_mem 参数的最大对齐值.
         // 否则 align=32 的 agg 会在 16 对齐的地址上错位.
         let frame_align = max_force_align.max(16); // 至少 16 (SysV ABI call 对齐)
@@ -223,6 +247,7 @@ impl Codegen {
         };
 
         let mut staged: Vec<(ArgLoc, usize, bool)> = Vec::new();
+        let mut stack_staged: Vec<(usize, usize, usize)> = Vec::new();
         for (arg_idx, (arg, arg_locs)) in args.iter().zip(locs.iter()).enumerate() {
             let param_ty = direct
                 .and_then(|name| self.func_param_types.get(name))
@@ -324,7 +349,11 @@ impl Codegen {
                         },
                     }
                     match *loc {
-                        ArgLoc::Stack(off) => self.store_rsp_qword(1, off),
+                        ArgLoc::Stack(off) => {
+                            self.store_rsp_qword(1, stage);
+                            stack_staged.push((off, stage, 8));
+                            stage += 8;
+                        },
                         _ => {
                             self.store_rsp_qword(1, stage);
                             staged.push((*loc, stage, false));
@@ -333,6 +362,26 @@ impl Codegen {
                     }
                 }
             } else if aggregate {
+                // _Complex long double: 两个 16 字节 tbyte 栈槽, 必须走 x87
+                // fldt/fstpt, 不能进下方任何 GP movq / SSE movsd 子路径
+                // (movq 会破坏 10 字节 tbyte, 读侧只能拿到尾数低 8 字节,
+                // 指数/符号与整个第二分量皆错)。materialize 已覆盖 Ident /
+                // lvalue (Index/Member/Deref) / Call / CompoundLit / rvalue
+                // 全部源形态且源只求值一次。
+                let is_complex_ld = matches!(&effective_ty, Type::Complex(inner)
+                    if matches!(&inner.base, Type::LongDouble));
+                if is_complex_ld {
+                    if let (Some(ArgLoc::Stack(real_off)), Some(ArgLoc::Stack(imag_off))) =
+                        (arg_locs.first(), arg_locs.get(1))
+                    {
+                        let src = self.gen_complex_ld_materialize(arg);
+                        self.emit_x87_fld_at(13, src as i32, &Type::LongDouble);
+                        self.emit_x87_fstp_at(4, *real_off as i32, &Type::LongDouble);
+                        self.emit_x87_fld_at(13, src as i32 + 16, &Type::LongDouble);
+                        self.emit_x87_fstp_at(4, *imag_off as i32, &Type::LongDouble);
+                    }
+                    continue;
+                }
                 // _Complex float/double: 两分量均为 SSE 类, 用 XMM 装载/存储
                 // 而非整数 GP 中转 (SysV ABI 3.2.3).
                 let is_complex_sse = matches!(&effective_ty, Type::Complex(inner)
@@ -540,47 +589,30 @@ impl Codegen {
                     }
                 }
             } else if matches!(effective_ty, Type::LongDouble) {
-                // A2: long double — dcc 内部以 64-bit double (xmm0) 表示.
-                // 调用方直接写 8 字节 double 到栈上, 被调方用 fldl 读取.
-                // 16 字节槽位: 8 字节 double + 8 字节零填充.
+                // SysV: x87 类实参永远走 16 字节栈槽（不是寄存器保存区），内容是
+                // `fstpt` 形式的真 80-bit 编码。具名形参与变参**同一规则**：早先本处
+                // 限定“仅变参”，是因为误信了 i386 cdecl 的“具名 x87 参数走 st(0)”。
+                // gcc -O0 实测证明 SysV AMD64 下具名形参同样从栈上读
+                // （fldt 0x10(%rbp)），只有**返回值**用 st(0)。
+                //
+                // 值通道迁移后：`long double` rvalue 本来就在 st(0)，直接 `fstpt` 落槽；
+                // 整数 / float / double 实参经 Layer0 唯一入口 `emit_operand_to_st0`
+                // 精确拓宽到 st(0) 再落。旧的
+                // `cvtsi2sd/cvtss2sd → movsd 到槽高半 → fld qword → fstp tbyte`
+                // 中转是“ld 内部为 f64”时代的产物，80-bit 值走 st(0) 后已删除
+                // —— 那条链会把实参先舍成 f64 再拓宽，正是本次要消除的序位错根因。
                 self.gen_expr(arg, 0);
-                // 隐式转换到形参 long double (dcc 内部 double 语义):
-                // 整数实参 → cvtsi2sd; float 实参 → cvtss2sd。
-                let ld_arg_ty = arg.ty();
-                if Self::is_integer_type(&ld_arg_ty) {
-                    if matches!(
-                        ld_arg_ty,
-                        Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-                    ) {
-                        self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, rax
-                    } else {
-                        self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
-                    }
-                } else if matches!(ld_arg_ty, Type::Float) {
-                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
-                }
-                // movsd xmm0 → [rsp+first_off]: 写 8 字节 double
+                self.emit_operand_to_st0(&arg.ty(), 0);
                 if let Some(ArgLoc::Stack(off)) = arg_locs.first() {
-                    let off = *off as i32;
-                    if off == 0 {
-                        // movsd [rsp], xmm0: F2 0F 11 04 24
-                        self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]);
-                    } else if off.abs() < 128 {
-                        // movsd [rsp+disp8], xmm0: F2 0F 11 44 24 disp8
-                        self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, off as u8]);
-                    } else {
-                        // movsd [rsp+disp32], xmm0: F2 0F 11 84 24 disp32
-                        self.emit(&[0xF2, 0x0F, 0x11, 0x84, 0x24]);
-                        self.emit(&off.to_le_bytes());
-                    }
+                    // fstp tbyte [rsp+off]：写 off..off+10，槽内其余字节是 SysV
+                    // 允许 implementation-defined 的 padding（gcc 亦如此），不填零。
+                    self.emit_x87_fstp_at(4, *off as i32, &Type::LongDouble);
+                } else {
+                    // 理论上不可达（标量 long double 的分类恒为 Memory）；
+                    // 但必须把 st(0) 弹掉，否则 x87 栈会随调用次数漏到溢出。
+                    self.emit_x87_fstp_st0();
                 }
-                // 高 8 字节写零 (long double 占 16 字节, 8 字节数据 + 8 字节填充)
-                if arg_locs.len() > 1 {
-                    if let Some(ArgLoc::Stack(off)) = arg_locs.get(1) {
-                        self.mov_imm(0, 0);
-                        self.store_rsp_qword(0, *off);
-                    }
-                }
+                continue;
             } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, 0);
                 // 隐式整数→浮点转换: 实参是整数但形参是浮点类型
@@ -682,6 +714,15 @@ impl Codegen {
             }
         }
 
+        // Commit all force_mem pieces only after every argument expression has
+        // been evaluated. The destinations are final outgoing offsets, while
+        // the sources are stable staging slots above that area.
+        for (off, slot, size) in stack_staged {
+            self.load_rsp_qword(0, slot);
+            if size == 8 {
+                self.store_rsp_qword(0, off);
+            }
+        }
         if let Some(slot) = sret_slot {
             self.load_rsp_qword(7, slot);
         }

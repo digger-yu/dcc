@@ -707,9 +707,9 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
+                self.emit(&[0xF3]);
                 self.emit(&[
                     Self::rex(w, *d, index.unwrap_or(0), *base),
-                    0xF3,
                     0x0F,
                     0xB8,
                 ]);
@@ -720,10 +720,11 @@ impl Codegen {
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 let r = Self::rex(w, *d, 0, *s);
+                self.emit(&[0xF3]);
                 if r != 0x40 {
                     self.emit(&[r]);
                 }
-                self.emit(&[0xF3, 0x0F, 0xB8, Self::modrm_reg_reg(*d, *s)]);
+                self.emit(&[0x0F, 0xB8, Self::modrm_reg_reg(*d, *s)]);
             },
             (
                 AsmOperand::Mem {
@@ -738,10 +739,11 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 let r = Self::rex(w, *d, index.unwrap_or(0), *base);
+                self.emit(&[0xF3]);
                 if r != 0x40 {
                     self.emit(&[r]);
                 }
-                self.emit(&[0xF3, 0x0F, 0xB8]);
+                self.emit(&[0x0F, 0xB8]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {

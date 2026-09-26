@@ -109,8 +109,8 @@ impl Codegen {
                     scale,
                 } => {
                     self.emit(&[
-                        Self::rex(false, *d, index.unwrap_or(0), *base),
                         0x66,
+                        Self::rex(false, *d, index.unwrap_or(0), *base),
                         0x0F,
                         0x38,
                         0x82,
@@ -125,8 +125,12 @@ impl Codegen {
                     scale,
                 } => {
                     let (_code, pfx) = Self::seg_meta(*seg);
-                    self.emit(&[pfx, Self::rex(false, *d, index.unwrap_or(0), *base)]);
-                    self.emit(&[0x66, 0x0F, 0x38, 0x82]);
+                    self.emit(&[
+                        pfx,
+                        0x66,
+                        Self::rex(false, *d, index.unwrap_or(0), *base),
+                    ]);
+                    self.emit(&[0x0F, 0x38, 0x82]);
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 },
                 _ => {

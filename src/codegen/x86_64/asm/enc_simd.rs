@@ -18,6 +18,18 @@ use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 impl Codegen {
+    /// Emit SSE instruction header with correct prefix order.
+    /// Order: legacy prefix (66/F2/F3 if any) -> REX (if any) -> opcode.
+    /// `prefix` is 0x66/0xF2/0xF3/0x0F (0x0F means no legacy prefix).
+    pub(crate) fn emit_sse_header(&mut self, prefix: u8, rex: u8) {
+        if prefix == 0x66 || prefix == 0xF2 || prefix == 0xF3 {
+            self.emit(&[prefix]);
+        }
+        if rex != 0 {
+            self.emit(&[0x40 | rex]);
+        }
+        self.emit(&[0x0F]);
+    }
     pub(crate) fn emit_asm_amx_3op(
         &mut self,
         dst: &AsmOperand,
@@ -463,16 +475,8 @@ impl Codegen {
                     if index.unwrap_or(0) >= 8 {
                         rex |= 0x02;
                     }
-                    if rex != 0 {
-                        self.emit(&[0x40 | rex]);
-                    }
-                    if prefix == 0x66 {
-                        self.emit(&[0x66, 0x0F, opcode]);
-                    } else if prefix == 0x0F {
-                        self.emit(&[0x0F, opcode]);
-                    } else {
-                        self.emit(&[prefix, 0x0F, opcode]);
-                    }
+                    self.emit_sse_header(prefix, rex);
+                    self.emit(&[opcode]);
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 }
             }
@@ -501,16 +505,8 @@ impl Codegen {
                     if index.unwrap_or(0) >= 8 {
                         rex |= 0x02;
                     }
-                    if rex != 0 {
-                        self.emit(&[0x40 | rex]);
-                    }
-                    if prefix == 0x66 {
-                        self.emit(&[0x66, 0x0F, opcode]);
-                    } else if prefix == 0x0F {
-                        self.emit(&[0x0F, opcode]);
-                    } else {
-                        self.emit(&[prefix, 0x0F, opcode]);
-                    }
+                    self.emit_sse_header(prefix, rex);
+                    self.emit(&[opcode]);
                     self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
                 }
             }
@@ -527,16 +523,8 @@ impl Codegen {
                 if *s >= 8 {
                     rex |= 0x01;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 {
-                    self.emit(&[0x66, 0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
-                } else if prefix == 0x0F {
-                    self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
-                } else {
-                    self.emit(&[prefix, 0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[opcode, Self::modrm_reg_reg(*d, *s)]);
             },
             (
                 AsmOperand::Mem {
@@ -557,16 +545,8 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 {
-                    self.emit(&[0x66, 0x0F, opcode]);
-                } else if prefix == 0x0F {
-                    self.emit(&[0x0F, opcode]);
-                } else {
-                    self.emit(&[prefix, 0x0F, opcode]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -588,16 +568,8 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 {
-                    self.emit(&[0x66, 0x0F, opcode]);
-                } else if prefix == 0x0F {
-                    self.emit(&[0x0F, opcode]);
-                } else {
-                    self.emit(&[prefix, 0x0F, opcode]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
@@ -629,14 +601,8 @@ impl Codegen {
                 if *s >= 8 {
                     rex |= 0x01;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 {
-                    self.emit(&[0x66, 0x0F, opcode, Self::modrm_reg_reg(*d, *s), imm8]);
-                } else {
-                    self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s), imm8]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[opcode, Self::modrm_reg_reg(*d, *s), imm8]);
             },
             (
                 AsmOperand::Mem {
@@ -657,14 +623,8 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 {
-                    self.emit(&[0x66, 0x0F, opcode]);
-                } else {
-                    self.emit(&[0x0F, opcode]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 self.emit(&[imm8]);
             },
@@ -693,10 +653,11 @@ impl Codegen {
                 if *s >= 8 {
                     rex |= 0x01;
                 }
+                self.emit(&[prefix]);
                 if rex != 0 {
                     self.emit(&[0x40 | rex]);
                 }
-                self.emit(&[prefix, 0x0F, 0x10, Self::modrm_reg_reg(*d, *s)]);
+                self.emit(&[0x0F, 0x10, Self::modrm_reg_reg(*d, *s)]);
             },
             (
                 AsmOperand::Mem {
@@ -717,10 +678,11 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
+                self.emit(&[prefix]);
                 if rex != 0 {
                     self.emit(&[0x40 | rex]);
                 }
-                self.emit(&[prefix, 0x0F, 0x10]);
+                self.emit(&[0x0F, 0x10]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -742,10 +704,11 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
+                self.emit(&[prefix]);
                 if rex != 0 {
                     self.emit(&[0x40 | rex]);
                 }
-                self.emit(&[prefix, 0x0F, 0x11]);
+                self.emit(&[0x0F, 0x11]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
@@ -783,14 +746,8 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
-                    self.emit(&[prefix, 0x0F, load_op]);
-                } else {
-                    self.emit(&[0x0F, load_op]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[load_op]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             // xmm -> mem (store)
@@ -813,14 +770,8 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
-                    self.emit(&[prefix, 0x0F, store_op]);
-                } else {
-                    self.emit(&[0x0F, store_op]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[store_op]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             // xmm -> xmm (reg-reg move, use load_op)
@@ -834,14 +785,8 @@ impl Codegen {
                 if *s >= 8 {
                     rex |= 0x01;
                 }
-                if rex != 0 {
-                    self.emit(&[0x40 | rex]);
-                }
-                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
-                    self.emit(&[prefix, 0x0F, load_op, Self::modrm_reg_reg(*d, *s)]);
-                } else {
-                    self.emit(&[0x0F, load_op, Self::modrm_reg_reg(*d, *s)]);
-                }
+                self.emit_sse_header(prefix, rex);
+                self.emit(&[load_op, Self::modrm_reg_reg(*d, *s)]);
             },
             _ => {
                 self.asm_warn("unsupported sse packed mov operand pattern");
@@ -1041,10 +986,12 @@ impl Codegen {
             // pp=0 → F2 (crc32b/crc32l/crc32q), pp=1 → 66 (crc32w); w=1 → REX.W (crc32q)
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                // mandatory prefix must precede REX
+                self.emit(&[prefix]);
                 if w == 1 {
                     self.emit(&[0x48]);
                 } // REX.W
-                self.emit(&[prefix, 0x0F, 0x38, opcode, Self::modrm_reg_reg(*d, *s)]);
+                self.emit(&[0x0F, 0x38, opcode, Self::modrm_reg_reg(*d, *s)]);
             },
             (
                 AsmOperand::Reg(s, _),
@@ -1056,10 +1003,11 @@ impl Codegen {
                 },
             ) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                self.emit(&[prefix]);
                 if w == 1 {
                     self.emit(&[0x48]);
                 } // REX.W
-                self.emit(&[prefix, 0x0F, 0x38, opcode]);
+                self.emit(&[0x0F, 0x38, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (
@@ -1072,10 +1020,11 @@ impl Codegen {
                 AsmOperand::Reg(d, _),
             ) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                self.emit(&[prefix]);
                 if w == 1 {
                     self.emit(&[0x48]);
                 } // REX.W
-                self.emit(&[prefix, 0x0F, 0x38, opcode]);
+                self.emit(&[0x0F, 0x38, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {

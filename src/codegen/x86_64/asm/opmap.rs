@@ -271,6 +271,16 @@ impl Codegen {
 
             // XMM 寄存器约束
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
+                if !Self::asm_type_allows_xmm(&op.ty()) {
+                    self.asm_warn(
+                        "inconsistent operand constraints in an 'asm': long double needs an x87 constraint (t/u/f)",
+                    );
+                    map.insert(format!("%{idx}"), String::new());
+                    slots.push(Slot::Reg(0, "st"));
+                    meta.push((0, 200, true, false, 0));
+                    idx += 1;
+                    continue;
+                }
                 let xi = planner.alloc_xmm(idx, AsmRegUse::Output);
                 let name = Self::asm_xmm_name(xi as usize);
                 if is_inout {
@@ -472,6 +482,16 @@ impl Codegen {
 
             // XMM
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
+                if !Self::asm_type_allows_xmm(&op.ty()) {
+                    self.asm_warn(
+                        "inconsistent operand constraints in an 'asm': long double needs an x87 constraint (t/u/f)",
+                    );
+                    map.insert(format!("%{idx}"), String::new());
+                    slots.push(Slot::Reg(0, "st"));
+                    meta.push((0, 200, false, false, 0));
+                    idx += 1;
+                    continue;
+                }
                 let xi = planner.alloc_xmm(idx, AsmRegUse::Input);
                 let name = Self::asm_xmm_name(xi as usize);
                 if matches!(op.ty(), Type::Float | Type::Double | Type::LongDouble) {
@@ -510,17 +530,16 @@ impl Codegen {
                     let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
                     let name = Self::gp_reg_name(chosen as usize);
                     // 尝试直接求值浮点常量位型
-                    if let Expr::Float { v, ty, .. } = op {
-                        // 浮点常量的位型加载到 GP 寄存器
+                    if let Expr::Float { c, ty, .. } = op {
+                        // 浮点常量的位型加载到 GP 寄存器。
+                        // long double 无法整体放入 GP 寄存器，此处为 GCC
+                        // 兼容降级路径：显式转 f64 取其 64 位位型。
                         let bits: u64 = if matches!(ty, Type::Float) {
                             // float: 32 位
-                            u32::from_le_bytes((*v as f32).to_le_bytes()) as u64
-                        } else if matches!(ty, Type::LongDouble) {
-                            // long double: 低 64 位 double 位型
-                            u64::from_le_bytes(v.to_le_bytes())
+                            (c.as_f64() as f32).to_bits() as u64
                         } else {
-                            // double: 64 位
-                            u64::from_le_bytes(v.to_le_bytes())
+                            // double / long double 降级: 64 位
+                            c.as_f64().to_bits()
                         };
                         self.mov_imm(chosen, bits as i128);
                     } else if let Expr::Ident {
@@ -791,47 +810,65 @@ impl Codegen {
     fn prepare_asm_x87_binding(&mut self, expr: &Expr, st_idx: u8) {
         let _ = st_idx; // 仅作注释, 不影响本函数行为
         if let Expr::Ident { name, ty, .. } = expr {
+            // _Imaginary: 按内型
+            let effective_ty = if let Type::Imaginary(ref inner) = ty {
+                inner.base.clone()
+            } else {
+                ty.clone()
+            };
             // 局部优先: 与全局同名的参数/局部变量必须走栈槽 fld
             if self.is_global_not_local(&name.name) {
-                // 全局变量: 先加载地址到 rax, 再 fld
-                self.emit_global_addr(0, &name.name);
-                let is_float = matches!(ty, Type::Float);
-                // fld m32 = D9 /0 ; fld m64 = DD /0
-                let opcode = if is_float { 0xD9 } else { 0xDD };
-                self.emit(&[opcode, 0x00]); // mod=00, reg=0, r/m=0 ([rax])
+                // 全局: RIP 相对 fld，float=D9 /5 double=DD /5 ld=DB /5
+                let (opcode, modrm) = match effective_ty {
+                    Type::Float => (0xD9u8, 0x05u8),
+                    Type::LongDouble => (0xDBu8, 0x2Du8),
+                    _ => (0xDDu8, 0x05u8),
+                };
+                let disp_pos = self.pos() + 2;
+                self.emit(&[opcode, modrm, 0, 0, 0, 0]);
+                self.push_global_float_rel(disp_pos, &name.name);
             } else {
                 let off = self.var_offset(&name.name);
-                let is_float = matches!(ty, Type::Float);
-                let opcode = if is_float { 0xD9 } else { 0xDD };
-                self.emit(&[0x41, opcode]);
-                if off.abs() < 128 {
-                    self.emit(&[0x45, off as i8 as u8]); // mod=01, reg=0, r/m=5
-                } else {
-                    self.emit(&[0x85]);
-                    self.emit(&(off as i32).to_le_bytes());
-                }
+                self.emit_x87_fld_at(13, off as i32, &effective_ty);
             }
             return;
         }
-        // 非变量表达式: gen_expr 到 rax, 再 fld [rax]
+        // 非变量表达式: gen_expr 按通道约定求值（ld 在 st0、f32/f64 在
+        // xmm0、整数在 rax），再统一搬到 st0；旧代码无条件发 fld m64
+        // [rax]，把整数/指针位型当 double 且漏掉 xmm0/st0 两种来源。
         self.gen_expr(expr, 0);
-        self.emit(&[0xDD, 0x00]); // fld m64 [rax]
+        self.emit_operand_to_st0(&expr.ty(), 0);
     }
     fn prepare_asm_xmm_binding(&mut self, expr: &Expr, xmm: u8, _is_inout: bool) {
         if let Expr::Ident { name, ty, .. } = expr {
-            if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+            if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+                || matches!(ty, Type::Imaginary(_))
+            {
                 // 局部优先: 与全局同名的参数/局部变量 (如 double b 与
                 // static float b[]) 必须走栈槽加载, 不得误入全局 rip 路径
                 if self.is_global_not_local(&name.name) {
-                    self.emit_global_float_load_to_xmm(xmm, &name.name, ty);
+                    self.emit_global_float_to_xmm_typed(xmm, &name.name, ty);
                 } else {
-                    self.load_float_to_xmm(&name.name, ty, xmm);
+                    let off = self.var_offset(&name.name);
+                    let effective_ty = if let Type::Imaginary(ref inner) = ty {
+                        inner.base.clone()
+                    } else {
+                        ty.clone()
+                    };
+                    self.emit_mem_float_to_xmm(13, off as i32, &effective_ty, xmm);
                 }
                 return;
             }
         }
         self.gen_expr(expr, 0);
-        if matches!(expr.ty(), Type::Float | Type::Double | Type::LongDouble) {
+        let ty = expr.ty();
+        if self.float_in_st0(&ty) {
+            // long double 表达式结果在 st0：经栈 scratch 单步舍入到 f64
+            self.emit_x87_to_xmm0();
+            if xmm != 0 {
+                self.mov_xmm_to_xmm(xmm, 0);
+            }
+        } else if matches!(ty, Type::Float | Type::Double) {
             self.mov_xmm_to_xmm(xmm, 0);
         }
     }
@@ -847,16 +884,25 @@ impl Codegen {
             let Expr::Ident { name, ty, .. } = expr else {
                 return;
             };
-            let off = self.var_offset(&name.name);
-            let is_float = matches!(ty, Type::Float);
-            // fstp m32 = D9 /3 ; fstp m64 = DD /3 (REX.B for r13)
-            let opcode = if is_float { 0xD9 } else { 0xDD };
-            self.emit(&[0x41, opcode]);
-            if off.abs() < 128 {
-                self.emit(&[0x5D, off as i8 as u8]); // mod=01, reg=3, r/m=5
+            let effective_ty = if let Type::Imaginary(ref inner) = ty {
+                inner.base.clone()
             } else {
-                self.emit(&[0x9D]); // mod=10, reg=3, r/m=5
-                self.emit(&(off as i32).to_le_bytes());
+                ty.clone()
+            };
+            if self.is_global_not_local(&name.name) {
+                // 全局: RIP 相对 fstp
+                // float=D9 /3 double=DD /3 long double=DB /7
+                let (opcode, modrm) = match effective_ty {
+                    Type::Float => (0xD9u8, 0x1Du8),
+                    Type::LongDouble => (0xDBu8, 0x3Du8),
+                    _ => (0xDDu8, 0x1Du8),
+                };
+                let disp_pos = self.pos() + 2;
+                self.emit(&[opcode, modrm, 0, 0, 0, 0]);
+                self.push_global_float_rel(disp_pos, &name.name);
+            } else {
+                let off = self.var_offset(&name.name);
+                self.emit_x87_fstp_at(13, off as i32, &effective_ty);
             }
             return;
         }
@@ -945,11 +991,38 @@ impl Codegen {
             let Expr::Ident { name, ty, .. } = expr else {
                 return;
             };
+            let effective_ty = if let Type::Imaginary(ref inner) = ty {
+                inner.base.clone()
+            } else {
+                ty.clone()
+            };
             if self.is_global_not_local(&name.name) {
-                self.emit_global_float_store_from_xmm(reg, &name.name, ty);
+                if self.float_in_st0(&effective_ty) {
+                    // xmm 约束写回 long double 全局：拓宽后 fstp tbyte
+                    let src_ty = if matches!(effective_ty, Type::Float) {
+                        Type::Float
+                    } else {
+                        Type::Double
+                    };
+                    self.emit_xmm_to_global_float_typed(
+                        reg,
+                        &name.name,
+                        &src_ty,
+                        &effective_ty,
+                    );
+                } else {
+                    self.emit_global_float_store_from_xmm(reg, &name.name, &effective_ty);
+                }
             } else {
                 let off = self.var_offset(&name.name);
-                if matches!(ty, Type::Float) || xmm_width == 32 {
+                if self.float_in_st0(&effective_ty) {
+                    let src_ty = if matches!(effective_ty, Type::Float) {
+                        Type::Float
+                    } else {
+                        Type::Double
+                    };
+                    self.emit_xmm_to_mem_float(reg, &src_ty, 13, off as i32, &effective_ty);
+                } else if matches!(effective_ty, Type::Float) || xmm_width == 32 {
                     self.store_xmm32_stack(reg, off);
                 } else {
                     self.store_xmm64_stack(reg, off);
@@ -960,9 +1033,20 @@ impl Codegen {
         let Expr::Ident { name, ty, .. } = expr else {
             return;
         };
-        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+        if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+            || matches!(ty, Type::Imaginary(_))
+        {
+            let effective_ty = if let Type::Imaginary(ref inner) = ty {
+                inner.base.clone()
+            } else {
+                ty.clone()
+            };
             let off = self.var_offset(&name.name);
-            if matches!(ty, Type::Float) {
+            if self.float_in_st0(&effective_ty) {
+                // 该兜底分支不可达：long double 输出必走 xmm/x87 绑定
+                // （xmm_width != 0），不会落到 GP 写回路径。
+                unreachable!("long double writeback must use xmm/x87 binding");
+            } else if matches!(effective_ty, Type::Float) {
                 self.store_xmm32_stack(reg, off);
             } else {
                 self.store_xmm64_stack(reg, off);

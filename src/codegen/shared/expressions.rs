@@ -329,9 +329,9 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                 // Load immediate integer constant
                 self.executor.load_immediate_constant(*v as u64, reg, ty)?;
             },
-            Expr::Float { v, .. } => {
+            Expr::Float { c, .. } => {
                 // Floating point constants go through rodata
-                let symbol = format!(".const_float_{v}");
+                let symbol = format!(".const_float_{}", c.as_f64());
                 self.executor.load_from_symbol_address(&symbol, reg, ty)?;
             },
             Expr::Char { v, .. } => {
@@ -688,7 +688,7 @@ mod tests {
         assert!(is_constant_expr(&int_expr));
 
         let float_expr = Expr::Float {
-            v: 3.14,
+            c: crate::ast::FloatConst::F64(3.14),
             span: Span::point("", 1, 1),
             ty: Type::Double,
         };
