@@ -221,6 +221,256 @@ impl Codegen {
         }
     }
 
+    // ========================================================================
+    // sret / 物化槽字节水位静态扫描
+    // ------------------------------------------------------------------------
+    // 与运行时分配器 alloc_sret_slot 完全同口径: 每个槽按 16 字节对齐,
+    // 自 sret_region_base 向下累计; 槽在其所属的“语句/块 item”边界死亡。
+    // 扫描返回整函数任意执行路径上的最大同时存活字节水位, 供帧规划把
+    // 槽区计入 frame_size (旧 bump 不做扫描, 槽位越过帧底覆盖 call
+    // outgoing 区, cld 夹具在此段错误)。
+    //
+    // 建模规则 (必须与代码生成的 save/restore 挂钩点一一对应):
+    //   * 一个 BlockItem 从 incoming 水位开始, 结束时回到 incoming —
+    //     gen_block_items / 函数顶层循环在每个 item 边界 save/restore;
+    //   * 单个表达式树内部不释放 (兄弟子表达式也不回收), 故表达式的
+    //     “本树新增字节”对整棵子树求和 (过近似, 安全);
+    //   * 控制流语句的条件用 incoming 求值; 每个体语句从其自己的
+    //     incoming 起算 (体在 gen_stmt 外层 save/restore 内, 且 switch
+    //     等的体可能复用外层为条件分配的槽);
+    //   * switch 表达式分配的 16+8 槽存活至全部 case 体结束 — 取
+    //     (24 + 体内最大水位)。
+    pub fn max_sret_bytes(items: &[BlockItem]) -> i64 {
+        items
+            .iter()
+            .map(Self::sret_bytes_block_item)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn sret_bytes_block_item(item: &BlockItem) -> i64 {
+        match item {
+            BlockItem::Decl(Decl::Var(v)) => v
+                .init
+                .as_ref()
+                .map_or(0, |e| Self::sret_bytes_expr(e)),
+            BlockItem::Stmt(s) => Self::sret_bytes_stmt(s),
+            _ => 0,
+        }
+    }
+
+    fn sret_bytes_stmt(s: &Stmt) -> i64 {
+        match s {
+            Stmt::Expr { e, .. } => Self::sret_bytes_expr(e),
+            Stmt::Return { val: Some(e), .. } => Self::sret_bytes_expr(e),
+            Stmt::If {
+                cond, then_, else_, ..
+            } => Self::sret_bytes_expr(cond)
+                .max(Self::sret_bytes_stmt(then_))
+                .max(else_.as_ref().map_or(0, |e| Self::sret_bytes_stmt(e))),
+            Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+                Self::sret_bytes_expr(cond).max(Self::sret_bytes_stmt(body))
+            },
+            Stmt::For {
+                init, cond, step, body, ..
+            } => init
+                .iter()
+                .map(|s| Self::sret_bytes_stmt(s))
+                .chain(cond.iter().map(Self::sret_bytes_expr))
+                .chain(step.iter().map(Self::sret_bytes_expr))
+                .max()
+                .unwrap_or(0)
+                .max(Self::sret_bytes_stmt(body)),
+            Stmt::Block { b, .. } => Self::max_sret_bytes(&b.items),
+            Stmt::Switch { expr, cases, .. } => {
+                // expr 槽 (16+8) 存活至所有 case 体结束
+                let base = Self::sret_bytes_expr(expr) + 24;
+                cases
+                    .iter()
+                    .flat_map(|c| c.body.items.iter())
+                    .map(Self::sret_bytes_block_item)
+                    .max()
+                    .unwrap_or(0)
+                    .max(base)
+            },
+            Stmt::GotoIndirect { expr, .. } => Self::sret_bytes_expr(expr),
+            _ => 0,
+        }
+    }
+
+    /// 表达式树在一次求值内“新增的 sret/物化字节”峰值。按当前代码生成,
+    /// 表达式求值期间不释放任何槽, 故对各分配站点与其子树求和。
+    fn sret_bytes_expr(e: &Expr) -> i64 {
+        let own = match e {
+            Expr::Call { ty, callee, args, .. } => {
+                let sret = if Self::needs_memory_return(ty) {
+                    (ty.size() as i64 + 15) & !15
+                } else {
+                    0
+                };
+                // _Complex long double 返回 (经 x87, needs_memory_return
+                // == false) 仍在调用侧复制到固定 result_off, 不经过
+                // alloc_sret_slot, 故不占本区。
+                sret
+                    + std::iter::once(callee.as_ref())
+                        .map(Self::sret_bytes_expr)
+                        .chain(args.iter().map(Self::sret_bytes_expr))
+                        .max()
+                        .unwrap_or(0)
+            },
+            Expr::VaArg { ty, ap, .. } => {
+                let own = if Self::va_arg_result_in_memory(ty) {
+                    (ty.size() as i64 + 15) & !15
+                } else {
+                    0
+                };
+                own + Self::sret_bytes_expr(ap)
+            },
+            Expr::Binop { l, r, .. } => {
+                // _Complex long double 二元: 两个 32B 物化槽同时存活
+                // (spill l, spill r), 结果走固定 result_off 不占本区。
+                Self::complex_ld_sret_binop(e)
+                    + Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
+            },
+            Expr::Assign { l, r, .. } => {
+                Self::sret_bytes_expr(l) + Self::sret_bytes_expr(r)
+            },
+            Expr::StmtExpr { block, ty, .. } => {
+                // 聚合 StmtExpr 分配一个类型槽; 内部块另算
+                let own = if ty.size() > 0 {
+                    (ty.size() as i64 + 15) & !15
+                } else {
+                    0
+                };
+                own + Self::max_sret_bytes(&block.items)
+            },
+            Expr::Comma { l, r, .. } => {
+                Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
+            },
+            Expr::Unary { e: inner, .. }
+            | Expr::Cast { e: inner, .. }
+            | Expr::AddrOf { e: inner, .. }
+            | Expr::Deref { e: inner, .. }
+            | Expr::PostInc { e: inner, .. }
+            | Expr::PostDec { e: inner, .. }
+            | Expr::PreInc { e: inner, .. }
+            | Expr::PreDec { e: inner, .. } => Self::sret_bytes_expr(inner),
+            Expr::Index { arr, idx, .. } => {
+                Self::sret_bytes_expr(arr).max(Self::sret_bytes_expr(idx))
+            },
+            Expr::Member { expr, .. } => Self::sret_bytes_expr(expr),
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => Self::sret_bytes_expr(cond)
+                .max(Self::sret_bytes_expr(then_))
+                .max(Self::sret_bytes_expr(else_)),
+            _ => 0,
+        };
+        own
+    }
+
+    /// 若表达式是 `_Complex long double` 二元 (含一元负/conj 等物化点),
+    /// 返回其直接物化槽字节数; 否则 0。
+    fn complex_ld_sret_binop(e: &Expr) -> i64 {
+        let is_cld = |ty: &Type| {
+            matches!(
+                ty,
+                Type::Complex(q) if matches!(q.base, Type::LongDouble)
+            )
+        };
+        match e {
+            Expr::Binop { ty, .. } if is_cld(ty) => 64, // 两个 32B 物化槽
+            Expr::Unary { ty, .. } if is_cld(ty) => 32,
+            _ => 0,
+        }
+    }
+
+    /// 单个变量声明占用的 8 字节栈槽数 (分配口径的单一真源)。
+    /// VLA 追加 16 字节元信息槽 (基址 + 运行时行大小 + 声明时总大小)。
+    /// pre_register_vars 与 register_var 必须共用本函数, 否则两处对
+    /// “变量占多大槽”的理解会漂移。
+    pub fn var_alloc_slots(ty: &Type) -> i64 {
+        let alloc_sz = if Self::type_has_vla(ty) {
+            ty.size().saturating_add(16)
+        } else {
+            ty.size()
+        };
+        ((alloc_sz.saturating_add(7) / 8).max(1)) as i64
+    }
+
+    /// 收集函数体内每个变量名在**所有作用域**中的最大分配需求。
+    /// var_map 按名字去重: 不同作用域的同名变量共享同一个栈槽 (这是
+    /// 既有设计, 见 register_var 的遮蔽注释), 但槽容量必须取同名声明
+    /// 的最大值。旧实现按**首次声明**定容, 后续同名更大的结构体声明
+    /// (如先 `struct with_vec s;` 16B 后 `struct vec_int s;` 32B) 会
+    /// 溢出到相邻局部 —— 根因: flag_clobber_frame.c 中 `s.i = 7`
+    /// 静默覆盖已执行的 `ok = 0`, 退出码型夹具假绿。
+    /// 遍历结构与 pre_register_stmt 保持一致, 跳过规则 (extern /
+    /// static local) 也与 pre_register_vars 一致。
+    fn collect_var_alloc_maxima(
+        items: &[BlockItem],
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
+        out: &mut HashMap<String, (i64, Type)>,
+    ) {
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    if v.is_extern && v.init.is_none() {
+                        continue;
+                    }
+                    if v.is_static && static_local_map.is_static_local(func_name, &v.name.name) {
+                        continue;
+                    }
+                    let slots = Self::var_alloc_slots(&v.ty);
+                    match out.get(&v.name.name) {
+                        Some(&(cur, _)) if cur >= slots => {},
+                        _ => {
+                            out.insert(v.name.name.clone(), (slots, v.ty.clone()));
+                        },
+                    }
+                },
+                BlockItem::Stmt(s) => Self::collect_var_alloc_maxima_stmt(s, static_local_map, func_name, out),
+                _ => {},
+            }
+        }
+    }
+
+    fn collect_var_alloc_maxima_stmt(
+        s: &Stmt,
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
+        out: &mut HashMap<String, (i64, Type)>,
+    ) {
+        match s {
+            Stmt::Block { b, .. } => {
+                Self::collect_var_alloc_maxima(&b.items, static_local_map, func_name, out);
+            },
+            Stmt::If { then_, else_, .. } => {
+                Self::collect_var_alloc_maxima_stmt(then_, static_local_map, func_name, out);
+                if let Some(e) = else_ {
+                    Self::collect_var_alloc_maxima_stmt(e, static_local_map, func_name, out);
+                }
+            },
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Do { body, .. } => {
+                Self::collect_var_alloc_maxima_stmt(body, static_local_map, func_name, out);
+            },
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    Self::collect_var_alloc_maxima(
+                        &case.body.items,
+                        static_local_map,
+                        func_name,
+                        out,
+                    );
+                }
+            },
+            _ => {},
+        }
+    }
+
     pub fn pre_register_vars(
         var_map: &mut HashMap<String, (i64, Type)>,
         items: &[BlockItem],
@@ -229,6 +479,34 @@ impl Codegen {
         static_local_map: &crate::static_locals::StaticLocalMap,
         func_name: &str,
         total_slots: &mut i64,
+    ) {
+        // 先收集每个名字的全函数最大分配需求, 再按首次出现顺序分配偏移。
+        // maxima 必须从整棵函数体树算得并随递归全程携带: 若在嵌套
+        // 调用里重算, 子树看不到其它作用域的同名更大声明, 会倒退回
+        // 按首次声明定容的旧缺陷。
+        let mut maxima: HashMap<String, (i64, Type)> = HashMap::new();
+        Self::collect_var_alloc_maxima(items, static_local_map, func_name, &mut maxima);
+        Self::pre_register_vars_max(
+            var_map,
+            items,
+            temp_slots,
+            kasan_rz_slots,
+            static_local_map,
+            func_name,
+            total_slots,
+            &maxima,
+        );
+    }
+
+    fn pre_register_vars_max(
+        var_map: &mut HashMap<String, (i64, Type)>,
+        items: &[BlockItem],
+        temp_slots: i32,
+        kasan_rz_slots: i32,
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
+        total_slots: &mut i64,
+        maxima: &HashMap<String, (i64, Type)>,
     ) {
         for item in items {
             match item {
@@ -243,22 +521,17 @@ impl Codegen {
                             continue;
                         }
                     }
-                    // VLA: 追加 16 字节元信息槽 (与 register_var 一致:
-                    // 基址 + 运行时行大小 + 声明时总大小)。
-                    let is_vla = Self::type_has_vla(&v.ty);
-                    let alloc_sz = if is_vla {
-                        v.ty.size().saturating_add(16)
-                    } else {
-                        v.ty.size()
+                    let (slots, alloc_ty) = match maxima.get(&v.name.name) {
+                        Some((s, t)) => (*s, t.clone()),
+                        None => (Self::var_alloc_slots(&v.ty), v.ty.clone()),
                     };
-                    let slots = ((alloc_sz.saturating_add(7) / 8).max(1)) as i64;
                     // 同名变量在不同作用域出现多次时, or_insert 不插入但
                     // total_slots 仍递增会导致偏移计算错误。
                     if !var_map.contains_key(&v.name.name) {
                         let used = total_slots.saturating_mul(8);
                         let hdr = 48i64 + temp_slots as i64 * 8;
                         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
-                        var_map.insert(v.name.name.clone(), (off, v.ty.clone()));
+                        var_map.insert(v.name.name.clone(), (off, alloc_ty));
                         *total_slots = total_slots.saturating_add(slots);
                         let rz_slots = kasan_rz_slots as i64;
                         *total_slots = total_slots.saturating_add(rz_slots);
@@ -270,7 +543,7 @@ impl Codegen {
                     }
                 },
                 BlockItem::Stmt(s) => {
-                    Self::pre_register_stmt(
+                    Self::pre_register_stmt_max(
                         var_map,
                         s,
                         temp_slots,
@@ -278,6 +551,7 @@ impl Codegen {
                         static_local_map,
                         func_name,
                         total_slots,
+                        maxima,
                     );
                 },
                 _ => {},
@@ -285,7 +559,7 @@ impl Codegen {
         }
     }
 
-    fn pre_register_stmt(
+    fn pre_register_stmt_max(
         var_map: &mut HashMap<String, (i64, Type)>,
         s: &Stmt,
         temp_slots: i32,
@@ -293,10 +567,11 @@ impl Codegen {
         static_local_map: &crate::static_locals::StaticLocalMap,
         func_name: &str,
         total_slots: &mut i64,
+        maxima: &HashMap<String, (i64, Type)>,
     ) {
         match s {
             Stmt::Block { b, .. } => {
-                Self::pre_register_vars(
+                Self::pre_register_vars_max(
                     var_map,
                     &b.items,
                     temp_slots,
@@ -304,10 +579,11 @@ impl Codegen {
                     static_local_map,
                     func_name,
                     total_slots,
+                    maxima,
                 );
             },
             Stmt::If { then_, else_, .. } => {
-                Self::pre_register_stmt(
+                Self::pre_register_stmt_max(
                     var_map,
                     then_,
                     temp_slots,
@@ -315,9 +591,10 @@ impl Codegen {
                     static_local_map,
                     func_name,
                     total_slots,
+                    maxima,
                 );
                 if let Some(e) = else_ {
-                    Self::pre_register_stmt(
+                    Self::pre_register_stmt_max(
                         var_map,
                         e,
                         temp_slots,
@@ -325,11 +602,12 @@ impl Codegen {
                         static_local_map,
                         func_name,
                         total_slots,
+                        maxima,
                     );
                 }
             },
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-                Self::pre_register_stmt(
+                Self::pre_register_stmt_max(
                     var_map,
                     body,
                     temp_slots,
@@ -337,11 +615,12 @@ impl Codegen {
                     static_local_map,
                     func_name,
                     total_slots,
+                    maxima,
                 );
             },
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    Self::pre_register_vars(
+                    Self::pre_register_vars_max(
                         var_map,
                         &case.body.items,
                         temp_slots,
@@ -349,6 +628,7 @@ impl Codegen {
                         static_local_map,
                         func_name,
                         total_slots,
+                        maxima,
                     );
                 }
             },

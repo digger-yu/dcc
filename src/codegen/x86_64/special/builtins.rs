@@ -1054,6 +1054,8 @@ impl Codegen {
             // __builtin_conj/conjf/conjl: 复数共轭 (实部不变, 虚部翻转符号位).
             // 参数为 lvalue 时直接对内存分量寻址; rvalue 时按 complex rvalue
             // 约定 (xmm0=实部, 调用返回时虚部在 xmm1) 物化到临时槽再处理.
+            //   complex LD: 走 x87, fldt imag / fchs / fstpt; SSE 翻转 0x8000...
+            //   标志位对 LD 是错的 (符号位在 tbyte 第 9 字节, 不在低 8 字节)。
             "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" => {
                 if let Some(arg) = args.first() {
                     let inner = match &arg.ty() {
@@ -1062,6 +1064,22 @@ impl Codegen {
                     };
                     let inner_sz = inner.size() as i64;
                     let result_off = -self.frame_size + 8;
+                    if matches!(inner, Type::LongDouble) {
+                        // LD 路径: 物化源到临时 tbyte 对, real 不变直写,
+                        // imag fchs 后写 (同 unary.rs BitNot 分支)。
+                        let src = self.gen_complex_ld_materialize(arg);
+                        self.emit_x87_fld_at(13, src as i32, &inner);
+                        self.emit_x87_fstp_at(13, result_off as i32, &inner);
+                        self.emit_x87_fld_at(13, (src + 16) as i32, &inner);
+                        self.emit_x87_chs();
+                        self.emit_x87_fstp_at(13, (result_off + inner_sz) as i32, &inner);
+                        // LD rvalue 约定: rax = 结果槽地址。
+                        self.emit_lea_r13(0, result_off);
+                        if dst != 0 {
+                            self.mov(dst, 0);
+                        }
+                        return true;
+                    }
                     let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     if self.gen_lvalue_addr(arg, 0) {
                         self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax

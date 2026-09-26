@@ -75,7 +75,8 @@ impl Codegen {
         self.reg_bindings.clear();
         self.reg_bindings.extend(self.global_reg_bindings.clone());
         self.cleanup_vars.clear();
-        self.sret_depth = 0;
+        self.sret_watermark = 0;
+        self.sret_region_base = 0;
         self.vla_total_size = 0;
         // 静态扫描函数体是否含 VLA 声明 (决定跳转前是否恢复动态栈基)
         self.cur_func_has_vla = f
@@ -186,6 +187,11 @@ impl Codegen {
         }
         let temp_slots = (self.max_expr_depth as i32 + 1).max(2);
         self.temp_slots = temp_slots;
+        // sret/物化槽最大同时存活字节水位 (与运行时分配器同口径静态扫描)
+        let sret_need: i64 = f
+            .body
+            .as_ref()
+            .map_or(0, |b| Self::max_sret_bytes(&b.items));
         // KASAN 红区: 每个局部变量后追加 32 字节 (4 个 8 字节槽位)
         let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
         // Static 局部变量: 已由分析 pass 预注册到 data/bss,
@@ -259,6 +265,12 @@ impl Codegen {
             // long double / __int128 / 16 字节对齐聚合体须落在 16 的
             // 倍数上, 否则 callee 读取位置与 caller 布局错位 (pr44942)。
             let mut stack_param_stores: Vec<(i64, i64)> = Vec::new();
+            // D10-2: 栈传的具名 `long double` 形参单独登记：它们不能逐字搬运，
+            // 必须在入口处把 SysV 的 80-bit 编码降级成 dcc 内部表示（见消费端）。
+            let mut ld_param_stores: Vec<(i64, i64)> = Vec::new();
+            // `_Complex long double` 具名形参: (入站 real 偏移, 局部 real 偏移)。
+            // imag 紧随各自 real +16。入口处用 fldt/fstpt 逐分量拷贝 (见 Phase 2)。
+            let mut cld_param_stores: Vec<(i64, i64)> = Vec::new();
             let mut gp_idx = if has_sret { 1 } else { 0 };
             let mut fp_idx = 0usize;
             let mut stack_arg_off: i64 = 0;
@@ -300,7 +312,29 @@ impl Codegen {
                             | Type::Atomic(_)
                             | Type::Vector(_, _)
                     );
-                if is_agg_param {
+                // complex LD 具名形参: 整体走内存, 两个 16 字节栈槽。
+                // 与 caller emit_sysv_call 的规划保持一致, 不能进通用聚合
+                // 8 字节 chunk 路径 (会破坏 tbyte)。
+                let is_cld_param = matches!(&p.ty, Type::Complex(inner)
+                    if matches!(&inner.base, Type::LongDouble));
+                if is_cld_param {
+                    let used_before = param_used_total;
+                    param_used_total += 32;
+                    let aligned = (stack_arg_off + 15) & !15;
+                    stack_arg_off = aligned + 32;
+                    if let Some(nm) = nm_opt {
+                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        // 32 字节 (real@off, imag@off+16) 在帧槽中占 4 个
+                        // 8 字节槽。局部槽公式与标量 LD (16B→-(SIZE-8)=-8)
+                        // 及通用聚合 base=-(u+hdr)-(chunks-1)*8 一致:
+                        // SIZE=32 → -(32-8)=-24。误用 -16 会让 imag 槽顶 2
+                        // 字节与相邻 GP 参数槽重叠 (tag qword 覆盖 imag
+                        // 指数字节, complex LD 后随的指针/整数参数被踩坏)。
+                        let off = -(used_before + hdr) - 24;
+                        self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                        cld_param_stores.push((aligned, off));
+                    }
+                } else if is_agg_param {
                     let classes = Self::abi_classes(&p.ty);
                     let chunks = p.ty.size().div_ceil(8);
                     let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
@@ -431,8 +465,8 @@ impl Codegen {
                         let hdr = 48i64 + temp_slots as i64 * 8;
                         let off = -(used_before + hdr) - 8;
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        stack_param_stores.push((aligned, off));
-                        stack_param_stores.push((aligned + 8, off + 8));
+                        // 不走逐字 8+8 搬运：改由 ld_param_stores 在入口降级。
+                        ld_param_stores.push((aligned, off));
                     }
                 } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
                     let used_before = param_used_total;
@@ -521,6 +555,7 @@ impl Codegen {
             let hdr: i64 = 48 + temp_slots as i64 * 8;
             let raw: i64 = var_bytes
                 .saturating_add(hdr)
+                .saturating_add(sret_need)
                 .saturating_add(sc_slot)
                 .saturating_add(va_slots)
                 .saturating_add(vec_reserve)
@@ -528,6 +563,9 @@ impl Codegen {
                 .saturating_add(tramp_reserve)
                 .saturating_add(self.stack_reserve_bytes());
             self.frame_size = (raw + 15) & !15; // 16 字节对齐
+            // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
+            self.sret_region_base = -(hdr + var_bytes);
+            // vec 区下移 sret 槽深度, 使槽区夹在变量区与 vec 区之间。
             self.vec_temp_off = -self.frame_size + va_slots + sc_slot + 8;
             if self.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_size > 4096 {
@@ -658,6 +696,38 @@ impl Codegen {
                     self.store_xmm64_stack(xmm, off);
                 }
             }
+            for (arg_off, off) in ld_param_stores {
+                // D10-2（已简化）：SysV AMD64 下 x87 **参数走内存** —— 每个具名
+                // `long double` 占一个 16 字节栈槽，内容是调用方 `fstpt` 写出的
+                // **真 80-bit 编码**（gcc callee 就是 `fldt 0x10(%rbp)` 读它）。
+                //
+                // 旧实现在此做 `fldt` → `fstp qword` → `movq $0, off+8` 的“入口
+                // 降级一次”，目的是维持“局部槽低 8 字节 = f64 位型、高 8 字节 = 0”
+                // 这个旧不变量。现在对象表示与 rvalue 值通道都已是真 80-bit，那次
+                // 降级反而**把调用方送来的 64 位尾数舍回 53 位**（并且 `fstp qword`
+                // 不写指数字节，配合槽高位清零会把值读成 0）。故改为槽→槽的
+                // `fldt`/`fstpt` 直拷，不再有任何精度损失。
+                let incoming = 16i64 + arg_off;
+                // fld tbyte [r13+incoming]  DB /5: mod=10|reg=5|rm=101 = 0xAD, REX.B=0x41
+                // （写成 0x85 会漏掉 reg 字段而变成 `fildl m32int`，静默读 4 字节整数）
+                self.emit(&[0x41, 0xDB, 0xAD]);
+                self.emit(&(incoming as i32).to_le_bytes());
+                // fstp tbyte [r13+off]      DB /7: mod=10 reg=7 rm=101 → 0xBD
+                self.emit(&[0x41, 0xDB, 0xBD]);
+                self.emit(&(off as i32).to_le_bytes());
+            }
+            for (arg_off, off) in cld_param_stores {
+                // complex LD: 两个 16 字节栈槽, 逐分量 fldt/fstpt 直拷
+                // (real@arg_off→off, imag@arg_off+16→off+16), 无精度损失。
+                for k in 0..2 {
+                    let incoming = 16i64 + arg_off + k * 16;
+                    let dst = off + k * 16;
+                    self.emit(&[0x41, 0xDB, 0xAD]);
+                    self.emit(&(incoming as i32).to_le_bytes());
+                    self.emit(&[0x41, 0xDB, 0xBD]);
+                    self.emit(&(dst as i32).to_le_bytes());
+                }
+            }
             for (arg_off, off) in stack_param_stores {
                 // 栈传参位于调用方栈顶: 经过 call 压入的返回地址与
                 // 被调方 push r13 后, 第一个栈参数位于 [r13 + 16].
@@ -693,10 +763,13 @@ impl Codegen {
             let tramp_reserve: i64 = 256; // 嵌套函数 trampoline 空间
             let raw = var_bytes
                 .saturating_add(hdr)
+                .saturating_add(sret_need)
                 .saturating_add(512) // 向量临时槽区 (嵌套 binop 操作数槽)
                 .saturating_add(tramp_reserve)
                 .saturating_add(self.stack_reserve_bytes());
             self.frame_size = (raw + 15) & !15;
+            // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
+            self.sret_region_base = -(hdr + var_bytes);
             self.vec_temp_off = -self.frame_size + 8;
             if self.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_size > 4096 {
@@ -799,8 +872,15 @@ impl Codegen {
         }
         let ends_ret = if let Some(body) = &f.body {
             for item in &body.items {
+                // Stmt 边界 save/restore 物化槽水位；Decl 变量槽已加入 var_map，全程保留
+                // (va_arg 分配的聚合临时槽属于 Stmt，需回收，变量定义槽无需回收)。
                 match item {
-                    BlockItem::Stmt(s) => self.gen_stmt(s),
+                    BlockItem::Stmt(s) => {
+                        // Stmt 单独处理：从当前水位开始，结束时回收槽位（Decl 变量槽全程保留）
+                        let mark = self.save_sret_watermark();
+                        self.gen_stmt(s);
+                        self.restore_sret_watermark(mark);
+                    },
                     BlockItem::Decl(Decl::Var(v)) => {
                         if v.is_static
                             && self
